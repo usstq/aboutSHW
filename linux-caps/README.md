@@ -37,6 +37,46 @@ $ renice -n 0 -u 2
 2 (user ID) old priority 0, new priority 0
 # remove capabilities after experiment
 $ sudo setcap -r /bin/renice
+# only set permitted capability is not enough, program need to call capset to make it effective
+$ sudo setcap cap_sys_nice+p ./a.out 
+$ getcap ./a.out 
+./a.out cap_sys_nice=p
+
 ```
 
 > https://www.man7.org/linux/man-pages/man7/capabilities.7.html
+
+## inspecting
+
+> https://www.youtube.com/watch?v=WYC6DHzWzFQ
+> [3:07] what is effective/permitted/bound/inherit
+
+we can use `pidof` & `cat /proc/<pid>/status` or `getpcaps <pid>` to inspect how capability is taking effect in system:
+
+```bash
+# process 1 has all capabilities
+$ cat /proc/1/status | grep Cap
+CapInh: 0000000000000000
+CapPrm: 000001ffffffffff
+CapEff: 000001ffffffffff
+CapBnd: 000001ffffffffff
+CapAmb: 0000000000000000
+$ getpcaps 1
+1: =ep
+
+# current bash has no special capabilities
+$ cat /proc/$$/status | grep Cap
+CapInh: 0000000000000000 i
+CapPrm: 0000000000000000 p
+CapEff: 0000000000000000 e
+CapBnd: 000001ffffffffff
+CapAmb: 0000000000000000
+
+# chrony-project is a versatile implementation of the Network Time Protocol (NTP). It can synchronise the system clock with NTP servers, chronyd is a daemon that can be started at boot time.
+$ pidof chronyd
+55003
+
+$ getpcaps 55003
+55003: cap_net_bind_service,cap_sys_time=ep
+```
+
