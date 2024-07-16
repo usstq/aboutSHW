@@ -1,4 +1,4 @@
-/* Until glibc provides a proper stub ... */
+
 #include <linux/perf_event.h>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -43,7 +43,7 @@ struct PerfEventGroup {
     uint64_t values[32];
     uint32_t tsc_time_shift;
     uint32_t tsc_time_mult;
-    uint32_t refcycle_time_mult;
+    uint32_t refcycle_time_mult = 0;
     
     // ref_cpu_cycles even id
     // this event is fixed function counter provided by most x86 CPU
@@ -64,10 +64,26 @@ struct PerfEventGroup {
     
     PerfEventGroup() = default;
 
+/*
+RAW HARDWARE EVENT DESCRIPTOR
+       Even when an event is not available in a symbolic form within perf right now, it can be encoded in a per processor specific way.
+
+       For instance For x86 CPUs NNN represents the raw register encoding with the layout of IA32_PERFEVTSELx MSRs (see [Intel® 64 and IA-32 Architectures Software Developer’s Manual Volume 3B: System Programming Guide] Figure 30-1
+       Layout of IA32_PERFEVTSELx MSRs) or AMD’s PerfEvtSeln (see [AMD64 Architecture Programmer’s Manual Volume 2: System Programming], Page 344, Figure 13-7 Performance Event-Select Register (PerfEvtSeln)).
+
+       Note: Only the following bit fields can be set in x86 counter registers: event, umask, edge, inv, cmask. Esp. guest/host only and OS/user mode flags must be setup using EVENT MODIFIERS.
+
+ event 7:0
+ umask 15:8
+ edge  18
+ inv   23
+ cmask 31:24
+*/
     struct Config {
         uint32_t type;
         uint64_t config;
         const char * name;
+        Config(uint32_t type, uint64_t config, const char * name = "?") : type(type), config(config), name(name) {}
     };
     PerfEventGroup(const std::vector<Config> type_configs) {
         for(auto& tc : type_configs) {
@@ -182,7 +198,7 @@ struct PerfEventGroup {
         ioctl(group_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
         // PMC index is only valid when being enabled
         for(auto& ev : events) {
-            if (ev.pmeta->cap_user_rdpmc) {
+            if (ev.pmc_index == 0 && ev.pmeta->cap_user_rdpmc) {
                 uint32_t seqlock;
                 do {
                     seqlock = ev.pmeta->lock;
@@ -210,7 +226,7 @@ struct PerfEventGroup {
 
         here we need to calibrate Reference Cycles (TSC)
         */
-        if (ref_cpu_cycles_evid >= 0) {
+        if (ref_cpu_cycles_evid >= 0 && refcycle_time_mult == 0) {
             auto ref_cycles_t0 = rdpmc(ref_cpu_cycles_evid);
             auto tsc_t0 = _rdtsc();
             auto ref_cycles_t1 = ref_cycles_t0;
