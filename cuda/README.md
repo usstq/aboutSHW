@@ -6,9 +6,15 @@ On my windows, this requires adding following path containing `cl.exe` (VC's com
  - C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64
 
 after that we can compile cuda source code directly using nvcc (since we are focusing on experiments, not building a big project, no make system is used).
+
 ```bash
-nvcc ./kernel.cu
+mkdir build
+# device code PTX & cubin are kept under build folder
+nvcc --generate-line-info --keep --keep-dir build  kernel.cu
+# disassemble device side code with line-info
+nvdisasm --print-line-info-inline -c build\kernel.sm_52.cubin
 ```
+also we can use `CUDA C++` in https://godbolt.org/ to inspect the generated PTX & SASS code.
 
 ## nvidia GPU code-name & series
 https://wiki.gentoo.org/wiki/NVIDIA
@@ -37,10 +43,7 @@ CUDA core is just scalar ALU; GPU executes multiple threads in time-division mul
  **for example on my GTX-1070, 2048 threads (or 64 warps) per SM are supported,
  but each SM has only 4 Warp schedulers, 16x oversubscride.**
 
-## GPU disassembly code
-use `CUDA C++` in https://godbolt.org/ to inspect the generated PTX & SASS code.
-
-https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capabilities
+Here are some [detailed HW-features](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications).
 
 ## GPU Memory hierarchy
 [GPU cache is designed with significant different purpose from CPU's](https://www.rastergrid.com/blog/gpu-tech/2021/01/understanding-gpu-caches/)
@@ -53,7 +56,7 @@ https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capabil
 **Per Core Instruction Cache**
 > One thing to keep in mind from performance point of view is that
 > on GPUs an instruction cache miss can potentially stall thousands
-> of threads instead of just one, as in the case of CPUs, so generally it¡¯s highly recommended
+> of threads instead of just one, as in the case of CPUs, so generally itï¿½ï¿½s highly recommended
 > for shader/kernel code to be small enough to completely fit into this cache.
 
 **Per Core Data Cache**
