@@ -214,7 +214,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 }
                 if (hw_cpu_cycles_evid >= 0) {
                     ss << "\"CPU Freq(GHz)\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])*1e-3/duration << ",";
-                    if (hw_instructions_evid >= 0) {
+                    if (hw_instructions_evid >= 0 && d.data[hw_instructions_evid] > 0) {
                         ss << "\"CPI\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[hw_instructions_evid] << ",";
                     }
                 }
@@ -289,11 +289,14 @@ RAW HARDWARE EVENT DESCRIPTOR
         if (enable_dump_json) {
             serial = PerfEventJsonDumper::get().register_manager(this);
         }
+
+        enable();
     }
 
     ~PerfEventGroup() {
         if (enable_dump_json)
             PerfEventJsonDumper::get().finalize();
+        disable();
         for(auto & ev : events) {
             close(ev.fd);
         }

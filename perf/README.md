@@ -42,3 +42,11 @@ cap_user_rdpmc (since Linux 3.12)
                 barrier();
             } while (pc->lock != seq);
 ```
+
+## Usage
+
+
+install torch extension by `pip install -e .`.
+
+
+please check [test.cpp](./test.cpp) and [test-torch.py](./test-torch.py) out 
