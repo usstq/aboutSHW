@@ -86,7 +86,9 @@ void test2() {
     PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
         {PERF_TYPE_RAW, 0x01b2, "PORT_0"},
         {PERF_TYPE_RAW, 0x02b2, "PORT_1"},
         {PERF_TYPE_RAW, 0x04b2, "PORT_2_3_10"},
@@ -94,6 +96,8 @@ void test2() {
         {PERF_TYPE_RAW, 0x20b2, "PORT_5_11"},
         {PERF_TYPE_RAW, 0x40b2, "PORT_6"},
         {PERF_TYPE_RAW, 0x80b2, "PORT_7_8"},
+    }, [](std::ostream& os, double usec, uint64_t* pmc) {
+        os << "\"CPI\" : " << static_cast<double>(pmc[0])/pmc[1] << ",";
     });
     Jit inst;
     inst.setup_loop([&](){
@@ -113,10 +117,19 @@ void test2() {
 
     pevg.enable();
 
+    {
+        auto prof0 = pevg.start_profile("outer", 0);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
     for(int i=0;i<10;i++) {
+
+        auto prof = pevg.start_profile("inner", 0);
+        inst(1000);
+
         auto pmc = pevg.rdpmc([&](){
             inst(1000);
-        }, false);
+        }, "test2", __LINE__, false);
 
         auto duration = pevg.refcycle2nano(pmc[2]);
         printf("CPU_freq:%.2f GHz, CPI: %.2f\n", static_cast<double>(pmc[0])/duration, static_cast<double>(pmc[0])/pmc[1]);
@@ -124,7 +137,7 @@ void test2() {
 }
 
 int main(int argc, char* argv[]) {
-    //test1(); return 0;
+  //test1(); return 0;
   test2();
   return 0;
 }

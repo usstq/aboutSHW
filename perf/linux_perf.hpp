@@ -20,8 +20,112 @@ int perf_event_open(struct perf_event_attr *attr, pid_t pid,
 #include <x86intrin.h>
 #include <sys/mman.h>
 #include <thread>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <deque>
+#include <mutex>
+#include <set>
+#include <iomanip>
+#include <functional>
 
-struct PerfEventGroup {
+struct TscCounter {
+    uint64_t tsc_ticks_per_second;
+    uint64_t tsc_ticks_base;
+    double tsc_to_usec(uint64_t tsc_ticks) const {
+        return (tsc_ticks - tsc_ticks_base) * 1000000.0 / tsc_ticks_per_second;
+    }
+    double tsc_to_usec(uint64_t tsc_ticks0, uint64_t tsc_ticks1) const {
+        return (tsc_ticks1 - tsc_ticks0) * 1000000.0 / tsc_ticks_per_second;
+    }
+    TscCounter() {
+        uint64_t start_ticks = __rdtsc();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        tsc_ticks_per_second = (__rdtsc() - start_ticks);
+        std::cout << "[PERF_DUMP_JSON] tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
+        tsc_ticks_base = __rdtsc();
+    }
+};
+
+class IPerfEventDumper {
+public:
+    virtual void dump_json(std::ofstream& fw, TscCounter& tsc) = 0;
+};
+
+struct PerfEventJsonDumper {
+    std::mutex g_mutex;
+    std::set<IPerfEventDumper*> all_dumpers;
+    const char* dump_file_name = "perf_dump.json";
+    bool dump_file_over = false;
+    bool not_finalized = true;
+    std::ofstream fw;
+    std::atomic_int totalProfilerManagers{0};
+    TscCounter tsc;
+
+    ~PerfEventJsonDumper() {
+        if (not_finalized)
+            finalize();
+    }
+
+    void finalize() {
+        if (!not_finalized)
+            return;
+        std::lock_guard<std::mutex> guard(g_mutex);
+        if (dump_file_over || all_dumpers.empty())
+            return;
+
+        // start dump
+        fw.open(dump_file_name, std::ios::out);
+        fw << "{\n";
+        fw << "\"schemaVersion\": 1,\n";
+        fw << "\"traceEvents\": [\n";
+        fw.flush();
+
+        for (auto& pthis : all_dumpers) {
+            pthis->dump_json(fw, tsc);
+        }
+        all_dumpers.clear();
+
+        fw << R"({
+            "name": "Profiler End",
+            "ph": "i",
+            "s": "g",
+            "pid": "Traces",
+            "tid": "Trace OV Profiler",
+            "ts":)"
+           << tsc.tsc_to_usec(__rdtsc()) << "}",
+            fw << "]\n";
+        fw << "}\n";
+        auto total_size = fw.tellp();
+        fw.close();
+        dump_file_over = true;
+        not_finalized = false;
+
+        std::cout << "[PERF_DUMP_JSON] Dumpped ";
+        
+        if (total_size < 1024) std::cout << total_size << " bytes ";
+        else if (total_size < 1024*1024) std::cout << total_size/1024 << " KB ";
+        else std::cout << total_size/(1024 * 1024) << " MB ";
+        std::cout << " to " << dump_file_name << std::endl;
+    }
+
+    int register_manager(IPerfEventDumper* pthis) {
+        std::lock_guard<std::mutex> guard(g_mutex);
+        std::stringstream ss;
+        auto serial_id = totalProfilerManagers.fetch_add(1);
+        ss << "[PERF_DUMP_JSON] #" << serial_id << "(" << pthis << ") : is registed." << std::endl;
+        std::cout << ss.str();
+        all_dumpers.emplace(pthis);
+        return serial_id;
+    }
+
+    static PerfEventJsonDumper& get() {
+        static PerfEventJsonDumper inst;
+        return inst;
+    }
+};
+
+struct PerfEventGroup : public IPerfEventDumper {
     int group_fd = -1;
     uint64_t read_format;
 
@@ -51,6 +155,81 @@ struct PerfEventGroup {
     //    - very high-resolution (<1ns or >1GHz)
     //    - independent of CPU-frequency throttling
     int ref_cpu_cycles_evid = -1;
+    int sw_task_clock_evid = -1;
+    int hw_cpu_cycles_evid = -1;
+    int hw_instructions_evid = -1;
+
+    struct ProfileData {
+        uint64_t tsc_start;
+        uint64_t tsc_end;
+        const char * title;
+        const char * cat;
+        uint32_t id;
+        static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
+        uint64_t data[data_size] = {0};
+
+        ProfileData() {
+            start();
+        }
+        void start() {
+            tsc_start = __rdtsc();
+        }
+        void stop() {
+            tsc_end = __rdtsc();
+        }
+    };
+
+    bool enable_dump_json;
+    std::deque<ProfileData> all_dump_data;
+    int serial;
+
+    using CallBackEventArgsSerializer = std::function<void(std::ostream& fw, double usec, uint64_t* counters)>;
+    CallBackEventArgsSerializer fn_evt_args_serializer;
+
+    void dump_json(std::ofstream& fw, TscCounter& tsc) override {
+        if (!enable_dump_json)
+            return;
+        auto data_size = all_dump_data.size();
+        if (!data_size)
+            return;
+
+        for (auto& d : all_dump_data) {
+            auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
+
+            auto title = std::string(d.title) + "_" + std::to_string(d.id);
+            auto cat = d.cat;
+            auto pid = serial;
+            auto start = tsc.tsc_to_usec(d.tsc_start);
+            fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
+                << "\"pid\": " << pid << ", \"tid\": 0,"
+                << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << ",";
+            fw << "\"args\":{";
+            {
+                std::stringstream ss;
+                fn_evt_args_serializer(ss, duration, d.data);
+                if (sw_task_clock_evid >= 0) {
+                    // PERF_COUNT_SW_TASK_CLOCK in nano-seconds
+                    ss << "\"CPU Usage\":" << (d.data[sw_task_clock_evid] * 1e-3)/duration << ",";
+                }
+                if (hw_cpu_cycles_evid >= 0) {
+                    ss << "\"CPU Freq(GHz)\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])*1e-3/duration << ",";
+                    if (hw_instructions_evid >= 0) {
+                        ss << "\"CPI\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[hw_instructions_evid] << ",";
+                    }
+                }
+                ss.imbue(std::locale(""));
+                const char * sep = "";
+                for(int i = 0; i < events.size() && i < d.data_size; i++) {
+                    ss << sep << "\"" << events[i].name << "\":\"" << d.data[i] << "\"";
+                    sep = ",";
+                }
+                fw << ss.str();
+            }
+            fw << "}},\n";
+        }
+        all_dump_data.clear();
+        std::cout << "[PERF_DUMP_JSON] #" << serial << "(" << this << ") finalize: dumpped " << data_size << std::endl;
+    }
 
     uint64_t operator[](int i) {
         if (i < events.size()) {
@@ -85,7 +264,8 @@ RAW HARDWARE EVENT DESCRIPTOR
         const char * name;
         Config(uint32_t type, uint64_t config, const char * name = "?") : type(type), config(config), name(name) {}
     };
-    PerfEventGroup(const std::vector<Config> type_configs) {
+
+    PerfEventGroup(const std::vector<Config> type_configs, CallBackEventArgsSerializer fn = {}) : fn_evt_args_serializer(fn) {
         for(auto& tc : type_configs) {
             if (tc.type == PERF_TYPE_SOFTWARE) {
                 add_sw(tc.config);
@@ -100,6 +280,22 @@ RAW HARDWARE EVENT DESCRIPTOR
             sprintf(events.back().format, "%%%lulu, ", strlen(tc.name));
         }
         show_header();
+
+        const char* str_enable = std::getenv("PERF_DUMP_JSON");
+        if (!str_enable)
+            str_enable = "0";
+        enable_dump_json = atoi(str_enable) > 0;
+        if (enable_dump_json) {
+            serial = PerfEventJsonDumper::get().register_manager(this);
+        }
+    }
+
+    ~PerfEventGroup() {
+        if (enable_dump_json)
+            PerfEventJsonDumper::get().finalize();
+        for(auto & ev : events) {
+            close(ev.fd);
+        }
     }
 
     void show_header() {
@@ -157,7 +353,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         pea.size = sizeof(struct perf_event_attr);
         pea.config = config;
         pea.disabled = 1;
-        pea.exclude_kernel = 1;
+        pea.exclude_kernel = 0; // some SW events are counted as kernel
         pea.exclude_hv = 1;
         //pea.pinned = 1;   //sw event cannot set pinned!!!
         pea.read_format = PERF_FORMAT_GROUP | PERF_FORMAT_ID ;
@@ -188,15 +384,30 @@ RAW HARDWARE EVENT DESCRIPTOR
         if (pev_attr->type == PERF_TYPE_HARDWARE && pev_attr->config == PERF_COUNT_HW_REF_CPU_CYCLES) {
             ref_cpu_cycles_evid = events.size();
         }
+        if (pev_attr->type == PERF_TYPE_SOFTWARE && pev_attr->config == PERF_COUNT_SW_TASK_CLOCK) {
+            sw_task_clock_evid = events.size();
+        }
+        if (pev_attr->type == PERF_TYPE_HARDWARE && pev_attr->config == PERF_COUNT_HW_CPU_CYCLES) {
+            hw_cpu_cycles_evid = events.size();
+        }
+        if (pev_attr->type == PERF_TYPE_HARDWARE && pev_attr->config == PERF_COUNT_HW_INSTRUCTIONS) {
+            hw_instructions_evid = events.size();
+        }
         printf("perf_event_open : fd=%d, id=%lu\n", ev.fd, ev.id);
 
         events.push_back(ev);
     }
 
+    bool event_group_enabled = false;
+    uint32_t num_events_no_pmc;
+
     void enable() {
+        if (event_group_enabled)
+            return;
         ioctl(group_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
         ioctl(group_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
         // PMC index is only valid when being enabled
+        num_events_no_pmc = 0;
         for(auto& ev : events) {
             if (ev.pmc_index == 0 && ev.pmeta->cap_user_rdpmc) {
                 uint32_t seqlock;
@@ -215,6 +426,9 @@ RAW HARDWARE EVENT DESCRIPTOR
                     std::atomic_thread_fence(std::memory_order_seq_cst);
                 } while (ev.pmeta->lock != seqlock || (seqlock & 1));
             }
+            // some events like PERF_TYPE_SOFTWARE cannot read using rdpmc()
+            if (ev.pmc_index == 0)
+                num_events_no_pmc ++;
         }
         /*
         UnHalted Reference Cycles — Event select 3CH, Umask 01H
@@ -223,7 +437,6 @@ RAW HARDWARE EVENT DESCRIPTOR
             Processors may implement this behavior differently. Current implementations use the core crystal clock, TSC or
             the bus clock. Because the rate may differ between implementations, software should calibrate it to a time
             source with known frequency.
-
         here we need to calibrate Reference Cycles (TSC)
         */
         if (ref_cpu_cycles_evid >= 0 && refcycle_time_mult == 0) {
@@ -241,9 +454,10 @@ RAW HARDWARE EVENT DESCRIPTOR
             } while (tsc_t1 - tsc_t0 < tsc_span);
 
             refcycle_time_mult = tsc_time_mult * (ref_cycles_t1 - ref_cycles_t0) / (tsc_t1 - tsc_t0);
-
             //printf("tsc_time_shift=%u, tsc_time_mult=%u, refcycle_time_mult=%u\n",tsc_time_shift,tsc_time_mult,refcycle_time_mult);
         }
+        
+        event_group_enabled = true;
     }
 
     uint64_t refcycle2nano(uint64_t cyc) {
@@ -261,10 +475,15 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     void disable() {
+        if (!event_group_enabled)
+            return;
+
         ioctl(group_fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+
         for(auto& ev : events) {
             ev.pmc_index = 0;
         }
+        event_group_enabled = false;
     }
 
     uint64_t rdpmc(int i, uint64_t base = 0) {
@@ -272,16 +491,37 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, bool verbose = false) {
+    std::vector<uint64_t> rdpmc(FN fn, const char * title = nullptr, int id = 0, bool verbose = false) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
+        if (enable_dump_json) {
+            all_dump_data.emplace_back();
+        }
+
         for(int i = 0; i < cnt; i++) {
-            pmc[i] = _rdpmc(events[i].pmc_index - 1);
+            if (events[i].pmc_index)
+                pmc[i] = _rdpmc(events[i].pmc_index - 1);
+            else
+                pmc[i] = 0;
         }
         fn();
         for(int i = 0; i < cnt; i++) {
-            pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+            if (events[i].pmc_index)
+                pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+            else
+                pmc[i] = 0;
         }
+
+        if (enable_dump_json) {
+            auto& pd = all_dump_data.back();
+            pd.stop();
+            pd.title = title ? title : "???";
+            pd.cat = "rdpmc";
+            pd.id = id;
+            for (int i =0; i < events.size() && i < pd.data_size; i++)
+                pd.data[i] = pmc[i];
+        }
+
         if (verbose) {
             printf("\e[33m");
             for(int i = 0; i < cnt; i++) {
@@ -331,10 +571,56 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
     }
 
-    ~PerfEventGroup() {
-        for(auto & ev : events) {
-            close(ev.fd);
+    //================================================================================
+    // profiler API with json_dump capability
+    struct ProfileScope {
+        PerfEventGroup* pevg = nullptr;
+        ProfileData* pd = nullptr;
+        bool use_pmc;
+        ProfileScope() = default;
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
+        ~ProfileScope() {
+            if (!pevg)
+                return;
+
+            pd->stop();
+            if (use_pmc) {
+                for (int i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                    if (pevg->events[i].pmc_index)
+                        pd->data[i] = (_rdpmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
+                    else
+                        pd->data[i] = 0;
+            } else {
+                pevg->read();
+                for (int i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                    pd->data[i] = pevg->values[i] - pd->data[i];
+            }
         }
+    };
+
+    ProfileScope start_profile(const char * title, int id = 0) {
+        if (!enable_dump_json)
+            return {};
+        all_dump_data.emplace_back();
+        auto* pd = &all_dump_data.back();
+        pd->title = title;
+        pd->cat = "enable";
+        pd->id = id;
+
+        // use rdpmc if possible
+        bool use_pmc = (num_events_no_pmc == 0);
+        if (use_pmc) {
+            for (int i =0; i < events.size() && i < pd->data_size; i++)
+                if (events[i].pmc_index)
+                    pd->data[i] = _rdpmc(events[i].pmc_index - 1);
+        } else {
+            read();
+            for (int i =0; i < events.size() && i < pd->data_size; i++)
+                pd->data[i] = values[i];
+        }
+
+        return ProfileScope(this, pd, use_pmc);
     }
+
 };
 
