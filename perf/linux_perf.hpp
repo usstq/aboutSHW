@@ -162,13 +162,13 @@ struct PerfEventGroup : public IPerfEventDumper {
     struct ProfileData {
         uint64_t tsc_start;
         uint64_t tsc_end;
-        const char * title;
+        std::string title;
         const char * cat;
         uint32_t id;
         static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
         uint64_t data[data_size] = {0};
 
-        ProfileData() {
+        ProfileData(const std::string& title) : title(title) {
             start();
         }
         void start() {
@@ -492,11 +492,11 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, const char * title = nullptr, int id = 0, bool verbose = false) {
+    std::vector<uint64_t> rdpmc(FN fn, const char * title = "", int id = 0, bool verbose = false) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
         if (enable_dump_json) {
-            all_dump_data.emplace_back();
+            all_dump_data.emplace_back(title);
         }
 
         for(int i = 0; i < cnt; i++) {
@@ -580,7 +580,27 @@ RAW HARDWARE EVENT DESCRIPTOR
         bool use_pmc;
         ProfileScope() = default;
         ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
-        ~ProfileScope() {
+
+        ProfileScope(ProfileScope&& other) {
+            pevg = other.pevg;
+            pd = other.pd;
+            use_pmc = other.use_pmc;
+            other.pevg = nullptr;
+            other.pd = nullptr;
+        }
+
+        ProfileScope& operator=(ProfileScope&& other) {
+            if (&other != this) {
+                pevg = other.pevg;
+                pd = other.pd;
+                use_pmc = other.use_pmc;
+                other.pevg = nullptr;
+                other.pd = nullptr;
+            }
+            return *this;
+        }
+
+        void finish() {
             if (!pevg)
                 return;
 
@@ -596,15 +616,19 @@ RAW HARDWARE EVENT DESCRIPTOR
                 for (int i =0; i < pevg->events.size() && i < pd->data_size; i++)
                     pd->data[i] = pevg->values[i] - pd->data[i];
             }
+            pevg = nullptr;
+        }
+
+        ~ProfileScope() {
+            finish();
         }
     };
 
-    ProfileScope start_profile(const char * title, int id = 0) {
+    ProfileScope start_profile(const std::string& title, int id = 0) {
         if (!enable_dump_json)
             return {};
-        all_dump_data.emplace_back();
+        all_dump_data.emplace_back(title);
         auto* pd = &all_dump_data.back();
-        pd->title = title;
         pd->cat = "enable";
         pd->id = id;
 
