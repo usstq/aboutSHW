@@ -96,8 +96,6 @@ void test2() {
         {PERF_TYPE_RAW, 0x20b2, "PORT_5_11"},
         {PERF_TYPE_RAW, 0x40b2, "PORT_6"},
         {PERF_TYPE_RAW, 0x80b2, "PORT_7_8"},
-    }, [](std::ostream& os, double usec, uint64_t* pmc) {
-        os << "\"CPI\" : " << static_cast<double>(pmc[0])/pmc[1] << ",";
     });
     Jit inst;
     inst.setup_loop([&](){

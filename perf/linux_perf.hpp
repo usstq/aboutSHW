@@ -206,7 +206,8 @@ struct PerfEventGroup : public IPerfEventDumper {
             fw << "\"args\":{";
             {
                 std::stringstream ss;
-                fn_evt_args_serializer(ss, duration, d.data);
+                if (fn_evt_args_serializer)
+                    fn_evt_args_serializer(ss, duration, d.data);
                 if (sw_task_clock_evid >= 0) {
                     // PERF_COUNT_SW_TASK_CLOCK in nano-seconds
                     ss << "\"CPU Usage\":" << (d.data[sw_task_clock_evid] * 1e-3)/duration << ",";
