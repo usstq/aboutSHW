@@ -17,25 +17,43 @@ thread_local PerfEventGroup pevg({
     {PERF_TYPE_RAW, 0x01b2, "PORT_0"},
 });
 
-thread_local PerfEventGroup::ProfileScope pscope;
+struct PerfData {
+    PerfEventGroup::ProfileScope pscope[256];
+    int NT;
+    const std::string title;
+    bool is_finished;
 
-void start(std::string title, int id) {
-    auto NT = at::get_num_threads();
-    // std::cout << "aten::get_num_threads() is " << NT << std::endl;
-    at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
-        pscope = std::move(pevg.start_profile(title, id));
-    });
-}
-
-void finish() {
-    auto NT = at::get_num_threads();
-    at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
-        pscope.finish();
-    });
-}
+    PerfData(const std::string& title) : NT(0), title(title), is_finished(false) {
+        NT = at::get_num_threads();
+        at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
+            pscope[i0] = std::move(pevg.start_profile(title, 0));
+        });
+    }
+    void finish() {
+        if (!is_finished) {
+            at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
+                pscope[i0].finish();
+            });
+            is_finished = true;
+        }
+    }
+    ~PerfData() {
+        finish();
+    }
+};
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("start", &start, "start");
-    m.def("finish", &finish, "finish");
+    pybind11::class_<PerfData>(m, "PerfData")
+        .def(pybind11::init<const std::string&>())
+        .def("finish", &PerfData::finish)
+        .def("__enter__", [&] (PerfData& r) { })
+        .def("__exit__",
+        [&] (PerfData& r,
+            const pybind11::object& exc_type,
+            const pybind11::object& exc_value,
+            const pybind11::object& traceback)
+        { 
+                r.finish(); 
+        });
 }
