@@ -213,7 +213,11 @@ struct PerfEventGroup : public IPerfEventDumper {
                     ss << "\"CPU Usage\":" << (d.data[sw_task_clock_evid] * 1e-3)/duration << ",";
                 }
                 if (hw_cpu_cycles_evid >= 0) {
-                    ss << "\"CPU Freq(GHz)\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])*1e-3/duration << ",";
+                    if (sw_task_clock_evid >= 0 && d.data[sw_task_clock_evid] > 0) {
+                        ss << "\"CPU Freq(GHz)\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[sw_task_clock_evid] << ",";
+                    } else {
+                        ss << "\"CPU Freq(GHz)\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])*1e-3/duration << ",";
+                    }
                     if (hw_instructions_evid >= 0 && d.data[hw_instructions_evid] > 0) {
                         ss << "\"CPI\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[hw_instructions_evid] << ",";
                     }
