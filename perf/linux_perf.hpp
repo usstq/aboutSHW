@@ -134,7 +134,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t id = 0;
         uint64_t pmc_index = 0;
         perf_event_mmap_page* pmeta = nullptr;
-        const char * name = "?";
+        std::string name = "?";
         char format[16];
     };
     std::vector<event> events;
@@ -266,6 +266,19 @@ RAW HARDWARE EVENT DESCRIPTOR
         Config(uint32_t type, uint64_t config, const char * name = "?") : type(type), config(config), name(name) {}
     };
 
+    std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
+        std::vector<std::string> ret;
+        size_t last = 0;
+        size_t next = 0;
+        while ((next = s.find(delimiter, last)) != std::string::npos) {
+            std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
+            ret.push_back(s.substr(last, next-last));
+            last = next + 1;
+        }
+        ret.push_back(s.substr(last));
+        return ret;
+    }
+
     PerfEventGroup(const std::vector<Config> type_configs, CallBackEventArgsSerializer fn = {}) : fn_evt_args_serializer(fn) {
         for(auto& tc : type_configs) {
             if (tc.type == PERF_TYPE_SOFTWARE) {
@@ -280,16 +293,32 @@ RAW HARDWARE EVENT DESCRIPTOR
             events.back().name = tc.name;
             sprintf(events.back().format, "%%%lulu, ", strlen(tc.name));
         }
-        show_header();
 
-        const char* str_enable = std::getenv("PERF_DUMP_JSON");
-        if (!str_enable)
-            str_enable = "0";
-        enable_dump_json = atoi(str_enable) > 0;
-        if (enable_dump_json) {
-            serial = PerfEventJsonDumper::get().register_manager(this);
+        // env var defined raw events
+        const char* str_raw_config = std::getenv("PERF_RAW_CONFIG");
+        if (str_raw_config) {
+            auto options = str_split(str_raw_config, ",");
+            for(auto& opt : options) {
+                auto items = str_split(opt, "=");
+                if (items.size() == 2) {
+                    auto config = strtoul(&items[1][0], nullptr, 0);
+                    if (config > 0) {
+                        add_raw(config);
+                        events.back().name = items[0];
+                    }
+                }
+            }
         }
 
+        serial = 0;
+        const char* str_enable = std::getenv("PERF_DUMP_JSON");
+        if (str_enable) {
+            enable_dump_json = (str_enable[0] != '0');
+            if (enable_dump_json) {
+                serial = PerfEventJsonDumper::get().register_manager(this);
+            }
+        }
+        show_header();
         enable();
     }
 
@@ -303,11 +332,14 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     void show_header() {
-        printf(" === PerfEventGroup ===\n\e[33m");
+        std::stringstream ss;
+        ss << "\e[33m";
+        ss << "#" << serial << ":";
         for(auto& ev : events) {
-            printf("%s, ", ev.name);
+            ss << ev.name << ", ";
         }
-        printf("\e[0m\n");
+        ss << "\e[0m\n";
+        std::cout << ss.str();
     }
 
     void add_raw(uint64_t config, bool pinned=false) {
