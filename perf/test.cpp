@@ -117,8 +117,30 @@ void test2() {
 
     {
         auto prof0 = pevg.start_profile("outer", 0);
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        //std::this_thread::sleep_for(std::chrono::microseconds(500));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+
+    {
+        auto prof0 = pevg.start_profile("clock_gettime", 0);
+        struct timespec tp0;
+        if (clock_gettime(CLOCK_MONOTONIC_RAW, &tp0) != 0) {
+            perror("clock_gettime(CLOCK_MONOTONIC_RAW,...) failed!");
+            abort();
+        }
+        uint64_t tpns = (tp0.tv_sec * 1000000000) + tp0.tv_nsec;
+        if (tpns == 0) {
+            printf("impossible!\n");
+        }
+    }
+
+    {
+        auto prof0 = pevg.start_profile("_rdtsc", 0);
+        if (_rdtsc() == 0) {
+            printf("impossible!\n");
+        }
+    }
+
 
     for(int i=0;i<10;i++) {
 

@@ -1,8 +1,11 @@
 
 #include <linux/perf_event.h>
+#include <time.h>
+//#include <linux/time.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+
 
 __attribute__((weak))
 int perf_event_open(struct perf_event_attr *attr, pid_t pid,
@@ -29,6 +32,15 @@ int perf_event_open(struct perf_event_attr *attr, pid_t pid,
 #include <iomanip>
 #include <functional>
 
+inline uint64_t get_time_ns() {
+    struct timespec tp0;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &tp0) != 0) {
+        perror("clock_gettime(CLOCK_MONOTONIC_RAW,...) failed!");
+        abort();
+    }
+    return (tp0.tv_sec * 1000000000) + tp0.tv_nsec;    
+}
+
 struct TscCounter {
     uint64_t tsc_ticks_per_second;
     uint64_t tsc_ticks_base;
@@ -44,6 +56,10 @@ struct TscCounter {
         tsc_ticks_per_second = (__rdtsc() - start_ticks);
         std::cout << "[PERF_DUMP_JSON] tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
         tsc_ticks_base = __rdtsc();
+
+        // use CLOCK_MONOTONIC_RAW instead of TSC
+        tsc_ticks_per_second = 1000000000; // ns
+        tsc_ticks_base = get_time_ns();
     }
 };
 
@@ -93,7 +109,7 @@ struct PerfEventJsonDumper {
             "pid": "Traces",
             "tid": "Trace OV Profiler",
             "ts":)"
-           << tsc.tsc_to_usec(__rdtsc()) << "}",
+           << tsc.tsc_to_usec(get_time_ns()) << "}",
             fw << "]\n";
         fw << "}\n";
         auto total_size = fw.tellp();
@@ -172,10 +188,10 @@ struct PerfEventGroup : public IPerfEventDumper {
             start();
         }
         void start() {
-            tsc_start = __rdtsc();
+            tsc_start = get_time_ns();
         }
         void stop() {
-            tsc_end = __rdtsc();
+            tsc_end = get_time_ns();
         }
     };
 
@@ -192,6 +208,16 @@ struct PerfEventGroup : public IPerfEventDumper {
         auto data_size = all_dump_data.size();
         if (!data_size)
             return;
+        
+        if (context_switch_in_time > 0) {
+            all_dump_data.emplace_back("active");
+            auto* pd = &all_dump_data.back();
+            pd->cat = "ctx-switch";
+            pd->id = 0;
+            pd->tsc_start = context_switch_in_time;
+            pd->tsc_end = get_time_ns();
+            context_switch_in_time = 0;
+        }
 
         for (auto& d : all_dump_data) {
             auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
@@ -282,6 +308,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         ret.push_back(s.substr(last));
         return ret;
     }
+    uint64_t context_switch_in_time = 0;
 
     PerfEventGroup(const std::vector<Config> type_configs, CallBackEventArgsSerializer fn = {}) : fn_evt_args_serializer(fn) {
         for(auto& tc : type_configs) {
@@ -402,6 +429,24 @@ RAW HARDWARE EVENT DESCRIPTOR
 
     void add(perf_event_attr* pev_attr, pid_t pid = 0, int cpu = -1) {
         event ev;
+
+        size_t mmap_length = sysconf(_SC_PAGESIZE) * 1;
+        if (group_fd == -1) {
+            // for group master, generate PERF_RECORD_SWITCH into ring-buffer
+            // is helpful to visualize context switch
+            pev_attr->context_switch = 1;
+            // then TID, TIME, ID, STREAM_ID, and CPU can additionally be included in non-PERF_RECORD_SAMPLEs
+            // if the  corresponding sample_type is selected
+            pev_attr->sample_id_all = 1;
+            pev_attr->sample_type = PERF_SAMPLE_TIME;
+            mmap_length = sysconf(_SC_PAGESIZE) * (1024 + 1);
+        }
+
+        // clockid must consistent within group
+        pev_attr->use_clockid = 1;
+        // can be synched with clock_gettime(CLOCK_MONOTONIC_RAW)
+        pev_attr->clockid = CLOCK_MONOTONIC_RAW;
+
         ev.fd = perf_event_open(pev_attr, pid, cpu, group_fd, 0);
         if (ev.fd < 0) {
             perror("perf_event_open");
@@ -409,8 +454,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
         ioctl(ev.fd, PERF_EVENT_IOC_ID, &ev.id);
 
-        size_t mmap_length = sysconf(_SC_PAGESIZE)*2;
-        ev.pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ, MAP_SHARED, ev.fd, 0));
+        ev.pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ | PROT_WRITE, MAP_SHARED, ev.fd, 0));
         if (ev.pmeta == MAP_FAILED) {
             perror("mmap perf_event_mmap_page failed:");
             close(ev.fd);
@@ -498,6 +542,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
         
         event_group_enabled = true;
+        context_switch_in_time = get_time_ns();
     }
 
     uint64_t refcycle2nano(uint64_t cyc) {
@@ -617,8 +662,9 @@ RAW HARDWARE EVENT DESCRIPTOR
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
         bool use_pmc;
+        uint64_t ring_buff_head;
         ProfileScope() = default;
-        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc, uint64_t ring_buff_head) : pevg(pevg), pd(pd), use_pmc(use_pmc), ring_buff_head(ring_buff_head) {}
 
         ProfileScope(ProfileScope&& other) {
             pevg = other.pevg;
@@ -639,9 +685,64 @@ RAW HARDWARE EVENT DESCRIPTOR
             return *this;
         }
 
+        template<typename T>
+        T& read_ring_buffer(perf_event_mmap_page& meta, uint64_t& offset) {
+            auto offset0 = offset;
+            offset += sizeof(T);
+            return *reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(&meta) + meta.data_offset + (offset0)%meta.data_size);
+        }
+
         void finish() {
             if (!pevg)
                 return;
+
+            auto& group_meta = *pevg->events[0].pmeta;
+
+            auto head0 = ring_buff_head;
+            auto head1 = group_meta.data_head;
+
+            if (head0 != head1) {
+                //printf("ring-buffer@end: %lu~%llu %llu %llu %llu\n", head0, head1, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
+
+                //printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
+                //printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
+                //printf("PERF_RECORD_MISC_SWITCH_OUT_PREEMPT  = %d\n", PERF_RECORD_MISC_SWITCH_OUT_PREEMPT);
+
+                uint64_t tpns = get_time_ns();
+                while(head0 < head1) {
+                    auto h0 = head0;
+                    auto type = read_ring_buffer<__u32>(group_meta, head0);
+                    auto misc = read_ring_buffer<__u16>(group_meta, head0);
+                    auto size = read_ring_buffer<__u16>(group_meta, head0);
+                    auto time = read_ring_buffer<uint64_t>(group_meta, head0);
+
+                    if (type == PERF_RECORD_SWITCH) {
+                        if (misc == PERF_RECORD_MISC_SWITCH_OUT || misc == PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) {
+                            // switch out
+                            // generate a log
+                            pevg->all_dump_data.emplace_back("active");
+                            auto* pd = &pevg->all_dump_data.back();
+                            pd->cat = "ctx-switch";
+                            pd->id = 0;
+                            //printf("context_switch_in_time=%lu\n", pevg->context_switch_in_time);
+                            pd->tsc_start = pevg->context_switch_in_time;
+                            pd->tsc_end = time;
+
+                            pevg->context_switch_in_time = 0;
+                        } else {
+                            // switch in
+                            pevg->context_switch_in_time = time;
+                        }
+                    }
+                    //printf("event: %lu/%llu  type,misc,size,time=%u,%u,%u, %lu = %lu = %lu\n", h0, head1, type, misc, size, tpns, time, tpns - time);
+                    head0 += size - (head0 - h0);
+                }
+                //printf("event: %lu/%llu\n", head0, head1);
+
+                // update tail so kernel can keep generate event records
+                group_meta.data_tail = head0;
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+            }
 
             pd->stop();
             if (use_pmc) {
@@ -671,6 +772,10 @@ RAW HARDWARE EVENT DESCRIPTOR
         pd->cat = "enable";
         pd->id = id;
 
+        auto& group_meta = *events[0].pmeta;
+        auto data_head = group_meta.data_head;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        // printf("ring-buffer@start: %llu %llu %llu %llu\n", group_meta.data_head, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
         // use rdpmc if possible
         bool use_pmc = (num_events_no_pmc == 0);
         if (use_pmc) {
@@ -683,7 +788,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                 pd->data[i] = values[i];
         }
 
-        return ProfileScope(this, pd, use_pmc);
+        return ProfileScope(this, pd, use_pmc, data_head);
     }
 
 };
