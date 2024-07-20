@@ -13,6 +13,8 @@ mkdir build
 nvcc --generate-line-info --keep --keep-dir build  kernel.cu
 # disassemble device side code with line-info
 nvdisasm --print-line-info-inline -c build\kernel.sm_52.cubin
+# profile all metrics
+nvprof.exe --metrics all .\a.exe
 ```
 also we can use `CUDA C++` in https://godbolt.org/ to inspect the generated PTX & SASS code.
 
