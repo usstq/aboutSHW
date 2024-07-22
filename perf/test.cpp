@@ -172,6 +172,7 @@ void test2() {
         for(int ithr=0; ithr<nthr; ithr++) {
             inst(1000);
         }
+
         #pragma omp parallel for
         for(int ithr=0; ithr<nthr; ithr++) {
             pscope[ithr].finish();
