@@ -662,9 +662,8 @@ RAW HARDWARE EVENT DESCRIPTOR
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
         bool use_pmc;
-        uint64_t ring_buff_head;
         ProfileScope() = default;
-        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc, uint64_t ring_buff_head) : pevg(pevg), pd(pd), use_pmc(use_pmc), ring_buff_head(ring_buff_head) {}
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
 
         ProfileScope(ProfileScope&& other) {
             pevg = other.pevg;
@@ -698,11 +697,11 @@ RAW HARDWARE EVENT DESCRIPTOR
 
             auto& group_meta = *pevg->events[0].pmeta;
 
-            auto head0 = ring_buff_head;
-            auto head1 = group_meta.data_head;
+            uint64_t head0 = group_meta.data_tail;
+            uint64_t head1 = group_meta.data_head;
+            //printf("ring-buffer@end: %lu~%lu %llu %llu %llu\n", head0, head1, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
 
             if (head0 != head1) {
-                //printf("ring-buffer@end: %lu~%llu %llu %llu %llu\n", head0, head1, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
 
                 //printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
                 //printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
@@ -717,7 +716,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                     auto time = read_ring_buffer<uint64_t>(group_meta, head0);
 
                     if (type == PERF_RECORD_SWITCH) {
-                        if (misc == PERF_RECORD_MISC_SWITCH_OUT || misc == PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) {
+                        if (misc & PERF_RECORD_MISC_SWITCH_OUT || misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) {
                             // switch out
                             // generate a log
                             pevg->all_dump_data.emplace_back("active");
@@ -734,7 +733,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                             pevg->context_switch_in_time = time;
                         }
                     }
-                    //printf("event: %lu/%llu  type,misc,size,time=%u,%u,%u, %lu = %lu = %lu\n", h0, head1, type, misc, size, tpns, time, tpns - time);
+                    //printf("event: %lu/%lu  type,misc,size,time=%u,%u,%u, %lu = %lu = %lu\n", h0, head1, type, misc, size, tpns, time, tpns - time);
                     head0 += size - (head0 - h0);
                 }
                 //printf("event: %lu/%llu\n", head0, head1);
@@ -773,7 +772,6 @@ RAW HARDWARE EVENT DESCRIPTOR
         pd->id = id;
 
         auto& group_meta = *events[0].pmeta;
-        auto data_head = group_meta.data_head;
         std::atomic_thread_fence(std::memory_order_seq_cst);
         // printf("ring-buffer@start: %llu %llu %llu %llu\n", group_meta.data_head, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
         // use rdpmc if possible
@@ -788,7 +786,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                 pd->data[i] = values[i];
         }
 
-        return ProfileScope(this, pd, use_pmc, data_head);
+        return ProfileScope(this, pd, use_pmc);
     }
 
 };

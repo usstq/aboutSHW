@@ -82,21 +82,38 @@ void test1() {
   printf("\tCPI: %.2f \n", static_cast<double>(pevg[0])/pevg[1]);
 }
 
+inline int omp_thread_count() {
+    int n = 0;
+#pragma omp parallel reduction(+ : n)
+    n += 1;
+    return n;
+}
+
+thread_local PerfEventGroup pevg({
+    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+    //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
+    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
+    {PERF_TYPE_RAW, 0x01b2, "PORT_0"},
+    {PERF_TYPE_RAW, 0x02b2, "PORT_1"},
+    {PERF_TYPE_RAW, 0x04b2, "PORT_2_3_10"},
+    {PERF_TYPE_RAW, 0x10b2, "PORT_4_9"},
+    {PERF_TYPE_RAW, 0x20b2, "PORT_5_11"},
+    {PERF_TYPE_RAW, 0x40b2, "PORT_6"},
+    {PERF_TYPE_RAW, 0x80b2, "PORT_7_8"},
+});
+
+void busy_sleep_ms(int duration_ms) {
+    const auto now0 = std::chrono::system_clock::now();
+    do{
+        auto now1 = std::chrono::system_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now1 - now0);
+        if (ms.count() > duration_ms) break;
+    } while(1);
+}
+
 void test2() {
-    PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-        {PERF_TYPE_RAW, 0x01b2, "PORT_0"},
-        {PERF_TYPE_RAW, 0x02b2, "PORT_1"},
-        {PERF_TYPE_RAW, 0x04b2, "PORT_2_3_10"},
-        {PERF_TYPE_RAW, 0x10b2, "PORT_4_9"},
-        {PERF_TYPE_RAW, 0x20b2, "PORT_5_11"},
-        {PERF_TYPE_RAW, 0x40b2, "PORT_6"},
-        {PERF_TYPE_RAW, 0x80b2, "PORT_7_8"},
-    });
     Jit inst;
     inst.setup_loop([&](){
         for(int i = 0; i< 50; i++) {
@@ -113,8 +130,7 @@ void test2() {
         }
     });
 
-    pevg.enable();
-
+#if 0
     {
         auto prof0 = pevg.start_profile("outer", 0);
         //std::this_thread::sleep_for(std::chrono::microseconds(500));
@@ -141,18 +157,34 @@ void test2() {
         }
     }
 
+#endif
+    PerfEventGroup::ProfileScope pscope[256];
 
+    auto nthr = omp_thread_count();
+    printf("omp_thread_count = %d\n", nthr);
     for(int i=0;i<10;i++) {
+        #pragma omp parallel for
+        for(int ithr=0; ithr<nthr; ithr++) {
+            pscope[ithr] = std::move(pevg.start_profile("inner", 0));
+        }
 
-        auto prof = pevg.start_profile("inner", 0);
-        inst(1000);
+        #pragma omp parallel for
+        for(int ithr=0; ithr<nthr; ithr++) {
+            inst(1000);
+        }
+        #pragma omp parallel for
+        for(int ithr=0; ithr<nthr; ithr++) {
+            pscope[ithr].finish();
+        }
 
+        busy_sleep_ms(10);
+        /*
         auto pmc = pevg.rdpmc([&](){
             inst(1000);
         }, "test2", __LINE__, false);
-
         auto duration = pevg.refcycle2nano(pmc[2]);
         printf("CPU_freq:%.2f GHz, CPI: %.2f\n", static_cast<double>(pmc[0])/duration, static_cast<double>(pmc[0])/pmc[1]);
+        */
     }
 }
 
