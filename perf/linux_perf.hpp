@@ -214,15 +214,15 @@ struct PerfEventGroup : public IPerfEventDumper {
         if (!data_size)
             return;
 
-        updateRingBuffer();        
-        if (context_switch_in_time > 0) {
-            all_dump_data.emplace_back("active");
+        updateRingBuffer();
+        if (ctx_switch_in_time > 0) {
+            all_dump_data.emplace_back("cpu");
             auto* pd = &all_dump_data.back();
             pd->cat = "ctx-switch";
-            pd->id = context_switch_in_idx++;
-            pd->tsc_start = context_switch_in_time;
+            pd->id = ctx_switch_in_cpu;
+            pd->tsc_start = ctx_switch_in_time;
             pd->tsc_end = get_time_ns();
-            context_switch_in_time = 0;
+            ctx_switch_in_time = 0;
         }
 
         for (auto& d : all_dump_data) {
@@ -235,11 +235,11 @@ struct PerfEventGroup : public IPerfEventDumper {
 
             if (std::string(d.cat) == std::string("ctx-switch")) {
                 auto evid = async_evid++;
-                fw << "{\"cat\": \"ctx-switch\", \"name\": \"" << d.title << "\", \"ph\": \"b\", "
+                fw << "{\"cat\": \"ctx-switch\", \"name\": \"" << title << "\", \"ph\": \"b\", "
                     << "\"pid\": " << pid << ", \"tid\": 0, \"id\":" << evid << "," 
                     << " \"ts\": " << std::setprecision (15) << start << " },";
 
-                fw << "{\"cat\": \"ctx-switch\", \"name\": \"" << d.title << "\", \"ph\": \"e\", "
+                fw << "{\"cat\": \"ctx-switch\", \"name\": \"" << title << "\", \"ph\": \"e\", "
                     << "\"pid\": " << pid << ", \"tid\": 0, \"id\":" << evid << ","
                     << " \"ts\": " << std::setprecision (15) << end << " },";
                 continue;
@@ -269,7 +269,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 }
                 ss.imbue(std::locale(""));
                 const char * sep = "";
-                for(int i = 0; i < events.size() && i < d.data_size; i++) {
+                for(size_t i = 0; i < events.size() && i < d.data_size; i++) {
                     ss << sep << "\"" << events[i].name << "\":\"" << d.data[i] << "\"";
                     sep = ",";
                 }
@@ -327,7 +327,12 @@ RAW HARDWARE EVENT DESCRIPTOR
         ret.push_back(s.substr(last));
         return ret;
     }
-    uint64_t context_switch_in_time = 0;
+    uint64_t ctx_switch_in_time = 0;
+    uint64_t ctx_switch_in_cpu = 0;
+    uint32_t ctx_switch_in_pid = 0;
+    uint32_t ctx_switch_in_tid = 0;
+    uint32_t ctx_switch_my_pid = 0;
+    uint32_t ctx_switch_my_tid = 0;
     uint64_t context_switch_in_idx = 0;
 
     PerfEventGroup(const std::vector<Config> type_configs, CallBackEventArgsSerializer fn = {}) : fn_evt_args_serializer(fn) {
@@ -356,6 +361,14 @@ RAW HARDWARE EVENT DESCRIPTOR
                     if (config > 0) {
                         add_raw(config);
                         events.back().name = items[0];
+                    }
+                }
+                if (items.size() == 1) {
+                    if (items[0] == "switch") {
+                        add_switch(false);
+                    }
+                    if (items[0] == "switch-cpu") {
+                        add_switch(true);
                     }
                 }
             }
@@ -451,6 +464,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         event ev;
 
         size_t mmap_length = sysconf(_SC_PAGESIZE) * 1;
+        /*
         if (group_fd == -1) {
             // for group master, generate PERF_RECORD_SWITCH into ring-buffer
             // is helpful to visualize context switch
@@ -460,7 +474,7 @@ RAW HARDWARE EVENT DESCRIPTOR
             pev_attr->sample_id_all = 1;
             pev_attr->sample_type = PERF_SAMPLE_TIME;
             mmap_length = sysconf(_SC_PAGESIZE) * (1024 + 1);
-        }
+        }*/
 
         // clockid must consistent within group
         pev_attr->use_clockid = 1;
@@ -500,6 +514,64 @@ RAW HARDWARE EVENT DESCRIPTOR
         printf("perf_event_open : fd=%d, id=%lu\n", ev.fd, ev.id);
 
         events.push_back(ev);
+    }
+
+    int ctx_switch_fd = -1;
+    perf_event_mmap_page* ctx_switch_pmeta;
+
+    void add_switch(bool cpu_wide) {
+        perf_event_attr pea;
+        memset(&pea, 0, sizeof(struct perf_event_attr));
+        pea.type = PERF_TYPE_HARDWARE;
+        pea.size = sizeof(struct perf_event_attr);
+        pea.config = PERF_COUNT_HW_REF_CPU_CYCLES;  // not the point, can be any
+        pea.disabled = 0;
+        pea.exclude_kernel = 1;
+        pea.exclude_hv = 1;
+        pea.read_format = PERF_FORMAT_GROUP | PERF_FORMAT_ID;        
+        // pinned: It applies only to hardware counters and only to group leaders
+        pea.pinned = 1;
+        pea.read_format |= PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+
+        // for group master, generate PERF_RECORD_SWITCH into ring-buffer
+        // is helpful to visualize context switch
+        pea.context_switch = 1;
+        // then TID, TIME, ID, STREAM_ID, and CPU can additionally be included in non-PERF_RECORD_SAMPLEs
+        // if the  corresponding sample_type is selected
+        pea.sample_id_all = 1;
+        pea.sample_type = PERF_SAMPLE_TIME | PERF_SAMPLE_TID | PERF_SAMPLE_CPU;
+        auto mmap_length = sysconf(_SC_PAGESIZE) * (1024 + 1);
+        pea.use_clockid = 1;
+        pea.clockid = CLOCK_MONOTONIC_RAW;
+
+        // calling thread on any processor
+        int cpu_id = -1;
+        pid_t pid = 0;
+        if (cpu_wide) {
+            // measures all processes/threads on the specified CPU
+            pid = -1;
+            if (getcpu(reinterpret_cast<uint32_t*>(&cpu_id), nullptr) != 0) {
+                perror("getcpu failed:");
+                abort();
+            }
+        }
+        ctx_switch_my_pid = getpid();
+        ctx_switch_my_tid = gettid();
+        ctx_switch_fd = perf_event_open(&pea, pid, cpu_id, -1, 0);
+        //ctx_switch_fd = perf_event_open(&pea, 0, -1, -1, 0);
+        if (ctx_switch_fd < 0) {
+            perror("perf_event_open:");
+            abort();
+        }
+        //ioctl(ctx_switch_fd, PERF_EVENT_IOC_ID, &ev.id);
+
+        ctx_switch_pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ | PROT_WRITE, MAP_SHARED, ctx_switch_fd, 0));
+        if (ctx_switch_pmeta == MAP_FAILED) {
+            perror("mmap perf_event_mmap_page failed:");
+            close(ctx_switch_fd);
+            abort();
+        }
+        printf("perf_event_open : my_pid/tid=%u/%u, cpu_id=%d, ctx_switch_fd=%d\n", ctx_switch_my_pid, ctx_switch_my_tid, cpu_id, ctx_switch_fd);
     }
 
     bool event_group_enabled = false;
@@ -637,7 +709,7 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     void read(bool verbose = false) {
-        for(int i = 0; i < events.size(); i++) values[i] = 0;
+        for(size_t i = 0; i < events.size(); i++) values[i] = 0;
 
         if (::read(group_fd, read_buf, sizeof(read_buf)) == -1) {
             perror("read perf event failed:");
@@ -658,10 +730,10 @@ RAW HARDWARE EVENT DESCRIPTOR
             if (verbose) printf("time_running:\t%lu\n", time_running);
         }
 
-        for (int i = 0; i < nr; i++) {
+        for (size_t i = 0; i < nr; i++) {
             auto value = *readv++;
             auto id = *readv++;
-            for (int k = 0; k < events.size(); k++) {
+            for (size_t k = 0; k < events.size(); k++) {
                 if (id == events[k].id) {
                     values[k] = value;
                 }
@@ -669,8 +741,8 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
 
         if (verbose) {
-            for (int k = 0; k < events.size(); k++) {
-                printf("\t[%d]: %lu\n", k, values[k]);
+            for (size_t k = 0; k < events.size(); k++) {
+                printf("\t[%lu]: %lu\n", k, values[k]);
             }
         }
     }
@@ -682,52 +754,99 @@ RAW HARDWARE EVENT DESCRIPTOR
         return *reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(&meta) + meta.data_offset + (offset0)%meta.data_size);
     }
 
+    uint64_t ctx_last_time = 0;
     void updateRingBuffer() {
-        auto& group_meta = *events[0].pmeta;
+        if (!ctx_switch_pmeta)
+            return;
 
-        uint64_t head0 = group_meta.data_tail;
-        uint64_t head1 = group_meta.data_head;
+        auto& mmap_meta = *ctx_switch_pmeta;
+        uint64_t head0 = mmap_meta.data_tail;
+        uint64_t head1 = mmap_meta.data_head;
         //printf("ring-buffer@end: %lu~%lu %llu %llu %llu\n", head0, head1, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
 
         if (head0 != head1) {
 
-            //printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
-            //printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
-            //printf("PERF_RECORD_MISC_SWITCH_OUT_PREEMPT  = %d\n", PERF_RECORD_MISC_SWITCH_OUT_PREEMPT);
+            printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
+            printf("PERF_RECORD_SWITCH_CPU_WIDE = %d\n", PERF_RECORD_SWITCH_CPU_WIDE);
+            printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
+            printf("PERF_RECORD_MISC_SWITCH_OUT_PREEMPT  = %d\n", PERF_RECORD_MISC_SWITCH_OUT_PREEMPT);
 
-            uint64_t tpns = get_time_ns();
             while(head0 < head1) {
                 auto h0 = head0;
-                auto type = read_ring_buffer<__u32>(group_meta, head0);
-                auto misc = read_ring_buffer<__u16>(group_meta, head0);
-                auto size = read_ring_buffer<__u16>(group_meta, head0);
-                auto time = read_ring_buffer<uint64_t>(group_meta, head0);
+                auto type = read_ring_buffer<__u32>(mmap_meta, head0);
+                auto misc = read_ring_buffer<__u16>(mmap_meta, head0);
+                auto size = read_ring_buffer<__u16>(mmap_meta, head0);
+                uint32_t next_prev_pid = 0, next_prev_tid = 0;
+                if (type == PERF_RECORD_SWITCH_CPU_WIDE) {
+                    // previous PID/TID if switching-in
+                    // next PID/TID if switching-out
+                    next_prev_pid = read_ring_buffer<__u32>(mmap_meta, head0);
+                    next_prev_tid = read_ring_buffer<__u32>(mmap_meta, head0);
+                }
+                auto pid = read_ring_buffer<__u32>(mmap_meta, head0);
+                auto tid = read_ring_buffer<__u32>(mmap_meta, head0);
+                auto time = read_ring_buffer<uint64_t>(mmap_meta, head0);
+                auto cpu = read_ring_buffer<__u32>(mmap_meta, head0);
+                auto reserved0 = read_ring_buffer<__u32>(mmap_meta, head0);
 
                 if (type == PERF_RECORD_SWITCH) {
                     if (misc & PERF_RECORD_MISC_SWITCH_OUT || misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) {
                         // switch out
                         // generate a log
-                        all_dump_data.emplace_back("active");
+                        all_dump_data.emplace_back("cpu");
                         auto* pd = &all_dump_data.back();
                         pd->cat = "ctx-switch";
-                        pd->id = context_switch_in_idx++;
-                        //printf("context_switch_in_time=%lu\n", context_switch_in_time);
-                        pd->tsc_start = context_switch_in_time;
+                        pd->id = ctx_switch_in_cpu;
+                        //printf("ctx_switch_in_time=%lu\n", ctx_switch_in_time);
+                        pd->tsc_start = ctx_switch_in_time;
                         pd->tsc_end = time;
 
-                        context_switch_in_time = 0;
+                        ctx_switch_in_time = 0;
                     } else {
                         // switch in
-                        context_switch_in_time = time;
+                        ctx_switch_in_cpu = cpu;
+                        ctx_switch_in_time = time;
+                    }
+                } else if (type == PERF_RECORD_SWITCH_CPU_WIDE && tid > 0) {
+                    if (misc & PERF_RECORD_MISC_SWITCH_OUT || misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) {
+                        // switch out
+                        // generate a log
+                        all_dump_data.emplace_back("tid");
+                        auto* pd = &all_dump_data.back();
+                        pd->cat = "ctx-switch";
+                        pd->id = tid;
+                        pd->data[0] = cpu;
+                        //printf("ctx_switch_in_time=%lu\n", ctx_switch_in_time);
+                        pd->tsc_start = ctx_switch_in_time;
+                        pd->tsc_end = time;
+
+                        ctx_switch_in_time = 0;
+                    } else {
+                        // switch in
+                        ctx_switch_in_cpu = cpu;
+                        ctx_switch_in_time = time;
                     }
                 }
-                //printf("event: %lu/%lu  type,misc,size,time=%u,%u,%u, %lu = %lu = %lu\n", h0, head1, type, misc, size, tpns, time, tpns - time);
+                // skip idle process (with TID 0)
+                if (tid > 0)
+                printf(" #%u: event: %lu/%lu\ttype,misc,size,cpu, tid,time=(%u,%u,%u,%u)\tnext_prev:(%u)  sample:(%u), %lu ( + %lu)\n",
+                       ctx_switch_my_tid,
+                       h0, head1, type, misc, size, cpu,
+                       next_prev_tid,
+                       tid,
+                       time,
+                       time - ctx_last_time);
+                ctx_last_time = time;
                 head0 += size - (head0 - h0);
+            }
+            if (head0 != head1) {
+                printf("head0(%lu) != head1(%lu)\n", head0, head1);
+                abort();
             }
             //printf("event: %lu/%llu\n", head0, head1);
 
             // update tail so kernel can keep generate event records
-            group_meta.data_tail = head0;
+            mmap_meta.data_tail = head0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
         }
     }
@@ -766,14 +885,14 @@ RAW HARDWARE EVENT DESCRIPTOR
 
             pd->stop();
             if (use_pmc) {
-                for (int i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                for (size_t i =0; i < pevg->events.size() && i < pd->data_size; i++)
                     if (pevg->events[i].pmc_index)
                         pd->data[i] = (_rdpmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
                     else
                         pd->data[i] = 0;
             } else {
                 pevg->read();
-                for (int i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                for (size_t i =0; i < pevg->events.size() && i < pd->data_size; i++)
                     pd->data[i] = pevg->values[i] - pd->data[i];
             }
             pevg->updateRingBuffer();
@@ -793,8 +912,8 @@ RAW HARDWARE EVENT DESCRIPTOR
         pd->cat = "enable";
         pd->id = id;
 
-        if (context_switch_in_time == 0) {
-            context_switch_in_time = get_time_ns();
+        if (ctx_switch_in_time == 0) {
+            ctx_switch_in_time = get_time_ns();
         }
         auto& group_meta = *events[0].pmeta;
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -802,12 +921,12 @@ RAW HARDWARE EVENT DESCRIPTOR
         // use rdpmc if possible
         bool use_pmc = (num_events_no_pmc == 0);
         if (use_pmc) {
-            for (int i =0; i < events.size() && i < pd->data_size; i++)
+            for (size_t i =0; i < events.size() && i < pd->data_size; i++)
                 if (events[i].pmc_index)
                     pd->data[i] = _rdpmc(events[i].pmc_index - 1);
         } else {
             read();
-            for (int i =0; i < events.size() && i < pd->data_size; i++)
+            for (size_t i =0; i < events.size() && i < pd->data_size; i++)
                 pd->data[i] = values[i];
         }
 
