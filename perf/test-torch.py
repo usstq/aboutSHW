@@ -5,7 +5,7 @@ import time
 logits = torch.zeros(1280, 32000, dtype=torch.float32)
 
 
-#p0 = tp.PerfData("all")
+p0 = tp.PerfData("all")
 
 for i in range(10):
     # support context manager style
@@ -14,6 +14,6 @@ for i in range(10):
     
     time.sleep(0.01)
 
-#p0.finish()
+p0.finish()
 
 print(dir(tp))

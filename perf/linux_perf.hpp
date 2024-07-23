@@ -215,14 +215,25 @@ struct PerfEventGroup : public IPerfEventDumper {
             return;
 
         updateRingBuffer();
-        if (ctx_switch_in_time > 0) {
-            all_dump_data.emplace_back("cpu");
-            auto* pd = &all_dump_data.back();
-            pd->cat = "ctx-switch";
-            pd->id = ctx_switch_in_cpu;
-            pd->tsc_start = ctx_switch_in_time;
-            pd->tsc_end = get_time_ns();
-            ctx_switch_in_time = 0;
+        if (ctx_switch_fd > 0 && ctx_switch_in_time > 0) {
+            if (ctx_switch_cpu_wide) {
+                all_dump_data.emplace_back("tid");
+                auto* pd = &all_dump_data.back();
+                pd->cat = "ctx-switch";
+                pd->id = ctx_switch_my_tid;
+                pd->data[0] = ctx_switch_in_cpu;
+                pd->tsc_start = ctx_switch_in_time;
+                pd->tsc_end = get_time_ns();
+                ctx_switch_in_time = 0;
+            } else {
+                all_dump_data.emplace_back("cpu");
+                auto* pd = &all_dump_data.back();
+                pd->cat = "ctx-switch";
+                pd->id = ctx_switch_in_cpu;
+                pd->tsc_start = ctx_switch_in_time;
+                pd->tsc_end = get_time_ns();
+                ctx_switch_in_time = 0;
+            }
         }
 
         for (auto& d : all_dump_data) {
@@ -517,9 +528,13 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     int ctx_switch_fd = -1;
+    bool ctx_switch_cpu_wide;
     perf_event_mmap_page* ctx_switch_pmeta;
-
+    
     void add_switch(bool cpu_wide) {
+
+        ctx_switch_cpu_wide = cpu_wide;
+
         perf_event_attr pea;
         memset(&pea, 0, sizeof(struct perf_event_attr));
         pea.type = PERF_TYPE_HARDWARE;
@@ -755,6 +770,7 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     uint64_t ctx_last_time = 0;
+    bool ring_buffer_verbose = false;
     void updateRingBuffer() {
         if (!ctx_switch_pmeta)
             return;
@@ -765,11 +781,12 @@ RAW HARDWARE EVENT DESCRIPTOR
         //printf("ring-buffer@end: %lu~%lu %llu %llu %llu\n", head0, head1, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
 
         if (head0 != head1) {
-
-            printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
-            printf("PERF_RECORD_SWITCH_CPU_WIDE = %d\n", PERF_RECORD_SWITCH_CPU_WIDE);
-            printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
-            printf("PERF_RECORD_MISC_SWITCH_OUT_PREEMPT  = %d\n", PERF_RECORD_MISC_SWITCH_OUT_PREEMPT);
+            if (ring_buffer_verbose) {
+                printf("PERF_RECORD_SWITCH = %d\n", PERF_RECORD_SWITCH);
+                printf("PERF_RECORD_SWITCH_CPU_WIDE = %d\n", PERF_RECORD_SWITCH_CPU_WIDE);
+                printf("PERF_RECORD_MISC_SWITCH_OUT = %d\n", PERF_RECORD_MISC_SWITCH_OUT);
+                printf("PERF_RECORD_MISC_SWITCH_OUT_PREEMPT  = %d\n", PERF_RECORD_MISC_SWITCH_OUT_PREEMPT);
+            }
 
             while(head0 < head1) {
                 auto h0 = head0;
@@ -828,22 +845,23 @@ RAW HARDWARE EVENT DESCRIPTOR
                     }
                 }
                 // skip idle process (with TID 0)
-                if (tid > 0)
-                printf(" #%u: event: %lu/%lu\ttype,misc,size,cpu, tid,time=(%u,%u,%u,%u)\tnext_prev:(%u)  sample:(%u), %lu ( + %lu)\n",
-                       ctx_switch_my_tid,
-                       h0, head1, type, misc, size, cpu,
-                       next_prev_tid,
-                       tid,
-                       time,
-                       time - ctx_last_time);
+                if (tid > 0 && ring_buffer_verbose) {
+                    printf(" #%u: event: %lu/%lu\ttype,misc,size,cpu, tid,time=(%u,%u,%u,%u)\tnext_prev:(%u)  sample:(%u), %lu ( + %lu)\n",
+                        ctx_switch_my_tid,
+                        h0, head1, type, misc, size, cpu,
+                        next_prev_tid,
+                        tid,
+                        time,
+                        time - ctx_last_time);
+                }
                 ctx_last_time = time;
                 head0 += size - (head0 - h0);
             }
+
             if (head0 != head1) {
                 printf("head0(%lu) != head1(%lu)\n", head0, head1);
                 abort();
             }
-            //printf("event: %lu/%llu\n", head0, head1);
 
             // update tail so kernel can keep generate event records
             mmap_meta.data_tail = head0;
