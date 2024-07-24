@@ -113,6 +113,15 @@ void busy_sleep_ms(int duration_ms) {
     } while(1);
 }
 
+uint32_t get_cpu_id() {
+    uint32_t cpuid;
+    if (getcpu(reinterpret_cast<uint32_t*>(&cpuid), nullptr) != 0) {
+        perror("getcpu failed : ");
+        abort();
+    }
+    return cpuid;
+}
+
 void test2() {
     Jit inst;
     inst.setup_loop([&](){
@@ -162,7 +171,15 @@ void test2() {
 
     auto nthr = omp_thread_count();
     printf("omp_thread_count = %d\n", nthr);
-    for(int i=0;i<10;i++) {
+
+    uint32_t cpus[128];
+
+    #pragma omp parallel for
+    for(int ithr=0; ithr<nthr; ithr++) {
+        cpus[ithr] = get_cpu_id();
+    }
+
+    for(int i=0;i<100;i++) {
         #pragma omp parallel for
         for(int ithr=0; ithr<nthr; ithr++) {
             pscope[ithr] = std::move(pevg.start_profile("inner", 0));
@@ -170,6 +187,11 @@ void test2() {
 
         #pragma omp parallel for
         for(int ithr=0; ithr<nthr; ithr++) {
+            auto cpu = get_cpu_id();
+            if (cpus[ithr] != cpu) {
+                printf("%u->%u\n", cpus[ithr], cpu);
+                cpus[ithr] = cpu;
+            }
             inst(1000);
         }
 

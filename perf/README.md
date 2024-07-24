@@ -49,4 +49,14 @@ cap_user_rdpmc (since Linux 3.12)
 install torch extension by `pip install -e .`.
 
 
-please check [test.cpp](./test.cpp) and [test-torch.py](./test-torch.py) out 
+please check [test.cpp](./test.cpp) and [test-torch.py](./test-torch.py) out
+
+## Threads switching debug
+
+```bash
+# PERF_RAW_CONFIG, comma separated list of custom options or raw PMU events, examples:
+#    - switch-cpu
+#    - switch
+#    - STALLS_TOTAL=0x040014a3  (0x CMask/00/UMask/EventSel)
+PERF_RAW_CONFIG=switch-cpu,STALLS_TOTAL=0x040014a3 PERF_DUMP_JSON=1 numactl -C0-3 python ./test-tbb-omp.py
+```

@@ -23,18 +23,26 @@ struct PerfData {
     int NT;
     const std::string title;
     bool is_finished;
+    bool all_threads;
 
-    PerfData(const std::string& title) : NT(0), title(title), is_finished(false) {
-        NT = at::get_num_threads();
-        at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
-            pscope[i0] = std::move(pevg.start_profile(title, 0));
-        });
+    PerfData(const std::string& title, bool all_threads) : NT(0), title(title), is_finished(false), all_threads(all_threads) {
+        pscope[0] = std::move(pevg.start_profile(title, 0));
+
+        if (all_threads) {
+            NT = at::get_num_threads();
+            at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
+                if (i0 > 0) pscope[i0] = std::move(pevg.start_profile(title, 0));
+            });
+        }
     }
     void finish() {
         if (!is_finished) {
-            at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
-                pscope[i0].finish();
-            });
+            if (all_threads) {
+                at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
+                    if (i0 > 0) pscope[i0].finish();
+                });
+            }
+            pscope[0].finish();
             is_finished = true;
         }
     }
@@ -46,7 +54,7 @@ struct PerfData {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     pybind11::class_<PerfData>(m, "PerfData")
-        .def(pybind11::init<const std::string&>())
+        .def(pybind11::init<const std::string&, bool>())
         .def("finish", &PerfData::finish)
         .def("__enter__", [&] (PerfData& r) { })
         .def("__exit__",
