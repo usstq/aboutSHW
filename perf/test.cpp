@@ -50,59 +50,12 @@ void do_something() {
   free(ptr);
 }
 
-
-void test1() {
-  PerfEventGroup pevg({
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES},
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_MIGRATIONS},
-  });
-  Jit inst;
-  inst.setup_loop([&](){
-    for(int i = 0; i< 50; i++)
-        inst.vaddps(inst.zmm0, inst.zmm1, inst.zmm0);
-  });
-  pevg.enable();
-  //do_something();
-  inst(1000);
-  pevg.disable();
-  pevg.read();
-
-  printf("\ttime_running: %.2f ms\n", static_cast<double>(pevg.time_running)/1e6);
-  printf("\ttime_enabled: %.2f ms\n", static_cast<double>(pevg.time_enabled)/1e6);
-  printf("\tcpu cycles:%lu\n", pevg[0]);
-  printf("\tinstructions:%lu\n", pevg[1]);
-  printf("\tpage faults:%lu\n", pevg[2]);
-  printf("\tcontext switches:%lu\n", pevg[3]);
-  printf("\tcpu migrations:\t%lu\n", pevg[4]);
-  printf("\t=========\n");
-  printf("\tcpu freq: %.2f GHz\n", static_cast<double>(pevg[0])/pevg.time_running);
-  printf("\tCPI: %.2f \n", static_cast<double>(pevg[0])/pevg[1]);
-}
-
 inline int omp_thread_count() {
     int n = 0;
 #pragma omp parallel reduction(+ : n)
     n += 1;
     return n;
 }
-
-thread_local PerfEventGroup pevg({
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-    //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-    {PERF_TYPE_RAW, 0x01b2, "PORT_0"},
-    {PERF_TYPE_RAW, 0x02b2, "PORT_1"},
-    {PERF_TYPE_RAW, 0x04b2, "PORT_2_3_10"},
-    {PERF_TYPE_RAW, 0x10b2, "PORT_4_9"},
-    {PERF_TYPE_RAW, 0x20b2, "PORT_5_11"},
-    {PERF_TYPE_RAW, 0x40b2, "PORT_6"},
-    {PERF_TYPE_RAW, 0x80b2, "PORT_7_8"},
-});
 
 void busy_sleep_ms(int duration_ms) {
     const auto now0 = std::chrono::system_clock::now();
@@ -141,13 +94,13 @@ void test2() {
 
 #if 0
     {
-        auto prof0 = pevg.start_profile("outer", 0);
+        auto prof0 = LinuxPerf::Profile("outer", 0);
         //std::this_thread::sleep_for(std::chrono::microseconds(500));
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
     {
-        auto prof0 = pevg.start_profile("clock_gettime", 0);
+        auto prof0 = LinuxPerf::Profile("clock_gettime", 0);
         struct timespec tp0;
         if (clock_gettime(CLOCK_MONOTONIC_RAW, &tp0) != 0) {
             perror("clock_gettime(CLOCK_MONOTONIC_RAW,...) failed!");
@@ -160,14 +113,14 @@ void test2() {
     }
 
     {
-        auto prof0 = pevg.start_profile("_rdtsc", 0);
+        auto prof0 = LinuxPerf::Profile("_rdtsc", 0);
         if (_rdtsc() == 0) {
             printf("impossible!\n");
         }
     }
 
 #endif
-    PerfEventGroup::ProfileScope pscope[256];
+    LinuxPerf::ProfileScope pscope[256];
 
     auto nthr = omp_thread_count();
     printf("omp_thread_count = %d\n", nthr);
@@ -182,7 +135,7 @@ void test2() {
     for(int i=0;i<100;i++) {
         #pragma omp parallel for
         for(int ithr=0; ithr<nthr; ithr++) {
-            pscope[ithr] = std::move(pevg.start_profile("inner", 0));
+            pscope[ithr] = std::move(LinuxPerf::Profile("inner", 0));
         }
 
         #pragma omp parallel for
@@ -212,6 +165,7 @@ void test2() {
 }
 
 int main(int argc, char* argv[]) {
+  LinuxPerf::Init();
   //test1(); return 0;
   test2();
   return 0;

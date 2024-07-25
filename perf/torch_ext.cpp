@@ -8,15 +8,7 @@
 
 #include "linux_perf.hpp"
 
-thread_local PerfEventGroup pevg({
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-    //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-    {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
-});
+auto _xx = LinuxPerf::Init();
 
 struct PerfData {
     PerfEventGroup::ProfileScope pscope[256];
@@ -26,12 +18,12 @@ struct PerfData {
     bool all_threads;
 
     PerfData(const std::string& title, bool all_threads) : NT(0), title(title), is_finished(false), all_threads(all_threads) {
-        pscope[0] = std::move(pevg.start_profile(title, 0));
+        pscope[0] = std::move(LinuxPerf::Profile(title, 0));
 
         if (all_threads) {
             NT = at::get_num_threads();
             at::parallel_for(0, NT, 0, [&](int64_t i0, int64_t i1) {
-                if (i0 > 0) pscope[i0] = std::move(pevg.start_profile(title, 0));
+                if (i0 > 0) pscope[i0] = std::move(LinuxPerf::Profile(title, 0));
             });
         }
     }
