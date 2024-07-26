@@ -350,8 +350,33 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
     bool ring_buffer_verbose = false;
     uint32_t my_pid = 0;
     uint32_t my_tid = 0;
+    std::atomic<int> atom_gard{0};
 
     void updateRingBuffer() {
+        // only one thread can enter
+        const int lock_value = atom_gard.exchange(1);
+        if (lock_value == 1) {
+            // has been locked, return;
+            return;
+        }
+
+        // only update when any ring-buffer is half loaded
+        bool need_update = false;
+        for(auto& ev : events) {
+            auto& mmap_meta = *ev.meta;
+            auto used_size = (mmap_meta.data_tail - mmap_meta.data_head) % mmap_meta.data_size;
+            if (used_size > (mmap_meta.data_size >> 1)) {
+                need_update = true;
+                break;
+            }
+        }
+
+        if (!need_update) {
+            // unlock
+            atom_gard.exchange(0);
+            return;
+        }
+
         for(auto& ev : events) {
             auto& mmap_meta = *ev.meta;
             uint64_t head0 = mmap_meta.data_tail;
@@ -431,6 +456,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                 std::atomic_thread_fence(std::memory_order_seq_cst);
             }
         }
+        atom_gard.exchange(0);
     }
 
     static PerfEventCtxSwitch& get() {
@@ -704,18 +730,6 @@ RAW HARDWARE EVENT DESCRIPTOR
         event ev;
 
         size_t mmap_length = sysconf(_SC_PAGESIZE) * 1;
-        /*
-        if (group_fd == -1) {
-            // for group master, generate PERF_RECORD_SWITCH into ring-buffer
-            // is helpful to visualize context switch
-            pev_attr->context_switch = 1;
-            // then TID, TIME, ID, STREAM_ID, and CPU can additionally be included in non-PERF_RECORD_SAMPLEs
-            // if the  corresponding sample_type is selected
-            pev_attr->sample_id_all = 1;
-            pev_attr->sample_type = PERF_SAMPLE_TIME;
-            mmap_length = sysconf(_SC_PAGESIZE) * (1024 + 1);
-        }*/
-
         // clockid must consistent within group
         pev_attr->use_clockid = 1;
         // can be synched with clock_gettime(CLOCK_MONOTONIC_RAW)
@@ -754,66 +768,6 @@ RAW HARDWARE EVENT DESCRIPTOR
         //printf("perf_event_open : fd=%d, id=%lu\n", ev.fd, ev.id);
 
         events.push_back(ev);
-    }
-
-    int ctx_switch_fd = -1;
-    bool ctx_switch_cpu_wide;
-    perf_event_mmap_page* ctx_switch_pmeta;
-    
-    void add_switch(bool cpu_wide) {
-
-        ctx_switch_cpu_wide = cpu_wide;
-
-        perf_event_attr pea;
-        memset(&pea, 0, sizeof(struct perf_event_attr));
-        pea.type = PERF_TYPE_HARDWARE;
-        pea.size = sizeof(struct perf_event_attr);
-        pea.config = PERF_COUNT_HW_REF_CPU_CYCLES;  // not the point, can be any
-        pea.disabled = 0;
-        pea.exclude_kernel = 1;
-        pea.exclude_hv = 1;
-        pea.read_format = PERF_FORMAT_GROUP | PERF_FORMAT_ID;        
-        // pinned: It applies only to hardware counters and only to group leaders
-        pea.pinned = 1;
-        pea.read_format |= PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
-
-        // for group master, generate PERF_RECORD_SWITCH into ring-buffer
-        // is helpful to visualize context switch
-        pea.context_switch = 1;
-        // then TID, TIME, ID, STREAM_ID, and CPU can additionally be included in non-PERF_RECORD_SAMPLEs
-        // if the  corresponding sample_type is selected
-        pea.sample_id_all = 1;
-        pea.sample_type = PERF_SAMPLE_TIME | PERF_SAMPLE_TID | PERF_SAMPLE_CPU;
-        auto mmap_length = sysconf(_SC_PAGESIZE) * (1024 + 1);
-        pea.use_clockid = 1;
-        pea.clockid = CLOCK_MONOTONIC_RAW;
-
-        // calling thread on any processor
-        int cpu_id = -1;
-        pid_t pid = 0;
-        if (cpu_wide) {
-            // measures all processes/threads on the specified CPU
-            pid = -1;
-            if (getcpu(reinterpret_cast<uint32_t*>(&cpu_id), nullptr) != 0) {
-                perror("getcpu failed:");
-                abort();
-            }
-        }
-        ctx_switch_fd = perf_event_open(&pea, pid, cpu_id, -1, 0);
-        //ctx_switch_fd = perf_event_open(&pea, 0, -1, -1, 0);
-        if (ctx_switch_fd < 0) {
-            perror("perf_event_open:");
-            abort();
-        }
-        //ioctl(ctx_switch_fd, PERF_EVENT_IOC_ID, &ev.id);
-
-        ctx_switch_pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ | PROT_WRITE, MAP_SHARED, ctx_switch_fd, 0));
-        if (ctx_switch_pmeta == MAP_FAILED) {
-            perror("mmap perf_event_mmap_page failed:");
-            close(ctx_switch_fd);
-            abort();
-        }
-        printf("perf_event_open : my_pid/tid=%u/%u, cpu_id=%d, ctx_switch_fd=%d\n", my_pid, my_tid, cpu_id, ctx_switch_fd);
     }
 
     bool event_group_enabled = false;
@@ -1049,6 +1003,9 @@ RAW HARDWARE EVENT DESCRIPTOR
     ProfileScope start_profile(const std::string& title, int id = 0) {
         if (!enable_dump_json)
             return {};
+
+        PerfEventCtxSwitch::get().updateRingBuffer();
+
         all_dump_data.emplace_back(title);
         auto* pd = &all_dump_data.back();
         pd->cat = "enable";
