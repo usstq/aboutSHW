@@ -315,7 +315,6 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
 
         updateRingBuffer();
 
-        printf("===== dump_json %d, %lu, \n", is_enabled, all_dump_data.size());
         auto data_size = all_dump_data.size();
         if (!data_size) return;
 
@@ -488,8 +487,7 @@ struct PerfEventGroup : public IPerfEventDumper {
     uint64_t values[32];
     uint32_t tsc_time_shift;
     uint32_t tsc_time_mult;
-    uint32_t refcycle_time_mult = 0;
-    
+
     // ref_cpu_cycles even id
     // this event is fixed function counter provided by most x86 CPU
     // and it provides TSC clock which is:
@@ -802,41 +800,7 @@ RAW HARDWARE EVENT DESCRIPTOR
             if (ev.pmc_index == 0)
                 num_events_no_pmc ++;
         }
-        /*
-        UnHalted Reference Cycles — Event select 3CH, Umask 01H
-            This event counts reference clock cycles at a fixed frequency while the clock signal on the core is running. The
-            event counts at a fixed frequency, irrespective of core frequency changes due to performance state transitions.
-            Processors may implement this behavior differently. Current implementations use the core crystal clock, TSC or
-            the bus clock. Because the rate may differ between implementations, software should calibrate it to a time
-            source with known frequency.
-        here we need to calibrate Reference Cycles (TSC)
-        */
-        if (ref_cpu_cycles_evid >= 0 && refcycle_time_mult == 0) {
-            auto ref_cycles_t0 = rdpmc(ref_cpu_cycles_evid);
-            auto tsc_t0 = _rdtsc();
-            auto ref_cycles_t1 = ref_cycles_t0;
-            auto tsc_t1 = tsc_t0;
-            // (tsc >> time_shift) * time_mult = 0.5e9 nanoseconds
-            // tsc = (0.5e9 << time_shift / time_mult)
-            uint64_t tsc_span = 500*1000*1000; // 100ms
-            tsc_span = (tsc_span << tsc_time_shift) / tsc_time_mult;
-            do {
-                ref_cycles_t1 = rdpmc(ref_cpu_cycles_evid);
-                tsc_t1 = _rdtsc();
-            } while (tsc_t1 - tsc_t0 < tsc_span);
-
-            refcycle_time_mult = tsc_time_mult * (ref_cycles_t1 - ref_cycles_t0) / (tsc_t1 - tsc_t0);
-            //printf("tsc_time_shift=%u, tsc_time_mult=%u, refcycle_time_mult=%u\n",tsc_time_shift,tsc_time_mult,refcycle_time_mult);
-        }
-        
         event_group_enabled = true;
-    }
-
-    uint64_t refcycle2nano(uint64_t cyc) {
-        uint64_t quot, rem;
-        quot  = cyc >> tsc_time_shift;
-        rem   = cyc & (((uint64_t)1 << tsc_time_shift) - 1);
-        return quot * refcycle_time_mult + ((rem * refcycle_time_mult) >> tsc_time_shift);
     }
 
     uint64_t tsc2nano(uint64_t cyc) {
@@ -948,9 +912,8 @@ RAW HARDWARE EVENT DESCRIPTOR
     struct ProfileScope {
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
-        bool use_pmc;
         ProfileScope() = default;
-        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd) : pevg(pevg), pd(pd) {}
 
         // Move only
         ProfileScope(const ProfileScope&) = delete;
@@ -959,7 +922,6 @@ RAW HARDWARE EVENT DESCRIPTOR
         ProfileScope(ProfileScope&& other) {
             pevg = other.pevg;
             pd = other.pd;
-            use_pmc = other.use_pmc;
             other.pevg = nullptr;
             other.pd = nullptr;
         }
@@ -968,7 +930,6 @@ RAW HARDWARE EVENT DESCRIPTOR
             if (&other != this) {
                 pevg = other.pevg;
                 pd = other.pd;
-                use_pmc = other.use_pmc;
                 other.pevg = nullptr;
                 other.pd = nullptr;
             }
@@ -981,6 +942,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                 return;
 
             pd->stop();
+            bool use_pmc = (pevg->num_events_no_pmc == 0);
             if (use_pmc) {
                 for (size_t i =0; i < pevg->events.size() && i < pd->data_size; i++)
                     if (pevg->events[i].pmc_index)
@@ -1000,7 +962,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
     };
 
-    ProfileScope start_profile(const std::string& title, int id = 0) {
+    ProfileData* start_profile(const std::string& title, int id = 0) {
         if (!enable_dump_json)
             return {};
 
@@ -1011,9 +973,6 @@ RAW HARDWARE EVENT DESCRIPTOR
         pd->cat = "enable";
         pd->id = id;
 
-        auto& group_meta = *events[0].pmeta;
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        // printf("ring-buffer@start: %llu %llu %llu %llu\n", group_meta.data_head, group_meta.data_tail, group_meta.data_offset, group_meta.data_size);
         // use rdpmc if possible
         bool use_pmc = (num_events_no_pmc == 0);
         if (use_pmc) {
@@ -1026,9 +985,8 @@ RAW HARDWARE EVENT DESCRIPTOR
                 pd->data[i] = values[i];
         }
 
-        return ProfileScope(this, pd, use_pmc);
+        return pd;
     }
-
 };
 
 using ProfileScope = PerfEventGroup::ProfileScope;
@@ -1044,7 +1002,7 @@ inline ProfileScope Profile(const std::string& title, int id = 0) {
         {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
         {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
     });
-    return pevg.start_profile(title, id);
+    return {&pevg, pevg.start_profile(title, id)};
 }
 
 inline int Init() {
@@ -1057,3 +1015,34 @@ inline int Init() {
 }
 
 } // namespace LinuxPerf
+
+
+
+#if 0
+
+#ifdef IMPLEMENT
+extern "C" void* profile_start() {
+    thread_local PerfEventGroup pevg({
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
+        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
+    });
+    return pevg.start_profile(title, id);
+}
+
+#else
+
+// weak symbol as a stub/proxy, LD_PRELOAD
+extern "C" void* profile_start() __attribute__ ((weak)) {
+    return nullptr;
+}
+extern "C" void profile_finish(void* p) __attribute__ ((weak)) {
+}
+
+extern "C" void profile_finish(void* p) __attribute__ ((weak)) {
+#endif
+#endif
