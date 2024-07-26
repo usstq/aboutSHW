@@ -279,7 +279,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                     close(ctx_switch_fd);
                     abort();
                 }
-                printf("perf_event_open CPU_WIDE context_switch on cpu %d, ctx_switch_fd=%d\n", cpu, ctx_switch_fd);
+                //printf("perf_event_open CPU_WIDE context_switch on cpu %d, ctx_switch_fd=%d\n", cpu, ctx_switch_fd);
                 events.emplace_back(ctx_switch_fd, ctx_switch_pmeta);
                 events.back().ctx_switch_in_time = get_time_ns();
                 events.back().ctx_last_time = get_time_ns();
@@ -347,13 +347,11 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
         }
     }
 
-
-    bool ring_buffer_verbose = true;
+    bool ring_buffer_verbose = false;
     uint32_t my_pid = 0;
     uint32_t my_tid = 0;
 
     void updateRingBuffer() {
-        
         for(auto& ev : events) {
             auto& mmap_meta = *ev.meta;
             uint64_t head0 = mmap_meta.data_tail;
@@ -409,7 +407,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                             pd->tsc_start = ev.ctx_switch_in_time;
                             pd->tsc_end = time;
 
-                            printf("\t  cpu: %u tid: %u  %lu (+%lu)\n", cpu, tid, ev.ctx_switch_in_time, time-ev.ctx_switch_in_time);
+                            if (ring_buffer_verbose) printf("\t  cpu: %u tid: %u  %lu (+%lu)\n", cpu, tid, ev.ctx_switch_in_time, time-ev.ctx_switch_in_time);
 
                             ev.ctx_switch_in_time = 0;
                         } else {
@@ -753,7 +751,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         if (pev_attr->type == PERF_TYPE_HARDWARE && pev_attr->config == PERF_COUNT_HW_INSTRUCTIONS) {
             hw_instructions_evid = events.size();
         }
-        printf("perf_event_open : fd=%d, id=%lu\n", ev.fd, ev.id);
+        //printf("perf_event_open : fd=%d, id=%lu\n", ev.fd, ev.id);
 
         events.push_back(ev);
     }
@@ -1000,6 +998,10 @@ RAW HARDWARE EVENT DESCRIPTOR
         ProfileScope() = default;
         ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool use_pmc) : pevg(pevg), pd(pd), use_pmc(use_pmc) {}
 
+        // Move only
+        ProfileScope(const ProfileScope&) = delete;
+        ProfileScope& operator=(const ProfileScope&) = delete;
+
         ProfileScope(ProfileScope&& other) {
             pevg = other.pevg;
             pd = other.pd;
@@ -1016,6 +1018,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                 other.pevg = nullptr;
                 other.pd = nullptr;
             }
+
             return *this;
         }
 
@@ -1087,12 +1090,13 @@ inline ProfileScope Profile(const std::string& title, int id = 0) {
     return pevg.start_profile(title, id);
 }
 
-inline ProfileScope Init() {
+inline int Init() {
     // this is for capture all context switching events
     PerfEventCtxSwitch::get();
 
     // this is for making main threads the first process
-    return Profile("start");
+    auto dummy = Profile("start");
+    return 0;
 }
 
 } // namespace LinuxPerf

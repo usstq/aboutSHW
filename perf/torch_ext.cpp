@@ -11,7 +11,7 @@
 auto _xx = LinuxPerf::Init();
 
 struct PerfData {
-    PerfEventGroup::ProfileScope pscope[256];
+    LinuxPerf::ProfileScope pscope[256];
     int NT;
     const std::string title;
     bool is_finished;
