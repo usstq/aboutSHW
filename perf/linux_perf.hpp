@@ -6,6 +6,10 @@
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
+#endif
 
 __attribute__((weak))
 int perf_event_open(struct perf_event_attr *attr, pid_t pid,
