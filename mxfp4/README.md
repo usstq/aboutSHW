@@ -39,6 +39,25 @@ definitions of E2M1 & E8M0 are modified from IEEE 754, the expression capability
 
 LUT for E2M1 element is defined [here](https://github.com/openvinotoolkit/openvino/blob/4a5bd43723eeaff934d58e188c23629b65189778/src/core/src/type/float4_e2m1.cpp#L20). notice that no NaN nor Infinity can be encoded, so ALU can handle them easier.
 
+|encode| Exponent | Mantissa | enc-type | abs-value |  note  |
+|------|----------|----------|----------|-----------|--------|
+| s000 |   -1     |    0     | 0.x      |       0   | sub-norm/even |
+| s001 |   -1     |    1     | 0.x      |     0.5   | sub-norm/odd  |
+| s010 |    0     |    0     | 1.x      |     1.0   | normal/even   |
+| s011 |    0     |    1     | 1.x      |     1.5   | normal/odd    |
+| s100 |    1     |    0     | 1.x      |     2.0   | normal/even   |
+| s101 |    1     |    1     | 1.x      |     3.0   | normal/odd    |
+| s110 |    2     |    0     | 1.x      |     4.0   | normal/even/noInf-Nan |
+| s111 |    2     |    1     | 1.x      |     6.0   | normal/odd/noInf-Nan |
+
+for better statistical accuracy, conversion from float32 to E2M1 should use rounding mode : [roundTiesToEven][2]. we can see:
+ - Although the conversion is not a typical rounding problem between float & integer. roundTiesToEven still apply.
+ - although 1.0 is odd number, but it's treated as even
+ - although 6.0 is even number, but it's treated as odd
+ - thus odd & even is determined by its index in the representable sequence, or by value of mantissa, not the value of whole number.
+
+
+
 E8M0 to float is defined [here](https://github.com/openvinotoolkit/openvino/blob/3056b53056d6319666f3fc250bebefb0c4b1a91e/src/core/src/type/float8_e8m0.cpp#L49), notice :
  - subnormal float are required to represent scale when exponent is -127
  - NaN is possible
@@ -48,6 +67,32 @@ As show in 6.1 of [OCP MX specification][1], dot product is done efficiently if 
 
 In case no special ALU is available, columns of B must be decompressed/converted_back to float (bf16/fp16) and A don't need to be encoded into MX formats at all.
 
+# Accuracy test
+
+Unit test is [here](./test.cpp).
+```bash
+g++ ./test.cpp
+./a.out
+```
+
+But how this implementation works for LLM? how good the accuracy can be? we need to replace it into HF pipeline and test.
+
+we will compress weights into MXFP4 format and recover it back (like FakeQuantize) to evaluate its impact on accuracy.
+
+```bash
+pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+lm_eval --model hf --tasks lambada_openai --model_args pretrained=meta-llama/Llama-2-7b-hf,trust_remote_code=True
+```
+
+# Optimization
+
+In 6.1 of [OCP MX spec][1], if HW ALU support FP4-E2M1 dot-product, then MF-format can be boost performance if accuracy-drop is acceptable (see Table 6 of [Microscaling Data Formats for Deep Learning][3]).
+
+Since there is no MXFP4 capable ALU on x86 for now, the only possible way is to decompress into BF16 or FP32 before using FMA, and the only benefits we can expect from this format is the reduction of second-token-latency.
+
+
 
 
 [1]: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+[2]: https://www.gnu.org/software/gawk/manual/html_node/Setting-the-rounding-mode.html
+[3]: https://arxiv.org/abs/2310.10537

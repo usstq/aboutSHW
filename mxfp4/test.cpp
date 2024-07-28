@@ -1,62 +1,12 @@
 
-#include <limits>
-#include <cstdint>
+#include "mxformat.hpp"
 #include <sstream>
 #include <iostream>
-#include <cmath>
+
 #include <vector>
 
 //#include "../perf/linux_perf.hpp"
 //#include "../thirdparty/xbyak/xbyak/xbyak.h"
-
-#define ASSERT(cond) if (!(cond)) {\
-    std::stringstream ss; \
-    ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
-    throw std::runtime_error(ss.str()); \
-}
-
-// E2M1 to float can be done with LUT easily (no test case is needed)
-float e2m1_to_float(uint8_t bits, bool high_4_bit=false) {
-    static constexpr float f4e2m1_to_f32_lut[16] = {
-        0.0f,   0.5f,
-        1.0f,   1.5f,
-        2.0f,   3.0f,
-        4.0f,   6.0f,
-        -0.0f,  -0.5f,
-        -1.0f,  -1.5f,
-        -2.0f,  -3.0f,
-        -4.0f,  -6.0f};
-    return f4e2m1_to_f32_lut[high_4_bit ? (bits >> 4) : (bits & 0x0F)];
-}
-
-uint8_t float_to_e2m1(float f) {
-    uint8_t sign_off = f < 0 ? 8 : 0;
-
-    // clamp
-    if (f >= 6.0 || f <= -6.0)
-        return sign_off + 7;
-
-    // subnormal of e2m1
-    if (f <= 0.25f && f >= -0.25f)
-        return sign_off + 0;
-
-    if (f <= 0.5f && f >= -0.5f)
-        return sign_off + 1;
-
-    // e2m1 number set is subset of float32
-    auto v = reinterpret_cast<uint32_t&>(f);
-    auto exponent = static_cast<int>((v >> 23) & 0xFF) - 127;
-    auto E = static_cast<uint8_t>(exponent + 1) << 1;
-    // valid exponent in e2m1 : -1, 0, 1, 2
-    auto mantissa = v & ((1<<23) - 1);
-    auto point1 = (0x1<<21);
-    auto point3 = (0x3<<21);
-
-    //printf("\t v=%x mantissa=%x\n", v, mantissa);
-    if (mantissa <= point1) return sign_off + E;
-    if (mantissa < point3) return sign_off + E + 1;
-    return sign_off + E + (1<<1);
-}
 
 int test_f32_to_e2m1 = []() {
     float src1[] = {
@@ -64,39 +14,61 @@ int test_f32_to_e2m1 = []() {
         -0.0f,  -0.5f, -1.0f,  -1.5f,  -2.0f,  -3.0f,  -4.0f,  -6.0f
     };
     for(int i = 0; i<sizeof(src1)/sizeof(src1[0]); i++) {
-        auto fp4 = float_to_e2m1(src1[i]);
-        auto recover = e2m1_to_float(fp4);
+        auto fp4 = mxformat::e2m1(src1[i]);
+        auto recover = float(fp4);
         if(recover != src1[i]) {
             printf("%6.4f to 0x%x (e2m1) and back to %6.4f is unexpected!\n",
                     src1[i], static_cast<int>(fp4), recover);
         }
+        if (i > 0) {
+            auto vsrc = src1[i]-0.1f;
+            auto fp4 = mxformat::e2m1(vsrc);
+            auto recover = float(fp4);
+            if(recover != src1[i]) {
+                printf("%6.4f to 0x%x (e2m1) and back to %6.4f is unexpected!\n",
+                        vsrc, static_cast<int>(fp4), recover);
+            }
+        }
     }
+    float half_expect[] = {
+         0.0f,  1.0f,  1.0f,  2.0f,  2.0f,  4.0f,  4.0f, 3.0f,
+        -0.0f, -1.0f, -1.0f, -2.0f, -2.0f, -4.0f, -4.0f
+    };
+    for(int i = 1; i<sizeof(src1)/sizeof(src1[0]); i++) {
+
+        if (src1[i-1] == 6.0f) continue;
+
+        auto half = (src1[i] + src1[i-1])*0.5f;
+        auto fp4 = mxformat::e2m1(half);
+        auto recover = float(fp4);
+        //printf("half %f to fp4 & back %f\n", half, recover);
+        if (recover != half_expect[i-1]) {
+            printf("ERROR: half %f to fp4 & back %f\n", half, recover);
+        }
+
+        auto half_minus = half - 0.01f;
+        auto half_plus = half + 0.01f;
+        if (half < 0) {
+            half_minus = half + 0.01f;
+            half_plus = half - 0.01f;
+        }
+        auto fp4_minus = mxformat::e2m1(half_minus);
+        auto fp4_plus = mxformat::e2m1(half_plus);
+        if (fp4_plus.bits != fp4_minus.bits + 1) {
+            printf("ERROR: half %f (-/+)delta to %d/%d\n", half, (int)fp4_minus, (int)fp4_plus);
+        }
+    }
+
     printf("test_f32_to_e2m1 is done\n");
     return 0;
 }();
-
-float e8m0_to_float(uint8_t bits) {
-    constexpr uint8_t f32_mantissa_bits{23u};
-    constexpr uint8_t e8m0_NaN = 0xff;
-
-    if (bits == e8m0_NaN) {
-        return std::numeric_limits<float>::quiet_NaN();
-    } else if (bits == 0) {
-        // this is the only special value needs to use subnormal to express
-        return std::numeric_limits<float>::min() / 2;
-    } else {
-        int value = bits;
-        value = (value) << f32_mantissa_bits;
-        return reinterpret_cast<float&>(value);
-    }
-}
 
 int test_e8m0 = []() {
     constexpr uint8_t e8m0_bias = 127;
     {
         float expect = 1.0f;
         for(int i = 0; i <= 127; i++) {
-            auto got = e8m0_to_float(e8m0_bias + i);
+            auto got = mxformat::e8m0_to_float(e8m0_bias + i);
             if (got != expect) {
                 std::cout << "[" << i << "] " << got << " != " << expect << std::endl;
                 abort();
@@ -107,7 +79,7 @@ int test_e8m0 = []() {
     {
         float expect = 1.0f;
         for(int i = 0; i >= -127; i--) {
-            auto got = e8m0_to_float(e8m0_bias + i);
+            auto got = mxformat::e8m0_to_float(e8m0_bias + i);
             if (got != expect) {
                 std::cout << "[" << i << "] " << got << " != " << expect << std::endl;
                 abort();
@@ -116,7 +88,7 @@ int test_e8m0 = []() {
         }
     }
     {
-        auto got = e8m0_to_float(255);
+        auto got = mxformat::e8m0_to_float(255);
         if (!std::isnan(got)) {
             std::cout << "expect [Nan] got " << got << std::endl;
             abort();
@@ -126,6 +98,52 @@ int test_e8m0 = []() {
     return 0;
 }();
 
+
+int test_mxfp4 = [](){
+    float src[32];
+    auto test_accuracy = [&](){
+        mxformat::mxfp4 m0(src);
+        float avg_rel_error = 0.0f;
+        for(int i = 0; i < 32; i++) {
+            auto recorver = m0[i];
+            auto abs_error = std::abs(src[i] - recorver);
+            auto rel_error = abs_error / std::abs(src[i]);
+            if (abs_error == 0) continue;
+            if (rel_error > 0.05)
+                printf("\t%10.4f->%10.4f  error(abs/rel): %f/%f\n", src[i], recorver, abs_error, rel_error);
+            avg_rel_error += rel_error;
+        }
+        avg_rel_error/=32;
+        printf("avg_rel_error = %f\n", avg_rel_error);
+        return avg_rel_error;
+    };
+
+    printf("== test_mxfp4 =============\n");
+    float LO = -10.0f;
+    float HI = 10.0f;
+    for(int i = 0; i < 32; i++) {
+        src[i] = LO + static_cast <float> (rand()) /(static_cast <float> (RAND_MAX/(HI-LO)));
+    }
+    test_accuracy();
+    float e2m1s[] = {
+        0.0f,   0.5f,   1.0f,   1.5f,   2.0f,   3.0f,   4.0f,   6.0f,
+        -0.0f,  -0.5f, -1.0f,  -1.5f,  -2.0f,  -3.0f,  -4.0f,  -6.0f
+    };
+    auto e2m1s_cnt = sizeof(e2m1s)/sizeof(e2m1s[0]);
+    for(int i = 0; i < 32; i++) src[i] = e2m1s[i%e2m1s_cnt];
+    test_accuracy();
+
+    for(int i = 0; i < 32; i++) src[i] = e2m1s[i%e2m1s_cnt] * 0.125f;
+    test_accuracy();
+
+    for(int i = 0; i < 32; i++) src[i] = e2m1s[i%e2m1s_cnt] * 128.0f;
+    test_accuracy();
+
+    return 0;
+}();
+
+
+#if 0
 /**************************
 now e8m0_to_float/e2m1_to_float can be used as reference to test jit optimization
 ***************************/
@@ -144,41 +162,7 @@ struct e2m1_x2 {
     uint8_t value;
     e2m1_x2(uint8_t x) : value(x) {}
     float operator[](bool high_part) {
-        return e2m1_to_float(high_part);
-    }
-};
-
-
-struct mxfp4 {
-    // block size 32
-    uint8_t scale_e8m0;
-    uint8_t element_e2m1[16];
-
-    // 32 floats will be converted into a single mxfp4
-    // according to 6.3 of OCP MX spec.
-    mxfp4(float * src) {
-        float max_abs_v = std::fabs(src[0]);
-        for(int i = 1; i < 32; i++) {
-            auto abs_v = std::fabs(src[i]);
-            if (max_abs_v < abs_v)
-                max_abs_v = abs_v;
-        }
-        // largest power-of-two1 less than or equal to max_abs_v
-        float p = 1.0f;
-        while(p <= max_abs_v) p *= 2.0f;
-        while(p > max_abs_v) p *= 0.5f;
-
-        float largest_pow_of_2_src = p;
-        float largest_pow_of_2_e2m1 = 4.0f;
-        float X = largest_pow_of_2_src / largest_pow_of_2_e2m1;
-        std::cout << "X=" << X  << std::endl;
-        for(int i = 0; i < 32; i++) {
-            float pi = src[i] / X;
-            if (pi > 6.0f) pi = 6.0f;
-            if (pi < -6.0f) pi = -6.0f;
-            // https://stackoverflow.com/questions/12103514/how-do-you-round-off-decimal-places-in-c
-            std::rint(pi);
-        }
+        return mxformat::e2m1_to_float(high_part);
     }
 };
 
@@ -228,6 +212,9 @@ void simple_test() {
         }
 
 }
+#endif
+
+
 
 int main() {
     return 0;

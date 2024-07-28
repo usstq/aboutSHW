@@ -639,6 +639,7 @@ RAW HARDWARE EVENT DESCRIPTOR
             events.back().name = raw_cfg.first;
         }
 
+        enable_dump_json = false;
         serial = 0;
         const char* str_enable = std::getenv("PERF_DUMP_JSON");
         if (str_enable) {
@@ -831,12 +832,9 @@ RAW HARDWARE EVENT DESCRIPTOR
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, const char * title = "", int id = 0, bool verbose = false) {
+    std::vector<uint64_t> rdpmc(FN fn, bool verbose = false) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
-        if (enable_dump_json) {
-            all_dump_data.emplace_back(title);
-        }
 
         for(int i = 0; i < cnt; i++) {
             if (events[i].pmc_index)
@@ -850,16 +848,6 @@ RAW HARDWARE EVENT DESCRIPTOR
                 pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
             else
                 pmc[i] = 0;
-        }
-
-        if (enable_dump_json) {
-            auto& pd = all_dump_data.back();
-            pd.stop();
-            pd.title = title ? title : "???";
-            pd.cat = "rdpmc";
-            pd.id = id;
-            for (int i =0; i < events.size() && i < pd.data_size; i++)
-                pd.data[i] = pmc[i];
         }
 
         if (verbose) {
