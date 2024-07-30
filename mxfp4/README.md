@@ -90,9 +90,42 @@ In 6.1 of [OCP MX spec][1], if HW ALU support FP4-E2M1 dot-product, then MF-form
 
 Since there is no MXFP4 capable ALU on x86 for now, the only possible way is to decompress into BF16 or FP32 before using FMA, and the only benefits we can expect from this format is the reduction of second-token-latency.
 
+BTW, oneDNN has a term vnni-2 which is defined as following (and little misleading):
 
+```C++
+case avx2_vnni_2:
+    return mayiuse(avx2_vnni, soft) && cpu().has(Cpu::tAVX_VNNI_INT8)
+            && cpu().has(Cpu::tAVX_NE_CONVERT);
+```
 
+According to [Intel® Architecture Instruction Set Extensions and Future Features]():
+
+ - AVX_VNNI_INT8:
+    - VPDPB[SU,UU,SS]D[,S]—Multiply and Add Unsigned and Signed Bytes With and Without Saturation
+ - AVX-NE-CONVERT:
+    - converts one element from bf16/fp16 and broadcast into packed fp32
+    - converts odd/even elements from bf16/fp16 into fp32
+    - converts packed fp32 into packed bf16
+
+# Learn from compiler
+
+We can find useful intrinsics in [Intel intrinsics-guide][4], but don't know the best way to write assembly\jit to implement them, for example, broadcast a 8bit constant into zmm register can be done by `_mm512_set1_epi8`, but how assembly would be? we can do following:
+```c++
+// find-inst.cpp
+#include <immintrin.h>
+
+__m512i test(char x) {
+    auto a = _mm512_set1_epi8(x);
+    auto b = _mm512_set1_epi8(127);
+    return _mm512_add_epi8(a, b);
+}
+```
+```bash
+g++ ./find-inst.cpp -O2  -S -march=native -masm=intel -fverbose-asm
+```
+from `find-inst.s` we can learn how the assembly code look like.
 
 [1]: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 [2]: https://www.gnu.org/software/gawk/manual/html_node/Setting-the-rounding-mode.html
 [3]: https://arxiv.org/abs/2310.10537
+[4]: https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html

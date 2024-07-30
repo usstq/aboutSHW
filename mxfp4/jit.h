@@ -143,6 +143,7 @@ class jit_generator : public Xbyak::CodeGenerator {
     system("objdump -D -b binary -mi386:x86-64 -M intel temp.bin");
   }
 
+#if 0
   std::vector<uint8_t> log_buffer;
   uint8_t* m_log_addr;
   Xbyak::Reg64 reg_scratch = r9;
@@ -173,6 +174,55 @@ class jit_generator : public Xbyak::CodeGenerator {
       }
     }
   }
+#endif
+
+  uint8_t log_buffer[4096*1024];
+  uint8_t * log_ptr = nullptr;
+  std::vector<std::string> log_fmt;
+
+  void log_reset() {
+    log_fmt.clear();
+    log_ptr = log_buffer;
+  }
+  void log_zmm(const char* fmt, Xbyak::Zmm zmm) {
+    auto index = log_fmt.size();
+    log_fmt.push_back(fmt);
+    push(rax);
+    mov(rax, reinterpret_cast<uintptr_t>(log_ptr));
+    vmovdqu16(ptr[rax], zmm);
+    pop(rax);
+    log_ptr += 64;
+
+    if (log_ptr - log_buffer > sizeof(log_buffer)) {
+        printf("error: log-buffer overflow!");
+        abort();
+    }
+  }
+  void log_show() {
+    uint8_t* plog = log_buffer;
+    for(int i = 0; i < log_fmt.size(); i++) {
+        printf("[%2d] '%s' ", i, log_fmt[i].c_str());
+        if (log_fmt[i] == "u8") {
+            for(int k = 0; k < 64; k++)
+                printf("%02x,", plog[k]);
+        }
+        if (log_fmt[i] == "u16") {
+            auto* pu16 = reinterpret_cast<uint16_t *>(plog);
+            for(int k = 0; k < 32; k++)
+                printf(" %04x,", pu16[k]);
+        }
+        if (log_fmt[i] == "bf16") {
+            auto* pbf16 = reinterpret_cast<uint16_t *>(plog);
+            for(int k = 0; k < 32; k++) {
+                auto if32 = static_cast<uint32_t>(pbf16[k]) << 16;
+                printf(" %.3f,", reinterpret_cast<float&>(if32));
+            }
+        }
+        plog += 64;
+        printf("\n");
+    }
+  }
+
 };
 
 struct TileConfig {

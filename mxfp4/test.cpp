@@ -103,6 +103,7 @@ int test_mxfp4 = [](){
     float src[32];
     auto test_accuracy = [&](){
         mxformat::mxfp4 m0(src);
+        //m0.show();
         float avg_rel_error = 0.0f;
         for(int i = 0; i < 32; i++) {
             auto recorver = m0[i];

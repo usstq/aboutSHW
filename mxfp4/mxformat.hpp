@@ -7,7 +7,7 @@
 
 namespace mxformat {
 
-float e8m0_to_float(uint8_t bits) {
+inline float e8m0_to_float(uint8_t bits) {
     constexpr uint8_t f32_mantissa_bits{23u};
     constexpr uint8_t e8m0_NaN = 0xff;
 
@@ -23,8 +23,13 @@ float e8m0_to_float(uint8_t bits) {
     }
 }
 
+inline uint8_t float_to_e8m0(float x) {
+    // float32 has same exponent encoding as e8m0 (except sub-normal)
+    return ((reinterpret_cast<uint32_t&>(x) >> 23) & 0xFF);
+}
+
 // E2M1 to float can be done with LUT easily (no test case is needed)
-float e2m1_to_float(uint8_t bits, bool high_4_bit=false) {
+inline float e2m1_to_float(uint8_t bits, bool high_4_bit=false) {
     static constexpr float f4e2m1_to_f32_lut[16] = {
         0.0f,   0.5f,
         1.0f,   1.5f,
@@ -37,7 +42,7 @@ float e2m1_to_float(uint8_t bits, bool high_4_bit=false) {
     return f4e2m1_to_f32_lut[high_4_bit ? (bits >> 4) : (bits & 0x0F)];
 }
 
-uint8_t float_to_e2m1(float f) {
+inline uint8_t float_to_e2m1(float f) {
     uint8_t sign_off = f < 0 ? 8 : 0;
 
     // clamp
@@ -123,7 +128,16 @@ struct mxfp4 {
             auto e2m1_1 = float_to_e2m1(pi_1);
             //auto pi_actual = e2m1_to_float(e2m1);
             element_e2m1[i/2] = (e2m1_1 << 4) | (e2m1_0);
+        }
+    }
 
+    void show() {
+        printf("scale: %f(0x%x) elements:\n", e8m0_to_float(scale_e8m0), scale_e8m0);
+        for(int i = 0; i < 32; i++) {
+            uint8_t e2m1 = element_e2m1[i/2];
+            e2m1 = (i&1) ? (e2m1 >> 4) : (e2m1 & 0xF);
+            printf("     [%2d] %4.1f(0x%x) => %10.5f", i, e2m1_to_float(e2m1), e2m1, (*this)[i]);
+            if ((i & 3) == 3) printf("\n");
         }
     }
 
@@ -132,8 +146,11 @@ struct mxfp4 {
         float element = e2m1_to_float(element_e2m1[i/2], i & 1);
         float result = element;
         if (element != 0.0f) {
+            // combine exponent by sum is valid since sub-normals of e2m1 has been converted to normal FP32
             reinterpret_cast<uint32_t&>(result) += static_cast<uint32_t>(scale_e8m0 - 127) << 23;
         }
+
+        // double check correctness
         auto expected = e8m0_to_float(scale_e8m0) * element;
         if (result != expected) {
             printf("Error: mxfp4 convert failed\n");
