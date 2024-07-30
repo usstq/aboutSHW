@@ -253,10 +253,244 @@ class MXFP4Brgemm : public jit_generator {
 
 
 
+class MXFP4BrgemmFMA : public jit_generator {
+ public:
+  int BM = 0;
+  MXFP4BrgemmFMA(int BM=1) : BM(BM) { log_reset(); create_kernel("MXFP4BrgemmFMA"); }
+
+  void generate() override {
+    //  abi_param1 ~ abi_param6, RAX, R10, R11
+    auto src_ptr = abi_param1;
+    auto src_stride = abi_param2;
+    auto scale_ptr = abi_param3;
+    auto weight_ptr = abi_param4;
+    auto dst_ptr = abi_param5;
+    auto mxblock_cnt = abi_param6;
+
+    auto zmm_zero = zmm0;
+    auto zmm_e2m1_lut = zmm1;
+    auto zmm_exponent_bias = zmm2;
+
+    Xbyak::Label loop_begin;
+    Xbyak::Label kx32_loop_begin;
+
+    // zmm_e2m1_lut is look-up table maps E2M1 into BF16/FP16 values 32 entries with high-16 entries duplicates low-16 entries
+    // so 5bits index for vpermw can works irrespect of the value of the highest bit.
+    static ov::bfloat16 lut_e2m1_bf16[] ={
+        0.0f,   0.5f,  1.0f,   1.5f,   2.0f,   3.0f,  4.0f,   6.0f,
+        -0.0f,  -0.5f,-1.0f,  -1.5f,  -2.0f,  -3.0f, -4.0f,  -6.0f,
+        // duplicate
+        0.0f,   0.5f,  1.0f,   1.5f,   2.0f,   3.0f,  4.0f,   6.0f,
+        -0.0f,  -0.5f,-1.0f,  -1.5f,  -2.0f,  -3.0f, -4.0f,  -6.0f,
+    };
+
+    vpxorq(zmm_zero, zmm_zero, zmm_zero);
+
+    // accumulation registers
+    auto acc_zmm = [&](int m, int n) {
+        return Xbyak::Zmm(16 + 2*m + n);
+    };
+    for(int m = 0; m < BM; m++) {
+        auto zmmA = acc_zmm(m, 0);
+        auto zmmB = acc_zmm(m, 1);
+        vpxorq(zmmA, zmmA, zmmA);
+        vpxorq(zmmB, zmmB, zmmB);
+    }
+
+    mov(eax, reinterpret_cast<uintptr_t>(lut_e2m1_bf16));
+    vmovdqu32(zmm_e2m1_lut, ptr[eax]);
+
+    mov(eax, 0x007f);
+    vpbroadcastw(zmm_exponent_bias, ax);
+
+    //
+    L(kx32_loop_begin);
+
+    // zmm5 : 32x MX scales
+    vmovdqu8(ymm5, ptr[scale_ptr]);  // 32x E8M0
+    vpmovzxbw(zmm5, ymm5);           // 32x 16bit
+    vpcmpw(k1, zmm5, zmm_zero, 0);   // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+    vpsubw(zmm5, zmm5, zmm_exponent_bias);   // subtract bias 127
+    vpsllw(zmm5, zmm5, 0x7);         // shift-left into bf16/fp16 exponent: 32x scales
+
+    mov(r10, 16);
+    align(64, false);
+    L(loop_begin);
+    {
+        // global : zmm_e2m1_lut, zmm_zero
+        // input  : zmm5, k1, weight_ptr
+        // output : zmm6/zmm7
+        // scratch: k2, k3
+        vmovdqu8(ymm6, ptr[weight_ptr]);    // load 64x FP4 or 32x(nibble-pair) = 256bits
+        vpmovzxbw(zmm6, ymm6);              //      32x (0x00, nibble-pair)
+
+        vpsrld(zmm7, zmm6, 0x4);            // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+        vpermw(zmm6, zmm6, zmm_e2m1_lut);   // e2m1 nibble to float32
+
+        vpcmpw(k2, zmm6, zmm_zero, 0);      // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+        kord(k2, k1, k2);
+        vpaddw(zmm6, zmm6, zmm5);
+        vpblendmw(zmm6|k2, zmm6, zmm_zero); // 32x bf16/fp16 even weights: w0, w2, w4, ... 
+
+        vpermw(zmm7, zmm7, zmm_e2m1_lut);
+        vpcmpw(k3, zmm7, zmm_zero, 0);
+        kord(k3, k1, k3);
+        vpaddw(zmm7, zmm7, zmm5);
+        vpblendmw(zmm7|k3, zmm7, zmm_zero); // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+
+        // the even/odd part share same scales, thus they come from 2 adjacent rows of weight-matrix(belong to same MX block)
+        vpunpcklwd(zmm9, zmm_zero, zmm6);
+        vpunpckhwd(zmm10, zmm_zero, zmm6);
+        mov(rax, src_ptr);
+        for(int m = 0; m < BM; m++) {
+            vpbroadcastd(zmm8, ptr[rax]);    // load & broadcast a fp32 from source
+            vfmadd231ps(acc_zmm(m, 0), zmm8, zmm9);
+            vfmadd231ps(acc_zmm(m, 1), zmm8, zmm10);
+            add(rax, src_stride);
+        }
+
+        vpunpcklwd(zmm9, zmm_zero, zmm7);
+        vpunpckhwd(zmm10, zmm_zero, zmm7);
+        mov(rax, src_ptr);
+        for(int m = 0; m < BM; m++) {
+            vpbroadcastd(zmm8, ptr[rax + 4]);    // load & broadcast a fp32 from source
+            vfmadd231ps(acc_zmm(m, 0), zmm8, zmm9);
+            vfmadd231ps(acc_zmm(m, 1), zmm8, zmm10);
+            add(rax, src_stride);
+        }
+    }
+    add(src_ptr, 8);
+    add(weight_ptr, 32);
+    dec(r10);
+    jnz(loop_begin, T_NEAR);
+
+    add(scale_ptr, 32);
+    dec(mxblock_cnt);
+    jnz(kx32_loop_begin, T_NEAR);
+    
+    log_zmm("bf16", zmm16);
+    log_zmm("bf16", zmm17);
+
+    // 
+    for(int m = 0; m < BM; m++) {
+        vmovdqu32(ptr[dst_ptr], acc_zmm(m, 0));
+        vmovdqu32(ptr[dst_ptr + 64], acc_zmm(m, 1));
+        add(dst_ptr, src_stride);
+    }
+    ret();
+  }
+
+  struct PackedWeight {
+    std::vector<uint8_t> scales;
+    std::vector<uint8_t> elements;
+  };
+  // weight: mxblocks x (32 x mxfp4)
+  PackedWeight reorder_weights(mxfp4 * mxfp4_weight, int mxblocks) {
+    PackedWeight pw;
+    pw.scales.resize(mxblocks, 0);
+    pw.elements.resize(mxblocks*32*32/2, 0);
+    
+    return pw;
+  }
+
+  // convert FP4 into required layout
+  // A: BM x (32*mxblocks)
+  // weight: mxblocks x (32 x mxfp4) (each mxfp4 has 32 elements)
+  // C: BM x 32
+  void exec_reference(float *src, int src_stride,
+                      mxfp4 * mxfp4_weight,
+                      float * dst, int dst_stride,
+                      int BM, int mxblocks, bool verbose=false) {
+    // decompress mxfp4 first
+    int BK = mxblocks*32; // 32-elements per MX-block
+    int BN = 32;
+    std::vector<float> weight(BN * BK, 0);
+
+    auto getW = [&](int k, int n) -> float& {
+        return weight[n*BK + k];
+    };
+    for(int k = 0; k < BK; k+=32) {
+        for(int n = 0; n < BN; n++) {
+            for(int ki=0; ki < 32; ki++) {
+                getW(k + ki, n) = mxfp4_weight[n][ki];
+            }
+        }
+        mxfp4_weight += BN;
+    }
+    for(int m = 0; m < BM; m++) {
+        float* A = src + m*src_stride;
+        float* C = dst + m*dst_stride;
+
+        for(int n = 0; n < BN; n++) {
+            float sum = 0;
+            for(int k = 0; k < BK; k++) {
+                sum += A[k] * getW(k, n);
+            }
+            C[n] = sum;
+        }
+    }
+
+    if (verbose) {
+        printf("exec_reference src:\n");
+        for(int k=0; k<BK; k++) printf("%4.1f,", src[k]);
+        printf("\n");
+        printf("exec_reference weight:\n");
+        for(int k=0; k<BK; k++) {
+            for(int n=0; n<BN; n++) {
+                printf("%4.1f,", getW(k, n));
+            }
+            printf("\n");
+        }
+        printf("exec_reference dst:\n");
+        for(int n=0; n<BN; n++) printf("%4.1f,", dst[n]);
+        printf("\n");
+    }
+  }
+
+  void self_test() {
+    LinuxPerf::PerfEventGroup pevg({
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+    });
+    #define MXBLOCKS 2
+
+    float src[32*MXBLOCKS] = {0};
+    mxfp4 mxfp4_weight[MXBLOCKS*32];
+    float dst[32*MXBLOCKS] = {0};
+    float ref[32*MXBLOCKS] = {0};
+
+    float weights[32] = {0};
+    for(int i=0; i<MXBLOCKS*32; i++) {
+        auto mask = (rand() % 100) - 50;
+        weights[i % 32] = mask * 0.1;
+        mxfp4_weight[i].assign(weights);
+    }
+
+    src[3] = 2.0f;
+    // check accuracy
+    exec_reference(src, 0, mxfp4_weight, ref, 0, 1, MXBLOCKS, true);
+
+    // reorder weights
+    PackedWeight pw = reorder_weights(mxfp4_weight, MXBLOCKS);
+    (*this)(src, 0, &pw.scales[0], &pw.elements[0], dst, MXBLOCKS);
+
+
+    constexpr int REPEATS = 100;
+    for(int i = 0; i < 10; i++) {
+        auto pmc = pevg.rdpmc([&]() {
+            // repeat
+            for(int repeat = 0; repeat < REPEATS; repeat++)
+                (*this)(src, 0, &pw.scales[0], &pw.elements[0], dst, MXBLOCKS);
+        }, true);
+        printf("CPI: %.2f  cycles-per-iteration: %.2f\n", (double)(pmc[0])/pmc[1], double(pmc[0])/(REPEATS*16*MXBLOCKS));
+    }
+  }
+};
+
 int main() {
   //test_CPI();
-  MXFP4Brgemm brg;
+  MXFP4BrgemmFMA brg;
   //brg.self_test();
-  brg.self_test_perf();
+  brg.self_test();
   return 0;
 }

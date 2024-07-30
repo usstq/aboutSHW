@@ -99,26 +99,36 @@ struct mxfp4 {
 
     // 32 floats will be converted into a single mxfp4
     // according to 6.3 of OCP MX spec.
+    mxfp4() = default;
     mxfp4(float * src) {
+        assign(src);
+    }
+    void assign(float * src) {
         float max_abs_v = std::fabs(src[0]);
         for(int i = 1; i < 32; i++) {
             auto abs_v = std::fabs(src[i]);
             if (max_abs_v < abs_v)
                 max_abs_v = abs_v;
         }
+        float X = 1.0f;
         // largest power-of-two1 less than or equal to max_abs_v
-        float p = 1.0f;
-        while(p <= max_abs_v) p *= 2.0f;
-        while(p > max_abs_v) p *= 0.5f;
+        if (max_abs_v == 0) {
+            scale_e8m0 = 127;
+            X = 1.0f;
+        } else {
+            float p = 1.0f;
+            while(p <= max_abs_v) p *= 2.0f;
+            while(p > max_abs_v) p *= 0.5f;
 
-        float largest_pow_of_2_src = p;
-        float largest_pow_of_2_e2m1 = 4.0f;
-        float X = largest_pow_of_2_src / largest_pow_of_2_e2m1;
+            float largest_pow_of_2_src = p;
+            float largest_pow_of_2_e2m1 = 4.0f;
+            X = largest_pow_of_2_src / largest_pow_of_2_e2m1;
 
-        // E8M0 is an unsigned representation of a conventional biased Float32 exponent
-        scale_e8m0 = ((reinterpret_cast<uint32_t&>(X) >> 23) & 0xFF);
+            // E8M0 is an unsigned representation of a conventional biased Float32 exponent
+            scale_e8m0 = ((reinterpret_cast<uint32_t&>(X) >> 23) & 0xFF);
+        }
         if (scale_e8m0 == 0) {
-            printf("Subnormal scale is met, unexpected!");
+            printf("Subnormal scale is met, unexpected!  max_abs_v = %f \n", max_abs_v);
             abort();
         }
         for(int i = 0; i < 32; i+=2) {
