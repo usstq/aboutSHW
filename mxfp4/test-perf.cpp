@@ -324,6 +324,8 @@ class MXFP4BrgemmFMA : public jit_generator {
         vmovdqu8(ymm6, ptr[weight_ptr]);    // load 64x FP4 or 32x(nibble-pair) = 256bits
         vpmovzxbw(zmm6, ymm6);              //      32x (0x00, nibble-pair)
 
+        //log_zmm("u16", __LINE__, zmm6);
+
         vpsrld(zmm7, zmm6, 0x4);            // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
         vpermw(zmm6, zmm6, zmm_e2m1_lut);   // e2m1 nibble to float32
 
@@ -337,6 +339,9 @@ class MXFP4BrgemmFMA : public jit_generator {
         kord(k3, k1, k3);
         vpaddw(zmm7, zmm7, zmm5);
         vpblendmw(zmm7|k3, zmm7, zmm_zero); // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+
+        //log_zmm("bf16", __LINE__, zmm6);
+        //log_zmm("bf16", __LINE__, zmm7);
 
         // the even/odd part share same scales, thus they come from 2 adjacent rows of weight-matrix(belong to same MX block)
         vpunpcklwd(zmm9, zmm_zero, zmm6);
@@ -368,8 +373,8 @@ class MXFP4BrgemmFMA : public jit_generator {
     dec(mxblock_cnt);
     jnz(kx32_loop_begin, T_NEAR);
     
-    log_zmm("bf16", zmm16);
-    log_zmm("bf16", zmm17);
+    //log_zmm("f32", __LINE__, acc_zmm(0, 0));
+    //log_zmm("f32", __LINE__, acc_zmm(0, 1));
 
     // 
     for(int m = 0; m < BM; m++) {
@@ -387,9 +392,33 @@ class MXFP4BrgemmFMA : public jit_generator {
   // weight: mxblocks x (32 x mxfp4)
   PackedWeight reorder_weights(mxfp4 * mxfp4_weight, int mxblocks) {
     PackedWeight pw;
-    pw.scales.resize(mxblocks, 0);
+    pw.scales.resize(mxblocks*32, 0);
     pw.elements.resize(mxblocks*32*32/2, 0);
     
+    const int nmap[] = {
+        0,  1,  2,  3,  16,17,18,19,
+        4,  5,  6,  7,  20,21,22,23,
+        8,  9, 10, 11,  24,25,26,27,
+        12,13, 14, 15,  28,29,30,31
+    };
+
+    uint8_t * p_scales = &pw.scales[0];
+    uint8_t * p_elements = &pw.elements[0];
+    for(int mblk = 0; mblk < mxblocks; mblk++) {
+        for(int m = 0; m < 32; m+=2) {
+            for(int n = 0; n < 32; n++) {
+                auto idx = nmap[n];
+                p_scales[n] = mxfp4_weight[idx].scale_e8m0;
+
+                auto e2m1_even = mxfp4_weight[idx].get_e2m1(m);
+                auto e2m1_odd = mxfp4_weight[idx].get_e2m1(m + 1);
+                p_elements[n] = (e2m1_odd << 4) | e2m1_even;
+            }
+            p_elements += 32;
+        }
+        p_scales += 32;
+        mxfp4_weight += 32;
+    }
     return pw;
   }
 
@@ -452,7 +481,7 @@ class MXFP4BrgemmFMA : public jit_generator {
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
     });
-    #define MXBLOCKS 2
+    #define MXBLOCKS 10
 
     float src[32*MXBLOCKS] = {0};
     mxfp4 mxfp4_weight[MXBLOCKS*32];
@@ -466,14 +495,21 @@ class MXFP4BrgemmFMA : public jit_generator {
         mxfp4_weight[i].assign(weights);
     }
 
-    src[3] = 2.0f;
+    
+    //src[3] = 2.0f;
+    for(int i=0; i<MXBLOCKS*32; i++) src[i] = i;
     // check accuracy
     exec_reference(src, 0, mxfp4_weight, ref, 0, 1, MXBLOCKS, true);
 
     // reorder weights
     PackedWeight pw = reorder_weights(mxfp4_weight, MXBLOCKS);
-    (*this)(src, 0, &pw.scales[0], &pw.elements[0], dst, MXBLOCKS);
 
+    (*this)(src, 0, &pw.scales[0], &pw.elements[0], dst, MXBLOCKS);
+    printf("exec_jit_kernel dst:\n");
+    for(int n=0; n<32; n++) printf("%4.1f,", dst[n]);
+    printf("\n");
+
+    log_show();
 
     constexpr int REPEATS = 100;
     for(int i = 0; i < 10; i++) {

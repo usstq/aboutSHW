@@ -144,11 +144,15 @@ struct mxfp4 {
     void show() {
         printf("scale: %f(0x%x) elements:\n", e8m0_to_float(scale_e8m0), scale_e8m0);
         for(int i = 0; i < 32; i++) {
-            uint8_t e2m1 = element_e2m1[i/2];
-            e2m1 = (i&1) ? (e2m1 >> 4) : (e2m1 & 0xF);
+            uint8_t e2m1 = get_e2m1(i);
             printf("     [%2d] %4.1f(0x%x) => %10.5f", i, e2m1_to_float(e2m1), e2m1, (*this)[i]);
             if ((i & 3) == 3) printf("\n");
         }
+    }
+
+    uint8_t get_e2m1(int i) {
+        uint8_t e2m1 = element_e2m1[i/2];
+        return (i&1) ? (e2m1 >> 4) : (e2m1 & 0xF);
     }
 
     float operator[](int i) {

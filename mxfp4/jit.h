@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <vector>
+#include <cstring>
 
 #ifdef XBYAK64
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
@@ -178,48 +179,58 @@ class jit_generator : public Xbyak::CodeGenerator {
 
   uint8_t log_buffer[4096*1024];
   uint8_t * log_ptr = nullptr;
-  std::vector<std::string> log_fmt;
 
   void log_reset() {
-    log_fmt.clear();
     log_ptr = log_buffer;
   }
-  void log_zmm(const char* fmt, Xbyak::Zmm zmm) {
-    auto index = log_fmt.size();
-    log_fmt.push_back(fmt);
+  void log_zmm(const char* fmt, int line_num, Xbyak::Zmm zmm) {
     push(rax);
-    mov(rax, reinterpret_cast<uintptr_t>(log_ptr));
-    vmovdqu16(ptr[rax], zmm);
-    pop(rax);
-    log_ptr += 64;
+    push(rbx);
+    
+    mov(rax, reinterpret_cast<uintptr_t>(&log_ptr));
+    mov(rbx, ptr[rax]);
+    mov(qword[rbx], reinterpret_cast<uintptr_t>(fmt));    // pointer to fmt
+    add(rbx, 8);
+    mov(dword[rbx], line_num);                          // DWORD, line-number constant
+    add(rbx, 4);
+    vmovdqu16(ptr[rbx], zmm);
+    add(rbx, 64);
+    mov(ptr[rax], rbx);
 
-    if (log_ptr - log_buffer > sizeof(log_buffer)) {
-        printf("error: log-buffer overflow!");
-        abort();
-    }
+    pop(rbx);
+    pop(rax);
   }
   void log_show() {
     uint8_t* plog = log_buffer;
-    for(int i = 0; i < log_fmt.size(); i++) {
-        printf("[%2d] '%s' ", i, log_fmt[i].c_str());
-        if (log_fmt[i] == "u8") {
+    int i = 0;
+    while(plog < log_ptr) {
+        auto * fmt = *reinterpret_cast<const char **>(plog); plog += 8;
+        auto line_num = *reinterpret_cast<const int *>(plog); plog += 4;
+        printf("line:%d '%s' ", line_num, fmt);
+        if (strcmp(fmt, "u8") == 0) {
             for(int k = 0; k < 64; k++)
                 printf("%02x,", plog[k]);
         }
-        if (log_fmt[i] == "u16") {
+        if (strcmp(fmt, "u16") == 0) {
             auto* pu16 = reinterpret_cast<uint16_t *>(plog);
             for(int k = 0; k < 32; k++)
                 printf(" %04x,", pu16[k]);
         }
-        if (log_fmt[i] == "bf16") {
+        if (strcmp(fmt, "bf16") == 0) {
             auto* pbf16 = reinterpret_cast<uint16_t *>(plog);
             for(int k = 0; k < 32; k++) {
                 auto if32 = static_cast<uint32_t>(pbf16[k]) << 16;
                 printf(" %.3f,", reinterpret_cast<float&>(if32));
             }
         }
-        plog += 64;
+        if (strcmp(fmt, "f32") == 0) {
+            auto* pf32 = reinterpret_cast<float *>(plog);
+            for(int k = 0; k < 16; k++) {
+                printf(" %8.3f,", pf32[k]);
+            }
+        }
         printf("\n");
+        plog += 64;
     }
   }
 
