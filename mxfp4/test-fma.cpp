@@ -48,11 +48,11 @@ class MXFP4BrgemmFMA : public jit_generator {
   MXFP4BrgemmFMA(int BM=1) : BM(BM) { log_reset(); create_kernel("MXFP4BrgemmFMA"); }
     struct CallArgs {
         const float* src_ptr;
-        int64_t src_stride;   // in bytes
-        const uint8_t* scale_ptr;  // bfloat16
-        const uint8_t* weight_ptr;  // float32
+        int64_t src_stride;          // in bytes
+        const uint8_t* scale_ptr;    // E8M0
+        const uint8_t* weight_ptr;   // E2M1
         float * dst_ptr;
-        int64_t dst_stride;    // in bytes
+        int64_t dst_stride;          // in bytes
         int64_t mxblock_cnt;
     };
 

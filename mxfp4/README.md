@@ -115,11 +115,17 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
 
 ## Computation bound
 
+[./test-fma.cpp](./test-fma.cpp) uses FMA as final ALU.
+```bash
+g++ -O2 ./test-fma.cpp
+VMUL_SCALE=0 ./a.out 10 # apply MX-scale by adding exponent with zero-guard, batch-size 10
+VMUL_SCALE=1 ./a.out 10 # apply MX-scale by vmulps directly, batch-size 10
+```
+
 [uiCA](https://uica.uops.info/) on Skylake-X shows 11.72 cycles-per-iteration, measurement on SPR is ~12.45 which is little higher (due to outer-loop overhead).
 when increase batch-size to 10, uiCA-Skylake-X & test-SPR results are both ~34.2, so one more item in batch needs ~2.4 cycles (2 for 4 FMA instructions, 0.4 for vpbroadcastd?)
 
-directly using `vmulps` to apply mx-scales on elements converted to fp32 can save 2 cycles in decoding
-process if FMA is to be used.
+directly using `vmulps` to apply mx-scales on elements converted to fp32 can save 2 cycles in weight decompression process if target weight format is fp32.
 
 | batch-size | ->bf16->(add exponent)->fp32 | ->bf16->fp32->(vmulps scales) |
 | ---------- | ---------------------------- | ---------------------------- |
