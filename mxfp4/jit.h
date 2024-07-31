@@ -74,6 +74,9 @@ class jit_generator : public Xbyak::CodeGenerator {
   jit_generator()
       : Xbyak::CodeGenerator(Xbyak::DEFAULT_MAX_CODE_SIZE * 4, (void*)0) {}
 
+  const char * name() {
+    return ker_name;
+  }
  protected:
   const size_t num_abi_save_gpr_regs =
       sizeof(abi_save_gpr_regs) / sizeof(abi_save_gpr_regs[0]);
@@ -236,6 +239,13 @@ class jit_generator : public Xbyak::CodeGenerator {
   }
 
 };
+
+inline int getenv(const char * var, int default_value) {
+    const char * p = std::getenv(var);
+    if (p) default_value = std::atoi(p);
+    printf("\e[32mENV:\t %s = %d %s\e[0m\n", var, default_value, p?"":"(default)");
+    return default_value;
+}
 
 struct TileConfig {
   uint8_t palette_id;

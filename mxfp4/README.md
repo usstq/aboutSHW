@@ -117,9 +117,8 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
 
 [./test-fma.cpp](./test-fma.cpp) uses FMA as final ALU.
 ```bash
-g++ -O2 ./test-fma.cpp
-VMUL_SCALE=0 ./a.out 10 # apply MX-scale by adding exponent with zero-guard, batch-size 10
-VMUL_SCALE=1 ./a.out 10 # apply MX-scale by vmulps directly, batch-size 10
+g++ -O2 ./test-jit.cpp
+./a.out 1 128 # batch-size 1, Mx-block-count 128 (K=128*32)
 ```
 
 [uiCA](https://uica.uops.info/) on Skylake-X shows 11.72 cycles-per-iteration, measurement on SPR is ~12.45 which is little higher (due to outer-loop overhead).
