@@ -9,7 +9,7 @@ Following image shows how floating point values are distributed on number axis. 
 
 In following example, geometric sequence $[\frac{1}{8}, \frac{1}{4}, \frac{1}{2}, 1]$ are encoded by exponent, and special subnormal range $[0,\frac{1}{8})$ and $[2,\infty)$  also encoded by exponent values, thus totally 6 exponent values are required (which is not friendly to binary encoding which usually has power of 2 number of values).
 
-![Floating point values visualized](./fp_vis.jpg)
+![Floating point values visualized](./resource/fp_vis.jpg)
 
 we can think of exponent value 1~(Emax-1) as encoding a sequence of length increasing geometrically, and these length are concatenated together to cover a continuous range in number axis, and significand/mantissa part encodes a series of discrete points equally distributed along each geometric length encoded by exponent.
 
@@ -106,6 +106,58 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
     - converts one element from bf16/fp16 and broadcast into packed fp32
     - converts odd/even elements from bf16/fp16 into fp32
     - converts packed fp32 into packed bf16
+
+
+# FMA version
+
+![MXFP4 FMA weight layout visualized](./resource/fma-wlayout.png)
+
+
+## Computation bound
+
+[uiCA](https://uica.uops.info/) on Skylake-X shows 11.72 cycles-per-iteration, measurement on SPR is ~12.45 which is little higher (due to outer-loop overhead).
+when increase batch-size to 10, uiCA-Skylake-X & test-SPR results are both ~34.2, so one more item in batch needs ~2.4 cycles (2 for 4 FMA instructions, 0.4 for vpbroadcastd?)
+
+directly using `vmulps` to apply mx-scales on elements converted to fp32 can save 2 cycles in decoding
+process if FMA is to be used.
+
+| batch-size | ->bf16->(add exponent)->fp32 | ->bf16->fp32->(vmulps scales) |
+| ---------- | ---------------------------- | ---------------------------- |
+| 1          |    12.4 cycles               |      10 cycles              |
+|10          |    34.2 cycles               |      31.2   cycles          |
+
+```txt
+vmovdqu8 ymm6,YMMWORD PTR [r8]               vmovdqu8 ymm6, ymmword ptr [r8]                  
+vpmovzxbw zmm6,ymm6                          vpmovzxbw zmm6, ymm6
+vpsrld zmm7,zmm6,0x4                         vpsrld zmm7, zmm6, 0x4
+vpermw zmm6,zmm6,zmm1                        vpermw zmm6, zmm6, zmm1
+vpermw zmm7,zmm7,zmm1                        vpcmpeqw k2, zmm6, zmm0
+vpunpcklwd zmm9,zmm0,zmm6                    kord k2, k1, k2
+vpunpckhwd zmm10,zmm0,zmm6                   vpaddw zmm6, zmm6, zmm5
+vmulps zmm9,zmm9,zmm3                        vpblendmw zmm6{k2}, zmm6, zmm0
+vmulps zmm10,zmm10,zmm4                      vpermw zmm7, zmm7, zmm1
+mov    rax,rsi                               vpcmpeqw k3, zmm7, zmm0
+vpbroadcastd zmm8,DWORD PTR [rax]            kord k3, k1, k3
+vfmadd231ps zmm11,zmm8,zmm9                  vpaddw zmm7, zmm7, zmm5
+vfmadd231ps zmm12,zmm8,zmm10                 vpblendmw zmm7{k3}, zmm7, zmm0
+add    rax,rdx                               vpunpcklwd zmm9, zmm0, zmm6
+vpunpcklwd zmm9,zmm0,zmm7                    vpunpckhwd zmm10, zmm0, zmm6
+vpunpckhwd zmm10,zmm0,zmm7                   mov rax, rsi
+vmulps zmm9,zmm9,zmm3                        vpbroadcastd zmm8, dword ptr [rax]
+vmulps zmm10,zmm10,zmm4                      vfmadd231ps zmm11, zmm8, zmm9
+mov    rax,rsi                               vfmadd231ps zmm12, zmm8, zmm10
+vpbroadcastd zmm8,DWORD PTR [rax+0x4]        add rax, rdx
+vfmadd231ps zmm11,zmm8,zmm9                  vpunpcklwd zmm9, zmm0, zmm7
+vfmadd231ps zmm12,zmm8,zmm10                 vpunpckhwd zmm10, zmm0, zmm7
+add    rax,rdx                               mov rax, rsi
+add    rsi,0x8                               vpbroadcastd zmm8, dword ptr [rax+0x4]
+add    r8,0x20                               vfmadd231ps zmm11, zmm8, zmm9
+dec    r10                                   vfmadd231ps zmm12, zmm8, zmm10
+                                             add rax, rdx
+                                             add rsi, 0x8
+                                             add r8, 0x20
+                                             dec r10
+```
 
 # Learn from compiler
 

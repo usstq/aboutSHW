@@ -34,9 +34,17 @@ using namespace mxformat;
 // let's focus on latency case in which M is just 1 (or 4).
 //
 
+int getenv(const char * var, int default_value) {
+    const char * p = std::getenv(var);
+    if (p) default_value = std::atoi(p);
+    printf("\e[32mENV:\t %s = %d %s\e[0m\n", var, default_value, p?"":"(default)");
+    return default_value;
+}
+
 class MXFP4BrgemmFMA : public jit_generator {
  public:
   int BM = 0;
+  bool is_vmul_scale = getenv("VMUL_SCALE", 0);
   MXFP4BrgemmFMA(int BM=1) : BM(BM) { log_reset(); create_kernel("MXFP4BrgemmFMA"); }
     struct CallArgs {
         const float* src_ptr;
@@ -105,11 +113,20 @@ class MXFP4BrgemmFMA : public jit_generator {
     L(kx32_loop_begin);
 
     // zmm5 : 32x MX scales
-    vmovdqu8(ymm5, ptr[scale_ptr]);  // 32x E8M0
-    vpmovzxbw(zmm5, ymm5);           // 32x 16bit
-    vpcmpw(k1, zmm5, zmm_zero, 0);   // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
-    vpsubw(zmm5, zmm5, zmm_exponent_bias);   // subtract bias 127
-    vpsllw(zmm5, zmm5, 0x7);         // shift-left into bf16/fp16 exponent: 32x scales
+
+    if (!is_vmul_scale) {
+        vmovdqu8(ymm5, ptr[scale_ptr]);  // 32x E8M0
+        vpmovzxbw(zmm5, ymm5);           // 32x 16bit
+        vpcmpw(k1, zmm5, zmm_zero, 0);   // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+        vpsubw(zmm5, zmm5, zmm_exponent_bias);   // subtract bias 127
+        vpsllw(zmm5, zmm5, 0x7);         // shift-left into bf16/fp16 exponent: 32x scales
+    } else {
+        vmovdqu8(ymm5, ptr[scale_ptr]);  // 32x E8M0
+        vpmovzxbw(zmm5, ymm5);           // 32x 16bit
+        vpsllw(zmm5, zmm5, 0x7);         // bf16
+        vpunpcklwd(zmm3, zmm_zero, zmm5);
+        vpunpckhwd(zmm4, zmm_zero, zmm5);
+    }
 
     mov(mx_size, 16);
     align(64, false);
@@ -126,17 +143,22 @@ class MXFP4BrgemmFMA : public jit_generator {
 
         vpsrld(zmm7, zmm6, 0x4);            // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
         vpermw(zmm6, zmm6, zmm_e2m1_lut);   // e2m1 nibble to float32
-
-        vpcmpw(k2, zmm6, zmm_zero, 0);      // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
-        kord(k2, k1, k2);
-        vpaddw(zmm6, zmm6, zmm5);
-        vpblendmw(zmm6|k2, zmm6, zmm_zero); // 32x bf16/fp16 even weights: w0, w2, w4, ... 
-
         vpermw(zmm7, zmm7, zmm_e2m1_lut);
-        vpcmpw(k3, zmm7, zmm_zero, 0);
-        kord(k3, k1, k3);
-        vpaddw(zmm7, zmm7, zmm5);
-        vpblendmw(zmm7|k3, zmm7, zmm_zero); // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+
+        if (!is_vmul_scale) {
+            // use exponent-add to apply MX-scale
+            vpcmpw(k2, zmm6, zmm_zero, 0);      // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+            vpcmpw(k3, zmm7, zmm_zero, 0);
+
+            kord(k2, k1, k2);
+            kord(k3, k1, k3);
+
+            vpaddw(zmm6, zmm6, zmm5);
+            vpaddw(zmm7, zmm7, zmm5);
+
+            vpblendmw(zmm6|k2, zmm6, zmm_zero); // 32x bf16/fp16 even weights: w0, w2, w4, ... 
+            vpblendmw(zmm7|k3, zmm7, zmm_zero); // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+        }
 
         //log_zmm("bf16", __LINE__, zmm6);
         //log_zmm("bf16", __LINE__, zmm7);
@@ -144,6 +166,13 @@ class MXFP4BrgemmFMA : public jit_generator {
         // the even/odd part share same scales, thus they come from 2 adjacent rows of weight-matrix(belong to same MX block)
         vpunpcklwd(zmm9, zmm_zero, zmm6);
         vpunpckhwd(zmm10, zmm_zero, zmm6);
+
+        if (is_vmul_scale) {
+            // use vmulps to apply MX-scales
+            vmulps(zmm9, zmm9, zmm3);
+            vmulps(zmm10, zmm10, zmm4);
+        }
+
         mov(rax, src_ptr);
         for(int m = 0; m < BM; m++) {
             vpbroadcastd(zmm8, ptr[rax]);    // load & broadcast a fp32 from source
@@ -154,6 +183,12 @@ class MXFP4BrgemmFMA : public jit_generator {
 
         vpunpcklwd(zmm9, zmm_zero, zmm7);
         vpunpckhwd(zmm10, zmm_zero, zmm7);
+        if (is_vmul_scale) {
+            // use vmulps to apply MX-scales
+            vmulps(zmm9, zmm9, zmm3);
+            vmulps(zmm10, zmm10, zmm4);
+        }
+
         mov(rax, src_ptr);
         for(int m = 0; m < BM; m++) {
             vpbroadcastd(zmm8, ptr[rax + 4]);    // load & broadcast a fp32 from source
