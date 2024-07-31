@@ -7,6 +7,7 @@
 #include <fstream>
 #include <vector>
 #include <cstring>
+#include <cstddef>
 
 #ifdef XBYAK64
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
