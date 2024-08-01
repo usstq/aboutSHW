@@ -652,7 +652,6 @@ struct PerfEventGroup : public IPerfEventDumper {
         my_pid = getpid();
         my_tid = gettid();
 
-        show_header();
         enable();
     }
 

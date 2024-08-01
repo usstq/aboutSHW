@@ -539,7 +539,7 @@ public:
         CallArgs() {
             // cache line align
             scratch_buff = reinterpret_cast<ov::bfloat16 *>(::aligned_alloc(64, 4096*4));
-            if (scratch_buff = nullptr) {
+            if (scratch_buff == nullptr) {
                 printf("::aligned_alloc failed\n");
                 abort();
             }
@@ -576,8 +576,7 @@ public:
         mov(weight_ptr, ptr[abi_param1 + offsetof(CallArgs, weight_ptr)]);
         mov(dst_ptr, ptr[abi_param1 + offsetof(CallArgs, dst_ptr)]);
         mov(mxblock_cnt, ptr[abi_param1 + offsetof(CallArgs, mxblock_cnt)]);
-        mov(scratch_ptr, abi_param1);
-        add(scratch_ptr, ptr[abi_param1 + offsetof(CallArgs, scratch_buff)]);
+        mov(scratch_ptr, ptr[abi_param1 + offsetof(CallArgs, scratch_buff)]);
 
         auto zmm_zero = zmm0;
         auto zmm_e2m1_lut = zmm1;
@@ -776,6 +775,7 @@ public:
     }
     void run(CallArgs* args_ptr) {
         TileConfigScope tcfg(m_tile_cfg);
+        //printf("src: %p   buff: %p\n", args_ptr->src_ptr, args_ptr->scratch_buff);
         (*this)(args_ptr);
     }
 #if 0
@@ -889,6 +889,8 @@ void test(int BM, int MXBLOCKS) {
         {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00),"SPLIT_LOADS"},
         {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00),"SPLIT_STORES"},
     });
+
+    if (PMU_VERBOSE) pevg.show_header();
 
     //std::vector<ActType> src(BM * 32 * MXBLOCKS, 0);
     std::vector<mxfp4> mxfp4_weight(MXBLOCKS * 32);
@@ -1017,7 +1019,7 @@ int main(int argc, const char* argv[]) {
     int MXBLOCKS = argc > 2 ? atoi(argv[2]) : 1;
 
     bool initAMX = initXTILE();
-    if (BM <= 10 && 0) {
+    if (BM <= 10) {
         test<MXFP4BrgemmFMA<false>>(BM, MXBLOCKS);
         test<MXFP4BrgemmFMA<true>>(BM, MXBLOCKS);
         test<MXFP4BrgemmAVX512_BF16>(BM, MXBLOCKS);
