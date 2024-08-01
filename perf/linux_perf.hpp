@@ -468,6 +468,22 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
     }
 };
 
+/*
+RAW HARDWARE EVENT DESCRIPTOR
+       Even when an event is not available in a symbolic form within perf right now, it can be encoded in a per processor specific way.
+
+       For instance For x86 CPUs NNN represents the raw register encoding with the layout of IA32_PERFEVTSELx MSRs (see [Intel® 64 and IA-32 Architectures Software Developer’s Manual Volume 3B: System Programming Guide] Figure 30-1
+       Layout of IA32_PERFEVTSELx MSRs) or AMD’s PerfEvtSeln (see [AMD64 Architecture Programmer’s Manual Volume 2: System Programming], Page 344, Figure 13-7 Performance Event-Select Register (PerfEvtSeln)).
+
+       Note: Only the following bit fields can be set in x86 counter registers: event, umask, edge, inv, cmask. Esp. guest/host only and OS/user mode flags must be setup using EVENT MODIFIERS.
+
+ event 7:0
+ umask 15:8
+ edge  18
+ inv   23
+ cmask 31:24
+*/
+#define X86_RAW_EVENT(EventSel, UMask, CMask) ((CMask << 24) | (UMask << 8) | (EventSel))
 
 struct PerfEventGroup : public IPerfEventDumper {
     int group_fd = -1;
@@ -593,21 +609,6 @@ struct PerfEventGroup : public IPerfEventDumper {
     
     PerfEventGroup() = default;
 
-/*
-RAW HARDWARE EVENT DESCRIPTOR
-       Even when an event is not available in a symbolic form within perf right now, it can be encoded in a per processor specific way.
-
-       For instance For x86 CPUs NNN represents the raw register encoding with the layout of IA32_PERFEVTSELx MSRs (see [Intel® 64 and IA-32 Architectures Software Developer’s Manual Volume 3B: System Programming Guide] Figure 30-1
-       Layout of IA32_PERFEVTSELx MSRs) or AMD’s PerfEvtSeln (see [AMD64 Architecture Programmer’s Manual Volume 2: System Programming], Page 344, Figure 13-7 Performance Event-Select Register (PerfEvtSeln)).
-
-       Note: Only the following bit fields can be set in x86 counter registers: event, umask, edge, inv, cmask. Esp. guest/host only and OS/user mode flags must be setup using EVENT MODIFIERS.
-
- event 7:0
- umask 15:8
- edge  18
- inv   23
- cmask 31:24
-*/
     struct Config {
         uint32_t type;
         uint64_t config;
@@ -842,7 +843,9 @@ RAW HARDWARE EVENT DESCRIPTOR
             else
                 pmc[i] = 0;
         }
+        auto tsc0 = __rdtsc();
         fn();
+        auto tsc1 = __rdtsc();
         for(int i = 0; i < cnt; i++) {
             if (events[i].pmc_index)
                 pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
@@ -855,7 +858,11 @@ RAW HARDWARE EVENT DESCRIPTOR
             for(int i = 0; i < cnt; i++) {
                 printf(events[i].format, pmc[i]);
             }
-            printf("\e[0m\n");
+            auto duration_ns = tsc2nano(tsc1 - tsc0);
+            printf("\e[0m %.3f us", duration_ns/1e3);
+            if (hw_cpu_cycles_evid >= 0)
+                printf(" CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
+            printf("\n");
         }
         return pmc;
     }
@@ -929,9 +936,9 @@ RAW HARDWARE EVENT DESCRIPTOR
             return *this;
         }
 
-        void finish() {
+        uint64_t* finish() {
             if (!pevg)
-                return;
+                return nullptr;
 
             pd->stop();
             bool use_pmc = (pevg->num_events_no_pmc == 0);
@@ -947,6 +954,7 @@ RAW HARDWARE EVENT DESCRIPTOR
                     pd->data[i] = pevg->values[i] - pd->data[i];
             }
             pevg = nullptr;
+            return pd->data;
         }
 
         ~ProfileScope() {
@@ -954,7 +962,7 @@ RAW HARDWARE EVENT DESCRIPTOR
         }
     };
 
-    ProfileData* start_profile(const std::string& title, int id = 0) {
+    ProfileData* _profile(const std::string& title, int id = 0) {
         if (!enable_dump_json)
             return {};
 
@@ -979,6 +987,10 @@ RAW HARDWARE EVENT DESCRIPTOR
 
         return pd;
     }
+
+    ProfileScope Profile(const std::string& title, int id = 0) {
+        return {this, _profile(title, id)};
+    }
 };
 
 using ProfileScope = PerfEventGroup::ProfileScope;
@@ -994,7 +1006,7 @@ inline ProfileScope Profile(const std::string& title, int id = 0) {
         {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
         {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
     });
-    return {&pevg, pevg.start_profile(title, id)};
+    return {&pevg, pevg._profile(title, id)};
 }
 
 inline int Init() {

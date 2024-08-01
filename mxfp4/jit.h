@@ -224,7 +224,7 @@ class jit_generator : public Xbyak::CodeGenerator {
             auto* pbf16 = reinterpret_cast<uint16_t *>(plog);
             for(int k = 0; k < 32; k++) {
                 auto if32 = static_cast<uint32_t>(pbf16[k]) << 16;
-                printf(" %.3f,", reinterpret_cast<float&>(if32));
+                printf(" %.1f,", reinterpret_cast<float&>(if32));
             }
         }
         if (strcmp(fmt, "f32") == 0) {
@@ -240,6 +240,8 @@ class jit_generator : public Xbyak::CodeGenerator {
 
 };
 
+
+//===============================================================
 inline int getenv(const char * var, int default_value) {
     const char * p = std::getenv(var);
     if (p) default_value = std::atoi(p);
@@ -247,6 +249,45 @@ inline int getenv(const char * var, int default_value) {
     return default_value;
 }
 
+//===============================================================
+// XTILE initialize on Linux
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* See feature_test_macros(7) */
+#endif
+#include <sys/syscall.h> /* For SYS_xxx definitions */
+#include <unistd.h>
+
+#define XFEATURE_XTILECFG 17
+#define XFEATURE_XTILEDATA 18
+#define XFEATURE_MASK_XTILECFG (1 << XFEATURE_XTILECFG)
+#define XFEATURE_MASK_XTILEDATA (1 << XFEATURE_XTILEDATA)
+#define XFEATURE_MASK_XTILE (XFEATURE_MASK_XTILECFG | XFEATURE_MASK_XTILEDATA)
+#define ARCH_GET_XCOMP_PERM 0x1022
+#define ARCH_REQ_XCOMP_PERM 0x1023
+
+inline bool initXTILE() {
+    unsigned long bitmask = 0;
+    long status = syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &bitmask);
+    if (0 != status)
+        return false;
+    if (bitmask & XFEATURE_MASK_XTILEDATA)
+        return true;
+
+    status = syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA);
+    if (0 != status)
+        return false; // XFEATURE_XTILEDATA setup is failed, TMUL usage is not allowed
+    status = syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &bitmask);
+
+    // XFEATURE_XTILEDATA setup is failed, can't use TMUL
+    if (0 != status || !(bitmask & XFEATURE_MASK_XTILEDATA))
+        return false;
+
+    // XFEATURE_XTILEDATA set successfully, TMUL usage is allowed
+    printf("\e[33m""initXTILE success!\n""\e[0m");
+    return true;
+}
+
+//===============================================================
 struct TileConfig {
   uint8_t palette_id;
   uint8_t startRow;

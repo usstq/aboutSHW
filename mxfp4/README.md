@@ -56,12 +56,17 @@ for better statistical accuracy, conversion from float32 to E2M1 should use roun
  - although 6.0 is even number, but it's treated as odd
  - thus odd & even is determined by its index in the representable sequence, or by value of mantissa, not the value of whole number.
 
-
-
 E8M0 to float is defined [here](https://github.com/openvinotoolkit/openvino/blob/3056b53056d6319666f3fc250bebefb0c4b1a91e/src/core/src/type/float8_e8m0.cpp#L49), notice :
  - subnormal float are required to represent scale when exponent is -127
  - NaN is possible
  - no sign bit, thus no negative number is encoded.
+
+Conversion from MXFP4 can be done in two ways:
+ - multiplication :  `to_fp32(E8M0) * to_fp32(E2M1)`
+ - exponent adding with zero-guard:
+     - in non-subnormal range, exponent of element can add scale's exponent to recover result's exponent w/o changing mantissa.
+     - exponent adding must be done on target FP-format, for example, after conversion E2M1 into bfloat16 by LUT, all values becomes
+       non-subnormal except zero, also zero scale may results float32 sub-normal, also need to be zero-guarded.
 
 As show in 6.1 of [OCP MX specification][1], dot product is done efficiently if input vectors are group aligned, thus for MatMul to benefit from this format, row of A matrix & column of B matrix must be converted to same MX format.
 
