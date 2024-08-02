@@ -14,6 +14,7 @@ bool is_ktype(std::string cur_ktype, std::string target_ktype) {
     return cur_ktype == target_ktype;
 }
 
+static int AMX_AVX_MIX = getenv("AMX_AVX_MIX", 0);
 
 class InstructionLoop : public jit_generator {
 public:
@@ -67,7 +68,9 @@ public:
         if (ktype == "tileloadd.stride1") {
             mov(tile_A_stride, 63*64);
         }
-
+        if (ktype == "amx2x2.stride1") {
+            mov(tile_A_stride, 63*64);
+        }
         tilezero(tmm0);
         tilezero(tmm1);
         tilezero(tmm2);
@@ -156,7 +159,7 @@ public:
                 tdpbf16ps(tmm2, tmm5, tmm6);
                 tdpbf16ps(tmm3, tmm5, tmm7);
             }
-            if (is_ktype(ktype, "amx2x2")) {
+            if (is_ktype(ktype, "amx2x2.stride0") || is_ktype(ktype, "amx2x2.stride1")) {
                 // CPK:64.2
                 //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
                 tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]);    // A0
@@ -170,6 +173,33 @@ public:
                 tdpbf16ps(tmm1, tmm4, tmm7);
                 tdpbf16ps(tmm3, tmm5, tmm7);
             }
+            if (is_ktype(ktype, "vpxor.x")) {
+                // 2.05 : 
+                //    considering vdpbf16ps performs 32x2 FOPS while vfmadd132ps only performs 16x2 FOPS
+                //    the overall throuput of avx512-BF16 is half of avx512-FMA
+                for(int i = 0; i < AMX_AVX_MIX; i++) {
+                    vpxorq(zmm0, zmm31, zmm0);
+                }
+            }            
+            if (is_ktype(ktype, "amx.avx.mix")) {
+                // CPK:64.2
+                //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
+                tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
+                tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
+                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm1, zmm31, zmm1);
+
+                tdpbf16ps(tmm0, tmm4, tmm6);
+
+                tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
+                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm0, zmm31, zmm0);
+                tdpbf16ps(tmm2, tmm5, tmm6);
+
+                tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
+                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm2, zmm31, zmm2);
+
+                tdpbf16ps(tmm1, tmm4, tmm7);
+                tdpbf16ps(tmm3, tmm5, tmm7);
+            }            
         }
         dec(regCnt);
         jne(loop_begin, T_NEAR);
@@ -205,7 +235,7 @@ void test_CPI(std::string ktype) {
                    });
     TileConfigScope tcfg(tile_cfg);
 
-    #define UNROLL_COUNT 100
+    #define UNROLL_COUNT 10
 
     InstructionLoop inst(ktype, UNROLL_COUNT);
     inst(LOOP_COUNT); // warm-up

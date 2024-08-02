@@ -667,7 +667,7 @@ public:
             // decompress B0|B1 (~118 cycles)
             if (AMX_DEBUG & 1) {
                 decompress_Btile(0);
-                decompress_Btile(1024);
+                decompress_Btile(1024);                
             }
             if (AMX_DEBUG & 2) {
                 // load B0|B1
@@ -683,11 +683,12 @@ public:
                 if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
                 tdpbf16ps(tmmC01, tmmA0, tmmB1);
                 if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+                // move to next MX-block(32 along K dimension)
+                // Btile is automatically moved
+                lea(src_ptr, ptr[src_ptr + 64]);
+                if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
             }
-            // move to next MX-block(32 along K dimension)
-            // Btile is automatically moved
-            lea(src_ptr, ptr[src_ptr + 64]);
-            if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
         }
         dec(mxblock_cnt);
         jnz(kx32_loop_begin, T_NEAR);
