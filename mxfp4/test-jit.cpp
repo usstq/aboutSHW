@@ -674,25 +674,20 @@ public:
                 // load A0|A1
                 // TMUL into C0,C1,C2,C3
                 tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+                if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+
                 tileloadd(tmmB0, ptr[scratch_ptr + reg_B_stride + 0]);
+                tileloadd(tmmB1, ptr[scratch_ptr + reg_B_stride + 1024]);
 
                 tdpbf16ps(tmmC00, tmmA0, tmmB0);
-                if (BM > 16) {
-                    tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-                    tdpbf16ps(tmmC10, tmmA1, tmmB0);
-                }
-
-                tileloadd(tmmB1, ptr[scratch_ptr + reg_B_stride + 1024]);
+                if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
                 tdpbf16ps(tmmC01, tmmA0, tmmB1);
-                if (BM > 16) {
-                    tdpbf16ps(tmmC11, tmmA1, tmmB1);
-                }
+                if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
             }
             // move to next MX-block(32 along K dimension)
             // Btile is automatically moved
             lea(src_ptr, ptr[src_ptr + 64]);
-            if (BM > 16)
-                lea(src_ptr1, ptr[src_ptr1 + 64]);
+            if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
         }
         dec(mxblock_cnt);
         jnz(kx32_loop_begin, T_NEAR);
@@ -866,7 +861,6 @@ void exec_reference(const AT* src, int64_t src_stride, mxfp4* mxfp4_weight, floa
 }
 
 static auto REF_VERBOSE = getenv("REF_VERBOSE", 0);
-static auto PMU_VERBOSE = getenv("PMU_VERBOSE", 0);
 
 template <class MXFP4Gemm>
 void test(int BM, int MXBLOCKS) {
@@ -889,8 +883,6 @@ void test(int BM, int MXBLOCKS) {
         {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00),"SPLIT_LOADS"},
         {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00),"SPLIT_STORES"},
     });
-
-    if (PMU_VERBOSE) pevg.show_header();
 
     //std::vector<ActType> src(BM * 32 * MXBLOCKS, 0);
     std::vector<mxfp4> mxfp4_weight(MXBLOCKS * 32);
@@ -967,11 +959,9 @@ void test(int BM, int MXBLOCKS) {
     }
     printf("\n");
 
-    char acclog[1024];
-    sprintf(acclog, "%s[ACCURACY:%s]\e[0m", all_equal ? "\e[32m" : "\e[31m", all_equal ? "PASSED!" : "FAILED!");
-
-    jit_kernel.log_show();
-
+    printf("%s[%s] ACCURACY:%s\e[0m \n", all_equal ? "\e[32m" : "\e[31m", jit_kernel.name(), all_equal ? "PASSED!" : "FAILED!");
+    pevg.show_header();
+    //jit_kernel.log_show();
     
     double avg_cycles = 0;
     double avg_instructions = 0;
@@ -990,28 +980,9 @@ void test(int BM, int MXBLOCKS) {
                 for (int repeat = 0; repeat < REPEATS; repeat++)
                     jit_kernel.run(&args);
             },
-            PMU_VERBOSE);
-        auto cpi0 = (double)(pmc[0]) / pmc[1];
-        auto cpi1 = (double)(pmc[0]) / (REPEATS * 16 * MXBLOCKS);
-        avg_cpi0 += cpi0;
-        avg_cpi1 += cpi1;
-        avg_cycles += pmc[0];
-        avg_instructions += pmc[1];
-        // printf("CPI: %.2f  cycles-per-iteration: %.2f\n", cpi0, cpi1);
+            jit_kernel.name(),
+            REPEATS*MXBLOCKS);
     }
-    avg_cpi0 /= 10;
-    avg_cpi1 /= 10;
-    avg_cycles /= 10 * REPEATS * MXBLOCKS;
-    avg_instructions /= 10 * REPEATS * MXBLOCKS;
-    printf("test<%s>(BM=%d, MXBLOCKS=%d)  %s  CPI: %.2f   cycles-per-iteration: %.2f  instructions-per-kernel&mxblock: %.2f cycles-per-kernel&mxblock: %.2f \n",
-           jit_kernel.name(),
-           BM,
-           MXBLOCKS,
-           acclog,
-           avg_cpi0,
-           avg_cpi1,
-           avg_instructions,
-           avg_cycles);
 }
 
 int main(int argc, const char* argv[]) {

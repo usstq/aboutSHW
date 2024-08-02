@@ -117,10 +117,18 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
 
 ![MXFP4 FMA weight layout visualized](./resource/fma-wlayout.png)
 
+## Compute bound Analysis
+[./test-cpi.cpp](./test-cpi.cpp) using jit to test instruction/instruction-sequence throughput using PMU.
+This is measuring actual throughput rather than predicting (like [uiCA](https://uica.uops.info/)), this is helpful to understand & optimize compute bound.
 
 ## Computation bound
 
-[./test-fma.cpp](./test-fma.cpp) uses FMA as final ALU.
+[./test-jit.cpp](./test-jit.cpp) implemented a few version of MXFP4 matmul kernels:
+
+  - `MXFP4BrgemmFMA` using FMA instruction `vfmadd231ps`
+  - `MXFP4BrgemmAVX512_BF16` using `vdpbf16ps`
+  - `MXFP4BrgemmAMX` using AMX-BF16 `tdpbf16ps`
+
 ```bash
 g++ -O2 ./test-jit.cpp
 ./a.out 1 128 # batch-size 1, Mx-block-count 128 (K=128*32)

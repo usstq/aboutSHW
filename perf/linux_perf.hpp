@@ -832,7 +832,7 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, bool verbose = false) {
+    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
 
@@ -852,15 +852,24 @@ struct PerfEventGroup : public IPerfEventDumper {
                 pmc[i] = 0;
         }
 
-        if (verbose) {
+        if (!name.empty()) {
             printf("\e[33m");
             for(int i = 0; i < cnt; i++) {
                 printf(events[i].format, pmc[i]);
             }
             auto duration_ns = tsc2nano(tsc1 - tsc0);
-            printf("\e[0m %.3f us", duration_ns/1e3);
-            if (hw_cpu_cycles_evid >= 0)
+            
+            printf("\e[0m [%16s] %.3f us", name.c_str(), duration_ns/1e3);
+            if (hw_cpu_cycles_evid >= 0) {
                 printf(" CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
+                if (hw_instructions_evid >= 0) {
+                    printf(" CPI:%.2f", 1.0 * pmc[hw_cpu_cycles_evid] / pmc[hw_instructions_evid]);
+                }
+                if (loop_cnt > 0) {
+                    // cycles per kernel (or per-iteration)
+                    printf(" CPK:%.1f", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt);
+                }
+            }
             printf("\n");
         }
         return pmc;
