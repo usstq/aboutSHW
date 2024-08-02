@@ -1,6 +1,6 @@
 
 #include "../perf/linux_perf.hpp"
-#include "bf16.hpp"
+#include "../mxfp4/bf16.hpp"
 #include "jit.h"
 
 
