@@ -249,6 +249,40 @@ inline int getenv(const char * var, int default_value) {
     return default_value;
 }
 
+static std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
+    std::vector<std::string> ret;
+    size_t last = 0;
+    size_t next = 0;
+    while ((next = s.find(delimiter, last)) != std::string::npos) {
+        std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
+        ret.push_back(s.substr(last, next-last));
+        last = next + 1;
+    }
+    ret.push_back(s.substr(last));
+    return ret;
+}
+
+// multiple values separated by ,
+inline std::vector<int> getenvs(const char * var, int count = -1, int default_v = 0) {
+    std::vector<int> ret;
+    const char * p = std::getenv(var);
+    if (p) {
+        auto vec = str_split(p, ",");
+        for(auto& v : vec)
+            ret.push_back(std::atoi(v.c_str()));
+    }
+    while(ret.size() < count)
+        ret.push_back(default_v);
+    printf("\e[32mENV:\t %s = ", var);
+    const char * sep = "";
+    for(int v : ret) {
+        printf("%s%d", sep, v);
+        sep = ",";
+    }
+    printf("\e[0m\n");
+    return ret;
+}
+
 //===============================================================
 // XTILE initialize on Linux
 #ifndef _GNU_SOURCE

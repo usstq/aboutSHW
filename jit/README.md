@@ -52,6 +52,23 @@ Also we can measure instruction-sequence throughput like 2x2 tiles AMX-BF16 TMUL
 
 with proper strides, Load & TMUL can hide latency of each-other, so above sequence took `64 cycles` which is same as 4 TMUL sequence. this suggests that redundant physical Tile register exists, so load & TMUL can run in parallel.
 
-in `20.11.2 INTEL® AMX AND INTEL® AVX-512 INTERLEAVING (SW PIPELINING)` of `Intel architecture optimization reference manual`, it says data-independent AMX instructions & AVX instructions can be SW-pipelined to overcome the limited code window size of out-of-order CPU engine. so 
+in `20.11.2 INTEL® AMX AND INTEL® AVX-512 INTERLEAVING (SW PIPELINING)` of `Intel architecture optimization reference manual`, it says data-independent AMX instructions & AVX instructions can be SW-pipelined to overcome the limited code window size of out-of-order CPU engine. `amx.avx.mix` is designed to test how well AVX512 & AMX instructions can be mixed.
 
+we increase the number of different avx instructions inserted into the AMX-2x2-TMUL loop and see how well they can run in parallel:
+
+we measure CPU cycles per iteration for following 3 loop:
+ - 4 AMX-BF16 TMULs instrucions along. this measurement is always 64 cycles.
+ - N avx instrucions running along. we use 4 independent avx instruction of same-kind, so this measurement is always `throughput * N`
+ - 4 AMX-BF16 TMULs interleaved with N avx instructions, this is the most interesting measurement, call it `X`.
+
+As `N` increasing, `X` would stable at 64 cycles for a while, and then increase along with N, the point of `N` where `X` starts to increase is the max number of avx instructions can be run in parallel or totally hidden by AMX TMUL.
+
+
+| AVX512 instruction | Dispatch-Port | inflection point `N`(`N'`) | hidden latency `throughput * N` | Note |
+| ------------------ | ------------- | -------------------  | ------------------------------- | ---- |
+| `vpsllq`(avx512)   |   0           |    64 (64)           |     1 * 64                      | perfectly hidden|
+| `vpxorq`(avx512)   |   0,5         |   128 (116)          |   0.5 * 128                     | perfectly hidden|
+| `vdpbf16ps`(avx512) |  0,5         |    28 (28)           |     2 * 28                      | partially hidden|
+
+> if we put all `N` avx instructions together, rather than evenly distributed between 4 TMULs, we may have less perfect hiding (depending on avx instruction type used), denoted as `N'`
 

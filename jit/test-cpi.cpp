@@ -14,7 +14,7 @@ bool is_ktype(std::string cur_ktype, std::string target_ktype) {
     return cur_ktype == target_ktype;
 }
 
-static int AMX_AVX_MIX = getenv("AMX_AVX_MIX", 0);
+static auto AMX_AVX_MIX = getenv("AMX_AVX_MIX", 0);
 
 class InstructionLoop : public jit_generator {
 public:
@@ -39,6 +39,15 @@ public:
         tileAbf16 = alloc(32*(128*32)/sizeof(ov::bfloat16), 0.1f);
         create_kernel("InstructionLoop");
     }
+
+    void insert_avx512_inst(Xbyak::Zmm zmm){
+        for(int i = 0; i < AMX_AVX_MIX/4; i++) {
+            //vpsrld(ymm0, ymm0, 4);
+            //vpxorq(zmm, zmm31, zmm);
+            vdpbf16ps(zmm, zmm31, zmm);
+            //vpsllq(zmm, zmm, 4);
+        }
+    };
 
     void generate() override {
         static std::vector<float> initv(16, 0.0f);
@@ -65,10 +74,7 @@ public:
         mov(tile_A0_addr, reinterpret_cast<uintptr_t>(tileAbf16.get()));
         mov(tile_A1_addr, reinterpret_cast<uintptr_t>(tileAbf16.get()) + 16*(128*32));
         mov(tile_A_stride, 128*32);
-        if (ktype == "tileloadd.stride1") {
-            mov(tile_A_stride, 63*64);
-        }
-        if (ktype == "amx2x2.stride1") {
+        if (ktype == "tileloadd.stride1" || ktype == "amx.avx.mix" || ktype == "amx2x2.stride1") {
             mov(tile_A_stride, 63*64);
         }
         tilezero(tmm0);
@@ -173,33 +179,27 @@ public:
                 tdpbf16ps(tmm1, tmm4, tmm7);
                 tdpbf16ps(tmm3, tmm5, tmm7);
             }
-            if (is_ktype(ktype, "vpxor.x")) {
+            if (is_ktype(ktype, "avx512.along")) {
                 // 2.05 : 
                 //    considering vdpbf16ps performs 32x2 FOPS while vfmadd132ps only performs 16x2 FOPS
                 //    the overall throuput of avx512-BF16 is half of avx512-FMA
-                for(int i = 0; i < AMX_AVX_MIX; i++) {
-                    vpxorq(zmm0, zmm31, zmm0);
-                }
-            }            
-            if (is_ktype(ktype, "amx.avx.mix")) {
+                insert_avx512_inst(zmm0);
+                insert_avx512_inst(zmm1);
+                insert_avx512_inst(zmm2);
+                insert_avx512_inst(zmm3);
+            }
+            if (is_ktype(ktype, "amx.avx512.mix")) {
                 // CPK:64.2
                 //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
-                tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
-                tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
-                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm1, zmm31, zmm1);
-
-                tdpbf16ps(tmm0, tmm4, tmm6);
-
-                tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
-                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm0, zmm31, zmm0);
-                tdpbf16ps(tmm2, tmm5, tmm6);
-
-                tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
-                for(int i = 0; i < AMX_AVX_MIX; i++) vpxorq(zmm2, zmm31, zmm2);
-
-                tdpbf16ps(tmm1, tmm4, tmm7);
-                tdpbf16ps(tmm3, tmm5, tmm7);
-            }            
+                //tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
+                //tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
+                tdpbf16ps(tmm0, tmm4, tmm6); insert_avx512_inst(zmm0); 
+                //tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
+                tdpbf16ps(tmm2, tmm5, tmm6); insert_avx512_inst(zmm1); 
+                //tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
+                tdpbf16ps(tmm1, tmm4, tmm7); insert_avx512_inst(zmm2); 
+                tdpbf16ps(tmm3, tmm5, tmm7); insert_avx512_inst(zmm3);
+            }
         }
         dec(regCnt);
         jne(loop_begin, T_NEAR);
@@ -213,6 +213,16 @@ void test_CPI(std::string ktype) {
     LinuxPerf::PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x01, 0x00),"UOPS.PORT_0"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x02, 0x00),"UOPS.PORT_1"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x20, 0x00),"UOPS.PORT_5_11"},
+
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x02, 0x00),"1_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x04, 0x00),"2_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x08, 0x00),"3_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x10, 0x00),"4_PORTS_UTIL"},
+        
+        
     });
     if (index == 0)
         pevg.show_header();
@@ -235,7 +245,7 @@ void test_CPI(std::string ktype) {
                    });
     TileConfigScope tcfg(tile_cfg);
 
-    #define UNROLL_COUNT 10
+    #define UNROLL_COUNT 2
 
     InstructionLoop inst(ktype, UNROLL_COUNT);
     inst(LOOP_COUNT); // warm-up
@@ -257,5 +267,15 @@ int main() {
     for(auto ktype : all_support_ktypes) {
         test_CPI(ktype);
     }
+
+
+    for(int i = 0; i < 256; i+=4) {
+        AMX_AVX_MIX = i;
+        printf("[%d]", i);
+        test_CPI("avx512.along");
+        printf("[%d]", i);
+        test_CPI("amx.avx512.mix");
+    }
+
     return 0;
 }

@@ -867,7 +867,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 }
                 if (loop_cnt > 0) {
                     // cycles per kernel (or per-iteration)
-                    printf(" CPK:%.1f", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt);
+                    printf(" CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
                 }
             }
             printf("\n");
