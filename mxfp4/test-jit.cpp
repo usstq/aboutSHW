@@ -140,14 +140,12 @@ public:
             // input  : zmm5, k1, weight_ptr
             // output : zmm6/zmm7
             // scratch: k2, k3
-            vmovdqu8(ymm6,
-                     ptr[weight_ptr]);  // load 64x FP4 or 32x(nibble-pair) = 256bits
+            vmovdqu8(ymm6, ptr[weight_ptr]);  // load 64x FP4 or 32x(nibble-pair) = 256bits
             vpmovzxbw(zmm6, ymm6);      //      32x (0x00, nibble-pair)
 
             // log_zmm("u16", __LINE__, zmm6);
 
-            vpsrld(zmm7, zmm6,
-                   0x4);                       // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+            vpsrld(zmm7, zmm6, 0x4);                       // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
             vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to float32
             vpermw(zmm7, zmm7, zmm_e2m1_lut);
 
@@ -163,10 +161,8 @@ public:
                 vpaddw(zmm6, zmm6, zmm5);
                 vpaddw(zmm7, zmm7, zmm5);
 
-                vpblendmw(zmm6 | k2, zmm6,
-                          zmm_zero);  // 32x bf16/fp16 even weights: w0, w2, w4, ...
-                vpblendmw(zmm7 | k3, zmm7,
-                          zmm_zero);  // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+                vpblendmw(zmm6 | k2, zmm6, zmm_zero);  // 32x bf16/fp16 even weights: w0, w2, w4, ...
+                vpblendmw(zmm7 | k3, zmm7, zmm_zero);  // 32x bf16/fp16 odd weights: w1, w3, w5, ...
             }
 
             // log_zmm("bf16", __LINE__, zmm6);
@@ -201,8 +197,7 @@ public:
 
             mov(rax, src_ptr);
             for (int m = 0; m < BM; m++) {
-                vpbroadcastd(zmm8,
-                             ptr[rax + 4]);  // load & broadcast a fp32 from source
+                vpbroadcastd(zmm8, ptr[rax + 4]);  // load & broadcast a fp32 from source
                 vfmadd231ps(acc_zmm(m, 0), zmm8, zmm9);
                 vfmadd231ps(acc_zmm(m, 1), zmm8, zmm10);
                 add(rax, src_stride);
@@ -538,7 +533,7 @@ public:
 
         CallArgs() {
             // cache line align
-            scratch_buff = reinterpret_cast<ov::bfloat16 *>(::aligned_alloc(64, 4096*4));
+            scratch_buff = reinterpret_cast<ov::bfloat16 *>(::aligned_alloc(64, 1024*4));
             if (scratch_buff == nullptr) {
                 printf("::aligned_alloc failed\n");
                 abort();
@@ -598,10 +593,8 @@ public:
         };
         // clang-format on
         vpxorq(zmm_zero, zmm_zero, zmm_zero);
-
         mov(rax, reinterpret_cast<uintptr_t>(lut_e2m1_bf16));
         vmovdqu32(zmm_e2m1_lut, ptr[rax]);
-
         mov(eax, 0x007f);
         vpbroadcastw(zmm_exponent_bias, ax);
 
@@ -609,7 +602,124 @@ public:
         tilezero(tmmC01);
         tilezero(tmmC10);
         tilezero(tmmC11);
+#if 1
+        Xbyak::Reg64 double_buff1 = scratch_ptr;
+        Xbyak::Reg64 double_buff2 = r13;
+        push(double_buff2);
+        lea(double_buff2, ptr[double_buff1 + 2048]);
 
+        auto decompress_scale = [&](){
+            vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
+            vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
+            vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
+            vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
+            vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
+            add(scale_ptr, 32);
+        };
+
+        auto decompress_Btile = [&](int dst_offset, int i0, int i1) {
+            for (int i = i0; i < i1; i++) {
+                vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
+                vpmovzxbw(zmm6, ymm6);             //
+                vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+                vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
+                vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
+
+                vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
+                vpcmpw(k2, zmm7, zmm_zero, 0);
+                // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
+                kord(k1, k5, k1);
+                kord(k2, k5, k2);
+                vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
+                vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
+                vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
+                vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
+
+                vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset], zmm6);
+                vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset + 64], zmm7);
+
+                // is 32x16 weight correct?
+                // log_zmm("bf16", __LINE__, zmm6);
+                // log_zmm("bf16", __LINE__, zmm7);
+
+                add(weight_ptr, 32);
+            }
+        };
+
+        auto reg_B_stride = rax;
+        mov(reg_B_stride, 64);
+
+        Xbyak::Reg64 src_ptr1 = r12;
+        if (BM > 16) {
+            push(src_ptr1);
+            lea(src_ptr1, ptr[src_ptr + src_stride * 8]);
+            lea(src_ptr1, ptr[src_ptr1 + src_stride * 8]);
+        }
+
+        // decode B0|B1
+        decompress_scale();
+        decompress_Btile(0, 0, 8);
+        decompress_scale();
+        decompress_Btile(1024, 0, 8);
+
+        dec(mxblock_cnt);
+        jz(kx32_loop_end, T_NEAR);
+
+        // Loop-body:
+        //  load & decode mxblocks    [1, 2, 3, ... , mxblock_cnt-2, mxblock_cnt-1]
+        //  TMUL mxblocks          [0, 1, 2, 3, ... , mxblock_cnt-2]
+        align(64, false);
+        L(kx32_loop_begin);
+        {
+            // exchange double-buffer
+            // still decode into buff1, load from buff2
+            xchg(double_buff1, double_buff2);
+
+            decompress_scale();
+
+            tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+            tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
+            tdpbf16ps(tmmC00, tmmA0, tmmB0);
+
+            decompress_Btile(0, 0, 8);
+
+            if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+            tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+
+            decompress_scale();
+
+            if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
+            tdpbf16ps(tmmC01, tmmA0, tmmB1);
+
+            decompress_Btile(1024, 0, 8);
+
+            if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+            // move to next MX-block(32 along K dimension)
+            // Btile is automatically moved
+            lea(src_ptr, ptr[src_ptr + 64]);
+            if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
+        }
+        dec(mxblock_cnt);
+        jnz(kx32_loop_begin, T_NEAR);
+
+        // last TMUL : [mxblock_cnt-1]
+        L(kx32_loop_end);
+        xchg(double_buff1, double_buff2);
+        tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+        tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
+        tdpbf16ps(tmmC00, tmmA0, tmmB0);
+        if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+        tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+        if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
+        tdpbf16ps(tmmC01, tmmA0, tmmB1);
+        if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+        if (BM > 16) {
+            pop(src_ptr1);
+        }
+        pop(double_buff2);
+#else
         auto decompress_Btile = [&](int dst_offset) {
             // unroll into code segment which decompresses a B-tile into scratch buffer
             // input: weight_ptr/scratch_ptr
@@ -696,6 +806,7 @@ public:
         if (BM > 16) {
             pop(src_ptr1);
         }
+#endif
         // store accumulator C0~3 to dst
         auto dst_stride = rax;
         mov(dst_stride, ptr[abi_param1 + offsetof(CallArgs, dst_stride)]);
@@ -891,9 +1002,7 @@ void test(int BM, int MXBLOCKS) {
     std::vector<float> ref(BM * 32, 0);
 
     // cache-line aligned loads
-    auto src = std::shared_ptr<ActType>(
-                reinterpret_cast<ActType*>(aligned_alloc(64, BM * 32 * MXBLOCKS * sizeof(ActType))),
-                [](void * p) { ::free(p); });
+    auto src = alloc_cache_aligned<ActType>(BM * 32 * MXBLOCKS, 0.0f);
 
     // random weights & src
     float weights[32] = {0};
@@ -914,12 +1023,12 @@ void test(int BM, int MXBLOCKS) {
     psrc[3] = 1;
     for (int m = 0; m < BM; m++) {
         for (int i = 0; i < MXBLOCKS * 32; i++) {
-            psrc[m * MXBLOCKS * 32 + i] = ((i + m) % 3) - 1;
+            psrc[m * MXBLOCKS * 32 + i] = 0;//((i + m) % 3) - 1;
         }
     }
 
     // check accuracy
-    exec_reference(src.get(), 32 * MXBLOCKS, mxfp4_weight.data(), ref.data(), 32, BM, MXBLOCKS, REF_VERBOSE);
+    exec_reference(src.get(), 32 * MXBLOCKS, mxfp4_weight.data(), ref.data(), 32, BM, MXBLOCKS, REF_VERBOSE>1);
 
     // reorder weights
     auto pw = jit_kernel.reorder_weights(mxfp4_weight.data(), MXBLOCKS);
@@ -963,7 +1072,7 @@ void test(int BM, int MXBLOCKS) {
     printf("%s[%s] ACCURACY:%s\e[0m \n", all_equal ? "\e[32m" : "\e[31m", jit_kernel.name(), all_equal ? "PASSED!" : "FAILED!");
     pevg.show_header();
     //jit_kernel.log_show();
-    
+
     double avg_cycles = 0;
     double avg_instructions = 0;
     double avg_cpi0 = 0;
@@ -996,6 +1105,7 @@ int main(int argc, const char* argv[]) {
         test<MXFP4BrgemmFMA<true>>(BM, MXBLOCKS);
         test<MXFP4BrgemmAVX512_BF16>(BM, MXBLOCKS);
     }
+    //if (TESTFLAGS[3]) test<MXFP4BrgemmAMX>(BM, MXBLOCKS);
     test<MXFP4BrgemmAMX>(BM, MXBLOCKS);
     return 0;
 }

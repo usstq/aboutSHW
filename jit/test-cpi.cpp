@@ -23,20 +23,9 @@ public:
     std::string ktype;
     int unroll_count;
 
-    std::shared_ptr<ov::bfloat16> alloc(int count, float default_value) {
-        auto ret = std::shared_ptr<ov::bfloat16>(
-                reinterpret_cast<ov::bfloat16*>(aligned_alloc(64, count * sizeof(ov::bfloat16))),
-                [](void * p) { ::free(p); });
-        
-        for(int i = 0; i < count; i++) {
-            ret.get()[i] = default_value;
-        }
-        return ret;
-    }
-
     InstructionLoop(std::string ktype, int unroll_count) : ktype(ktype), unroll_count(unroll_count) {
-        tilebf16 = alloc(1024*8/sizeof(ov::bfloat16), 0.1f);
-        tileAbf16 = alloc(32*(128*32)/sizeof(ov::bfloat16), 0.1f);
+        tilebf16 = alloc_cache_aligned<ov::bfloat16>(1024*8/sizeof(ov::bfloat16), 0.1f);
+        tileAbf16 = alloc_cache_aligned<ov::bfloat16>(32*(128*32)/sizeof(ov::bfloat16), 0.1f);
         create_kernel("InstructionLoop");
     }
 

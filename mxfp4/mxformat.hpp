@@ -50,8 +50,10 @@ inline uint8_t float_to_e2m1(float f) {
         return sign_off + 7;
 
     // subnormal of e2m1
+    //   here we drop -0.0f since it causes additional difficulty
+    //   to decompression algo (exponent-adding with zero-guard)
     if (f <= 0.25f && f >= -0.25f)
-        return sign_off + 0;
+        return 0;
 
     if (f < 0.75f && f > -0.75f)
         return sign_off + 1;

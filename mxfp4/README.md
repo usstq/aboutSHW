@@ -117,9 +117,20 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
 
 ![MXFP4 FMA weight layout visualized](./resource/fma-wlayout.png)
 
-## Computation bound
+## Instruction-Level Parallelism (ILP) analysis
 
-[./test-jit.cpp](./test-jit.cpp) implemented a few version of MXFP4 matmul kernels:
+The MXFP4 matmul micro-kernel implemented in JIT contains the inner-most loop of [BRGEMM](https://arxiv.org/abs/1906.06440) kernel, which performs following sub-matrix computation using register blocking:
+
+$$
+  subC_{BM \times BN} = subA_{BM \times BK} \cdot subB_{BK \times BN}
+$$
+
+in which:
+ - BM is limited by number of registers
+ - BK is integer multiple of MX-block size (32)
+ - BN is choose to be 32
+
+[./test-jit.cpp](./test-jit.cpp) implemented a few version of such kernels:
 
   - `MXFP4BrgemmFMA` using FMA instruction `vfmadd231ps`
   - `MXFP4BrgemmAVX512_BF16` using `vdpbf16ps`
@@ -130,6 +141,7 @@ g++ -O2 ./test-jit.cpp
 ./a.out 1 128 # batch-size 1, Mx-block-count 128 (K=128*32)
 ```
 
+### AVX-512 kernel ILP analysis
 [uiCA](https://uica.uops.info/) on Skylake-X shows 11.72 cycles-per-iteration, measurement on SPR is ~12.45 which is little higher (due to outer-loop overhead).
 when increase batch-size to 10, uiCA-Skylake-X & test-SPR results are both ~34.2, so one more item in batch needs ~2.4 cycles (2 for 4 FMA instructions, 0.4 for vpbroadcastd?)
 
@@ -171,6 +183,42 @@ dec    r10                                   vfmadd231ps zmm12, zmm8, zmm10
                                              add rsi, 0x8
                                              add r8, 0x20
                                              dec r10
+```
+### AMX kernel ILP analysis
+
+According to `20.11.2 INTEL® AMX AND INTEL® AVX-512 INTERLEAVING (SW PIPELINING)` of `Intel architecture optimization reference manual`, AMX-BF16 TMUL instructions need to be manually interleaved with weight-decompression AVX512 instructions to get the best instruction level parallelism. This is confirmed with our experiments:
+
+```bash
+################### single buffer : 174 cycles (decompress-only:129 cycles, TMULs-only: 78 cycles)
+decompress_mxfp4_B1_to_buff0
+decompress_mxfp4_B1_to_buff1
+
+Load A0,A1
+Load B0 from buff0
+Load B1 from buff1
+TMUL (A0,B0)(A0,B1)(A1,B0)(A1,B1)
+
+################### double buffer : 174 cycles
+exchange_pointer buff0 <-> buff2
+exchange_pointer buff1 <-> buff3
+decompress_mxfp4_B1_to_buff2
+decompress_mxfp4_B1_to_buff3
+
+Load A0,A1
+Load B0 from buff0
+Load B1 from buff1
+TMUL (A0,B0)(A0,B1)(A1,B0)(A1,B1)
+
+################### double buffer + SW-pipelining : 132 cycles 
+exchange_pointer buff0 <-> buff2
+    Load A0,A1
+exchange_pointer buff1 <-> buff3
+    Load B0 from buff0
+    Load B1 from buff1
+decompress_mxfp4_B1_to_buff2
+    TMUL (A0,B0)(A0,B1)
+decompress_mxfp4_B1_to_buff3
+    TMUL (A1,B0)(A1,B1)
 ```
 
 # Learn from compiler

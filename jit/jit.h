@@ -284,6 +284,19 @@ inline std::vector<int> getenvs(const char * var, int count = -1, int default_v 
 }
 
 //===============================================================
+template<typename T>
+std::shared_ptr<T> alloc_cache_aligned(int count, T default_value) {
+    auto ret = std::shared_ptr<T>(
+            reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))),
+            [](void * p) { ::free(p); });
+    
+    for(int i = 0; i < count; i++) {
+        ret.get()[i] = default_value;
+    }
+    return ret;
+}
+
+//===============================================================
 // XTILE initialize on Linux
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* See feature_test_macros(7) */
