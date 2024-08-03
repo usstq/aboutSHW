@@ -50,7 +50,7 @@ Also we can measure instruction-sequence throughput like 2x2 tiles AMX-BF16 TMUL
     tdpbf16ps(tmm3, tmm5, tmm7);                        // TMUL A1 @ B1
 ```
 
-with proper strides, Load & TMUL can hide latency of each-other, so above sequence took `64 cycles` which is same as 4 TMUL sequence. this suggests that redundant physical Tile register exists, so load & TMUL can run in parallel.
+with proper strides, Load & TMUL can hide latency of each-other, so above sequence took `64 cycles` which is same as 4 TMUL sequence. this suggests that [register renaming](https://en.wikipedia.org/wiki/Register_renaming) works for Tile, so load & TMUL can run in parallel.
 
 in `20.11.2 INTEL® AMX AND INTEL® AVX-512 INTERLEAVING (SW PIPELINING)` of `Intel architecture optimization reference manual`, it says data-independent AMX instructions & AVX instructions can be SW-pipelined to overcome the limited code window size of out-of-order CPU engine. `amx.avx.mix` is designed to test how well AVX512 & AMX instructions can be mixed.
 
