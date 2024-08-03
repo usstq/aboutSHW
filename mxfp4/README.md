@@ -198,7 +198,7 @@ Load B0 from buff0
 Load B1 from buff1
 TMUL (A0,B0)(A0,B1)(A1,B0)(A1,B1)
 
-################### double buffer : 174 cycles
+################### double buffer : 165 cycles
 exchange_pointer buff0 <-> buff2
 exchange_pointer buff1 <-> buff3
 decompress_mxfp4_B1_to_buff2
