@@ -1,14 +1,13 @@
 
-#include "../perf/linux_perf.hpp"
 #include "../mxfp4/bf16.hpp"
+#include "../perf/linux_perf.hpp"
 #include "jit.h"
-
 
 std::vector<std::string> all_support_ktypes;
 
 bool is_ktype(std::string cur_ktype, std::string target_ktype) {
-    // collect all_support_ktypes 
-    if(std::find(all_support_ktypes.begin(), all_support_ktypes.end(), target_ktype) == all_support_ktypes.end()) {
+    // collect all_support_ktypes
+    if (std::find(all_support_ktypes.begin(), all_support_ktypes.end(), target_ktype) == all_support_ktypes.end()) {
         all_support_ktypes.push_back(target_ktype);
     }
     return cur_ktype == target_ktype;
@@ -24,17 +23,17 @@ public:
     int unroll_count;
 
     InstructionLoop(std::string ktype, int unroll_count) : ktype(ktype), unroll_count(unroll_count) {
-        tilebf16 = alloc_cache_aligned<ov::bfloat16>(1024*8/sizeof(ov::bfloat16), 0.1f);
-        tileAbf16 = alloc_cache_aligned<ov::bfloat16>(32*(128*32)/sizeof(ov::bfloat16), 0.1f);
+        tilebf16 = alloc_cache_aligned<ov::bfloat16>(1024 * 8 / sizeof(ov::bfloat16), 0.1f);
+        tileAbf16 = alloc_cache_aligned<ov::bfloat16>(32 * (128 * 32) / sizeof(ov::bfloat16), 0.1f);
         create_kernel("InstructionLoop");
     }
 
-    void insert_avx512_inst(Xbyak::Zmm zmm){
-        for(int i = 0; i < AMX_AVX_MIX/4; i++) {
-            //vpsrld(ymm0, ymm0, 4);
-            //vpxorq(zmm, zmm31, zmm);
+    void insert_avx512_inst(Xbyak::Zmm zmm) {
+        for (int i = 0; i < AMX_AVX_MIX / 4; i++) {
+            // vpsrld(ymm0, ymm0, 4);
+            // vpxorq(zmm, zmm31, zmm);
             vdpbf16ps(zmm, zmm31, zmm);
-            //vpsllq(zmm, zmm, 4);
+            // vpsllq(zmm, zmm, 4);
         }
     };
 
@@ -61,10 +60,10 @@ public:
         mov(tile_stride, 64);
 
         mov(tile_A0_addr, reinterpret_cast<uintptr_t>(tileAbf16.get()));
-        mov(tile_A1_addr, reinterpret_cast<uintptr_t>(tileAbf16.get()) + 16*(128*32));
-        mov(tile_A_stride, 128*32);
+        mov(tile_A1_addr, reinterpret_cast<uintptr_t>(tileAbf16.get()) + 16 * (128 * 32));
+        mov(tile_A_stride, 128 * 32);
         if (ktype == "tileloadd.stride1" || ktype == "amx.avx.mix" || ktype == "amx2x2.stride1") {
-            mov(tile_A_stride, 63*64);
+            mov(tile_A_stride, 63 * 64);
         }
         tilezero(tmm0);
         tilezero(tmm1);
@@ -82,7 +81,7 @@ public:
         // unroll enough times to lower the impact of loop-overhead instructions
         // these loop-overhead instructions usually can increase CPI by a lot.
         for (int unroll = 0; unroll < unroll_count; unroll++) {
-            if (is_ktype(ktype,"vaddps")) {
+            if (is_ktype(ktype, "vaddps")) {
                 // 0.5
                 vaddps(zmm0, zmm31, zmm0);
                 vaddps(zmm1, zmm31, zmm1);
@@ -107,7 +106,7 @@ public:
                 vfmadd132ps(zmm7, zmm31, zmm7);
             }
             if (is_ktype(ktype, "vdpbf16ps")) {
-                // 2.05 : 
+                // 2.05 :
                 //    considering vdpbf16ps performs 32x2 FOPS while vfmadd132ps only performs 16x2 FOPS
                 //    the overall throuput of avx512-BF16 is half of avx512-FMA
                 vdpbf16ps(zmm0, zmm31, zmm0);
@@ -124,12 +123,12 @@ public:
                 // 8.3 : Throughput from `software-optimization-manual`: 8
                 tileloadd(tmm0, ptr[rax + tile_stride + 0]);
                 tileloadd(tmm1, ptr[rax + tile_stride + 1024]);
-                tileloadd(tmm2, ptr[rax + tile_stride + 1024*2]);
-                tileloadd(tmm3, ptr[rax + tile_stride + 1024*3]);
-                tileloadd(tmm4, ptr[rax + tile_stride + 1024*4]);
-                tileloadd(tmm5, ptr[rax + tile_stride + 1024*5]);
-                tileloadd(tmm6, ptr[rax + tile_stride + 1024*6]);
-                tileloadd(tmm7, ptr[rax + tile_stride + 1024*7]);
+                tileloadd(tmm2, ptr[rax + tile_stride + 1024 * 2]);
+                tileloadd(tmm3, ptr[rax + tile_stride + 1024 * 3]);
+                tileloadd(tmm4, ptr[rax + tile_stride + 1024 * 4]);
+                tileloadd(tmm5, ptr[rax + tile_stride + 1024 * 5]);
+                tileloadd(tmm6, ptr[rax + tile_stride + 1024 * 6]);
+                tileloadd(tmm7, ptr[rax + tile_stride + 1024 * 7]);
             }
             if (is_ktype(ktype, "tileloadd.compact")) {
                 // 8.3 : Throughput from `software-optimization-manual`: 8
@@ -157,19 +156,19 @@ public:
             if (is_ktype(ktype, "amx2x2.stride0") || is_ktype(ktype, "amx2x2.stride1")) {
                 // CPK:64.2
                 //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
-                tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]);    // A0
-                tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]); // B0
+                tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]);  // A0
+                tileloadd(tmm6, ptr[rax + tile_stride + 1024 * 2]);  // B0
                 tdpbf16ps(tmm0, tmm4, tmm6);
 
-                tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
+                tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]);  // A1
                 tdpbf16ps(tmm2, tmm5, tmm6);
-                
-                tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]); // B1
+
+                tileloadd(tmm7, ptr[rax + tile_stride + 1024 * 3]);  // B1
                 tdpbf16ps(tmm1, tmm4, tmm7);
                 tdpbf16ps(tmm3, tmm5, tmm7);
             }
             if (is_ktype(ktype, "avx512.along")) {
-                // 2.05 : 
+                // 2.05 :
                 //    considering vdpbf16ps performs 32x2 FOPS while vfmadd132ps only performs 16x2 FOPS
                 //    the overall throuput of avx512-BF16 is half of avx512-FMA
                 insert_avx512_inst(zmm0);
@@ -180,14 +179,18 @@ public:
             if (is_ktype(ktype, "amx.avx512.mix")) {
                 // CPK:64.2
                 //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
-                //tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
-                //tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
-                tdpbf16ps(tmm0, tmm4, tmm6); insert_avx512_inst(zmm0); 
-                //tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
-                tdpbf16ps(tmm2, tmm5, tmm6); insert_avx512_inst(zmm1); 
-                //tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
-                tdpbf16ps(tmm1, tmm4, tmm7); insert_avx512_inst(zmm2); 
-                tdpbf16ps(tmm3, tmm5, tmm7); insert_avx512_inst(zmm3);
+                // tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
+                // tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
+                tdpbf16ps(tmm0, tmm4, tmm6);
+                insert_avx512_inst(zmm0);
+                // tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
+                tdpbf16ps(tmm2, tmm5, tmm6);
+                insert_avx512_inst(zmm1);
+                // tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
+                tdpbf16ps(tmm1, tmm4, tmm7);
+                insert_avx512_inst(zmm2);
+                tdpbf16ps(tmm3, tmm5, tmm7);
+                insert_avx512_inst(zmm3);
             }
         }
         dec(regCnt);
@@ -196,26 +199,25 @@ public:
     }
 };
 
-void test_CPI(std::string ktype) {
-    int LOOP_COUNT=10000;
+std::vector<uint64_t> test_CPI(std::string ktype) {
+    int LOOP_COUNT = 10000;
     static int index = 0;
     LinuxPerf::PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x01, 0x00),"UOPS.PORT_0"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x02, 0x00),"UOPS.PORT_1"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x20, 0x00),"UOPS.PORT_5_11"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x01, 0x00), "UOPS.PORT_0"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x02, 0x00), "UOPS.PORT_1"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xb2, 0x20, 0x00), "UOPS.PORT_5_11"},
 
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x02, 0x00),"1_PORTS_UTIL"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x04, 0x00),"2_PORTS_UTIL"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x08, 0x00),"3_PORTS_UTIL"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x10, 0x00),"4_PORTS_UTIL"},
-        
-        
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x02, 0x00), "1_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x04, 0x00), "2_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x08, 0x00), "3_PORTS_UTIL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x10, 0x00), "4_PORTS_UTIL"},
+
     });
     if (index == 0)
         pevg.show_header();
-    index ++;
+    index++;
 
     TileConfig tile_cfg;
     auto rows0 = 16;
@@ -234,17 +236,56 @@ void test_CPI(std::string ktype) {
                    });
     TileConfigScope tcfg(tile_cfg);
 
-    #define UNROLL_COUNT 2
+#define UNROLL_COUNT 2
 
     InstructionLoop inst(ktype, UNROLL_COUNT);
-    inst(LOOP_COUNT); // warm-up
-    for (int i = 0; i < 1; i++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                inst(LOOP_COUNT);
-            },
-            ktype,
-            UNROLL_COUNT*LOOP_COUNT);
+    inst(LOOP_COUNT);  // warm-up
+
+    auto pmc = pevg.rdpmc(
+        [&]() {
+            inst(LOOP_COUNT);
+        },
+        ktype,
+        UNROLL_COUNT * LOOP_COUNT);
+    pmc[0] /= UNROLL_COUNT * LOOP_COUNT;
+    return pmc;
+}
+
+template <int MAX_TICKS = 128>
+void show_progress_bars(std::vector<uint64_t> counts) {
+    uint64_t max_count = 0;
+    for (auto& c : counts)
+        if (c > max_count)
+            max_count = c;
+
+    int scale_up = 1;
+    int scale_down = 1;
+
+    while (max_count * scale_up < MAX_TICKS)
+        scale_up *= 2;
+    if (scale_up > 1) {
+        scale_up /= 2;
+    } else {
+        while (max_count / scale_down > MAX_TICKS)
+            scale_down *= 2;
+    }
+
+    uint64_t max_ticks = max_count * scale_up / scale_down;
+    bool show_scale = true;
+    for (auto& c : counts) {
+        int tick = c * scale_up / scale_down;
+        int k = 0;
+        for (k = 0; k < tick; k++)
+            printf("░");
+        for (; k < max_ticks; k++)
+            printf(" ");
+        printf(" [%lu]", c);
+        if (show_scale) {
+            printf(" scale:%s%d \n", scale_down > 1 ? "1/" : "", scale_up > 1 ? scale_up : scale_down);
+            show_scale = false;
+        } else {
+            printf(" \n");
+        }
     }
 }
 
@@ -253,17 +294,19 @@ int main() {
 
     // probing all_support_ktypes
     test_CPI("");
-    for(auto ktype : all_support_ktypes) {
+    for (auto ktype : all_support_ktypes) {
         test_CPI(ktype);
     }
 
-
-    for(int i = 0; i < 256; i+=4) {
+    for (int i = 0; i < 256; i += 4) {
         AMX_AVX_MIX = i;
         printf("[%d]", i);
-        test_CPI("avx512.along");
+        auto pmc0 = test_CPI("avx512.along");
         printf("[%d]", i);
-        test_CPI("amx.avx512.mix");
+        auto pmc1 = test_CPI("amx.avx512.mix");
+
+        show_progress_bars({pmc0[0], pmc1[0]});
+        // unicode progress bar:  ░ ▄ █
     }
 
     return 0;
