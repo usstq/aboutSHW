@@ -1,6 +1,15 @@
 
 #pragma once
 
+
+#ifndef ASSERT
+#define ASSERT(cond) if (!(cond)) {\
+    std::stringstream ss; \
+    ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
+    throw std::runtime_error(ss.str()); \
+}
+#endif
+
 #include "../thirdparty/xbyak/xbyak/xbyak.h"
 
 #include <cstdlib>
@@ -8,6 +17,7 @@
 #include <vector>
 #include <cstring>
 #include <cstddef>
+#include <memory>
 
 #ifdef XBYAK64
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
@@ -295,6 +305,153 @@ std::shared_ptr<T> alloc_cache_aligned(int count, T default_value) {
     }
     return ret;
 }
+
+template<typename T>
+std::shared_ptr<T> alloc_cache_aligned(int count) {
+    auto ret = std::shared_ptr<T>(
+            reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))),
+            [](void * p) { ::free(p); });
+    return ret;
+}
+
+//===============================================================
+template <typename T>
+struct tensor2D {
+    int shape[2];
+    int stride_bytes;
+    std::shared_ptr<T> data;
+
+    uint64_t size() {
+        return shape[0] * stride_bytes;
+    }
+
+    tensor2D(int rows, int cols) {
+        shape[0] = rows;
+        shape[1] = cols;
+        stride_bytes = cols * sizeof(T);
+        data = alloc_cache_aligned<T>(rows * cols);
+    }
+
+    T* ptr(int i0 = 0, int i1 = 0) const {
+        return data.get() + i0 * shape[1] + i1;
+    }
+
+    T& operator()(int i0, int i1) const {
+        return *ptr(i0, i1);
+    }
+
+    // flatten 1D indexing
+    T& operator[](int i) const {
+        auto i0 = i / shape[1];
+        auto i1 = i % shape[1];
+        return *ptr(i0, i1);
+    }
+};
+
+template <typename T>
+void show_value(T& v) {
+    printf("%6.1f,", static_cast<float>(v));
+}
+
+template <>
+inline void show_value<int>(int& v) {
+    printf("%6d,", v);
+}
+
+template <>
+inline void show_value<uint32_t>(uint32_t& v) {
+    printf("%6d,", v);
+}
+
+template <typename T>
+void show_tensor2D(const char * name, const tensor2D<T>& t, int rows_limit = 16, int cols_limit = 16) {
+    printf("tensor2D<%s(size=%d)> %s(%d, %d)={\n", typeid(T).name(), sizeof(T), name, t.shape[0], t.shape[1]);
+    for (int i0 = 0; i0 < t.shape[0]; i0++) {
+        if (i0 > rows_limit - 1 && i0 < t.shape[0] - 1) continue;
+        printf("\t{");
+        for (int i1 = 0; i1 < t.shape[1]; i1++) {
+            if (i1 > cols_limit - 1 && i1 < t.shape[1] - 1) continue;
+            show_value(t(i0, i1));
+            if (i1 == cols_limit - 1) printf("...,");
+        }
+        printf(" },\\\\ row %d \n", i0);
+        if (i0 == rows_limit - 1) printf("\t... ... ... \\\\ row %d ~ %d \n", i0, t.shape[0]-2);
+    }
+    printf("};\n");
+}
+
+template<typename T>
+bool compare(tensor2D<T>& ref, tensor2D<T>& cur, bool verbose) {
+    if (ref.shape[0] != cur.shape[0] || ref.shape[1] != cur.shape[1]) {
+        if (verbose)
+            printf("compare tensor2D shape incompatible   ref:(%d,%d)  cur:(%d,%d)\n",
+                    ref.shape[0], ref.shape[1], cur.shape[0], cur.shape[1]);
+        return false;
+    }
+    bool all_equal = true;
+    for (int m = 0; m < ref.shape[0]; m++) {
+        int ndiff = -1;
+        for (int n = 0; n < ref.shape[1]; n++) {
+            if (ref(m, n) != cur(m, n)) {
+                ndiff = n;
+                break;
+            }
+        }
+            
+        if (ndiff < 0)
+            continue;
+
+        all_equal = false;
+
+        if (verbose) {
+            int n;
+            printf("ref(%d,%d): ..., ", m, ndiff);
+            for (n = ndiff; n < ref.shape[1] && n < ndiff + 16; n++) show_value(ref(m, n));
+            if (n < ref.shape[1]) printf("...");
+            printf("\n");
+            printf("cur(%d,%d): ..., ", m, ndiff);
+            for (n = ndiff; n < ref.shape[1] && n < ndiff + 16; n++) {
+                bool equal = cur(m, n) == ref(m, n);
+                if (!equal)
+                    printf("\e[31m");
+                show_value(cur(m, n));
+                if (!equal)
+                    printf("\e[0m");
+            }
+            if (n < ref.shape[1]) printf("...");
+            printf("\n");
+        }
+    }
+    if (verbose) {
+        printf("compare result: %s\n", all_equal ? "equal" : "unequal");
+    }
+    return all_equal;
+}
+
+//===============================================================
+class CLflush : public jit_generator {
+public:
+    CLflush() {
+        create_kernel("CLflush");
+    }
+    void generate() override {
+        //  abi_param1 ~ abi_param6, RAX, R10, R11
+        auto start_ptr = abi_param1;
+        auto end_ptr = abi_param2;
+        Xbyak::Label loop_begin;
+
+        align(64, false);
+        L(loop_begin);
+
+        clflush(ptr[start_ptr]);
+
+        lea(start_ptr, ptr[start_ptr + 64]);
+        cmp(start_ptr, end_ptr);
+        js(loop_begin, T_NEAR); // jmp back if sign is set: (start_ptr-end_ptr) < 0
+        sfence();
+        ret();
+    }
+};
 
 //===============================================================
 // XTILE initialize on Linux

@@ -832,7 +832,7 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0) {
+    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0, std::function<void(uint64_t, uint64_t*)> addinfo = {}) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
 
@@ -869,6 +869,9 @@ struct PerfEventGroup : public IPerfEventDumper {
                     // cycles per kernel (or per-iteration)
                     printf(" CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
                 }
+            }
+            if (addinfo) {
+                addinfo(duration_ns, &pmc[0]);
             }
             printf("\n");
         }

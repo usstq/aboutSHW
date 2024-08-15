@@ -181,16 +181,15 @@ public:
                 //    CPI:load & TMUL can run perfectly in parallel (indicating multiple t)
                 // tileloadd(tmm4, ptr[tile_A0_addr + tile_A_stride]); // A0
                 // tileloadd(tmm6, ptr[rax + tile_stride + 1024*2]);   // B0
-                tdpbf16ps(tmm0, tmm4, tmm6);
                 insert_avx512_inst(zmm0);
-                // tileloadd(tmm5, ptr[tile_A1_addr + tile_A_stride]); // A1
-                tdpbf16ps(tmm2, tmm5, tmm6);
                 insert_avx512_inst(zmm1);
-                // tileloadd(tmm7, ptr[rax + tile_stride + 1024*3]);   // B1
-                tdpbf16ps(tmm1, tmm4, tmm7);
                 insert_avx512_inst(zmm2);
-                tdpbf16ps(tmm3, tmm5, tmm7);
                 insert_avx512_inst(zmm3);
+
+                tdpbf16ps(tmm0, tmm4, tmm6);
+                tdpbf16ps(tmm2, tmm5, tmm6);
+                tdpbf16ps(tmm1, tmm4, tmm7);
+                tdpbf16ps(tmm3, tmm5, tmm7);
             }
         }
         dec(regCnt);
@@ -199,7 +198,7 @@ public:
     }
 };
 
-std::vector<uint64_t> test_CPI(std::string ktype) {
+uint64_t test_CPI(std::string ktype) {
     int LOOP_COUNT = 10000;
     static int index = 0;
     LinuxPerf::PerfEventGroup pevg({
@@ -247,8 +246,7 @@ std::vector<uint64_t> test_CPI(std::string ktype) {
         },
         ktype,
         UNROLL_COUNT * LOOP_COUNT);
-    pmc[0] /= UNROLL_COUNT * LOOP_COUNT;
-    return pmc;
+    return pmc[0] / (UNROLL_COUNT * LOOP_COUNT);
 }
 
 template <int MAX_TICKS = 128>
@@ -272,6 +270,7 @@ void show_progress_bars(std::vector<uint64_t> counts) {
 
     uint64_t max_ticks = max_count * scale_up / scale_down;
     bool show_scale = true;
+    auto count_base = counts[0];
     for (auto& c : counts) {
         int tick = c * scale_up / scale_down;
         int k = 0;
@@ -284,10 +283,12 @@ void show_progress_bars(std::vector<uint64_t> counts) {
             printf(" scale:%s%d \n", scale_down > 1 ? "1/" : "", scale_up > 1 ? scale_up : scale_down);
             show_scale = false;
         } else {
-            printf(" \n");
+            printf(" Δ=%ld \n", c - count_base);
         }
     }
 }
+
+static int log_for_plot = getenv("LOG_FOR_PLOT", 0);
 
 int main() {
     bool initAMX = initXTILE();
@@ -301,12 +302,13 @@ int main() {
     for (int i = 0; i < 256; i += 4) {
         AMX_AVX_MIX = i;
         printf("[%d]", i);
-        auto pmc0 = test_CPI("avx512.along");
+        auto cycels0 = test_CPI("avx512.along");
         printf("[%d]", i);
-        auto pmc1 = test_CPI("amx.avx512.mix");
+        auto cycels1 = test_CPI("amx.avx512.mix");
 
-        show_progress_bars({pmc0[0], pmc1[0]});
-        // unicode progress bar:  ░ ▄ █
+        if (log_for_plot)
+            printf(">>>,%lu,%lu\n", cycels0, cycels1);
+        show_progress_bars({cycels0, cycels1});
     }
 
     return 0;

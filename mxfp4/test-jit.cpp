@@ -119,11 +119,9 @@ public:
         if (!is_vmul_scale) {
             vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
             vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-            vpcmpw(k1, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here, so
-                                                    // MXFP4 must replace -0.0f with +0.0f
+            vpcmpw(k1, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
             vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
-            vpsllw(zmm5, zmm5,
-                   0x7);  // shift-left into bf16/fp16 exponent: 32x scales
+            vpsllw(zmm5, zmm5, 0x7);  // shift-left into bf16/fp16 exponent: 32x scales
         } else {
             vmovdqu8(ymm5, ptr[scale_ptr]);  // 32x E8M0
             vpmovzxbw(zmm5, ymm5);           // 32x 16bit
@@ -141,11 +139,11 @@ public:
             // output : zmm6/zmm7
             // scratch: k2, k3
             vmovdqu8(ymm6, ptr[weight_ptr]);  // load 64x FP4 or 32x(nibble-pair) = 256bits
-            vpmovzxbw(zmm6, ymm6);      //      32x (0x00, nibble-pair)
+            vpmovzxbw(zmm6, ymm6);            //      32x (0x00, nibble-pair)
 
             // log_zmm("u16", __LINE__, zmm6);
 
-            vpsrld(zmm7, zmm6, 0x4);                       // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+            vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
             vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to float32
             vpermw(zmm7, zmm7, zmm_e2m1_lut);
 
@@ -228,43 +226,81 @@ public:
         ret();
     }
 
-    struct PackedWeight {
-        std::vector<uint8_t> scales;
-        std::vector<uint8_t> elements;
+    struct e2m1_32x32 {
+        uint8_t data[32*32/2];
     };
-    // weight: mxblocks x (32 x mxfp4)
-    PackedWeight reorder_weights(mxfp4* mxfp4_weight, int mxblocks) {
-        PackedWeight pw;
-        pw.scales.resize(mxblocks * 32, 0);
-        pw.elements.resize(mxblocks * 32 * 32 / 2, 0);
+    struct e8m0_1x32 {
+        uint8_t data[32];
+    };
+    struct PackedWeight {
+        tensor2D<e8m0_1x32> scales;
+        tensor2D<e2m1_32x32> elements;
+        PackedWeight(int K, int N) : elements(N/32, K/32), scales(N/32, K/32) {
+            ASSERT(K % 32 == 0);
+            ASSERT(N % 32 == 0);
+        }
+        uint8_t * scales_ptr() {
+            return scales[0].data;
+        }
+        uint8_t * elements_ptr() {
+            return elements[0].data;
+        }
+    };
+    // mxfp4_weight: (K / 32, N)
+    PackedWeight reorder_weights(tensor2D<mxfp4> mxfp4_weight) {
+        int num_k_blocks = mxfp4_weight.shape[0];
+        int K = num_k_blocks * 32;
+        int N = mxfp4_weight.shape[1];
+        int num_n_blocks = N / 32;
+        PackedWeight pw(K, N);
 
+        // 
         const int nmap[] = {0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23, 8, 9, 10, 11, 24, 25, 26, 27, 12, 13, 14, 15, 28, 29, 30, 31};
 
-        uint8_t* p_scales = &pw.scales[0];
-        uint8_t* p_elements = &pw.elements[0];
-        for (int mblk = 0; mblk < mxblocks; mblk++) {
-            for (int m = 0; m < 32; m += 2) {
-                for (int n = 0; n < 32; n++) {
-                    auto idx = nmap[n];
-                    p_scales[n] = mxfp4_weight[idx].scale_e8m0;
-
-                    auto e2m1_even = mxfp4_weight[idx].get_e2m1(m);
-                    auto e2m1_odd = mxfp4_weight[idx].get_e2m1(m + 1);
-                    p_elements[n] = (e2m1_odd << 4) | e2m1_even;
+        for(int nb = 0; nb < num_n_blocks; nb++) {
+            for(int kb = 0; kb < num_k_blocks; kb++) {
+                auto& pw_scales = pw.scales(nb, kb);
+                auto* pw_elements = pw.elements(nb, kb).data;
+                for(int ni = 0; ni < 32; ni++) {
+                    auto n = nb*32 + ni;
+                    auto& mw = mxfp4_weight(kb, nb*32 + nmap[ni]);
+                    pw_scales.data[ni] = mw.scale_e8m0;
                 }
-                p_elements += 32;
+                for(int ki = 0; ki < 32; ki+=2) {
+                    for(int ni = 0; ni < 32; ni++) {
+                        auto n = nb*32 + ni;
+                        auto& mw = mxfp4_weight(kb, nb*32 + nmap[ni]);
+                        auto e2m1_even = mw.get_e2m1(ki);
+                        auto e2m1_odd = mw.get_e2m1(ki + 1);
+                        pw_elements[ni] = (e2m1_odd << 4) | e2m1_even;
+                    }
+                    pw_elements += 32;
+                }
             }
-            p_scales += 32;
-            mxfp4_weight += 32;
         }
         return pw;
     }
 
-    void run(CallArgs* args_ptr) {
-        (*this)(args_ptr);
+    void run(tensor2D<float>& src, PackedWeight& pw, tensor2D<float>& dst) {
+        CallArgs args;
+        auto MXBLOCKS = src.shape[1] / 32;
+        auto num_n_blocks = pw.scales.shape[0];
+
+        args.src_ptr = src.ptr();
+        args.src_stride = src.stride_bytes;
+        args.dst_stride = dst.stride_bytes;
+        args.mxblock_cnt = MXBLOCKS;
+
+        for(int nb = 0; nb < num_n_blocks; nb++) {
+            args.scale_ptr = pw.scales(nb, 0).data;
+            args.weight_ptr = pw.elements(nb, 0).data;
+            args.dst_ptr = dst.ptr(0, nb*32);
+            (*this)(&args);
+        }
     }
 };
 
+#if 0
 class MXFP4BrgemmAVX512_BF16 : public jit_generator {
 public:
     int BM = 0;
@@ -424,6 +460,12 @@ public:
     struct PackedWeight {
         std::vector<uint8_t> scales;
         std::vector<uint8_t> elements;
+        uint8_t * scales_ptr() {
+            return &scales[0];
+        }
+        uint8_t * elements_ptr() {
+            return &elements[0];
+        }        
     };
 
     // suppose zmm0 is load from mem:
@@ -436,7 +478,10 @@ public:
     }
 
     // weight: mxblocks x (32 x mxfp4)
-    PackedWeight reorder_weights(mxfp4* mxfp4_weight, int mxblocks) {
+    PackedWeight reorder_weights(tensor2D<mxfp4> t_mxfp4_weight) {
+        mxfp4* mxfp4_weight = t_mxfp4_weight.ptr();
+        int mxblocks = t_mxfp4_weight.shape[0];
+
         PackedWeight pw;
         pw.scales.resize(mxblocks * 32, 0);
         pw.elements.resize(mxblocks * 32 * 32 / 2, 0);
@@ -468,12 +513,15 @@ public:
         return pw;
     }
 
-    void run(CallArgs* args_ptr) {
-        (*this)(args_ptr);
+    void run(tensor2D<float>& src, PackedWeight& pw, tensor2D<float>& dst) {
+        (*this)(nullptr);
     }
 };
 
+#endif
+
 static int AMX_DEBUG = getenv("AMX_DEBUG", 3);
+
 /*
     32x32 weights:     2-tiles B0 | B1
     ping-pong buffer:
@@ -529,11 +577,11 @@ public:
         float* dst_ptr;
         int64_t dst_stride;  // in bytes
         int64_t mxblock_cnt;
-        ov::bfloat16 *scratch_buff;  // B0|B1 ; B2|B3
+        ov::bfloat16* scratch_buff;  // B0|B1 ; B2|B3
 
         CallArgs() {
             // cache line align
-            scratch_buff = reinterpret_cast<ov::bfloat16 *>(::aligned_alloc(64, 1024*4));
+            scratch_buff = reinterpret_cast<ov::bfloat16*>(::aligned_alloc(64, 1024 * 4));
             if (scratch_buff == nullptr) {
                 printf("::aligned_alloc failed\n");
                 abort();
@@ -542,8 +590,8 @@ public:
         ~CallArgs() {
             ::free(scratch_buff);
         }
-        CallArgs( const CallArgs& ) = delete; // non construction-copyable
-        CallArgs& operator=( const CallArgs& ) = delete; // non copyable
+        CallArgs(const CallArgs&) = delete;             // non construction-copyable
+        CallArgs& operator=(const CallArgs&) = delete;  // non copyable
     };
 
     void generate() override {
@@ -602,211 +650,224 @@ public:
         tilezero(tmmC01);
         tilezero(tmmC10);
         tilezero(tmmC11);
-#if 1
-        Xbyak::Reg64 double_buff1 = scratch_ptr;
-        Xbyak::Reg64 double_buff2 = r13;
-        push(double_buff2);
-        lea(double_buff2, ptr[double_buff1 + 2048]);
 
-        auto decompress_scale = [&](){
-            vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
-            vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-            vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
-            vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
-            vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
-            add(scale_ptr, 32);
-        };
+        if (AMX_DEBUG > 3) {
+            Xbyak::Reg64 double_buff1 = scratch_ptr;
+            Xbyak::Reg64 double_buff2 = r13;
+            push(double_buff2);
+            lea(double_buff2, ptr[double_buff1 + 2048]);
 
-        auto decompress_Btile = [&](int dst_offset, int i0, int i1) {
-            for (int i = i0; i < i1; i++) {
-                vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
-                vpmovzxbw(zmm6, ymm6);             //
-                vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
-                vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
-                vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
+            auto decompress_scale = [&]() {
+                vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
+                vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
+                vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
+                vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
+                vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
+                add(scale_ptr, 32);
+            };
 
-                vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
-                vpcmpw(k2, zmm7, zmm_zero, 0);
-                // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
-                kord(k1, k5, k1);
-                kord(k2, k5, k2);
-                vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
-                vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
-                vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
-                vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
+            auto decompress_Btile = [&](int dst_offset, int i0, int i1) {
+                for (int i = i0; i < i1; i++) {
+                    vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
+                    vpmovzxbw(zmm6, ymm6);             //
+                    vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+                    vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
+                    vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
 
-                vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset], zmm6);
-                vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset + 64], zmm7);
+                    vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
+                    vpcmpw(k2, zmm7, zmm_zero, 0);
+                    // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
+                    kord(k1, k5, k1);
+                    kord(k2, k5, k2);
+                    vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
+                    vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
+                    vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
+                    vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
 
-                // is 32x16 weight correct?
-                // log_zmm("bf16", __LINE__, zmm6);
-                // log_zmm("bf16", __LINE__, zmm7);
+                    vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset], zmm6);
+                    vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset + 64], zmm7);
 
-                add(weight_ptr, 32);
+                    // is 32x16 weight correct?
+                    // log_zmm("bf16", __LINE__, zmm6);
+                    // log_zmm("bf16", __LINE__, zmm7);
+
+                    add(weight_ptr, 32);
+                }
+            };
+
+            auto reg_B_stride = rax;
+            mov(reg_B_stride, 64);
+
+            Xbyak::Reg64 src_ptr1 = r12;
+            if (BM > 16) {
+                push(src_ptr1);
+                lea(src_ptr1, ptr[src_ptr + src_stride * 8]);
+                lea(src_ptr1, ptr[src_ptr1 + src_stride * 8]);
             }
-        };
 
-        auto reg_B_stride = rax;
-        mov(reg_B_stride, 64);
-
-        Xbyak::Reg64 src_ptr1 = r12;
-        if (BM > 16) {
-            push(src_ptr1);
-            lea(src_ptr1, ptr[src_ptr + src_stride * 8]);
-            lea(src_ptr1, ptr[src_ptr1 + src_stride * 8]);
-        }
-
-        // decode B0|B1
-        decompress_scale();
-        decompress_Btile(0, 0, 8);
-        decompress_scale();
-        decompress_Btile(1024, 0, 8);
-
-        dec(mxblock_cnt);
-        jz(kx32_loop_end, T_NEAR);
-
-        // Loop-body:
-        //  load & decode mxblocks    [1, 2, 3, ... , mxblock_cnt-2, mxblock_cnt-1]
-        //  TMUL mxblocks          [0, 1, 2, 3, ... , mxblock_cnt-2]
-        align(64, false);
-        L(kx32_loop_begin);
-        {
-            // exchange double-buffer
-            // still decode into buff1, load from buff2
-            xchg(double_buff1, double_buff2);
-
+            // decode B0|B1
             decompress_scale();
-
-            tileloadd(tmmA0, ptr[src_ptr + src_stride]);
-            tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
-            tdpbf16ps(tmmC00, tmmA0, tmmB0);
-
             decompress_Btile(0, 0, 8);
-
-            if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-            tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
-
             decompress_scale();
-
-            if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
-            tdpbf16ps(tmmC01, tmmA0, tmmB1);
-
             decompress_Btile(1024, 0, 8);
 
-            if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+            dec(mxblock_cnt);
+            jz(kx32_loop_end, T_NEAR);
 
-            // move to next MX-block(32 along K dimension)
-            // Btile is automatically moved
-            lea(src_ptr, ptr[src_ptr + 64]);
-            if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
-        }
-        dec(mxblock_cnt);
-        jnz(kx32_loop_begin, T_NEAR);
+            // Loop-body:
+            //  load & decode mxblocks    [1, 2, 3, ... , mxblock_cnt-2, mxblock_cnt-1]
+            //  TMUL mxblocks          [0, 1, 2, 3, ... , mxblock_cnt-2]
+            align(64, false);
+            L(kx32_loop_begin);
+            {
+                // exchange double-buffer
+                // still decode into buff1, load from buff2
+                xchg(double_buff1, double_buff2);
 
-        // last TMUL : [mxblock_cnt-1]
-        L(kx32_loop_end);
-        xchg(double_buff1, double_buff2);
-        tileloadd(tmmA0, ptr[src_ptr + src_stride]);
-        tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
-        tdpbf16ps(tmmC00, tmmA0, tmmB0);
-        if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-        tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
-        if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
-        tdpbf16ps(tmmC01, tmmA0, tmmB1);
-        if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+                decompress_scale();
 
-        if (BM > 16) {
-            pop(src_ptr1);
-        }
-        pop(double_buff2);
-#else
-        auto decompress_Btile = [&](int dst_offset) {
-            // unroll into code segment which decompresses a B-tile into scratch buffer
-            // input: weight_ptr/scratch_ptr
-            //        dst_offset determines which of 4 Btile buffer it decompresses into
-            //
-            // zmm5 : 32x MX scales
-            vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
-            vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-            vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
-            vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
-            vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
-            add(scale_ptr, 32);
-
-            for (int i = 0; i < 8; i++) {
-                vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
-                vpmovzxbw(zmm6, ymm6);             //
-                vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
-                vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
-                vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
-
-                vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
-                vpcmpw(k2, zmm7, zmm_zero, 0);
-                // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
-                kord(k1, k5, k1);
-                kord(k2, k5, k2);
-                vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
-                vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
-                vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
-                vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
-
-                vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset], zmm6);
-                vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset + 64], zmm7);
-
-                // is 32x16 weight correct?
-                // log_zmm("bf16", __LINE__, zmm6);
-                // log_zmm("bf16", __LINE__, zmm7);
-
-                add(weight_ptr, 32);
-            }
-        };
-
-        auto reg_B_stride = rax;
-        mov(reg_B_stride, 64);
-
-        Xbyak::Reg64 src_ptr1 = r12;
-        if (BM > 16) {
-            push(src_ptr1);
-            lea(src_ptr1, ptr[src_ptr + src_stride * 8]);
-            lea(src_ptr1, ptr[src_ptr1 + src_stride * 8]);
-        }
-
-        align(64, false);
-        L(kx32_loop_begin);
-        {
-            // decompress B0|B1 (~118 cycles)
-            if (AMX_DEBUG & 1) {
-                decompress_Btile(0);
-                decompress_Btile(1024);                
-            }
-            if (AMX_DEBUG & 2) {
-                // load B0|B1
-                // load A0|A1
-                // TMUL into C0,C1,C2,C3
                 tileloadd(tmmA0, ptr[src_ptr + src_stride]);
-                if (BM > 16) tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-
-                tileloadd(tmmB0, ptr[scratch_ptr + reg_B_stride + 0]);
-                tileloadd(tmmB1, ptr[scratch_ptr + reg_B_stride + 1024]);
-
+                tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
                 tdpbf16ps(tmmC00, tmmA0, tmmB0);
-                if (BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
+
+                decompress_Btile(0, 0, 8);
+
+                if (BM > 16)
+                    tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+                tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+
+                decompress_scale();
+
+                if (BM > 16)
+                    tdpbf16ps(tmmC10, tmmA1, tmmB0);
                 tdpbf16ps(tmmC01, tmmA0, tmmB1);
-                if (BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+                decompress_Btile(1024, 0, 8);
+
+                if (BM > 16)
+                    tdpbf16ps(tmmC11, tmmA1, tmmB1);
 
                 // move to next MX-block(32 along K dimension)
                 // Btile is automatically moved
                 lea(src_ptr, ptr[src_ptr + 64]);
-                if (BM > 16) lea(src_ptr1, ptr[src_ptr1 + 64]);
+                if (BM > 16)
+                    lea(src_ptr1, ptr[src_ptr1 + 64]);
+            }
+            dec(mxblock_cnt);
+            jnz(kx32_loop_begin, T_NEAR);
+
+            // last TMUL : [mxblock_cnt-1]
+            L(kx32_loop_end);
+            xchg(double_buff1, double_buff2);
+            tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+            tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
+            tdpbf16ps(tmmC00, tmmA0, tmmB0);
+            if (BM > 16)
+                tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+            tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+            if (BM > 16)
+                tdpbf16ps(tmmC10, tmmA1, tmmB0);
+            tdpbf16ps(tmmC01, tmmA0, tmmB1);
+            if (BM > 16)
+                tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+            if (BM > 16) {
+                pop(src_ptr1);
+            }
+            pop(double_buff2);
+        } else {
+            auto decompress_Btile = [&](int dst_offset) {
+                // unroll into code segment which decompresses a B-tile into scratch buffer
+                // input: weight_ptr/scratch_ptr
+                //        dst_offset determines which of 4 Btile buffer it decompresses into
+                //
+                // zmm5 : 32x MX scales
+                vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
+                vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
+                vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
+                vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
+                vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
+                add(scale_ptr, 32);
+
+                for (int i = 0; i < 8; i++) {
+                    vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
+                    vpmovzxbw(zmm6, ymm6);             //
+                    vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+                    vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
+                    vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
+
+                    vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
+                    vpcmpw(k2, zmm7, zmm_zero, 0);
+                    // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
+                    kord(k1, k5, k1);
+                    kord(k2, k5, k2);
+                    vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
+                    vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
+                    vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
+                    vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
+
+                    vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset], zmm6);
+                    vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset + 64], zmm7);
+
+                    // is 32x16 weight correct?
+                    // log_zmm("bf16", __LINE__, zmm6);
+                    // log_zmm("bf16", __LINE__, zmm7);
+
+                    add(weight_ptr, 32);
+                }
+            };
+
+            auto reg_B_stride = rax;
+            mov(reg_B_stride, 64);
+
+            Xbyak::Reg64 src_ptr1 = r12;
+            if (BM > 16) {
+                push(src_ptr1);
+                lea(src_ptr1, ptr[src_ptr + src_stride * 8]);
+                lea(src_ptr1, ptr[src_ptr1 + src_stride * 8]);
+            }
+
+            align(64, false);
+            L(kx32_loop_begin);
+            {
+                // decompress B0|B1 (~118 cycles)
+                if (AMX_DEBUG & 1) {
+                    decompress_Btile(0);
+                    decompress_Btile(1024);
+                }
+                if (AMX_DEBUG & 2) {
+                    // load B0|B1
+                    // load A0|A1
+                    // TMUL into C0,C1,C2,C3
+                    tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+                    if (BM > 16)
+                        tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+
+                    tileloadd(tmmB0, ptr[scratch_ptr + reg_B_stride + 0]);
+                    tileloadd(tmmB1, ptr[scratch_ptr + reg_B_stride + 1024]);
+
+                    tdpbf16ps(tmmC00, tmmA0, tmmB0);
+                    if (BM > 16)
+                        tdpbf16ps(tmmC10, tmmA1, tmmB0);
+                    tdpbf16ps(tmmC01, tmmA0, tmmB1);
+                    if (BM > 16)
+                        tdpbf16ps(tmmC11, tmmA1, tmmB1);
+
+                    // move to next MX-block(32 along K dimension)
+                    // Btile is automatically moved
+                    lea(src_ptr, ptr[src_ptr + 64]);
+                    if (BM > 16)
+                        lea(src_ptr1, ptr[src_ptr1 + 64]);
+                }
+            }
+            dec(mxblock_cnt);
+            jnz(kx32_loop_begin, T_NEAR);
+
+            if (BM > 16) {
+                pop(src_ptr1);
             }
         }
-        dec(mxblock_cnt);
-        jnz(kx32_loop_begin, T_NEAR);
 
-        if (BM > 16) {
-            pop(src_ptr1);
-        }
-#endif
         // store accumulator C0~3 to dst
         auto dst_stride = rax;
         mov(dst_stride, ptr[abi_param1 + offsetof(CallArgs, dst_stride)]);
@@ -822,160 +883,156 @@ public:
         ret();
     }
 
-    struct PackedWeight {
-        std::vector<uint8_t> scales;
-        std::vector<uint8_t> elements;
+    struct e2m1_32x32 {
+        uint8_t data[32*32/2];
     };
-    //
-    // AMX weight is special, it stores in unit of 32x16-repacked B-tile format
-    // which is row of 2-tiles by row.
-    //
-    // weight: mxblocks x (32 x mxfp4)
-    PackedWeight reorder_weights(mxfp4* mxfp4_weight, int mxblocks) {
-        PackedWeight pw;
-        pw.scales.resize(mxblocks * 32 * 2, 0);
-        pw.elements.resize(mxblocks * 32 * 32 / 2, 0);
-
-        uint8_t* p_scales = &pw.scales[0];
-        uint8_t* p_elements = &pw.elements[0];
-        for (int mblk = 0; mblk < mxblocks; mblk++) {
-            //============ tile B0 ==================
-            for (int m = 0; m < 32; m += 4) {
-                for (int n = 0; n < 16; n++) {
-                    auto a = mxfp4_weight[n].get_e2m1(m);
-                    auto b = mxfp4_weight[n].get_e2m1(m + 1);
-                    auto c = mxfp4_weight[n].get_e2m1(m + 2);
-                    auto d = mxfp4_weight[n].get_e2m1(m + 3);
-                    p_elements[2 * n + 0] = (c << 4) | a;
-                    p_elements[2 * n + 1] = (d << 4) | b;
+    struct e8m0_1x32 {
+        uint8_t data[32*2];
+    };
+    struct PackedWeight {
+        tensor2D<e8m0_1x32> scales;
+        tensor2D<e2m1_32x32> elements;
+        PackedWeight(int K, int N) : elements(N/32, K/32), scales(N/32, K/32) {
+            ASSERT(K % 32 == 0);
+            ASSERT(N % 32 == 0);
+        }
+        uint8_t * scales_ptr() {
+            return scales[0].data;
+        }
+        uint8_t * elements_ptr() {
+            return elements[0].data;
+        }
+    };
+    // t_mxfp4_weight: (K / 32, N)
+    PackedWeight reorder_weights(tensor2D<mxfp4>& t_mxfp4_weight) {
+        int num_k_blocks = t_mxfp4_weight.shape[0];
+        int K = num_k_blocks * 32;
+        int N = t_mxfp4_weight.shape[1];
+        int num_n_blocks = N / 32;
+        PackedWeight pw(K, N);
+        for(int nb = 0; nb < num_n_blocks; nb++) {
+            for(int kb = 0; kb < num_k_blocks; kb++) {
+                auto* p_scales = pw.scales(nb, kb).data;
+                auto* p_elements = pw.elements(nb, kb).data;
+                auto* mxfp4_weight = t_mxfp4_weight.ptr(kb, nb*32);
+                //============ tile B0 ==================
+                for (int m = 0; m < 32; m += 4) {
+                    for (int n = 0; n < 16; n++) {
+                        auto a = mxfp4_weight[n].get_e2m1(m);
+                        auto b = mxfp4_weight[n].get_e2m1(m + 1);
+                        auto c = mxfp4_weight[n].get_e2m1(m + 2);
+                        auto d = mxfp4_weight[n].get_e2m1(m + 3);
+                        p_elements[2 * n + 0] = (c << 4) | a;
+                        p_elements[2 * n + 1] = (d << 4) | b;
+                    }
+                    p_elements += 32;
                 }
-                p_elements += 32;
-            }
-            for (int n = 0; n < 16; n++) {
-                p_scales[2 * n + 0] = mxfp4_weight[n].scale_e8m0;
-                p_scales[2 * n + 1] = mxfp4_weight[n].scale_e8m0;
-            }
-            p_scales += 32;
-
-            //============ tile B1 ==================
-            for (int m = 0; m < 32; m += 4) {
                 for (int n = 0; n < 16; n++) {
-                    auto a = mxfp4_weight[16 + n].get_e2m1(m);
-                    auto b = mxfp4_weight[16 + n].get_e2m1(m + 1);
-                    auto c = mxfp4_weight[16 + n].get_e2m1(m + 2);
-                    auto d = mxfp4_weight[16 + n].get_e2m1(m + 3);
-                    p_elements[2 * n + 0] = (c << 4) | a;
-                    p_elements[2 * n + 1] = (d << 4) | b;
+                    p_scales[2 * n + 0] = mxfp4_weight[n].scale_e8m0;
+                    p_scales[2 * n + 1] = mxfp4_weight[n].scale_e8m0;
                 }
-                p_elements += 32;
-            }
-            for (int n = 0; n < 16; n++) {
-                p_scales[2 * n + 0] = mxfp4_weight[16 + n].scale_e8m0;
-                p_scales[2 * n + 1] = mxfp4_weight[16 + n].scale_e8m0;
-            }
-            p_scales += 32;
+                p_scales += 32;
 
-            //=================================
-            mxfp4_weight += 32;
+                //============ tile B1 ==================
+                for (int m = 0; m < 32; m += 4) {
+                    for (int n = 0; n < 16; n++) {
+                        auto a = mxfp4_weight[16 + n].get_e2m1(m);
+                        auto b = mxfp4_weight[16 + n].get_e2m1(m + 1);
+                        auto c = mxfp4_weight[16 + n].get_e2m1(m + 2);
+                        auto d = mxfp4_weight[16 + n].get_e2m1(m + 3);
+                        p_elements[2 * n + 0] = (c << 4) | a;
+                        p_elements[2 * n + 1] = (d << 4) | b;
+                    }
+                    p_elements += 32;
+                }
+                for (int n = 0; n < 16; n++) {
+                    p_scales[2 * n + 0] = mxfp4_weight[16 + n].scale_e8m0;
+                    p_scales[2 * n + 1] = mxfp4_weight[16 + n].scale_e8m0;
+                }
+                p_scales += 32;
+            }
         }
         return pw;
     }
-    void run(CallArgs* args_ptr) {
+
+    void run(tensor2D<ov::bfloat16>& src, PackedWeight& pw, tensor2D<float>& dst) {
         TileConfigScope tcfg(m_tile_cfg);
-        //printf("src: %p   buff: %p\n", args_ptr->src_ptr, args_ptr->scratch_buff);
-        (*this)(args_ptr);
-    }
-#if 0
-    void run(const ov::bfloat16* src, int64_t src_stride, PackedWeight* weight_mxfp4, float* dst, int64_t dst_stride, int BM, int mxblocks) {
-        CallArgs args;
-        args.src_ptr = src;
-        args.src_stride = sizeof(ov::bfloat16) * 32 * mxblocks;
-        args.scale_ptr = &weight_mxfp4->scales[0];
-        args.weight_ptr = &weight_mxfp4->elements[0];
-        args.dst_ptr = dst;
-        args.dst_stride = sizeof(float) * 32;
-        args.mxblock_cnt = mxblocks;
+        static CallArgs args;
+        auto MXBLOCKS = src.shape[1] / 32;
+        auto num_n_blocks = pw.scales.shape[0];
 
-        TileConfigScope tcfg(m_tile_cfg);
-        (*this)(&args);
+        args.src_ptr = src.ptr();
+        args.src_stride = src.stride_bytes;
+        args.dst_stride = dst.stride_bytes;
+        args.mxblock_cnt = MXBLOCKS;
 
-        // loop order
-        int M = A.dims[0];
-        int K = A.dims[1];
-        // ASSERT((M%32) == 0); ASSERT(K == m_K); ASSERT(C.dims[0] == M); ASSERT(C.dims[1] == m_N);
-
-        auto strideA = A.stride;
-        auto strideC = C.stride;
-        auto* pA = reinterpret_cast<uint8_t*>(&A[0]);
-        auto* pC = reinterpret_cast<uint8_t*>(&C[0]);
-        for (int m = 0; m < M; m += 32, pA += 32 * strideA, pC += 32 * strideC) {
-            auto* pB = reinterpret_cast<uint8_t*>(&m_Weight[0]);
-            for (int n = 0; n < m_N; n += 32, pB += m_ktiles * 2048) {
-                (*this)(pA, strideA, pB, pC + n * sizeof(float), strideC);
-            }
+        for(int nb = 0; nb < num_n_blocks; nb++) {
+            args.scale_ptr = pw.scales(nb, 0).data;
+            args.weight_ptr = pw.elements(nb, 0).data;
+            args.dst_ptr = dst.ptr(0, nb*32);
+            (*this)(&args);
         }
-    }
-#endif
+    }    
 };
 
-// convert FP4 into required layout
-// A: BM x (32*mxblocks)
-// weight: mxblocks x (32 x mxfp4) (each mxfp4 has 32 elements)
-// C: BM x 32
-template <typename AT>
-void exec_reference(const AT* src, int64_t src_stride, mxfp4* mxfp4_weight, float* dst, int64_t dst_stride, int BM, int mxblocks, bool verbose = false) {
-    // decompress mxfp4 first
-    int BK = mxblocks * 32;  // 32-elements per MX-block
-    int BN = 32;
-    std::vector<float> weight(BN * BK, 0);
-
-    auto getW = [&](int k, int n) -> float& {
-        return weight[n * BK + k];
-    };
-    for (int k = 0; k < BK; k += 32) {
-        for (int n = 0; n < BN; n++) {
+// convert MXFP4 weight (K/32, N, mxfp4) into (K, N, float)
+// weight
+tensor2D<float> mxfp4_decompress(const tensor2D<mxfp4>& weight) {
+    tensor2D<float> ret(weight.shape[0]*32, weight.shape[1]);
+    for (int bk = 0; bk < weight.shape[0]; bk ++) {
+        for (int n = 0; n < weight.shape[1]; n++) {
             for (int ki = 0; ki < 32; ki++) {
-                getW(k + ki, n) = mxfp4_weight[n][ki];
+                ret(bk*32 + ki, n) = weight(bk, n)[ki];
             }
         }
-        mxfp4_weight += BN;
     }
-    for (int m = 0; m < BM; m++) {
-        const auto* A = src + m * src_stride;
-        float* C = dst + m * dst_stride;
+    return ret;
+}
 
-        for (int n = 0; n < BN; n++) {
+// A: (BM, BK)
+// weight: (BK/32, BN) in unit of mxfp4, each mxfp4 has 32 elements within same output channel
+// C: (BM, BN)
+template <typename AT>
+void exec_reference(tensor2D<AT>& src, tensor2D<mxfp4>& mxfp4_weight, tensor2D<float>& dst, bool verbose = false) {
+    // decompress mxfp4 first
+    int M = src.shape[0];
+    int K = src.shape[1];
+    ASSERT(K == mxfp4_weight.shape[0]*32);
+    int N = mxfp4_weight.shape[1];
+    ASSERT(M == dst.shape[0]);
+    ASSERT(N == dst.shape[1]);
+
+    // decompress weight into fp32 scratch buffer
+    tensor2D<float> weight = mxfp4_decompress(mxfp4_weight);
+
+    // do fp32 matmul
+    for (int m = 0; m < M; m++) {
+        const auto* A = src.ptr(m, 0);
+        float* C = dst.ptr(m, 0);
+
+        for (int n = 0; n < N; n++) {
             float sum = 0;
-            for (int k = 0; k < BK; k++) {
-                sum += A[k] * getW(k, n);
+            for (int k = 0; k < K; k++) {
+                sum += A[k] * weight(k, n);
             }
             C[n] = sum;
         }
     }
 
     if (verbose) {
-        printf("exec_reference src:\n");
-        for (int k = 0; k < BK; k++)
-            printf("%4.1f,", static_cast<float>(src[k]));
-        printf("\n");
-        printf("exec_reference weight:\n");
-        for (int k = 0; k < BK; k++) {
-            for (int n = 0; n < BN; n++) {
-                printf("%4.1f,", getW(k, n));
-            }
-            printf("\n");
-        }
-        printf("exec_reference dst:\n");
-        for (int n = 0; n < BN; n++)
-            printf("%4.1f,", dst[n]);
-        printf("\n");
+        show_tensor2D("exec_reference_src", src);
+        show_tensor2D("exec_reference_weight", weight);
+        show_tensor2D("exec_reference_dst", dst);
     }
 }
 
 static auto REF_VERBOSE = getenv("REF_VERBOSE", 0);
+static bool CLR_CACHE = getenv("CLR_CACHE", 0);
+static CLflush jit_clflush;
 
 template <class MXFP4Gemm>
-void test(int BM, int MXBLOCKS) {
+void test(int BM, int K, int N) {
+    int MXBLOCKS = K / 32;
     MXFP4Gemm jit_kernel(BM);
     typename MXFP4Gemm::CallArgs args;
     using ActType = typename MXFP4Gemm::act_type;
@@ -989,26 +1046,22 @@ void test(int BM, int MXBLOCKS) {
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06),"STALLS_L3_MISS"},
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05),"STALLS_L2_MISS"},
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05),"BOUND_ON_LOADS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00),"ALL_LOADS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
 
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00),"SPLIT_LOADS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00),"SPLIT_STORES"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
     });
 
-    //std::vector<ActType> src(BM * 32 * MXBLOCKS, 0);
-    std::vector<mxfp4> mxfp4_weight(MXBLOCKS * 32);
-    std::vector<float> dst(BM * 32, 0);
-    std::vector<float> ref(BM * 32, 0);
-
-    // cache-line aligned loads
-    auto src = alloc_cache_aligned<ActType>(BM * 32 * MXBLOCKS, 0.0f);
+    tensor2D<ActType> src(BM, K);
+    tensor2D<mxfp4> mxfp4_weight(K / 32, N);
+    tensor2D<float> dst(BM, N);
+    tensor2D<float> ref(BM, N);
 
     // random weights & src
     float weights[32] = {0};
-    for (int i = 0; i < MXBLOCKS * 32; i++) {
-        auto mask = (rand() % 100) - 50;
-        weights[i % 32] = mask * 0.1;
+    for (int i = 0; i < (K / 32) * N; i++) {
+        weights[i % 32] = ((rand() % 100) - 50) * 0.1f;
         if (i == 0) {
             // for(int k=0; k<32; k++) weights[k] = k*0.1;
         }
@@ -1019,93 +1072,71 @@ void test(int BM, int MXBLOCKS) {
         }
     }
 
-    auto* psrc = src.get();
-    psrc[3] = 1;
     for (int m = 0; m < BM; m++) {
-        for (int i = 0; i < MXBLOCKS * 32; i++) {
-            psrc[m * MXBLOCKS * 32 + i] = 0;//((i + m) % 3) - 1;
+        for (int k = 0; k < K; k++) {
+            src(m, k) = ((k + m) % 3) - 1;
         }
     }
+    src[4] = 1.0f;
 
     // check accuracy
-    exec_reference(src.get(), 32 * MXBLOCKS, mxfp4_weight.data(), ref.data(), 32, BM, MXBLOCKS, REF_VERBOSE>1);
+    exec_reference(src, mxfp4_weight, ref, REF_VERBOSE > 1);
 
     // reorder weights
-    auto pw = jit_kernel.reorder_weights(mxfp4_weight.data(), MXBLOCKS);
+    auto pw = jit_kernel.reorder_weights(mxfp4_weight);
 
-    args.src_ptr = src.get();
-    args.src_stride = sizeof(ActType) * 32 * MXBLOCKS;
-    args.scale_ptr = &pw.scales[0];
-    args.weight_ptr = &pw.elements[0];
-    args.dst_ptr = dst.data();
-    args.dst_stride = sizeof(float) * 32;
-    args.mxblock_cnt = MXBLOCKS;
+    jit_kernel.run(src, pw, dst);
 
-    jit_kernel.run(&args);
-    bool all_equal = true;
-    for (int m = 0; m < BM; m++) {
-        bool equal = true;
-        for (int n = 0; n < 32; n++)
-            equal = equal && (ref[m * 32 + n] == dst[m * 32 + n]);
-        if (equal)
-            continue;
-
-        all_equal = false;
-
-        if (REF_VERBOSE) {
-            printf("\nref[%d]:", m);
-            for (int n = 0; n < 32; n++)
-                printf("%4.1f,", ref[m * 32 + n]);
-            printf("\njit[%d]:", m);
-            for (int n = 0; n < 32; n++) {
-                bool equal = dst[m * 32 + n] == ref[m * 32 + n];
-                if (!equal)
-                    printf("\e[31m");
-                printf("%4.1f,", dst[m * 32 + n]);
-                if (!equal)
-                    printf("\e[0m");
-            }
-        }
-    }
-    printf("\n");
+    auto all_equal = compare(ref, dst, REF_VERBOSE);
 
     printf("%s[%s] ACCURACY:%s\e[0m \n", all_equal ? "\e[32m" : "\e[31m", jit_kernel.name(), all_equal ? "PASSED!" : "FAILED!");
     pevg.show_header();
-    //jit_kernel.log_show();
+    // jit_kernel.log_show();
 
     double avg_cycles = 0;
     double avg_instructions = 0;
     double avg_cpi0 = 0;
     double avg_cpi1 = 0;
-    constexpr int REPEATS = 100;
+    constexpr int REPEATS = 1;
 
     // warm-up
     for (int repeat = 0; repeat < REPEATS; repeat++)
-        jit_kernel.run(&args);
+        jit_kernel.run(src, pw, dst);
 
     for (int i = 0; i < 10; i++) {
+        if (CLR_CACHE) {
+            auto* start_ptr = pw.elements_ptr();
+            auto* end_ptr = start_ptr + K*N/2;
+            jit_clflush(start_ptr, end_ptr);
+        }
         auto pmc = pevg.rdpmc(
             [&]() {
                 // repeat
                 for (int repeat = 0; repeat < REPEATS; repeat++)
-                    jit_kernel.run(&args);
+                    jit_kernel.run(src, pw, dst);
             },
             jit_kernel.name(),
-            REPEATS*MXBLOCKS);
+            REPEATS * (N/32) * (K/32),
+            [&](uint64_t duration_ns, uint64_t* pmc){
+                printf(" MemBW:%.1f(GB/s)", (K*N/2)*REPEATS*1.0/duration_ns);
+            });
     }
 }
 
 int main(int argc, const char* argv[]) {
     int BM = argc > 1 ? atoi(argv[1]) : 1;
-    int MXBLOCKS = argc > 2 ? atoi(argv[2]) : 1;
+    int K = argc > 2 ? atoi(argv[2]) : 1024;
+    int N = argc > 3 ? atoi(argv[3]) : 32;
+
+    ASSERT(K % 32 == 0);
+    ASSERT(N % 32 == 0);
 
     bool initAMX = initXTILE();
     if (BM <= 10) {
-        test<MXFP4BrgemmFMA<false>>(BM, MXBLOCKS);
-        test<MXFP4BrgemmFMA<true>>(BM, MXBLOCKS);
-        test<MXFP4BrgemmAVX512_BF16>(BM, MXBLOCKS);
+        test<MXFP4BrgemmFMA<false>>(BM, K, N);
+        test<MXFP4BrgemmFMA<true>>(BM, K, N);
+        //test<MXFP4BrgemmAVX512_BF16>(BM, K, N);
     }
-    //if (TESTFLAGS[3]) test<MXFP4BrgemmAMX>(BM, MXBLOCKS);
-    test<MXFP4BrgemmAMX>(BM, MXBLOCKS);
+    test<MXFP4BrgemmAMX>(BM, K, N);
     return 0;
 }
