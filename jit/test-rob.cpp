@@ -1,7 +1,7 @@
 
-#include "../perf/linux_perf.hpp"
+#include "../include/linux_perf.hpp"
 #define JIT_DEBUG
-#include "jit.h"
+#include "../include/jit.h"
 #include <cstdlib>
 
 

@@ -1,5 +1,5 @@
 #define JIT_DEBUG
-#include "../jit/jit.h"
+#include "../include/jit.h"
 
 
 int main() {

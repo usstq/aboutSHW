@@ -1,11 +1,12 @@
 
 // https://stackoverflow.com/questions/42088515/perf-event-open-how-to-monitoring-multiple-events
 
-#include "linux_perf.hpp"
+#include "../include/linux_perf.hpp"
 
 #include "../thirdparty/xbyak/xbyak/xbyak.h"
 #include <chrono>
 #include <thread>
+#include <sched.h>
 
 class Jit : public Xbyak::CodeGenerator {
 public:
@@ -65,7 +66,7 @@ void busy_sleep_ms(int duration_ms) {
         if (ms.count() > duration_ms) break;
     } while(1);
 }
-
+/*
 uint32_t get_cpu_id() {
     uint32_t cpuid;
     if (getcpu(reinterpret_cast<uint32_t*>(&cpuid), nullptr) != 0) {
@@ -74,6 +75,8 @@ uint32_t get_cpu_id() {
     }
     return cpuid;
 }
+*/
+#define get_cpu_id sched_getcpu
 
 void test2() {
     Jit inst;

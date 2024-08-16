@@ -6,7 +6,7 @@
 */
 #include <torch/extension.h>
 
-#include "linux_perf.hpp"
+#include "../include/linux_perf.hpp"
 
 auto _xx = LinuxPerf::Init();
 

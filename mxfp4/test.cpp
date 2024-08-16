@@ -5,7 +5,7 @@
 
 #include <vector>
 
-//#include "../perf/linux_perf.hpp"
+//#include "../include/linux_perf.hpp"
 //#include "../thirdparty/xbyak/xbyak/xbyak.h"
 
 int test_f32_to_e2m1 = []() {

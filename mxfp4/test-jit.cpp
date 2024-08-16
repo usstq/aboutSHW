@@ -7,10 +7,10 @@ using namespace mxformat;
 
 #include <vector>
 
-#include "../perf/linux_perf.hpp"
+#include "../include/linux_perf.hpp"
 
 #define JIT_DEBUG
-#include "../jit/jit.h"
+#include "../include/jit.h"
 
 // decompress MXFP4 weights on-the-fly and do matmul in brgemm style
 // jit kernel does a small block sub-matrix matmul:

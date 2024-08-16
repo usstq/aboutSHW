@@ -1,7 +1,7 @@
 
 #include "../mxfp4/bf16.hpp"
-#include "../perf/linux_perf.hpp"
-#include "jit.h"
+#include "../include/linux_perf.hpp"
+#include "../include/jit.h"
 
 std::vector<std::string> all_support_ktypes;
 

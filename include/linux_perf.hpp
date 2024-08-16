@@ -38,10 +38,12 @@ int perf_event_open(struct perf_event_attr *attr, pid_t pid,
 
 namespace LinuxPerf {
 
+#define LINUX_PERF_ "\e[33m[LINUX_PERF]\e[0m "
+
 inline uint64_t get_time_ns() {
     struct timespec tp0;
     if (clock_gettime(CLOCK_MONOTONIC_RAW, &tp0) != 0) {
-        perror("clock_gettime(CLOCK_MONOTONIC_RAW,...) failed!");
+        perror(LINUX_PERF_"clock_gettime(CLOCK_MONOTONIC_RAW,...) failed!");
         abort();
     }
     return (tp0.tv_sec * 1000000000) + tp0.tv_nsec;    
@@ -64,7 +66,7 @@ struct TscCounter {
         uint64_t start_ticks = __rdtsc();
         std::this_thread::sleep_for(std::chrono::seconds(1));
         tsc_ticks_per_second = (__rdtsc() - start_ticks);
-        std::cout << "[PERF_DUMP_JSON] tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
+        std::cout << LINUX_PERF_"tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
         tsc_ticks_base = __rdtsc();
 
         // use CLOCK_MONOTONIC_RAW instead of TSC
@@ -127,7 +129,7 @@ struct PerfEventJsonDumper {
         dump_file_over = true;
         not_finalized = false;
 
-        std::cout << "[PERF_DUMP_JSON] Dumpped ";
+        std::cout << LINUX_PERF_"Dumpped ";
         
         if (total_size < 1024) std::cout << total_size << " bytes ";
         else if (total_size < 1024*1024) std::cout << total_size/1024 << " KB ";
@@ -139,7 +141,7 @@ struct PerfEventJsonDumper {
         std::lock_guard<std::mutex> guard(g_mutex);
         std::stringstream ss;
         auto serial_id = totalProfilerManagers.fetch_add(1);
-        ss << "[PERF_DUMP_JSON] #" << serial_id << "(" << pthis << ") : is registed." << std::endl;
+        ss << LINUX_PERF_"#" << serial_id << "(" << pthis << ") : is registed." << std::endl;
         std::cout << ss.str();
         all_dumpers.emplace(pthis);
         return serial_id;
@@ -156,7 +158,7 @@ std::vector<std::string> str_split(const std::string& s, std::string delimiter) 
     size_t last = 0;
     size_t next = 0;
     while ((next = s.find(delimiter, last)) != std::string::npos) {
-        std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
+        //std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
         ret.push_back(s.substr(last, next-last));
         last = next + 1;
     }
@@ -174,7 +176,7 @@ T& read_ring_buffer(perf_event_mmap_page& meta, uint64_t& offset) {
 struct PerfRawConfig {
     PerfRawConfig() {
         // env var defined raw events
-        const char* str_raw_config = std::getenv("PERF_RAW_CONFIG");
+        const char* str_raw_config = std::getenv("LINUX_PERF");
         if (str_raw_config) {
             auto options = str_split(str_raw_config, ",");
             for(auto& opt : options) {
@@ -187,11 +189,24 @@ struct PerfRawConfig {
                 if (items.size() == 1) {
                     if (items[0] == "switch-cpu")
                         switch_cpu = true;
+                    if (items[0] == "dump")
+                        dump_json = true;
                 }
             }
+
+            for(auto& cfg : raw_configs) {
+                printf(LINUX_PERF_" config: %s=0x%llx\n", cfg.first.c_str(), cfg.second);
+            }
+            if (switch_cpu)
+                printf(LINUX_PERF_" config: switch_cpu\n");
+            if (dump_json)
+                printf(LINUX_PERF_" config: dump\n");
+        } else {
+            printf(LINUX_PERF_" LINUX_PERF is unset, example: LINUX_PERF=dump,switch-cpu,L2_MISS=0x10d1\n");
         }
     }
 
+    bool dump_json = false;
     bool switch_cpu = false;
     std::vector<std::pair<std::string, uint64_t>> raw_configs;
 
@@ -229,13 +244,13 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
             cpu_set_t mask;
             CPU_ZERO(&mask);
             if (sched_getaffinity(0, sizeof(cpu_set_t), &mask)) {
-                perror("sched_getaffinity failed:");
+                perror(LINUX_PERF_"sched_getaffinity failed:");
                 abort();
             }
             long number_of_processors = sysconf(_SC_NPROCESSORS_ONLN);
-            printf("sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%lu: ", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
+            printf(LINUX_PERF_"sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%lu\n", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
             if (CPU_COUNT(&mask) >= number_of_processors) {
-                printf(" no affinity is set, will not enable PerfEventCtxSwitch\n");
+                printf(LINUX_PERF_" no affinity is set, will not enable PerfEventCtxSwitch\n");
                 is_enabled = false;
                 return;
             }
@@ -273,13 +288,13 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                 // measures all processes/threads on the specified CPU
                 int ctx_switch_fd = perf_event_open(&pea, pid, cpu, -1, 0);
                 if (ctx_switch_fd < 0) {
-                    perror("perf_event_open:");
+                    perror(LINUX_PERF_"PerfEventCtxSwitch perf_event_open failed (check /proc/sys/kernel/perf_event_paranoid please)");
                     abort();
                 }
 
                 auto* ctx_switch_pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ | PROT_WRITE, MAP_SHARED, ctx_switch_fd, 0));
                 if (ctx_switch_pmeta == MAP_FAILED) {
-                    perror("mmap perf_event_mmap_page failed:");
+                    perror(LINUX_PERF_"mmap perf_event_mmap_page failed:");
                     close(ctx_switch_fd);
                     abort();
                 }
@@ -594,14 +609,14 @@ struct PerfEventGroup : public IPerfEventDumper {
             fw << "}},\n";
         }
         all_dump_data.clear();
-        std::cout << "[PERF_DUMP_JSON] #" << serial << "(" << this << ") finalize: dumpped " << data_size << std::endl;
+        std::cout << LINUX_PERF_"#" << serial << "(" << this << ") finalize: dumpped " << data_size << std::endl;
     }
 
     uint64_t operator[](int i) {
         if (i < events.size()) {
             return values[i];
         } else {
-            printf("PerfEventGroup: operator[] with index %d oveflow (>%lu)\n", i, events.size());
+            printf(LINUX_PERF_"PerfEventGroup: operator[] with index %d oveflow (>%lu)\n", i, events.size());
             abort();
         }
         return 0;
@@ -640,14 +655,10 @@ struct PerfEventGroup : public IPerfEventDumper {
             events.back().name = raw_cfg.first;
         }
 
-        enable_dump_json = false;
+        enable_dump_json = PerfRawConfig::get().dump_json;
         serial = 0;
-        const char* str_enable = std::getenv("PERF_DUMP_JSON");
-        if (str_enable) {
-            enable_dump_json = (str_enable[0] != '0');
-            if (enable_dump_json) {
-                serial = PerfEventJsonDumper::get().register_manager(this);
-            }
+        if (enable_dump_json) {
+            serial = PerfEventJsonDumper::get().register_manager(this);
         }
         my_pid = getpid();
         my_tid = gettid();
@@ -738,16 +749,25 @@ struct PerfEventGroup : public IPerfEventDumper {
         // can be synched with clock_gettime(CLOCK_MONOTONIC_RAW)
         pev_attr->clockid = CLOCK_MONOTONIC_RAW;
 
+        RETRY:
         ev.fd = perf_event_open(pev_attr, pid, cpu, group_fd, 0);
         if (ev.fd < 0) {
-            perror("perf_event_open");
-            abort();
+            if (!pev_attr->exclude_kernel) {
+                printf(LINUX_PERF_"perf_event_open(type=%d,config=%lld) with exclude_kernel=0 failed (due to /proc/sys/kernel/perf_event_paranoid is 2),  set exclude_kernel=1 and retry...\n",
+                       pev_attr->type, pev_attr->config);
+                pev_attr->exclude_kernel = 1;
+                goto RETRY;
+            } else {
+                printf(LINUX_PERF_"perf_event_open(type=%d,config=%lld) failed", pev_attr->type, pev_attr->config);
+                perror("");
+                abort();
+            }
         }
         ioctl(ev.fd, PERF_EVENT_IOC_ID, &ev.id);
 
         ev.pmeta = reinterpret_cast<perf_event_mmap_page*>(mmap(NULL, mmap_length, PROT_READ | PROT_WRITE, MAP_SHARED, ev.fd, 0));
         if (ev.pmeta == MAP_FAILED) {
-            perror("mmap perf_event_mmap_page failed:");
+            perror(LINUX_PERF_"mmap perf_event_mmap_page failed:");
             close(ev.fd);
             abort();
         }
@@ -882,7 +902,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         for(size_t i = 0; i < events.size(); i++) values[i] = 0;
 
         if (::read(group_fd, read_buf, sizeof(read_buf)) == -1) {
-            perror("read perf event failed:");
+            perror(LINUX_PERF_"read perf event failed:");
             abort();
         }
 
@@ -948,7 +968,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
 
         uint64_t* finish() {
-            if (!pevg)
+            if (!pevg || !pd)
                 return nullptr;
 
             pd->stop();
