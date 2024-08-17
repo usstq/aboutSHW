@@ -38,7 +38,11 @@ int perf_event_open(struct perf_event_attr *attr, pid_t pid,
 
 namespace LinuxPerf {
 
-#define LINUX_PERF_ "\e[33m[LINUX_PERF]\e[0m "
+#define _LINE_STRINGIZE(x) _LINE_STRINGIZE2(x)
+#define _LINE_STRINGIZE2(x) #x
+#define LINE_STRING _LINE_STRINGIZE(__LINE__)
+
+#define LINUX_PERF_ "\e[33m[LINUX_PERF:" LINE_STRING "]\e[0m "
 
 inline uint64_t get_time_ns() {
     struct timespec tp0;
@@ -153,7 +157,7 @@ struct PerfEventJsonDumper {
     }
 };
 
-std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
+inline std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
     std::vector<std::string> ret;
     size_t last = 0;
     size_t next = 0;
@@ -182,15 +186,35 @@ struct PerfRawConfig {
             for(auto& opt : options) {
                 auto items = str_split(opt, "=");
                 if (items.size() == 2) {
-                    auto config = strtoul(&items[1][0], nullptr, 0);
-                    if (config > 0)
-                        raw_configs.emplace_back(items[0], config);
+                    if (items[0] == "dump") {
+                        // limit the number of dumps per thread
+                        dump = strtoll(&items[1][0], nullptr, 0);
+                    } else if (items[0] == "switch-cpu") {
+                        // thread's affinity (cpu-binding) can be changed by threading-libs(TBB/OpenMP) anytime
+                        // sched_getaffinity() can only get correct binding at start-up time, another way is to specify it 
+                        // switch-cpu=56
+                        // switch-cpu=56-111
+                        auto cpus = str_split(items[1], "-");
+                        printf(LINUX_PERF_"specify switch-cpu range is not supported yet!");
+                        abort();
+                    } else {
+                        auto config = strtoul(&items[1][0], nullptr, 0);
+                        if (config > 0)
+                            raw_configs.emplace_back(items[0], config);
+                    }
                 }
                 if (items.size() == 1) {
-                    if (items[0] == "switch-cpu")
+                    if (items[0] == "switch-cpu") {
+                        // get cpu_mask as early as possible
                         switch_cpu = true;
+                        CPU_ZERO(&cpu_mask);
+                        if (sched_getaffinity(getpid(), sizeof(cpu_set_t), &cpu_mask)) {
+                            perror(LINUX_PERF_"sched_getaffinity failed:");
+                            abort();
+                        }
+                    }
                     if (items[0] == "dump")
-                        dump_json = true;
+                        dump = -1; // no limit to number of dumps
                 }
             }
 
@@ -199,14 +223,15 @@ struct PerfRawConfig {
             }
             if (switch_cpu)
                 printf(LINUX_PERF_" config: switch_cpu\n");
-            if (dump_json)
-                printf(LINUX_PERF_" config: dump\n");
+            if (dump)
+                printf(LINUX_PERF_" config: dump=%ld\n", dump);
         } else {
             printf(LINUX_PERF_" LINUX_PERF is unset, example: LINUX_PERF=dump,switch-cpu,L2_MISS=0x10d1\n");
         }
     }
 
-    bool dump_json = false;
+    int64_t dump = 0;
+    cpu_set_t cpu_mask;
     bool switch_cpu = false;
     std::vector<std::pair<std::string, uint64_t>> raw_configs;
 
@@ -241,12 +266,8 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
             PerfEventJsonDumper::get().register_manager(this);
 
             // open fd for each CPU
-            cpu_set_t mask;
-            CPU_ZERO(&mask);
-            if (sched_getaffinity(0, sizeof(cpu_set_t), &mask)) {
-                perror(LINUX_PERF_"sched_getaffinity failed:");
-                abort();
-            }
+            cpu_set_t mask = PerfRawConfig::get().cpu_mask;
+
             long number_of_processors = sysconf(_SC_NPROCESSORS_ONLN);
             printf(LINUX_PERF_"sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%lu\n", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
             if (CPU_COUNT(&mask) >= number_of_processors) {
@@ -298,7 +319,7 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                     close(ctx_switch_fd);
                     abort();
                 }
-                //printf("perf_event_open CPU_WIDE context_switch on cpu %d, ctx_switch_fd=%d\n", cpu, ctx_switch_fd);
+                printf(LINUX_PERF_"perf_event_open CPU_WIDE context_switch on cpu %d, ctx_switch_fd=%d\n", cpu, ctx_switch_fd);
                 events.emplace_back(ctx_switch_fd, ctx_switch_pmeta);
                 events.back().ctx_switch_in_time = get_time_ns();
                 events.back().ctx_last_time = get_time_ns();
@@ -553,7 +574,8 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
     };
 
-    bool enable_dump_json;
+    bool enable_dump_json = false;
+    int64_t dump_limit = 0;
     std::deque<ProfileData> all_dump_data;
     int serial;
 
@@ -655,7 +677,8 @@ struct PerfEventGroup : public IPerfEventDumper {
             events.back().name = raw_cfg.first;
         }
 
-        enable_dump_json = PerfRawConfig::get().dump_json;
+        dump_limit = PerfRawConfig::get().dump;
+        enable_dump_json = (dump_limit != 0);
         serial = 0;
         if (enable_dump_json) {
             serial = PerfEventJsonDumper::get().register_manager(this);
@@ -994,8 +1017,9 @@ struct PerfEventGroup : public IPerfEventDumper {
     };
 
     ProfileData* _profile(const std::string& title, int id = 0) {
-        if (!enable_dump_json)
+        if (dump_limit == 0)
             return {};
+        dump_limit --;
 
         PerfEventCtxSwitch::get().updateRingBuffer();
 
