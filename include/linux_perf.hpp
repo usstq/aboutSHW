@@ -11,10 +11,7 @@
 #define gettid() syscall(SYS_gettid)
 #endif
 
-__attribute__((weak))
-int perf_event_open(struct perf_event_attr *attr, pid_t pid,
-		    int cpu, int group_fd, unsigned long flags)
-{
+inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) {
 	return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
@@ -182,21 +179,26 @@ struct PerfRawConfig {
         // env var defined raw events
         const char* str_raw_config = std::getenv("LINUX_PERF");
         if (str_raw_config) {
-            auto options = str_split(str_raw_config, ",");
+            CPU_ZERO(&cpu_mask);
+            // options are separated by ":" as PATH
+            auto options = str_split(str_raw_config, ":");
             for(auto& opt : options) {
                 auto items = str_split(opt, "=");
                 if (items.size() == 2) {
                     if (items[0] == "dump") {
                         // limit the number of dumps per thread
                         dump = strtoll(&items[1][0], nullptr, 0);
-                    } else if (items[0] == "switch-cpu") {
+                    } else if (items[0] == "cpus") {
                         // thread's affinity (cpu-binding) can be changed by threading-libs(TBB/OpenMP) anytime
                         // sched_getaffinity() can only get correct binding at start-up time, another way is to specify it 
-                        // switch-cpu=56
-                        // switch-cpu=56-111
-                        auto cpus = str_split(items[1], "-");
-                        printf(LINUX_PERF_"specify switch-cpu range is not supported yet!");
-                        abort();
+                        // also too many events may generate if per-thread event is used, cpus can limit
+                        // cpus=56
+                        // cpus=56.57.59
+                        auto cpus = str_split(items[1], ",");
+                        CPU_ZERO(&cpu_mask);
+                        for(auto& cpu : cpus) {
+                            CPU_SET(std::atoi(cpu.c_str()), &cpu_mask);
+                        }
                     } else {
                         auto config = strtoul(&items[1][0], nullptr, 0);
                         if (config > 0)
@@ -219,20 +221,34 @@ struct PerfRawConfig {
             }
 
             for(auto& cfg : raw_configs) {
-                printf(LINUX_PERF_" config: %s=0x%llx\n", cfg.first.c_str(), cfg.second);
+                printf(LINUX_PERF_" config: %s=0x%lx\n", cfg.first.c_str(), cfg.second);
             }
-            if (switch_cpu)
+            if (switch_cpu) {
                 printf(LINUX_PERF_" config: switch_cpu\n");
+            }
             if (dump)
                 printf(LINUX_PERF_" config: dump=%ld\n", dump);
+            if (CPU_COUNT(&cpu_mask)) {
+                printf(LINUX_PERF_" config: cpus=");
+                for (int cpu = 0; cpu < (int)sizeof(cpu_set_t)*8; cpu++)
+                    if(CPU_ISSET(cpu, &cpu_mask)) printf("%d,", cpu);
+                printf("\n");
+            }
         } else {
             printf(LINUX_PERF_" LINUX_PERF is unset, example: LINUX_PERF=dump,switch-cpu,L2_MISS=0x10d1\n");
         }
     }
 
+    bool dump_on_cpu(int cpu) {
+        if (dump == 0)
+            return false;
+        return CPU_ISSET(cpu, &cpu_mask);
+    }
+
     int64_t dump = 0;
     cpu_set_t cpu_mask;
     bool switch_cpu = false;
+    std::vector<int> dump_cpus;
     std::vector<std::pair<std::string, uint64_t>> raw_configs;
 
     static PerfRawConfig& get() {
@@ -269,14 +285,14 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
             cpu_set_t mask = PerfRawConfig::get().cpu_mask;
 
             long number_of_processors = sysconf(_SC_NPROCESSORS_ONLN);
-            printf(LINUX_PERF_"sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%lu\n", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
+            printf(LINUX_PERF_"sizeof(cpu_set_t):%lu: _SC_NPROCESSORS_ONLN=%ld CPU_COUNT=%d\n", sizeof(cpu_set_t), number_of_processors, CPU_COUNT(&mask));
             if (CPU_COUNT(&mask) >= number_of_processors) {
                 printf(LINUX_PERF_" no affinity is set, will not enable PerfEventCtxSwitch\n");
                 is_enabled = false;
                 return;
             }
 
-            for (int cpu = 0; cpu < sizeof(cpu_set_t)*8; cpu++) {
+            for (int cpu = 0; cpu < (int)sizeof(cpu_set_t)*8; cpu++) {
                 auto is_set = CPU_ISSET(cpu, &mask);
                 if (!is_set) continue;
 
@@ -369,15 +385,14 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
             ev.ctx_switch_in_time = 0;
         }
 
-        auto pid = 9999;
+        auto pid = 9999;    // fake pid for CPU
         auto cat = "TID";
         
         // TID is used for CPU id instead
         for (auto& d : all_dump_data) {
             auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
-            auto pid = 9999;    // fake pid for CPU
             auto start = tsc.tsc_to_usec(d.tsc_start);
-            auto end = tsc.tsc_to_usec(d.tsc_end);
+            //auto end = tsc.tsc_to_usec(d.tsc_end);
             auto cpu_id = d.cpu;
 
             fw << "{\"ph\": \"X\", \"name\": \"" << d.tid << "\", \"cat\":\"" << cat << "\","
@@ -447,6 +462,9 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
                     auto time = read_ring_buffer<uint64_t>(mmap_meta, head0);
                     auto cpu = read_ring_buffer<__u32>(mmap_meta, head0);
                     auto reserved0 = read_ring_buffer<__u32>(mmap_meta, head0);
+                    (void)reserved0;
+                    (void)next_prev_pid;
+                    (void)pid;
 
                     // skip idle process (with TID 0)
                     if (tid > 0 && ring_buffer_verbose) {
@@ -594,9 +612,9 @@ struct PerfEventGroup : public IPerfEventDumper {
             auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
             auto title = std::string(d.title) + "_" + std::to_string(d.id);
             auto cat = d.cat;
-            auto pid = serial;
+            //auto pid = serial;
             auto start = tsc.tsc_to_usec(d.tsc_start);
-            auto end = tsc.tsc_to_usec(d.tsc_end);
+            //auto end = tsc.tsc_to_usec(d.tsc_end);
 
             fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
                 << "\"pid\": " << my_pid << ", \"tid\": " << my_tid << ","
@@ -634,11 +652,11 @@ struct PerfEventGroup : public IPerfEventDumper {
         std::cout << LINUX_PERF_"#" << serial << "(" << this << ") finalize: dumpped " << data_size << std::endl;
     }
 
-    uint64_t operator[](int i) {
+    uint64_t operator[](size_t i) {
         if (i < events.size()) {
             return values[i];
         } else {
-            printf(LINUX_PERF_"PerfEventGroup: operator[] with index %d oveflow (>%lu)\n", i, events.size());
+            printf(LINUX_PERF_"PerfEventGroup: operator[] with index %lu oveflow (>%lu)\n", i, events.size());
             abort();
         }
         return 0;
@@ -678,7 +696,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
 
         dump_limit = PerfRawConfig::get().dump;
-        enable_dump_json = (dump_limit != 0);
+        enable_dump_json = PerfRawConfig::get().dump_on_cpu(sched_getcpu());
         serial = 0;
         if (enable_dump_json) {
             serial = PerfEventJsonDumper::get().register_manager(this);
