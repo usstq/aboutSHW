@@ -7,7 +7,7 @@
 #include <omp.h>
 #include <sstream>
 #include <thread>
-
+#include <x86intrin.h>
 #include "../include/jit.h"
 
 class TestBWjit : public jit_generator {

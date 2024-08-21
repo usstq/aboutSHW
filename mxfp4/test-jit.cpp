@@ -35,6 +35,8 @@ using namespace mxformat;
 //
 // let's focus on latency case in which M is just 1 (or 4).
 //
+static int PREFETCH_ADV = getenv("PREFETCH_ADV", 4096);
+
 
 template <bool is_vmul_scale>
 class MXFP4BrgemmFMA : public jit_generator {
@@ -115,7 +117,7 @@ public:
         L(kx32_loop_begin);
 
         // zmm5 : 32x MX scales
-
+/*
         if (!is_vmul_scale) {
             vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
             vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
@@ -129,7 +131,8 @@ public:
             vpunpcklwd(zmm3, zmm_zero, zmm5);
             vpunpckhwd(zmm4, zmm_zero, zmm5);
         }
-
+        prefetcht2(ptr[scale_ptr + 1024]);
+*/
         mov(mx_size, 16);
         align(64, false);
         L(loop_begin);
@@ -149,18 +152,17 @@ public:
 
             if (!is_vmul_scale) {
                 // use exponent-add to apply MX-scale
-                vpcmpw(k2, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here, so
-                                                // MXFP4 must replace -0.0f with +0.0f
-                vpcmpw(k3, zmm7, zmm_zero, 0);
+                //vpcmpw(k2, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+                //vpcmpw(k3, zmm7, zmm_zero, 0);
 
-                kord(k2, k1, k2);
-                kord(k3, k1, k3);
+                //kord(k2, k1, k2);
+                //kord(k3, k1, k3);
 
                 vpaddw(zmm6, zmm6, zmm5);
                 vpaddw(zmm7, zmm7, zmm5);
 
-                vpblendmw(zmm6 | k2, zmm6, zmm_zero);  // 32x bf16/fp16 even weights: w0, w2, w4, ...
-                vpblendmw(zmm7 | k3, zmm7, zmm_zero);  // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+                //vpblendmw(zmm6 | k2, zmm6, zmm_zero);  // 32x bf16/fp16 even weights: w0, w2, w4, ...
+                //vpblendmw(zmm7 | k3, zmm7, zmm_zero);  // 32x bf16/fp16 odd weights: w1, w3, w5, ...
             }
 
             // log_zmm("bf16", __LINE__, zmm6);
@@ -201,6 +203,7 @@ public:
                 add(rax, src_stride);
             }
         }
+        prefetcht2(ptr[weight_ptr + PREFETCH_ADV]);
         add(src_ptr, 8);
         add(weight_ptr, 32);
         dec(mx_size);
@@ -520,7 +523,17 @@ public:
 
 #endif
 
-static int AMX_DEBUG = getenv("AMX_DEBUG", 3);
+// AMX_DEBUG:
+//    1: no-SW-pipeline decompress only
+//    2: no-SW-pipeline TMULs only
+//
+//    4: SW-pipeline decompress only
+//    8: SW-pipeline TMULs only
+//
+//  (4+8) is faster than (1+2) : 10%(cache-cold case) ~ 20%(cache-hot case)
+//
+static int AMX_DEBUG = getenv("AMX_DEBUG", 12);
+static int ADDR_ADV32 = getenv("ADDR_ADV32", 32);
 
 /*
     32x32 weights:     2-tiles B0 | B1
@@ -624,6 +637,7 @@ public:
         auto zmm_zero = zmm0;
         auto zmm_e2m1_lut = zmm1;
         auto zmm_exponent_bias = zmm2;
+        auto zmm_scales = zmm3;
 
         Xbyak::Label kx32_loop_end;
         Xbyak::Label kx32_loop_begin;
@@ -634,10 +648,10 @@ public:
         // clang-format off
         static ov::bfloat16 lut_e2m1_bf16[] = {
              0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-            -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+             0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
             // duplicate
              0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-            -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+             0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
         };
         // clang-format on
         vpxorq(zmm_zero, zmm_zero, zmm_zero);
@@ -651,47 +665,55 @@ public:
         tilezero(tmmC10);
         tilezero(tmmC11);
 
-        if (AMX_DEBUG > 3) {
+        if (AMX_DEBUG >= 4) {
+            auto AMX_DEBUG_Decomp = AMX_DEBUG & 4;
+            auto AMX_DEBUG_Tmuls = AMX_DEBUG & 8;
+            auto AMX_DEBUG_MOV = AMX_DEBUG & 0x10;
             Xbyak::Reg64 double_buff1 = scratch_ptr;
             Xbyak::Reg64 double_buff2 = r13;
             push(double_buff2);
             lea(double_buff2, ptr[double_buff1 + 2048]);
 
-            auto decompress_scale = [&]() {
-                vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
-                vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-                vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
-                vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
-                vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
-                add(scale_ptr, 32);
+            auto decompress_scale = [&](int Btile_id) {
+                if (!AMX_DEBUG_Decomp) return;
+                if (Btile_id == 0) {
+                    vmovdqu8(Xbyak::Ymm(zmm_scales.getIdx()), ptr[scale_ptr]);         // 32x E8M0
+                    vpmovzxbw(zmm_scales, Xbyak::Ymm(zmm_scales.getIdx()));                  // 32x 16bit
+                    vpsubw(zmm_scales, zmm_scales, zmm_exponent_bias);  // subtract bias 127
+                    vpsllw(zmm_scales, zmm_scales, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
+                    vpunpcklwd(zmm5, zmm_scales, zmm_scales);
+                    prefetcht2(ptr[scale_ptr + 1024]);
+                    add(scale_ptr, ADDR_ADV32);
+                } else {
+                    vpunpckhwd(zmm5, zmm_scales, zmm_scales);
+                }
             };
 
             auto decompress_Btile = [&](int dst_offset, int i0, int i1) {
+                if (AMX_DEBUG_MOV) {
+                    for (int i = i0; i < i1; i++) {
+                        vmovdqu8(ymm6, ptr[weight_ptr]);
+                        prefetcht2(ptr[weight_ptr + PREFETCH_ADV]);
+                        add(weight_ptr, ADDR_ADV32);
+                    }
+                    return;
+                }
+                if (!AMX_DEBUG_Decomp) return;
                 for (int i = i0; i < i1; i++) {
                     vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
                     vpmovzxbw(zmm6, ymm6);             //
                     vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
                     vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
                     vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
-
-                    vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
-                    vpcmpw(k2, zmm7, zmm_zero, 0);
-                    // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
-                    kord(k1, k5, k1);
-                    kord(k2, k5, k2);
-                    vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
-                    vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
-                    vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
-                    vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
-
+                    vpcmpw(k1, zmm6, zmm_zero, 4);
+                    vpcmpw(k2, zmm7, zmm_zero, 4);
+                    vpaddw(zmm6|k1, zmm6, zmm5);       // bf16 exponent-addition with zero-guard to apply MX-scale
+                    vpaddw(zmm7|k2, zmm7, zmm5);       // bf16 exponent-addition with zero-guard to apply MX-scale
                     vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset], zmm6);
                     vmovdqu32(ptr[double_buff1 + i * 128 + dst_offset + 64], zmm7);
 
-                    // is 32x16 weight correct?
-                    // log_zmm("bf16", __LINE__, zmm6);
-                    // log_zmm("bf16", __LINE__, zmm7);
-
-                    add(weight_ptr, 32);
+                    prefetcht2(ptr[weight_ptr + PREFETCH_ADV]);
+                    add(weight_ptr, ADDR_ADV32);
                 }
             };
 
@@ -706,9 +728,9 @@ public:
             }
 
             // decode B0|B1
-            decompress_scale();
+            decompress_scale(0);
             decompress_Btile(0, 0, 8);
-            decompress_scale();
+            decompress_scale(1);
             decompress_Btile(1024, 0, 8);
 
             dec(mxblock_cnt);
@@ -724,28 +746,29 @@ public:
                 // still decode into buff1, load from buff2
                 xchg(double_buff1, double_buff2);
 
-                decompress_scale();
+                decompress_scale(0);
 
-                tileloadd(tmmA0, ptr[src_ptr + src_stride]);
-                tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
-                tdpbf16ps(tmmC00, tmmA0, tmmB0);
+                if (AMX_DEBUG_Tmuls) tileloadd(tmmA0, ptr[src_ptr + src_stride]);
 
-                decompress_Btile(0, 0, 8);
+                if (AMX_DEBUG_Tmuls) tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
 
-                if (BM > 16)
-                    tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-                tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+                if (AMX_DEBUG_Tmuls) tdpbf16ps(tmmC00, tmmA0, tmmB0);
+                decompress_Btile(0, 0, 4);
 
-                decompress_scale();
+                if (AMX_DEBUG_Tmuls && BM > 16)  tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
 
-                if (BM > 16)
-                    tdpbf16ps(tmmC10, tmmA1, tmmB0);
-                tdpbf16ps(tmmC01, tmmA0, tmmB1);
+                if (AMX_DEBUG_Tmuls) tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
 
-                decompress_Btile(1024, 0, 8);
+                if (AMX_DEBUG_Tmuls && BM > 16) tdpbf16ps(tmmC10, tmmA1, tmmB0);
+                decompress_Btile(0, 4, 8);
 
-                if (BM > 16)
-                    tdpbf16ps(tmmC11, tmmA1, tmmB1);
+                decompress_scale(1);
+
+                if (AMX_DEBUG_Tmuls) tdpbf16ps(tmmC01, tmmA0, tmmB1);
+                decompress_Btile(1024, 0, 4);
+
+                if (AMX_DEBUG_Tmuls && BM > 16) tdpbf16ps(tmmC11, tmmA1, tmmB1);
+                decompress_Btile(1024, 4, 8);
 
                 // move to next MX-block(32 along K dimension)
                 // Btile is automatically moved
@@ -759,17 +782,19 @@ public:
             // last TMUL : [mxblock_cnt-1]
             L(kx32_loop_end);
             xchg(double_buff1, double_buff2);
-            tileloadd(tmmA0, ptr[src_ptr + src_stride]);
-            tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
-            tdpbf16ps(tmmC00, tmmA0, tmmB0);
-            if (BM > 16)
-                tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
-            tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
-            if (BM > 16)
-                tdpbf16ps(tmmC10, tmmA1, tmmB0);
-            tdpbf16ps(tmmC01, tmmA0, tmmB1);
-            if (BM > 16)
-                tdpbf16ps(tmmC11, tmmA1, tmmB1);
+            if (AMX_DEBUG_Tmuls) {
+                tileloadd(tmmA0, ptr[src_ptr + src_stride]);
+                tileloadd(tmmB0, ptr[double_buff2 + reg_B_stride + 0]);
+                tdpbf16ps(tmmC00, tmmA0, tmmB0);
+                if (BM > 16)
+                    tileloadd(tmmA1, ptr[src_ptr1 + src_stride]);
+                tileloadd(tmmB1, ptr[double_buff2 + reg_B_stride + 1024]);
+                if (BM > 16)
+                    tdpbf16ps(tmmC10, tmmA1, tmmB0);
+                tdpbf16ps(tmmC01, tmmA0, tmmB1);
+                if (BM > 16)
+                    tdpbf16ps(tmmC11, tmmA1, tmmB1);
+            }
 
             if (BM > 16) {
                 pop(src_ptr1);
@@ -784,10 +809,10 @@ public:
                 // zmm5 : 32x MX scales
                 vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
                 vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-                vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
+                // vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
                 vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
                 vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
-                add(scale_ptr, 32);
+                add(scale_ptr, ADDR_ADV32);
 
                 for (int i = 0; i < 8; i++) {
                     vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
@@ -796,15 +821,11 @@ public:
                     vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
                     vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
 
-                    vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here!
-                    vpcmpw(k2, zmm7, zmm_zero, 0);
+                    vpcmpw(k1, zmm6, zmm_zero, 4);  // -0.0f would fail the logic here, so e2m1_lut use +0.0f only
+                    vpcmpw(k2, zmm7, zmm_zero, 4);
                     // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
-                    kord(k1, k5, k1);
-                    kord(k2, k5, k2);
-                    vpaddw(zmm6, zmm6, zmm5);              // use exponent-add to apply MX-scale
-                    vpaddw(zmm7, zmm7, zmm5);              // use exponent-add to apply MX-scale
-                    vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
-                    vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
+                    vpaddw(zmm6|k1, zmm6, zmm5);         // use exponent-add to apply MX-scale
+                    vpaddw(zmm7|k2, zmm7, zmm5);         // use exponent-add to apply MX-scale
 
                     vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset], zmm6);
                     vmovdqu32(ptr[scratch_ptr + i * 128 + dst_offset + 64], zmm7);
@@ -812,8 +833,8 @@ public:
                     // is 32x16 weight correct?
                     // log_zmm("bf16", __LINE__, zmm6);
                     // log_zmm("bf16", __LINE__, zmm7);
-
-                    add(weight_ptr, 32);
+                    prefetcht2(ptr[weight_ptr + PREFETCH_ADV]);
+                    add(weight_ptr, ADDR_ADV32);
                 }
             };
 
@@ -887,7 +908,7 @@ public:
         uint8_t data[32*32/2];
     };
     struct e8m0_1x32 {
-        uint8_t data[32*2];
+        uint8_t data[32];
     };
     struct PackedWeight {
         tensor2D<e8m0_1x32> scales;
@@ -909,6 +930,8 @@ public:
         int K = num_k_blocks * 32;
         int N = t_mxfp4_weight.shape[1];
         int num_n_blocks = N / 32;
+        static int nmap_b1[16] = {4,5,6,7, 12,13,14,15, 20,21,22,23, 28,29,30,31};
+        static int nmap_b0[16] = {0,1,2,3, 8,9,10,11,   16,17,18,19, 24,25,26,27};
         PackedWeight pw(K, N);
         for(int nb = 0; nb < num_n_blocks; nb++) {
             for(int kb = 0; kb < num_k_blocks; kb++) {
@@ -928,10 +951,11 @@ public:
                     p_elements += 32;
                 }
                 for (int n = 0; n < 16; n++) {
-                    p_scales[2 * n + 0] = mxfp4_weight[n].scale_e8m0;
-                    p_scales[2 * n + 1] = mxfp4_weight[n].scale_e8m0;
+                    // to adapt VPUNPCKLWD/VPUNPCKHWD 
+                    // if scale_e8m0 is zero, all elements should be zero too;
+                    ASSERT(mxfp4_weight[n].scale_e8m0 != 0);
+                    p_scales[nmap_b0[n]] = mxfp4_weight[n].scale_e8m0;
                 }
-                p_scales += 32;
 
                 //============ tile B1 ==================
                 for (int m = 0; m < 32; m += 4) {
@@ -946,10 +970,10 @@ public:
                     p_elements += 32;
                 }
                 for (int n = 0; n < 16; n++) {
-                    p_scales[2 * n + 0] = mxfp4_weight[16 + n].scale_e8m0;
-                    p_scales[2 * n + 1] = mxfp4_weight[16 + n].scale_e8m0;
+                    // if scale_e8m0 is zero, all elements should be zero too;
+                    ASSERT(mxfp4_weight[16 + n].scale_e8m0 != 0);
+                    p_scales[nmap_b1[n]] = mxfp4_weight[16 + n].scale_e8m0;
                 }
-                p_scales += 32;
             }
         }
         return pw;
@@ -1027,8 +1051,7 @@ void exec_reference(tensor2D<AT>& src, tensor2D<mxfp4>& mxfp4_weight, tensor2D<f
 }
 
 static auto REF_VERBOSE = getenv("REF_VERBOSE", 0);
-static bool CLR_CACHE = getenv("CLR_CACHE", 0);
-static CLflush jit_clflush;
+static int CLR_CACHE = getenv("CLR_CACHE", 0);
 
 template <class MXFP4Gemm>
 void test(int BM, int K, int N) {
@@ -1040,17 +1063,17 @@ void test(int BM, int K, int N) {
     LinuxPerf::PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
 
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04),"STALLS_TOTAL"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06),"STALLS_L3_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05),"STALLS_L2_MISS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04),"STALLS_TOTAL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06),"STALLS_L3_MISS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05),"STALLS_L2_MISS"},
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
 
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
     });
 
     tensor2D<ActType> src(BM, K);
@@ -1100,15 +1123,16 @@ void test(int BM, int K, int N) {
     constexpr int REPEATS = 1;
 
     // warm-up
-    for (int repeat = 0; repeat < REPEATS; repeat++)
-        jit_kernel.run(src, pw, dst);
-
-    for (int i = 0; i < 10; i++) {
-        if (CLR_CACHE) {
-            auto* start_ptr = pw.elements_ptr();
-            auto* end_ptr = start_ptr + K*N/2;
-            jit_clflush(start_ptr, end_ptr);
+    CLflush::run(pw.elements_ptr(), K*N/2);
+    for (int i = 0; i < 32; i++) {
+        if ((i & 3) == 2) {
+            
+            CLflush::run(pw.elements_ptr(), K*N/2);
+            //std::this_thread::sleep_for(std::chrono::seconds(1));
+            printf("============\n");
+            //jit_clflush(pw.scales_ptr(), pw.scales_ptr() + K*N*2/32);
         }
+
         auto pmc = pevg.rdpmc(
             [&]() {
                 // repeat
@@ -1122,6 +1146,7 @@ void test(int BM, int K, int N) {
             });
     }
 }
+
 
 int main(int argc, const char* argv[]) {
     int BM = argc > 1 ? atoi(argv[1]) : 1;

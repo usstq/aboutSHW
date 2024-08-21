@@ -252,10 +252,28 @@ class jit_generator : public Xbyak::CodeGenerator {
 
 
 //===============================================================
-inline int getenv(const char * var, int default_value) {
+inline int64_t getenv(const char * var, int64_t default_value) {
     const char * p = std::getenv(var);
-    if (p) default_value = std::atoi(p);
-    printf("\e[32mENV:\t %s = %d %s\e[0m\n", var, default_value, p?"":"(default)");
+    if (p) {
+        char str_value[256];
+        int len = 0;
+        while(p[len] >= '0' && p[len] <= '9') {
+            str_value[len] = p[len];
+            len++;
+        }
+        str_value[len] = 0;
+
+        char unit = p[len];
+        int64_t unit_value = 1;
+        // has unit?
+        if (unit == 'K' || unit == 'k') unit_value = 1024;
+        if (unit == 'M' || unit == 'm') unit_value = 1024*1024;
+        if (unit == 'G' || unit == 'g') unit_value = 1024*1024*1024;
+
+        default_value = std::atoi(str_value) * unit_value;
+    }
+    printf("\e[32mENV:\t %s = %ld %s\e[0m\n", var, default_value, p?"":"(default)");
+
     return default_value;
 }
 
@@ -430,26 +448,30 @@ bool compare(tensor2D<T>& ref, tensor2D<T>& cur, bool verbose) {
 
 //===============================================================
 class CLflush : public jit_generator {
-public:
     CLflush() {
         create_kernel("CLflush");
     }
+
+public:
     void generate() override {
         //  abi_param1 ~ abi_param6, RAX, R10, R11
         auto start_ptr = abi_param1;
-        auto end_ptr = abi_param2;
+        auto loop_cnt = abi_param2;
         Xbyak::Label loop_begin;
-
+        mfence();
         align(64, false);
         L(loop_begin);
 
         clflush(ptr[start_ptr]);
-
+        mfence();
         lea(start_ptr, ptr[start_ptr + 64]);
-        cmp(start_ptr, end_ptr);
-        js(loop_begin, T_NEAR); // jmp back if sign is set: (start_ptr-end_ptr) < 0
-        sfence();
+        dec(loop_cnt);
+        jne(loop_begin, T_NEAR); // jmp back if sign is set: (start_ptr-end_ptr) < 0
         ret();
+    }
+    static inline void run(void* pv, int64_t size_bytes) {
+        static CLflush jit;
+        jit(pv, (size_bytes + 63)/64);
     }
 };
 

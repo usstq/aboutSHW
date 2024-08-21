@@ -112,6 +112,56 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
     - converts odd/even elements from bf16/fp16 into fp32
     - converts packed fp32 into packed bf16
 
+## Memory-bound
+
+Decompression two B-tiles of MXFP4-weights needs to access (32x32/2 + 32)=544 bytes, on Xeon(40Cores) with HBM(520GB/s), each core has up-to 13GB/s memory bandwidth, so it will took 512/13 ns, during which we have following number of CPU cycles for decompression code to use depending on core frequency:
+
+|CPU-frequency| CPU cycles |
+|-------------|------------|
+| 2 Ghz       |   83       |
+| 3 Ghz       |  125       |
+| 4 Ghz       |  167       |
+
+So memory-bound can be reached only if following computations can be done within this time window:
+ - 4 AMX TMULs with double-buffer store & loads (this is OK, 64 cycles are enough)
+ - 32x32 weight-decompression (this is tricky part)
+ 
+ the tricky thing is, CPU frequency is changing dynamically based on work-loads, if AMX is enabled, the frequency can be as low as 2GHz which further limits CPU cycles available for weight-decompression. so to using AMX for MatMul, we need to use even fewer instructions to do weight-decompression, we tried that direction:
+```c++
+    // a full MXFP4 decompression algo
+    vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
+    vpmovzxbw(zmm6, ymm6);             //
+    vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+    vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
+    vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
+
+    vpcmpw(k1, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here, so e2m1_lut use +0.0f only
+    vpcmpw(k2, zmm7, zmm_zero, 0);
+    // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
+    kord(k1, k5, k1);
+    kord(k2, k5, k2);
+    vpaddw(zmm6, zmm6, zmm5);         // use exponent-add to apply MX-scale
+    vpaddw(zmm7, zmm7, zmm5);         // use exponent-add to apply MX-scale
+    vpblendmw(zmm6 | k1, zmm6, zmm_zero);  // 16x2 bf16/fp16 weights from row 0,1
+    vpblendmw(zmm7 | k2, zmm7, zmm_zero);  // 16x2 bf16/fp16 weights from row 2,3
+```
+ - we can save `kord(...)` by avoiding value 0 for E8M0 scale: just detect such case and set all k elements to 0 instead;
+ - we can save `vpblendmw(...)` by using masked `vpaddw` instead, add exponent only-if element is non-zero;
+```c++
+    // simplified version
+    vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
+    vpmovzxbw(zmm6, ymm6);             //
+    vpsrld(zmm7, zmm6, 0x4);           // zmm6 : 32x (0x00, even-nibble) zmm7 : 32x (0x00, odd-nibble)
+    vpermw(zmm6, zmm6, zmm_e2m1_lut);  // e2m1 nibble to bf16
+    vpermw(zmm7, zmm7, zmm_e2m1_lut);  // e2m1 nibble to bf16
+    vpcmpw(k1, zmm6, zmm_zero, 4);  // -0.0f would fail the logic here, so e2m1_lut use +0.0f only
+    vpcmpw(k2, zmm7, zmm_zero, 4);
+    // zmm6 & zmm7 from same group of 16-mx-blocks (belong to same 32x16 B-tile)
+    vpaddw(zmm6|k1, zmm6, zmm5);         // use exponent-add to apply MX-scale
+    vpaddw(zmm7|k2, zmm7, zmm5);         // use exponent-add to apply MX-scale
+```
+
+this reduces CPU cycles of 32x32 MXFP4 decompression from 135 to 101.
 
 # FMA version
 
@@ -219,6 +269,32 @@ decompress_mxfp4_B1_to_buff2
     TMUL (A0,B0)(A0,B1)
 decompress_mxfp4_B1_to_buff3
     TMUL (A1,B0)(A1,B1)
+```
+
+
+```bash
+
+#========= we do observe 15% speed-up by SW_pipelining AMX & AVX512 when weights are cache-hot ======================
+$ AMX_DEBUG=3 CLR_CACHE=0 numactl -C56 -m1 ./a.out 32 128
+[MXFP4BrgemmAMX] ACCURACY:PASSED! 
+#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
+       163509,          353521,             91944,           2929,     26920,       10241,            2,  [  MXFP4BrgemmAMX] 51.045 us CPU:3.20(GHz) CPI:0.46 CPK:127.7x1280
+
+$ AMX_DEBUG=4 CLR_CACHE=0 numactl -C56 -m1 ./a.out 32 128
+[MXFP4BrgemmAMX] ACCURACY:PASSED! 
+#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
+        26397,           36231,             25200,           9304,      2860,        1025,            0,  [  MXFP4BrgemmAMX] 13.938 us CPU:1.89(GHz) CPI:0.73 CPK:206.2x128
+
+#========= but this speed-up almost gone when weights are cache-cold (flushed out)
+$ AMX_DEBUG=3 CLR_CACHE=1 numactl -C56 -m1 ./a.out 32 1280
+[MXFP4BrgemmAMX] ACCURACY:PASSED! 
+#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
+       382376,          353508,            176328,         162759,     26918,       10241,            2,  [  MXFP4BrgemmAMX] 97.412 us CPU:3.93(GHz) CPI:1.08 CPK:298.7x1280
+
+$ AMX_DEBUG=4 CLR_CACHE=1 numactl -C56 -m1 ./a.out 1 1280
+[MXFP4BrgemmAMX] ACCURACY:PASSED! 
+#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
+       377752,          354749,            174024,         167156,     26920,       10241,            2,  [  MXFP4BrgemmAMX] 96.256 us CPU:3.92(GHz) CPI:1.06 CPK:295.1x1280
 ```
 
 # Learn from compiler
