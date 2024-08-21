@@ -117,11 +117,9 @@ public:
         L(kx32_loop_begin);
 
         // zmm5 : 32x MX scales
-/*
         if (!is_vmul_scale) {
             vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
             vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-            vpcmpw(k1, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
             vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
             vpsllw(zmm5, zmm5, 0x7);  // shift-left into bf16/fp16 exponent: 32x scales
         } else {
@@ -132,7 +130,7 @@ public:
             vpunpckhwd(zmm4, zmm_zero, zmm5);
         }
         prefetcht2(ptr[scale_ptr + 1024]);
-*/
+
         mov(mx_size, 16);
         align(64, false);
         L(loop_begin);
@@ -152,17 +150,10 @@ public:
 
             if (!is_vmul_scale) {
                 // use exponent-add to apply MX-scale
-                //vpcmpw(k2, zmm6, zmm_zero, 0);  // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
-                //vpcmpw(k3, zmm7, zmm_zero, 0);
-
-                //kord(k2, k1, k2);
-                //kord(k3, k1, k3);
-
-                vpaddw(zmm6, zmm6, zmm5);
-                vpaddw(zmm7, zmm7, zmm5);
-
-                //vpblendmw(zmm6 | k2, zmm6, zmm_zero);  // 32x bf16/fp16 even weights: w0, w2, w4, ...
-                //vpblendmw(zmm7 | k3, zmm7, zmm_zero);  // 32x bf16/fp16 odd weights: w1, w3, w5, ...
+                vpcmpw(k2, zmm6, zmm_zero, 4);  // -0.0f would fail the logic here, so MXFP4 must replace -0.0f with +0.0f
+                vpcmpw(k3, zmm7, zmm_zero, 4);
+                vpaddw(zmm6|k2, zmm6, zmm5);
+                vpaddw(zmm7|k3, zmm7, zmm5);
             }
 
             // log_zmm("bf16", __LINE__, zmm6);
@@ -807,12 +798,17 @@ public:
                 //        dst_offset determines which of 4 Btile buffer it decompresses into
                 //
                 // zmm5 : 32x MX scales
-                vmovdqu8(ymm5, ptr[scale_ptr]);         // 32x E8M0
-                vpmovzxbw(zmm5, ymm5);                  // 32x 16bit
-                // vpcmpw(k5, zmm5, zmm_zero, 0);          // -0.0f would fail the logic here!
-                vpsubw(zmm5, zmm5, zmm_exponent_bias);  // subtract bias 127
-                vpsllw(zmm5, zmm5, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
-                add(scale_ptr, ADDR_ADV32);
+                if (dst_offset == 0) {
+                    vmovdqu8(Xbyak::Ymm(zmm_scales.getIdx()), ptr[scale_ptr]);         // 32x E8M0
+                    vpmovzxbw(zmm_scales, Xbyak::Ymm(zmm_scales.getIdx()));                  // 32x 16bit
+                    vpsubw(zmm_scales, zmm_scales, zmm_exponent_bias);  // subtract bias 127
+                    vpsllw(zmm_scales, zmm_scales, 0x7);                // shift-left into bf16/fp16 exponent: 32x scales
+                    vpunpcklwd(zmm5, zmm_scales, zmm_scales);
+                    prefetcht2(ptr[scale_ptr + 1024]);
+                    add(scale_ptr, ADDR_ADV32);
+                } else {
+                    vpunpckhwd(zmm5, zmm_scales, zmm_scales);
+                }
 
                 for (int i = 0; i < 8; i++) {
                     vmovdqu8(ymm6, ptr[weight_ptr]);   // load 4x16 e2m1 = 32bytes = 256bits
@@ -1124,9 +1120,8 @@ void test(int BM, int K, int N) {
 
     // warm-up
     CLflush::run(pw.elements_ptr(), K*N/2);
-    for (int i = 0; i < 32; i++) {
-        if ((i & 3) == 2) {
-            
+    for (int i = 0; i < 12; i++) {
+        if ((i & 1) == 1) {
             CLflush::run(pw.elements_ptr(), K*N/2);
             //std::this_thread::sleep_for(std::chrono::seconds(1));
             printf("============\n");
