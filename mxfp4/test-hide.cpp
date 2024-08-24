@@ -65,8 +65,29 @@ public:
 static int TSIZE = getenv("TSIZE", 16*1024*1024);
 
 // start thread lib
+thread_local LinuxPerf::PerfEventGroup pevg({
+    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+    {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+    //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
 
-int test_openmp(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
+    {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04),"STALLS_TOTAL"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06),"STALLS_L3_MISS"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05),"STALLS_L2_MISS"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
+    
+    {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x01, 0x00), "XSNP_MISS"},
+    {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x02, 0x00), "XSNP_NO_FWD"},
+    {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x04, 0x00), "XSNP_FWD"},
+    {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x08, 0x00), "XSNP_NONE"},
+    
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
+    //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
+});
+
+int test_openmp(int REPEAT) {
+
     CPUMemParallel jit_kernel;
     auto nthr = omp_get_max_threads();
 
@@ -101,24 +122,24 @@ int test_openmp(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
             },
             jit_kernel.name(),
             loop_count,
-            [&](uint64_t duration_ns, uint64_t* pmc){
+            [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                 auto bw = TSIZE*1.0/duration_ns;
-                printf(" MemBW:%.2f(GB/s) x %d = %.2f(GB/s) %s", bw, nthr, bw*nthr, clr_cache ? "======== with clflush":"");
+                log += sprintf(log, " MemBW:%.2f(GB/s) x %d = %.2f(GB/s) %s", bw, nthr, bw*nthr, clr_cache ? "======== with clflush":"");
             });
     }
     return 0;
 }
 
-// totally atomic & Lock free synchronization
-int test_lock_free(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
-    CPUMemParallel jit_kernel;
-    auto nthr = omp_get_max_threads();
-    auto loop_count = TSIZE/32;
-
-    volatile uint64_t sync[64*64] = {0}; // leave extra space to avoid false-sharing
-
-    auto sync_threads = [&](int ithr){
+struct SyncThreads1 {
+    std::shared_ptr<uint64_t> sync_buff;
+    const int nthr;
+    SyncThreads1(int nthr) : nthr(nthr) {
+        // leave extra padding space to avoid false-sharing
+        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
+    }
+    void operator()(int ithr) {
         auto id = ithr * 64;
+        volatile uint64_t * sync = sync_buff.get();
         sync[id] ++;
         auto expected = sync[id];
         for(int i = 0; i < nthr; i++) {
@@ -131,7 +152,16 @@ int test_lock_free(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
                     break;
             }
         }
-    };
+    }
+};
+
+// totally atomic & Lock free synchronization
+int test_lock_free(int REPEAT) {
+    CPUMemParallel jit_kernel;
+    auto nthr = omp_get_max_threads();
+    auto loop_count = TSIZE/32;
+
+    SyncThreads1 sync_threads(nthr);
 
     #pragma omp parallel
     {
@@ -153,9 +183,9 @@ int test_lock_free(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
                 },
                 jit_kernel.name(),
                 loop_count,
-                [&](uint64_t duration_ns, uint64_t* pmc){
+                [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                     auto bw = TSIZE*1.0/duration_ns;
-                    printf(" MemBW:%.2f(GB/s) x %d = %.2f(GB/s) [%d]", bw, nthr, bw*nthr, i);
+                    log += sprintf(log, " MemBW:%.2f(GB/s) x %d = %.2f(GB/s) [%d]", bw, nthr, bw*nthr, i);
                 });
             }
             else
@@ -171,32 +201,87 @@ int test_lock_free(LinuxPerf::PerfEventGroup& pevg, int REPEAT) {
 }
 
 
+struct SyncThreads2 {
+    std::shared_ptr<uint64_t> sync_buff;
+    const int nthr;
+    SyncThreads2(int nthr) : nthr(nthr) {
+        // leave extra padding space to avoid false-sharing
+        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
+    }
+    void operator()(int ithr) {
+        volatile uint64_t * sync = sync_buff.get();
+        auto id = ithr * 64;
+        if (ithr == 0) {
+            auto expected = sync[id] + 1;
+            // main core, check other core's sync_id, this 1-producer vs 1-consumer pattern
+            // would generate XSNP_FWD (cross-core L2 cache read) events on main-core
+            for(int i = 1; i < nthr; i++) {
+                for(;;) {
+                    auto s = sync[i*64];
+                    if (s == expected)
+                        break;
+                }
+            }
+            // main core step-forward only after all worker threads have finished
+            sync[id] ++;
+        } else {
+            sync[id] ++;
+            auto expected = sync[id];
+            // worker threads, check main-core's sync id, this 1-producer vs N-consumer pattern
+            // would be optimized and much faster.
+            while(sync[0] != expected);
+        }
+    }
+};
+
+// only main thread will check other cores's sync id
+// other cores will spin on main-core's sync id
+int test_lock_free2(int REPEAT) {
+    CPUMemParallel jit_kernel;
+    auto nthr = omp_get_max_threads();
+    auto loop_count = TSIZE/32;
+
+    SyncThreads2 sync_threads(nthr);
+
+    #pragma omp parallel
+    {
+        // cooperate threads knows what to do next, so 
+        int ithr = omp_get_thread_num();
+
+        tensor2D<uint8_t> tsrc(1, TSIZE);
+        memset(tsrc.ptr(), 1, TSIZE);
+
+        for(int i = 0; i < REPEAT; i++) {
+            CLflush::run(tsrc.ptr(), TSIZE); // clear cache
+            sync_threads(ithr);
+
+            if (ithr == 0) {
+                pevg.rdpmc([&](){
+                    jit_kernel(tsrc.ptr(), loop_count);
+                    sync_threads(ithr);
+                },
+                jit_kernel.name(),
+                loop_count,
+                [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
+                    auto bw = TSIZE*1.0/duration_ns;
+                    log += sprintf(log, " MemBW:%.2f(GB/s) x %d = %.2f(GB/s) [%d.%d]", bw, nthr, bw*nthr, i, ithr);
+                });
+            } else {
+                jit_kernel(tsrc.ptr(), loop_count);
+                sync_threads(ithr);
+            }
+        }
+    }
+    return 0;
+}
+
 int main() {
-    LinuxPerf::PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04),"STALLS_TOTAL"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06),"STALLS_L3_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05),"STALLS_L2_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
-        
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x01, 0x00), "XSNP_MISS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x02, 0x00), "XSNP_NO_FWD"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x04, 0x00), "XSNP_FWD"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd2, 0x08, 0x00), "XSNP_NONE"},
-        
-
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
-    });
     printf("omp_get_max_threads()=%d\n", omp_get_max_threads());
     pevg.show_header();
     printf("============= openmp =============\n");
-    test_openmp(pevg, 10);
+    test_openmp(10);
     printf("============= lock_free =============\n");
-    test_lock_free(pevg, 10);
+    test_lock_free(10);
+    printf("============= lock_free2 =============\n");
+    test_lock_free2(10);    
 }

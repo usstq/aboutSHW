@@ -893,48 +893,68 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     template<class FN>
-    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0, std::function<void(uint64_t, uint64_t*)> addinfo = {}) {
+    std::vector<uint64_t> rdpmc(FN fn, std::string name = {}, int64_t loop_cnt = 0, std::function<void(uint64_t, uint64_t*, char*&)> addinfo = {}) {
         int cnt = events.size();
         std::vector<uint64_t> pmc(cnt, 0);
 
-        for(int i = 0; i < cnt; i++) {
-            if (events[i].pmc_index)
-                pmc[i] = _rdpmc(events[i].pmc_index - 1);
-            else
-                pmc[i] = 0;
+        bool use_pmc = (num_events_no_pmc == 0);
+        if (use_pmc) {
+            for(int i = 0; i < cnt; i++) {
+                if (events[i].pmc_index)
+                    pmc[i] = _rdpmc(events[i].pmc_index - 1);
+                else
+                    pmc[i] = 0;
+            }
+        } else {
+            read();
+            for(int i = 0; i < cnt; i++) {
+                pmc[i] = values[i];
+            }
         }
+
         auto tsc0 = __rdtsc();
         fn();
         auto tsc1 = __rdtsc();
-        for(int i = 0; i < cnt; i++) {
-            if (events[i].pmc_index)
-                pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
-            else
-                pmc[i] = 0;
+
+        if (use_pmc) {
+            for(int i = 0; i < cnt; i++) {
+                if (events[i].pmc_index)
+                    pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+                else
+                    pmc[i] = 0;
+            }
+        } else {
+            read();
+            for(int i = 0; i < cnt; i++) {
+                pmc[i] -= values[i];
+            }
         }
 
         if (!name.empty()) {
-            printf("\e[33m");
+            char log_buff[1024];
+            char * log = log_buff;
+            log += sprintf(log, "\e[33m");
             for(int i = 0; i < cnt; i++) {
-                printf(events[i].format, pmc[i]);
+                log += sprintf(log, events[i].format, pmc[i]);
             }
             auto duration_ns = tsc2nano(tsc1 - tsc0);
             
-            printf("\e[0m [%16s] %.3f us", name.c_str(), duration_ns/1e3);
+            log += sprintf(log, "\e[0m [%16s] %.3f us", name.c_str(), duration_ns/1e3);
             if (hw_cpu_cycles_evid >= 0) {
-                printf(" CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
+                log += sprintf(log, " CPU:%.2f(GHz)", 1.0 * pmc[hw_cpu_cycles_evid] / duration_ns);
                 if (hw_instructions_evid >= 0) {
-                    printf(" CPI:%.2f", 1.0 * pmc[hw_cpu_cycles_evid] / pmc[hw_instructions_evid]);
+                    log += sprintf(log, " CPI:%.2f", 1.0 * pmc[hw_cpu_cycles_evid] / pmc[hw_instructions_evid]);
                 }
                 if (loop_cnt > 0) {
                     // cycles per kernel (or per-iteration)
-                    printf(" CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
+                    log += sprintf(log, " CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
                 }
             }
             if (addinfo) {
-                addinfo(duration_ns, &pmc[0]);
+                addinfo(duration_ns, &pmc[0], log);
             }
-            printf("\n");
+            log += sprintf(log, "\n");
+            printf(log_buff);
         }
         return pmc;
     }
