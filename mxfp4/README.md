@@ -112,7 +112,7 @@ According to [Intel® Architecture Instruction Set Extensions and Future Feature
     - converts odd/even elements from bf16/fp16 into fp32
     - converts packed fp32 into packed bf16
 
-## Memory-bound
+## Memory-Access Computation Parallelism
 
 Decompression two B-tiles of MXFP4-weights needs to access (32x32/2 + 32)=544 bytes, on Xeon(40Cores) with HBM(520GB/s), each core has up-to 13GB/s memory bandwidth, so it will took 512/13 ns, during which we have following number of CPU cycles for decompression code to use depending on core frequency:
 
@@ -271,31 +271,13 @@ decompress_mxfp4_B1_to_buff3
     TMUL (A1,B0)(A1,B1)
 ```
 
+## Multi-Core Level Parallelism
 
-```bash
+[test-hide.cpp](./test-hide.cpp) shows that OpenMP has considerable overhead on 56-cores:
+ - gomp 15~20 us start-up overhead
+ - iomp 3~4 us start-up overhead
 
-#========= we do observe 15% speed-up by SW_pipelining AMX & AVX512 when weights are cache-hot ======================
-$ AMX_DEBUG=3 CLR_CACHE=0 numactl -C56 -m1 ./a.out 32 128
-[MXFP4BrgemmAMX] ACCURACY:PASSED! 
-#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
-       163509,          353521,             91944,           2929,     26920,       10241,            2,  [  MXFP4BrgemmAMX] 51.045 us CPU:3.20(GHz) CPI:0.46 CPK:127.7x1280
-
-$ AMX_DEBUG=4 CLR_CACHE=0 numactl -C56 -m1 ./a.out 32 128
-[MXFP4BrgemmAMX] ACCURACY:PASSED! 
-#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
-        26397,           36231,             25200,           9304,      2860,        1025,            0,  [  MXFP4BrgemmAMX] 13.938 us CPU:1.89(GHz) CPI:0.73 CPK:206.2x128
-
-#========= but this speed-up almost gone when weights are cache-cold (flushed out)
-$ AMX_DEBUG=3 CLR_CACHE=1 numactl -C56 -m1 ./a.out 32 1280
-[MXFP4BrgemmAMX] ACCURACY:PASSED! 
-#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
-       382376,          353508,            176328,         162759,     26918,       10241,            2,  [  MXFP4BrgemmAMX] 97.412 us CPU:3.93(GHz) CPI:1.08 CPK:298.7x1280
-
-$ AMX_DEBUG=4 CLR_CACHE=1 numactl -C56 -m1 ./a.out 1 1280
-[MXFP4BrgemmAMX] ACCURACY:PASSED! 
-#0:HW_CPU_CYCLES, HW_INSTRUCTIONS, HW_REF_CPU_CYCLES, BOUND_ON_LOADS, ALL_LOADS, SPLIT_LOADS, SPLIT_STORES, 
-       377752,          354749,            174024,         167156,     26920,       10241,            2,  [  MXFP4BrgemmAMX] 96.256 us CPU:3.92(GHz) CPI:1.06 CPK:295.1x1280
-```
+if we use atomic & lock free synchronization (test_lock_free), this can be greatly reduced.
 
 # Learn from compiler
 

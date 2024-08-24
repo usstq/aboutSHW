@@ -335,19 +335,32 @@ std::shared_ptr<T> alloc_cache_aligned(int count) {
 //===============================================================
 template <typename T>
 struct tensor2D {
-    int shape[2];
-    int stride_bytes;
+    int shape[2] = {0};
+    int stride_bytes = 0;
     std::shared_ptr<T> data;
 
     uint64_t size() {
         return shape[0] * stride_bytes;
     }
 
+    tensor2D() = default;
+
     tensor2D(int rows, int cols) {
         shape[0] = rows;
         shape[1] = cols;
         stride_bytes = cols * sizeof(T);
         data = alloc_cache_aligned<T>(rows * cols);
+    }
+
+    tensor2D<T> clone() {
+        // deep copy
+        tensor2D<T> ret;
+        ret.shape[0] = shape[0];
+        ret.shape[1] = shape[1];
+        ret.stride_bytes = shape[1] * sizeof(T);
+        ret.data = alloc_cache_aligned<T>(shape[0] * shape[1]);
+        memcpy(ret.data.get(), data.get(), shape[0] * shape[1] * sizeof(T));
+        return ret;
     }
 
     T* ptr(int i0 = 0, int i1 = 0) const {
