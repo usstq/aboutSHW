@@ -181,6 +181,150 @@ void test_lockfree2(bool show_detailed_pmc) {
     }
 }
 
+#define _GNU_SOURCE             /* See feature_test_macros(7) */
+#include <sched.h>
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
+#endif
+
+struct ThreadPool {
+    std::shared_ptr<uint64_t> sync_buff;
+    const int nthr;
+
+    std::vector< std::thread > workers;
+    std::function<void(int ithr, int nthr)>* p_task;
+
+    struct CPUAffinity {
+        cpu_set_t cpu_mask;
+        std::vector<int> cpu_ids;
+        CPUAffinity() {
+            CPU_ZERO(&cpu_mask);
+            if (sched_getaffinity(getpid(), sizeof(cpu_set_t), &cpu_mask)) {
+                perror(LINUX_PERF_"sched_getaffinity failed:");
+                abort();
+            }
+            for (int cpu = 0; cpu < (int)sizeof(cpu_set_t)*8; cpu++)
+                if(CPU_ISSET(cpu, &cpu_mask))
+                    cpu_ids.push_back(cpu);
+        }
+        ~CPUAffinity() {
+            // recover affinity of main thread
+            if (sched_setaffinity(getpid(), sizeof(cpu_mask), &cpu_mask) == -1) {
+                perror("sched_setaffinity");
+                abort();
+            }
+        }
+        cpu_set_t set(int ithr) {
+            auto ttid = gettid();
+            cpu_set_t org_set;
+            if (sched_getaffinity(ttid, sizeof(org_set), &org_set)) {
+                perror(LINUX_PERF_"sched_getaffinity failed:");
+                abort();
+            }
+            cpu_set_t set;
+            CPU_ZERO(&set);
+            CPU_SET(cpu_ids[ithr], &set);
+            if (sched_setaffinity(ttid, sizeof(set), &set) == -1) {
+                perror("sched_setaffinity");
+                abort();
+            }
+            return org_set;
+        }
+    } cpu_affinity;
+    
+
+    ThreadPool(int nthr) : nthr(nthr) {
+        // leave extra padding space to avoid false-sharing
+        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
+        
+        cpu_affinity.set(0);
+
+        // main threads is also a worker thread
+        // start other worker threads
+        for(int ithr = 1; ithr < nthr; ++ithr) {
+            workers.emplace_back(
+                [this, ithr, nthr]
+                {
+                    cpu_affinity.set(ithr);
+                    volatile uint64_t * sync = sync_buff.get();
+                    uint64_t expected_main_id = 0;
+                    auto id = ithr * 64;
+                    for(;;)
+                    {
+                        // worker threads, check main-core's sync id, this 1-producer vs N-consumer pattern
+                        // would be optimized and much faster.
+                        expected_main_id ++;
+                        while(sync[0] != expected_main_id);
+
+                        if (p_task == nullptr)
+                            break;
+                        // wait for 
+                        (*p_task)(ithr, nthr);
+
+                        sync[id] ++;
+                    }
+                }
+            );
+        }
+    }
+    ~ThreadPool() {
+        volatile uint64_t * sync = sync_buff.get();
+        p_task = nullptr;
+        std::atomic_thread_fence(std::memory_order_seq_cst); // mfence
+        sync[0] ++;
+        for(int ithr = 1; ithr < nthr; ++ithr) {
+            workers[ithr-1].join();
+        }
+    }
+
+    void run(std::function<void(int ithr, int nthr)>& task) {
+        volatile uint64_t * sync = sync_buff.get();
+        p_task = &task;
+        std::atomic_thread_fence(std::memory_order_seq_cst); // mfence
+        // main core step-forward only after all worker threads have finished
+        sync[0] ++;
+
+        // start next work
+        (*p_task)(0, nthr);
+
+        // wait all other worker thread to finish.
+        auto expected = sync[0];
+        // main core, check other core's sync_id, this 1-producer vs 1-consumer pattern
+        // would generate XSNP_FWD (cross-core L2 cache read) events on main-core
+        for(int i = 1; i < nthr; i++) {
+            for(;;) {
+                auto s = sync[i*64];
+                if (s == expected)
+                    break;
+            }
+        }
+    }
+};
+
+
+
+void test_threadpool(ThreadPool& tpool, bool show_detailed_pmc) {
+    thread_local volatile int a = 0;
+    auto nthr = omp_get_max_threads();
+
+    std::function<void(int ithr, int nthr)> task = [](int ithr, int nthr) {
+        if (ithr < 0) printf("not possible\n");
+    };
+
+    auto test_body = [&](){
+        for(int i = 0; i < REPEAT; i++) {
+            tpool.run(task);
+        }
+    };
+
+    if (show_detailed_pmc) {
+        pevg.rdpmc([&](){ test_body(); }, "x");
+    } else {
+        test_body();
+    }
+}
+
 static int ROUNDS = getenv("ROUNDS", 10);
 
 int main() {
@@ -191,5 +335,8 @@ int main() {
     for(int i = 0; i < ROUNDS; i++) pevg.rdpmc([&]() { test_lockfree1(i == ROUNDS-1); }, "test_lockfree1", REPEAT);
     printf("========\n");
     for(int i = 0; i < ROUNDS; i++) pevg.rdpmc([&]() { test_lockfree2(i == ROUNDS-1); }, "test_lockfree2", REPEAT);
+    printf("========\n");
+    ThreadPool tpool(omp_get_max_threads());
+    for(int i = 0; i < ROUNDS; i++) pevg.rdpmc([&]() { test_threadpool(tpool, i == ROUNDS-1); }, "test_threadpool", REPEAT);
     return 0;
 }
