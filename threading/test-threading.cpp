@@ -1,7 +1,9 @@
 /*
  what's the fatest way to synchronize using multi-threading on multi-core CPU, especially on Xeon with lots of cores?
  
- https://en.wikipedia.org/wiki/Spinlock
+https://en.wikipedia.org/wiki/Spinlock
+https://stackoverflow.com/questions/38447226/atomicity-of-loads-and-stores-on-x86
+https://www.cl.cam.ac.uk/%7Epes20/cpp/cpp0xmappings.html
 
 Retired load instructions whose data sources comes from different places:
 
@@ -55,18 +57,21 @@ thread_local LinuxPerf::PerfEventGroup pevg({
 
 static int REPEAT = getenv("REPEAT", 100);
 
+// padding between atomics to avoid false-sharing
+#define PADDING_MULT 64
+
 struct SyncThreads1 {
-    std::shared_ptr<uint64_t> sync_buff;
+    std::vector<std::atomic<uint64_t>> sync_ids; 
+    //std::shared_ptr<uint64_t> sync_buff;
     const int nthr;
-    SyncThreads1(int nthr) : nthr(nthr) {
+    SyncThreads1(int nthr) : nthr(nthr), sync_ids(nthr * PADDING_MULT) {
         // leave extra padding space to avoid false-sharing
-        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
+        // sync_buff = alloc_cache_aligned<uint64_t>(nthr * PADDING_MULT, 0);
     }
     void operator()(int ithr) {
-        auto id = ithr * 64;
-        volatile uint64_t * sync = sync_buff.get();
-        sync[id] ++;
-        auto expected = sync[id];
+        auto id = ithr * PADDING_MULT;
+        sync_ids[id] ++;
+        auto expected = sync_ids[id].load();
 
 
         // N-producer vs N-consumer, optimized cache would finally put the data in L3, and most access would be XSNP_NONE
@@ -76,7 +81,7 @@ struct SyncThreads1 {
             // started & finished next task & added its sync index.
             // but it cannot goes further until current thread also reach that point.
             for(;;) {
-                auto s = sync[i*64];
+                auto s = sync_ids[i*PADDING_MULT].load();
                 if (s == expected || s == (expected + 1))
                     break;
             }
@@ -85,36 +90,33 @@ struct SyncThreads1 {
 };
 
 struct SyncThreads2 {
-    std::shared_ptr<uint64_t> sync_buff;
+    std::vector<std::atomic<uint64_t>> sync_ids;
     const int nthr;
-    SyncThreads2(int nthr) : nthr(nthr) {
-        // leave extra padding space to avoid false-sharing
-        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
+    SyncThreads2(int nthr) : nthr(nthr), sync_ids(nthr * PADDING_MULT) {
     }
     void operator()(int ithr) {
-        volatile uint64_t * sync = sync_buff.get();
-        auto id = ithr * 64;
+        auto id = ithr * PADDING_MULT;
         if (ithr == 0) {
-            auto expected = sync[id] + 1;
+            auto expected = sync_ids[id].load() + 1;
             // main core, load & check worker thread/core's sync_id, this 1-producer vs 1-consumer pattern
             // would generate XSNP_FWD (cross-core L2 cache read) events on main-core (x nthr)
             for(int i = 1; i < nthr; i++) {
                 for(;;) {
-                    auto s = sync[i*64];
+                    auto s = sync_ids[i*PADDING_MULT].load();
                     if (s == expected)
                         break;
                 }
             }
             // main core step-forward only after all worker threads have finished.
-            sync[id] ++;
+            sync_ids[id] ++;
         } else {
-            sync[id] ++;
-            auto expected = sync[id];
+            sync_ids[id] ++;
+            auto expected = sync_ids[id].load();
             // worker threads, load & check main-core's sync id, this 1-producer vs N-consumer pattern
             // would generate XSNP_NO_FWD (data was shared/clean in another core's local cache)
             // this design decreases the number of cross-core loads for worker threads, since they
             // don't need to check all other worker's status.
-            while(sync[0] != expected);
+            while(sync_ids[0].load() != expected);
         }
     }
 };
@@ -189,11 +191,11 @@ void test_lockfree2(bool show_detailed_pmc) {
 #endif
 
 struct ThreadPool {
-    std::shared_ptr<uint64_t> sync_buff;
+    std::vector<std::atomic<uint64_t>> sync_ids;
     const int nthr;
 
     std::vector< std::thread > workers;
-    std::function<void(int ithr, int nthr)>* p_task;
+    std::atomic<std::function<void(int ithr, int nthr)>*> p_task;
 
     struct CPUAffinity {
         cpu_set_t cpu_mask;
@@ -234,10 +236,7 @@ struct ThreadPool {
     } cpu_affinity;
     
 
-    ThreadPool(int nthr) : nthr(nthr) {
-        // leave extra padding space to avoid false-sharing
-        sync_buff = alloc_cache_aligned<uint64_t>(nthr * 64, 0);
-        
+    ThreadPool(int nthr) : nthr(nthr), sync_ids(nthr * PADDING_MULT) {
         cpu_affinity.set(0);
 
         // main threads is also a worker thread
@@ -247,62 +246,55 @@ struct ThreadPool {
                 [this, ithr, nthr]
                 {
                     cpu_affinity.set(ithr);
-                    volatile uint64_t * sync = sync_buff.get();
                     uint64_t expected_main_id = 0;
-                    auto id = ithr * 64;
+                    auto id = ithr * PADDING_MULT;
                     for(;;)
                     {
                         // worker threads, check main-core's sync id, this 1-producer vs N-consumer pattern
                         // would be optimized and much faster.
                         expected_main_id ++;
-                        while(sync[0] != expected_main_id);
+                        while(sync_ids[0].load() != expected_main_id);
 
                         if (p_task == nullptr)
                             break;
                         // wait for 
                         (*p_task)(ithr, nthr);
 
-                        sync[id] ++;
+                        sync_ids[id] ++;
                     }
                 }
             );
         }
     }
     ~ThreadPool() {
-        volatile uint64_t * sync = sync_buff.get();
-        p_task = nullptr;
-        std::atomic_thread_fence(std::memory_order_seq_cst); // mfence
-        sync[0] ++;
+        p_task.store(nullptr); // std::atomic_thread_fence(std::memory_order_seq_cst); // mfence
+        sync_ids[0] ++;
         for(int ithr = 1; ithr < nthr; ++ithr) {
             workers[ithr-1].join();
         }
     }
 
     void run(std::function<void(int ithr, int nthr)>& task) {
-        volatile uint64_t * sync = sync_buff.get();
-        p_task = &task;
-        std::atomic_thread_fence(std::memory_order_seq_cst); // mfence
+        p_task.store(&task);
         // main core step-forward only after all worker threads have finished
-        sync[0] ++;
+        sync_ids[0] ++;
 
         // start next work
         (*p_task)(0, nthr);
 
         // wait all other worker thread to finish.
-        auto expected = sync[0];
+        auto expected = sync_ids[0].load();
         // main core, check other core's sync_id, this 1-producer vs 1-consumer pattern
         // would generate XSNP_FWD (cross-core L2 cache read) events on main-core
         for(int i = 1; i < nthr; i++) {
             for(;;) {
-                auto s = sync[i*64];
+                auto s = sync_ids[i*PADDING_MULT].load();
                 if (s == expected)
                     break;
             }
         }
     }
 };
-
-
 
 void test_threadpool(ThreadPool& tpool, bool show_detailed_pmc) {
     thread_local volatile int a = 0;
