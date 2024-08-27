@@ -32,6 +32,7 @@ inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int
 #include <set>
 #include <iomanip>
 #include <functional>
+#include <limits>
 
 namespace LinuxPerf {
 
@@ -216,7 +217,7 @@ struct PerfRawConfig {
                         }
                     }
                     if (items[0] == "dump")
-                        dump = -1; // no limit to number of dumps
+                        dump = std::numeric_limits<int64_t>::max(); // no limit to number of dumps
                 }
             }
 
@@ -242,7 +243,9 @@ struct PerfRawConfig {
     bool dump_on_cpu(int cpu) {
         if (dump == 0)
             return false;
-        return CPU_ISSET(cpu, &cpu_mask);
+        if (CPU_COUNT(&cpu_mask))
+            return CPU_ISSET(cpu, &cpu_mask);
+        return true;
     }
 
     int64_t dump = 0;
@@ -1056,7 +1059,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
     ProfileData* _profile(const std::string& title, int id = 0) {
         if (dump_limit == 0)
-            return {};
+            return nullptr;
         dump_limit --;
 
         PerfEventCtxSwitch::get().updateRingBuffer();

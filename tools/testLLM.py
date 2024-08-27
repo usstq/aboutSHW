@@ -13,6 +13,7 @@ import sys, os
 import psutil
 import tqdm
 import numpy as np
+from datetime import datetime
 
 process = psutil.Process()
 
@@ -135,6 +136,7 @@ parser.add_argument('-s', '--smaps', action="store_true")
 parser.add_argument('--maps', action="store_true")
 parser.add_argument('-r', '--repeats', type=int, default=1)
 parser.add_argument('-e', '--export', action="store_true")
+parser.add_argument('-nb', '--num_beams', type=int, default=1)
 
 parser.add_argument("-ppl", type=str, default=None)
 parser.add_argument("-ppl-chunk", type=int, default=512)
@@ -249,7 +251,7 @@ for batch_size in args.batch_sizes:
     # print(rank_info, f"all_data={all_data}")
 
     ov_model._latencies = []
-    answers = ov_model.generate(**inputs, max_new_tokens=args.new_tokens, min_new_tokens=args.new_tokens, do_sample=False)
+    answers = ov_model.generate(**inputs, max_new_tokens=args.new_tokens, min_new_tokens=args.new_tokens, do_sample=False, num_beams=args.num_beams)
 
     print("\r", " " * 80, "\r", end="")
     
@@ -279,7 +281,8 @@ for batch_size in args.batch_sizes:
     second_tok_latency = sum(l[1:])/(len(l)-1) if len(l) > 1 else 0
     mem_info = process.memory_info()
     second_tok_tput = input_ids.shape[0] * (1.0/second_tok_latency)
-    print(rank_info, f" prompt:{input_ids.shape[0]}x{input_ids.shape[1]}  {l[0]*1e3:6.1f} ms + {second_tok_latency*1e3:6.1f} ms x {len(l)-1} (2nd-token tput: {second_tok_tput:.1f})   outputs: {output_str}  RSS/VMS {mem_info.rss*1e-9: .3f}/{mem_info.vms*1e-9: .3f} GB")
+
+    print(rank_info, f" {datetime.now().strftime('%H:%M:%S')} prompt:{input_ids.shape[0]}x{input_ids.shape[1]}  {l[0]*1e3:6.1f} ms + {second_tok_latency*1e3:6.1f} ms x {len(l)-1} (2nd-token tput: {second_tok_tput:.1f})   outputs: {output_str}  RSS/VMS {mem_info.rss*1e-9: .3f}/{mem_info.vms*1e-9: .3f} GB")
 
 print(f"ov_config={ov_config}")
 
