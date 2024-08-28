@@ -552,7 +552,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t pmc_index = 0;
         perf_event_mmap_page* pmeta = nullptr;
         std::string name = "?";
-        char format[16];
+        char format[32];
     };
     std::vector<event> events;
 
@@ -689,7 +689,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 add_raw(tc.config);
             }
             events.back().name = tc.name;
-            sprintf(events.back().format, "%%%lulu, ", strlen(tc.name));
+            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", strlen(tc.name));
         }
 
         // env var defined raw events
