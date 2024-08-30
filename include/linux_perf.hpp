@@ -580,9 +580,45 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t tsc_end;
         std::string title;
         const char * cat;
-        uint32_t id;
+        int32_t id;
         static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
         uint64_t data[data_size] = {0};
+        // f/i/u/p
+        char extra_data_type[data_size] = {0};
+        union {
+            double f;
+            int64_t i;
+            void * p;
+        } extra_data[data_size];
+
+        template<typename T>
+        char get_extra_type(T t) {
+            if (std::is_pointer<T>::value) return 'p';
+            if (std::is_floating_point<T>::value) return 'f';
+            if (std::is_integral<T>::value) return 'i';
+            return '\0';
+        }
+        template<typename T>
+        void set_extra_data(int i, T* t) { extra_data[i].p = t; }
+        void set_extra_data(int i, float t) { extra_data[i].f = t; }
+        void set_extra_data(int i, double t) { extra_data[i].f = t; }
+        template<typename T>
+        void set_extra_data(int i, T t) {
+            static_assert(std::is_integral<T>::value);
+            extra_data[i].i = t;
+        }
+
+        template <typename ... Values>
+        void set_extra_data(Values... vals) {
+            static_assert(data_size >= sizeof...(vals));
+            int j = 0;
+            int unused1[] = { 0, (set_extra_data(j++, vals), 0)... };
+            (void)unused1;
+            j = 0;
+            int unused2[] = { 0, (extra_data_type[j++] = get_extra_type(vals), 0)... };
+            (void)unused2;
+            extra_data_type[j] = '\0';
+        }
 
         ProfileData(const std::string& title) : title(title) {
             start();
@@ -619,9 +655,22 @@ struct PerfEventGroup : public IPerfEventDumper {
             auto start = tsc.tsc_to_usec(d.tsc_start);
             //auto end = tsc.tsc_to_usec(d.tsc_end);
 
-            fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
-                << "\"pid\": " << my_pid << ", \"tid\": " << my_tid << ","
-                << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << ",";
+            if (d.id < 0) {
+                // async events
+                // {"cat": "foo", "name": "async_read2", "pid": 4092243, "id": 4092246, "ph": "b", "ts": 23819.718},
+                fw << "{\"ph\": \"b\", \"name\": \"" << d.title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"id\": " << (-d.id) << ","
+                    << "\"ts\": " << std::setprecision (15) << start << "},";
+
+                fw << "{\"ph\": \"e\", \"name\": \"" << d.title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"id\": " << (-d.id) << ","
+                    << "\"ts\": " << std::setprecision (15) << tsc.tsc_to_usec(d.tsc_end) << ",";
+            } else {
+                fw << "{\"ph\": \"X\", \"name\": \"" << title << "\", \"cat\":\"" << cat << "\","
+                    << "\"pid\": " << my_pid << ", \"tid\": " << my_tid << ","
+                    << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << ",";
+            }
+
             fw << "\"args\":{";
             {
                 std::stringstream ss;
@@ -641,11 +690,24 @@ struct PerfEventGroup : public IPerfEventDumper {
                         ss << "\"CPI\":" << static_cast<double>(d.data[hw_cpu_cycles_evid])/d.data[hw_instructions_evid] << ",";
                     }
                 }
-                ss.imbue(std::locale(""));
+                auto prev_locale = ss.imbue(std::locale(""));
                 const char * sep = "";
                 for(size_t i = 0; i < events.size() && i < d.data_size; i++) {
                     ss << sep << "\"" << events[i].name << "\":\"" << d.data[i] << "\"";
                     sep = ",";
+                }
+                ss.imbue(prev_locale);
+                if (d.extra_data_type[0] != 0) {
+                    sep = "";
+                    ss << ",\"Extra Data\":[";
+                    for(size_t i = 0; i < d.data_size && (d.extra_data_type[i] != 0); i++) {
+                        if (d.extra_data_type[i] == 'f') ss << sep << d.extra_data[i].f;
+                        else if (d.extra_data_type[i] == 'i') ss << sep << d.extra_data[i].i;
+                        else if (d.extra_data_type[i] == 'p') ss << sep << "\"" << d.extra_data[i].p << "\"";
+                        else ss << sep << "\"?\"";
+                        sep = ",";
+                    }
+                    ss << "]";
                 }
                 fw << ss.str();
             }
@@ -1006,8 +1068,9 @@ struct PerfEventGroup : public IPerfEventDumper {
     struct ProfileScope {
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
+        bool do_unlock = false;
         ProfileScope() = default;
-        ProfileScope(PerfEventGroup* pevg, ProfileData* pd) : pevg(pevg), pd(pd) {}
+        ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool do_unlock = false) : pevg(pevg), pd(pd), do_unlock(do_unlock) {}
 
         // Move only
         ProfileScope(const ProfileScope&) = delete;
@@ -1032,6 +1095,9 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
 
         uint64_t* finish() {
+            if (do_unlock) {
+                PerfEventGroup::get_sampling_lock() --;
+            }
             if (!pevg || !pd)
                 return nullptr;
 
@@ -1058,6 +1124,8 @@ struct PerfEventGroup : public IPerfEventDumper {
     };
 
     ProfileData* _profile(const std::string& title, int id = 0) {
+        if (get_sampling_lock().load() != 0)
+            return nullptr;
         if (dump_limit == 0)
             return nullptr;
         dump_limit --;
@@ -1084,25 +1152,53 @@ struct PerfEventGroup : public IPerfEventDumper {
         return pd;
     }
 
-    ProfileScope Profile(const std::string& title, int id = 0) {
-        return {this, _profile(title, id)};
+    static PerfEventGroup& get() {
+        thread_local PerfEventGroup pevg({
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+            {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+            //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
+            {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
+        });
+        return pevg;
+    }
+
+    // this lock is global, affect all threads
+    static std::atomic_int& get_sampling_lock() {
+        static std::atomic_int sampling_lock{0};
+        return sampling_lock;
     }
 };
 
 using ProfileScope = PerfEventGroup::ProfileScope;
 
 // pwe-thread event group with default events pre-selected
-inline ProfileScope Profile(const std::string& title, int id = 0) {
-    thread_local PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-        //{PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, "HW_REF_CPU_CYCLES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, "SW_CONTEXT_SWITCHES"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, "SW_TASK_CLOCK"},
-        {PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS, "SW_PAGE_FAULTS"}
-    });
-    return {&pevg, pevg._profile(title, id)};
+template <typename ... Args>
+ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+    return {&pevg, pd};
+}
+
+// overload accept sampling_probability, which can be used to disable profile in scope 
+template <typename ... Args>
+ProfileScope Profile(float sampling_probability, const std::string& title, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+
+    bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
+    if (disable_profile) {
+        PerfEventGroup::get_sampling_lock() ++;
+    }
+    return {&pevg, pd, disable_profile};
 }
 
 inline int Init() {
