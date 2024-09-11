@@ -191,11 +191,14 @@ class jit_generator : public Xbyak::CodeGenerator {
   }
 #endif
 
-  uint8_t log_buffer[4096*1024];
+  std::vector<uint8_t> log_buffer;
   uint8_t * log_ptr = nullptr;
 
   void log_reset() {
-    log_ptr = log_buffer;
+    if (log_buffer.empty()) {
+        log_buffer.resize(4096*1024);
+    }
+    log_ptr = &log_buffer[0];
   }
   void log_zmm(const char* fmt, int line_num, Xbyak::Zmm zmm) {
     push(rax);
@@ -215,7 +218,7 @@ class jit_generator : public Xbyak::CodeGenerator {
     pop(rax);
   }
   void log_show() {
-    uint8_t* plog = log_buffer;
+    uint8_t* plog = &log_buffer[0];
     int i = 0;
     while(plog < log_ptr) {
         auto * fmt = *reinterpret_cast<const char **>(plog); plog += 8;
@@ -345,11 +348,16 @@ struct tensor2D {
 
     tensor2D() = default;
 
-    tensor2D(int rows, int cols) {
+    tensor2D(int rows, int cols, bool initialize = false) {
         shape[0] = rows;
         shape[1] = cols;
         stride_bytes = cols * sizeof(T);
         data = alloc_cache_aligned<T>(rows * cols);
+        if (initialize) {
+            auto* pdata = data.get();
+            for(int i = 0; i < rows * cols; i++)
+                pdata[i] = 0;
+        }        
     }
 
     tensor2D<T> clone() {
@@ -554,8 +562,8 @@ struct TileConfig {
 } __attribute__((__packed__));
 
 class TileConfiger : public jit_generator {
- public:
-  TileConfiger() { create_kernel(); }
+public:
+  TileConfiger() { create_kernel("TileConfiger"); }
   void generate() override {
     Xbyak::Label release;
     test(abi_param1, abi_param1);
