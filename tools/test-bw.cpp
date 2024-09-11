@@ -59,7 +59,7 @@ public:
         xor_(reg_cnt, reg_cnt);
         L(loop_data);
         // for (int64_t i = 0; i < size; i += 64*4)
-#if 1
+#if 0
         prefetcht0(ptr[reg_base + reg_cnt]);
         prefetcht0(ptr[reg_base + reg_cnt + 64*1]);
         prefetcht0(ptr[reg_base + reg_cnt + 64*2]);
@@ -208,7 +208,8 @@ void test_all_bw(double duration) {
     test(56 * 1024 * 1024);        // 56MB L3
     test(128 * 1024 * 1024);       // 128MB L3 + DDR
     test(512 * 1024 * 1024);       // 512MB
-    test(1024 * 1024 * 1024l);     // 1GB DDR
+    while(1)
+        test(1024 * 1024 * 1024l);     // 1GB DDR
 }
 
 int main() {
