@@ -24,7 +24,9 @@ https://wiki.gentoo.org/wiki/NVIDIA
 
 ## CUDA programming Introductions
 [CUDA and Application to Task-Based Programming | Eurographics'2021 Tutorial]
-(https://cuda-tutorial.github.io/) videos: [part1](https://www.youtube.com/watch?v=6kT7vVHCZIc) [part2](https://www.youtube.com/watch?v=mrDWmnXC5Ck).
+(https://cuda-tutorial.github.io/) videos:
+ - [part1](https://www.youtube.com/watch?v=6kT7vVHCZIc)
+ - [part2](https://www.youtube.com/watch?v=mrDWmnXC5Ck).
 
 ## Hardware
 whitepapers from nvidia:
