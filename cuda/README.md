@@ -82,4 +82,38 @@ https://forums.developer.nvidia.com/t/instruction-latency/3579/13
 
 http://bebop.cs.berkeley.edu/pubs/volkov2008-benchmarking.pdf
 
- 
+## Occupancy
+
+on my GTX-1070 card:
+ - Maximum Threads per SM    : 2048 (64 Wraps)
+ - Maximum Blocks per SM     : 32
+ - Maximum Threads per Block : 1024
+
+Thus, to get full occupancy, we need : `2048(threads) = num_blocks_per_SM * block_size`, with `num_blocks_per_SM <= 32`, suppose registers/share_mem are not bottleneck, we can archieve 100% occupancy only in following cases:
+ - num_blocks_per_SM = 1  : `block_size = 2048`
+ - num_blocks_per_SM = 2  : `block_size = 1024`
+ - num_blocks_per_SM = 4  : `block_size = 512`
+ - num_blocks_per_SM = 8  : `block_size = 256`
+ - num_blocks_per_SM = 16 : `block_size = 128`
+ - num_blocks_per_SM = 32 : `block_size = 64`
+
+Other limitations are:
+ - Shared memory per Block    : 48 KiB
+ - Shared memory per SM       : 96 KiB
+ - Registers per Block        : 65536
+ - Registers per SM           : 65536
+
+HW level:
+ - totally 16 SMs
+ - Warp schedulers per SM    : 4 
+    - only 128 threads can run in-parallel in single cycle
+    - if 100% Occupancy is archieved, each thread can only run on 1/16 cycles (over-subscribed)
+    - over-subscription is good because neighbouring threads run in pipeline style:
+      threads in wrap0 issue 32 loads, then it blocks on data to be ready to access, then
+      next threads in wrap1 do the same thing, until the data is ready, wrap0 is waken to
+      do computations. thus memory-access latency is hidden by this over-subscription.
+
+ - each thread has one CUDA core, and each CUDA core provide 2-FLOPS per cycle (with FMADD)
+ - CUDA core runs at 1.645 GHz
+ - thus single precision FLOP/s `FLOP/s = 16(SMs) * 128(CUDA-cores) * 2(FLOPS) * 1.645 (GHz) =  6.73792 (TeraFLOP/S)`
+
