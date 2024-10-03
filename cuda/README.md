@@ -108,12 +108,21 @@ HW level:
  - Warp schedulers per SM    : 4 
     - only 128 threads can run in-parallel in single cycle
     - if 100% Occupancy is archieved, each thread can only run on 1/16 cycles (over-subscribed)
-    - over-subscription is good because neighbouring threads run in pipeline style:
+    - over-subscription helps neighbouring threads to run in pipeline for hiding memory access latency:
       threads in wrap0 issue 32 loads, then it blocks on data to be ready to access, then
       next threads in wrap1 do the same thing, until the data is ready, wrap0 is waken to
       do computations. thus memory-access latency is hidden by this over-subscription.
 
  - each thread has one CUDA core, and each CUDA core provide 2-FLOPS per cycle (with FMADD)
- - CUDA core runs at 1.645 GHz
- - thus single precision FLOP/s `FLOP/s = 16(SMs) * 128(CUDA-cores) * 2(FLOPS) * 1.645 (GHz) =  6.73792 (TeraFLOP/S)`
+ - CUDA core clock runs between `600MHz ~ 1.645MHz`
+ - thus single precision FLOP/s at different GPU frequency:
+  `FLOP/s = 16(SMs) * 128(CUDA-cores) * 2(FLOPS) * GPU_freq = 4096 * GPU_freq`
+   @ `1.645 (GHz)` `FLOP/s = 6.7 (TeraFLOP/S)`
+   @ `1.4   (GHz)` `FLOP/s = 5.7 (TeraFLOP/S)`
+   @ `0.76  (GHz)` `FLOP/s = 3.1 (TeraFLOP/S)`
+ - also all 2048 CUDA cores must be working togeteher to reach this peak FLOP/s,
+   single CUDA core only has `2(FLOPS) * GPU_freq` 
 
+## GPU frequency throttling
+
+All Compute Instances on a GPU share the same clock frequencies. To get consistent metric values with multi-pass collection, it is recommended to lock the GPU clocks during the profiling session. CLI tool nvidia-smi can be used to configure a fixed frequency for the whole GPU by calling `nvidia-smi --lock-gpu-clocks=tdp,tdp`. This sets the GPU clocks to the base TDP frequency until you reset the clocks by calling `nvidia-smi --reset-gpu-clocks`.

@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <memory>
 
+#include "../include/misc.hpp"
+
 #ifdef XBYAK64
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
     Xbyak::Operand::RBP, Xbyak::Operand::RBX, Xbyak::Operand::R12,
@@ -253,66 +255,6 @@ class jit_generator : public Xbyak::CodeGenerator {
 
 };
 
-
-//===============================================================
-inline int64_t getenv(const char * var, int64_t default_value) {
-    const char * p = std::getenv(var);
-    if (p) {
-        char str_value[256];
-        int len = 0;
-        while(p[len] >= '0' && p[len] <= '9') {
-            str_value[len] = p[len];
-            len++;
-        }
-        str_value[len] = 0;
-
-        char unit = p[len];
-        int64_t unit_value = 1;
-        // has unit?
-        if (unit == 'K' || unit == 'k') unit_value = 1024;
-        if (unit == 'M' || unit == 'm') unit_value = 1024*1024;
-        if (unit == 'G' || unit == 'g') unit_value = 1024*1024*1024;
-
-        default_value = std::atoi(str_value) * unit_value;
-    }
-    printf("\e[32mENV:\t %s = %ld %s\e[0m\n", var, default_value, p?"":"(default)");
-
-    return default_value;
-}
-
-static std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
-    std::vector<std::string> ret;
-    size_t last = 0;
-    size_t next = 0;
-    while ((next = s.find(delimiter, last)) != std::string::npos) {
-        std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
-        ret.push_back(s.substr(last, next-last));
-        last = next + 1;
-    }
-    ret.push_back(s.substr(last));
-    return ret;
-}
-
-// multiple values separated by ,
-inline std::vector<int> getenvs(const char * var, int count = -1, int default_v = 0) {
-    std::vector<int> ret;
-    const char * p = std::getenv(var);
-    if (p) {
-        auto vec = str_split(p, ",");
-        for(auto& v : vec)
-            ret.push_back(std::atoi(v.c_str()));
-    }
-    while(ret.size() < count)
-        ret.push_back(default_v);
-    printf("\e[32mENV:\t %s = ", var);
-    const char * sep = "";
-    for(int v : ret) {
-        printf("%s%d", sep, v);
-        sep = ",";
-    }
-    printf("\e[0m\n");
-    return ret;
-}
 
 //===============================================================
 template<typename T>

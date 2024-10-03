@@ -12,12 +12,43 @@
 #include <sstream>
 #include <chrono>
 #include <memory>
+#include <array>
+#include "../include/misc.hpp"
 
-#define ASSERT(cond) if (!(cond)) {\
-    std::stringstream ss; \
-    ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
-    throw std::runtime_error(ss.str()); \
-}
+struct CUDADevice {
+    CUDADevice(int id) {
+        ECOUT("cudaSetDevice(0)");
+        ASSERT(cudaSetDevice(id) == cudaSuccess);
+
+        cudaDeviceProp dev_prop;
+        cudaGetDeviceProperties(&dev_prop, id);
+        std::cout << " cudaGetDeviceProperties(..., " << id << " ) : \n";
+        std::cout << "\t totalGlobalMem     : " << dev_prop.totalGlobalMem << " (" << dev_prop.totalGlobalMem / (1024*1024) << " MB)" << std::endl;
+        std::cout << "\t sharedMemPerBlock  : " << dev_prop.sharedMemPerBlock << std::endl;
+        std::cout << "\t regsPerBlock       : " << dev_prop.regsPerBlock << std::endl;
+        std::cout << "\t warpSize           : " << dev_prop.warpSize << std::endl;
+        std::cout << "\t memPitch           : " << dev_prop.memPitch << std::endl;
+        std::cout << "\t maxThreadsPerBlock : " << dev_prop.maxThreadsPerBlock << std::endl;
+        std::cout << "\t totalConstMem      : " << dev_prop.totalConstMem << std::endl;
+        std::cout << "\t major          : " << dev_prop.major << std::endl;
+        std::cout << "\t minor          : " << dev_prop.minor << std::endl;
+        std::cout << "\t clockRate              : " << dev_prop.clockRate << std::endl;
+        std::cout << "\t multiProcessorCount    : " << dev_prop.multiProcessorCount << std::endl;
+        std::cout << "\t kernelExecTimeoutEnabled: " << dev_prop.kernelExecTimeoutEnabled << std::endl;
+        std::cout << "\t integrated         : " << dev_prop.integrated << std::endl;
+        std::cout << "\t canMapHostMemory   : " << dev_prop.canMapHostMemory << std::endl;
+        std::cout << "\t computeMode        : " << dev_prop.computeMode << std::endl;
+    }
+
+    ~CUDADevice() {
+        ECOUT("cudaDeviceReset()");
+        ASSERT(cudaDeviceReset() == cudaSuccess);
+    }
+};
+
+#define CEIL_DIV(x, a) (((x) + (a) - 1)/(a))
+#define WRAP_SIZE 32
+
 
 __global__ void _tensor_rand(int M, float *A) {
   const int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -116,7 +147,7 @@ std::ostream& operator<<(std::ostream& os, const tensor2D<T>& t) {
         int i = 0;
         const char* sep = "";
         for (; i < 8 && i < t.size; i++) {
-            os << sep << t.ptr_host[i];
+            os << sep << t.ptr_host.get()[i];
             sep = ",";
         }
         if (i < t.size)
@@ -133,15 +164,16 @@ struct CUDATimer {
     cudaEvent_t start;
     cudaEvent_t stop;
     const char* func_name;
+    int lineno;
     int id;
     const char* annotation;
     uint64_t bytes;
     uint64_t flops;
     std::stringstream postscript;
 
-    CUDATimer(const char* func_name = "", int id = 0, const char * annotation = nullptr,
+    CUDATimer(int id, const char* func_name = "", int lineno = 0, const char * annotation = nullptr,
               uint64_t bytes = 0, uint64_t flops = 0)
-        : func_name(func_name), id(id), annotation(annotation), bytes(bytes), flops(flops) {
+        : id(id), func_name(func_name), lineno(lineno), annotation(annotation), bytes(bytes), flops(flops) {
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
     }
@@ -190,9 +222,11 @@ inline std::ostream& operator<<(std::ostream& os, const prettyTime& dt) {
 struct AutoCUDATimer {
     std::deque<CUDATimer> timers;
 
-    void finish() {
+    // return avg device duration in seconds
+    double finish() {
         float elapsed_since_last_stop;
         cudaEvent_t tlast = nullptr;
+        double avg_dev_dur_nano_seconds = 0;
         for (auto& t : timers) {
             if (!tlast)
                 tlast = t.start;
@@ -200,20 +234,29 @@ struct AutoCUDATimer {
             elapsed_since_last_stop *= 1e-3; // in seconds
             auto host_dur = std::chrono::duration<double>(t.host_stop - t.host_start).count();
             auto dev_dur = t.Elapsed() * 1e-3; // in seconds
+            avg_dev_dur_nano_seconds += t.Elapsed() * 1e6;
 
-            std::cout << "\033[1;96m [AutoCUDATimer] @host " << prettyTime(host_dur)
+            std::cout << "\033[1;96m [AutoCUDATimer # " << t.id << "] @host " << prettyTime(host_dur)
                 << " | @device (+" << prettyTime(elapsed_since_last_stop) << ") " << prettyTime(dev_dur);
             if (t.bytes)
                 std::cout << " " << std::fixed << std::setw(7) << std::setprecision(3)
                           << t.bytes * 1e-9 / dev_dur << " GB/s";
-            if (t.flops)
-                std::cout << " " << std::fixed << std::setw(7) << std::setprecision(3)
-                          << t.flops * 1e-9 / dev_dur << " GFLOPS/s";
+            if (t.flops) {
+                double flops = t.flops * 1e-9 / dev_dur;
+                auto unit = " GFLOP/s";
+                if (flops > 1000.0) {
+                    flops /= 1000.0;
+                    unit = " TFLOP/s";
+                }
+                std::cout << " " << std::fixed << std::setw(7) << std::setprecision(3) << flops << unit;
+            }
             std::cout << "\t  " << t.annotation << " (" << t.func_name << ":" << t.id << ") "
                       << t.bytes/1e6 << " MB " << t.flops/1e9 << " Gflops  \033[0m" << t.postscript.str() << std::endl;
             tlast = t.stop;
         }
+        avg_dev_dur_nano_seconds /= timers.size();
         timers.clear();
+        return avg_dev_dur_nano_seconds;
     }
     ~AutoCUDATimer() {
         finish();
@@ -243,14 +286,35 @@ static AutoCUDATimer gpu_timers;
     gpu_timers.timers.back().Stop(); \
 } while(0)
 
+static int get_sequence_id() {
+    static int id = 0;
+    return id++;
+}
+
 template<typename F>
-std::stringstream& cuda_timeit(F func, const char * func_name, int lineno, const char * annotation, size_t bytes, size_t flops) {
-    gpu_timers.timers.emplace_back(func_name, lineno, annotation, bytes, flops);
-    auto& timer = gpu_timers.timers.back();
-    timer.Start();
-    func();
-    timer.Stop();
-    return timer.postscript;
+double cuda_timeit(F func, const char * func_name, int lineno, const char * annotation, size_t bytes, size_t flops, int repeat = 1) {
+    auto& list = getenvs("CUDATIMEIT");
+    auto myid = get_sequence_id();
+    auto skip = false;
+    if (!list.empty()) {
+        if (std::find(list.begin(), list.end(), myid) == list.end())
+            skip = true;
+    }
+
+    std::cout << "cuda_timeit #" << myid << " " << func_name << ":" << lineno << " " << annotation << " x " << repeat
+              << "  " << bytes << "(bytes) "  << flops << "(flops)" <<  (skip ? " ... SKIPPED":"") << std::endl;
+    if (skip) return 0;
+
+    AutoCUDATimer gpu_timers;
+
+    for(int i = 0; i < repeat; i++) {
+        gpu_timers.timers.emplace_back(myid, func_name, lineno, annotation, bytes, flops);
+        auto& timer = gpu_timers.timers.back();
+        timer.Start();
+        func(i, timer.postscript);
+        timer.Stop();
+    }
+    return gpu_timers.finish();
 }
 
 std::stringstream& cuda_timeit_last_ps() {
@@ -266,66 +330,45 @@ std::stringstream& cuda_timeit_last_ps() {
     throw std::runtime_error(ss.str()); \
 }
 
+template<class T>
+struct CArray {
+    const T* data;
+    std::size_t N;
+    CArray(const T* data, std::size_t N) : data(data), N(N) {}
+};
 
-
-//===============================================================
-inline int64_t getenv(const char * var, int64_t default_value) {
-    const char * p = std::getenv(var);
-    if (p) {
-        char str_value[256];
-        int len = 0;
-        while(p[len] >= '0' && p[len] <= '9') {
-            str_value[len] = p[len];
-            len++;
-        }
-        str_value[len] = 0;
-
-        char unit = p[len];
-        int64_t unit_value = 1;
-        // has unit?
-        if (unit == 'K' || unit == 'k') unit_value = 1024;
-        if (unit == 'M' || unit == 'm') unit_value = 1024*1024;
-        if (unit == 'G' || unit == 'g') unit_value = 1024*1024*1024;
-
-        default_value = std::atoi(str_value) * unit_value;
-    }
-    printf("\033[32mENV:\t %s = %lld %s\033[0m\n", var, default_value, p?"":"(default)");
-
-    return default_value;
+template<class T>
+CArray<T> carray(const T* data, std::size_t N) {
+    return CArray<T>(data, N);
 }
 
-static std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
-    std::vector<std::string> ret;
-    size_t last = 0;
-    size_t next = 0;
-    while ((next = s.find(delimiter, last)) != std::string::npos) {
-        std::cout << last << "," << next << "=" << s.substr(last, next-last) << "\n";
-        ret.push_back(s.substr(last, next-last));
-        last = next + 1;
-    }
-    ret.push_back(s.substr(last));
-    return ret;
+template<class T>
+CArray<T> carray(const tensor2D<T>& t) {
+    return CArray<T>(t.ptr_host.get(), t.size);
 }
 
-// multiple values separated by ,
-inline std::vector<int> getenvs(const char * var, int count = -1, int default_v = 0) {
-    std::vector<int> ret;
-    const char * p = std::getenv(var);
-    if (p) {
-        auto vec = str_split(p, ",");
-        for(auto& v : vec)
-            ret.push_back(std::atoi(v.c_str()));
-    }
-    while(ret.size() < count)
-        ret.push_back(default_v);
-    printf("\033[32mENV:\t %s = ", var);
+template<class T>
+std::ostream& operator<<(std::ostream& os, const CArray<T>& arr) {
+    T last_v = arr.data[0];
+    int last_c = 1;
     const char * sep = "";
-    for(int v : ret) {
-        printf("%s%d", sep, v);
-        sep = ",";
+    //os << "CArray<" << typeid(arr.data[0]).name() << "," << arr.N << ">{";
+    os << "{";
+    for(int i = 1; i < arr.N; i++) {
+        auto cur_v = arr.data[i];
+        if (last_v != cur_v) {
+            os << sep << last_v;
+            if (last_c > 1) os << "...x" << last_c;
+            last_v = cur_v;
+            last_c = 1;
+        } else {
+            last_c ++;
+        }
     }
-    printf("\033[0m\n");
-    return ret;
+    os << sep << last_v;
+    if (last_c > 1) os << "...x" << last_c;
+    os << "}";
+    return os;
 }
 
 
