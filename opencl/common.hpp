@@ -11,6 +11,7 @@
 #include <map>
 #include <sstream>
 #include <iomanip>
+#include <cassert>
 
 static void _flush_cache() {
     static char _flush_cache1[32 * 1024 * 1024];
@@ -224,85 +225,234 @@ std::shared_ptr<T> alloc_cache_aligned(int count) {
     return ret;
 }
 
-template <typename T>
-struct tensor2D {
-    int shape[2] = {0};
-    int stride_bytes = 0;
-    std::shared_ptr<T> data;
+template <typename T, int TENSORND_MAXDIMS=8>
+struct tensorND {
+    size_t m_shape[TENSORND_MAXDIMS] = {0};
+    size_t m_strides[TENSORND_MAXDIMS] = {0};
+    size_t m_ndims = 0;
+    size_t m_offset = 0;
+    size_t m_numel = 0;
+    std::shared_ptr<T> m_data;
     cl::Buffer ocl_buffer;
 
-    uint64_t size() {
-        return shape[0] * stride_bytes;
+    size_t ndims() const { return m_ndims; }
+    size_t numel() const  { return m_numel; }
+    size_t size(int i) const {
+        while (i < 0) i += m_ndims;
+        while (i >= m_ndims) i -= m_ndims;
+        return m_shape[i];
+    }
+    const size_t* shape() const { return m_shape; }
+    const size_t* strides() const { return m_strides; }
+
+    // coordinate
+    struct coordinate {
+        const tensorND<T, TENSORND_MAXDIMS>* m_tensor;
+        int64_t m_value[TENSORND_MAXDIMS] = {0};
+        size_t m_offset = 0;
+
+        size_t offset() { return m_offset; }
+        int64_t operator[](int i) {
+            auto ndims = m_tensor->ndims();
+            if (i < 0) i += ndims;
+            return m_value[i];
+        }
+
+        coordinate(tensorND<T, TENSORND_MAXDIMS>* p_tensor, const std::vector<int>& idx = {}) : m_tensor(p_tensor) {
+            for(int i = 0; i < TENSORND_MAXDIMS; i++) {
+                if (i < idx.size())
+                    m_value[i] = idx[i];
+                else
+                    m_value[i] = 0;
+            }
+        }
+        coordinate& operator+=(int64_t carry) {
+            auto* shape = m_tensor->shape();
+            auto ndims = m_tensor->ndims();
+            for (int r = ndims - 1; r >= 0; r--) {
+                m_value[r] += carry;
+                carry = 0;
+
+                assert(m_value[r] >= 0);
+                // get carry for next-higher digit
+                while(m_value[r] >= shape[r]) {
+                    m_value[r] -= shape[r];
+                    carry ++;
+                }
+
+                if (carry == 0) break;
+            }
+            // update offset
+            auto* strides = m_tensor->strides();
+            m_offset = 0;
+            for (int r = 0; r < ndims; r++) {
+                m_offset += m_value[r] * strides[r];
+            }
+            return *this;
+        }
+    };
+
+    coordinate get_coordinate() {
+        return coordinate(this);
     }
 
-    tensor2D() = default;
-
-    tensor2D(int rows, int cols, bool initialize = true) {
-        shape[0] = rows;
-        shape[1] = cols;
-        stride_bytes = cols * sizeof(T);
-        data = alloc_cache_aligned<T>(rows * cols);
-        if (initialize) {
-            auto* pdata = data.get();
-            for(int i = 0; i < rows * cols; i++)
-                pdata[i] = 0;
+    void resize(const std::vector<size_t>& dims) {
+        assert(dims.size() <= TENSORND_MAXDIMS);
+        m_ndims = dims.size();
+        size_t s = 1;
+        m_numel = 1;
+        for(int64_t i = static_cast<int64_t>(m_ndims - 1); i >= 0; i--) {
+            m_shape[i] = dims[i];
+            m_strides[i] = s;
+            s *= m_shape[i];
+            m_numel *= m_shape[i];
         }
+        m_data = alloc_cache_aligned<T>(m_numel);
+    }
+
+    void resize(const std::vector<size_t>& dims, T init) {
+        resize(dims);
+        auto* ptr = m_data.get();
+        for(int i = 0; i < m_numel; i++) ptr[i] = init;
+    }
+
+    tensorND() = default;
+
+    tensorND(const std::initializer_list<size_t>& dims) {
+        resize(dims);
+    }
+    tensorND(const std::initializer_list<size_t>& dims, T init) {
+        resize(dims, init);
     }
 
     cl::Buffer& to_gpu() {
         if (ocl_buffer() == NULL) {
-            ocl_buffer = cl::Buffer(data.get(), data.get() + shape[0] * shape[1], false);
+            ocl_buffer = cl::Buffer(m_data.get(), m_data.get() + m_numel, false);
         }
         return ocl_buffer;
     }
 
     void to_cpu() {
-        cl::copy(ocl_buffer, data.get(), data.get() + shape[0] * shape[1]);
+        cl::copy(ocl_buffer, m_data.get(), m_data.get() + m_numel);
     }
 
-    tensor2D<T> clone() {
+    tensorND<T> clone() {
         // deep copy
-        tensor2D<T> ret;
-        ret.shape[0] = shape[0];
-        ret.shape[1] = shape[1];
-        ret.stride_bytes = shape[1] * sizeof(T);
-        ret.data = alloc_cache_aligned<T>(shape[0] * shape[1]);
-        memcpy(ret.data.get(), data.get(), shape[0] * shape[1] * sizeof(T));
+        tensorND<T> ret;
+        memcpy(ret.m_shape, m_shape, sizeof(m_shape));
+        memcpy(ret.m_strides, m_strides, sizeof(m_strides));
+        ret.m_ndims = m_ndims;
+        ret.m_offset = m_offset;
+        ret.m_numel = m_numel;
+        ret.m_data = alloc_cache_aligned<T>(m_numel);
+        memcpy(ret.m_data.get(), m_data.get(), m_numel * sizeof(T));
         return ret;
     }
 
-    T* ptr(int i0 = 0, int i1 = 0) const {
-        return data.get() + i0 * shape[1] + i1;
+    // reference element using index directly
+    template <int dim>
+    int64_t offset() const {
+        return m_offset;
     }
+    template <int dim, typename I>
+    int64_t offset(I i) const {
+        return m_offset + i * m_strides[dim];
+    }
+    template <int dim, typename I, typename... Is>
+    int64_t offset(I i, Is... indices) const {
+        return i * m_strides[dim] + offset<dim + 1>(indices...);
+    }
+    template <typename... Is>
+    T* ptr(Is... indices) const {
+        return reinterpret_cast<T*>(m_data.get()) + offset<0>(indices...);
+    }
+    /*
+    template <typename... Is>
+    void* ptr_v(Is... indices) const {
+        return reinterpret_cast<void*>(m_data.get() + offset<0>(indices...) * m_element_size);
+    }*/
+    template <typename... Is>
+    T& at(Is... indices) const {
+#if 0
+        std::cout << "at" << " ("; 
+        int dummy[sizeof...(Is)] = {(std::cout << indices << ",", 0)...};
+        std::cout << ") offset=" << offset<0>(indices...) << "" << std::endl;
+#endif
+        return *(m_data.get() + offset<0>(indices...));
+    }
+    //T& operator[](const coordinate<T, TENSORND_MAXDIMS>& coord) {
+    //    return m_data.get()[coord.offset()];
+    //}
 
-    T& operator()(int i0, int i1) const {
-        return *ptr(i0, i1);
-    }
-
-    // flatten 1D indexing
-    T& operator[](int i) const {
-        auto i0 = i / shape[1];
-        auto i1 = i % shape[1];
-        return *ptr(i0, i1);
-    }
 
     std::string repr(int precision = 0, int width = 5) {
         std::stringstream ss;
-        auto* pdata = data.get();
-        ss << " (" << shape[0] << "," << shape[1] << ")" << typeid(*pdata).name() << " [\n";
-        if (precision >= 0)
-            ss << std::setprecision(precision);
-        for(int m = 0; m < shape[0]; m++, pdata+=shape[1]) {
-            ss << "  ";
-            for(int n = 0; n < shape[1]; n++) {
+        auto* pdata = m_data.get();
+        ss << " shape=(";
+        const char * sep = "";
+        for(int i = 0; i < m_ndims; i++) {
+            ss << sep << m_shape[i];
+            sep = ",";
+        }
+        ss << ") strides=(";
+        sep = "";
+        for(int i = 0; i < m_ndims; i++) {
+            ss << sep << m_strides[i];
+            sep = ",";
+        }
+        ss << ") dtype=" << typeid(*pdata).name() << " [\n";
+        if (precision >= 0) ss << std::setprecision(precision);
+
+        auto coord = get_coordinate();
+
+        for(int i = 0; i < m_numel; ) {
+            if (m_ndims > 1) {
+                ss << " [";
+                sep = "";
+                for(int n = 0; n < m_ndims - 1; n++) {
+                    ss << sep << coord[n];
+                    sep = ",";
+                }
+                ss << ", ...] : ";
+            }
+            for(int n = 0; n < m_shape[m_ndims - 1]; n++) {
                 if (width >= 0)
                     ss << std::fixed << std::setw(width);
-
-                ss << pdata[n] << ",";
+                ss << m_data.get()[coord.offset()];
+                // std::cout << coord.offset() << "\n";
+                coord += 1;
+                i += 1;
             }
-            ss << "    \\\\ row " << m <<  "\n";
+            ss << "\n";
         }
         ss << "]";
         return ss.str();
     }
 };
+
+
+
+inline int64_t getenv(const char * var, int64_t default_value) {
+    const char * p = std::getenv(var);
+    if (p) {
+        char str_value[256];
+        int len = 0;
+        while(p[len] >= '0' && p[len] <= '9') {
+            str_value[len] = p[len];
+            len++;
+        }
+        str_value[len] = 0;
+
+        char unit = p[len];
+        int64_t unit_value = 1;
+        // has unit?
+        if (unit == 'K' || unit == 'k') unit_value = 1024;
+        if (unit == 'M' || unit == 'm') unit_value = 1024*1024;
+        if (unit == 'G' || unit == 'g') unit_value = 1024*1024*1024;
+
+        default_value = std::atoi(str_value) * unit_value;
+    }
+    printf("\033[32mENV:\t %s = %lld %s\033[0m\n", var, default_value, p?"":"(default)");
+
+    return default_value;
+}
