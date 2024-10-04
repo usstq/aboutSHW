@@ -2,14 +2,6 @@
 #pragma once
 
 
-#ifndef ASSERT
-#define ASSERT(cond) if (!(cond)) {\
-    std::stringstream ss; \
-    ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
-    throw std::runtime_error(ss.str()); \
-}
-#endif
-
 #include "../thirdparty/xbyak/xbyak/xbyak.h"
 
 #include <cstdlib>
@@ -256,26 +248,6 @@ class jit_generator : public Xbyak::CodeGenerator {
 };
 
 
-//===============================================================
-template<typename T>
-std::shared_ptr<T> alloc_cache_aligned(int count, T default_value) {
-    auto ret = std::shared_ptr<T>(
-            reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))),
-            [](void * p) { ::free(p); });
-    
-    for(int i = 0; i < count; i++) {
-        ret.get()[i] = default_value;
-    }
-    return ret;
-}
-
-template<typename T>
-std::shared_ptr<T> alloc_cache_aligned(int count) {
-    auto ret = std::shared_ptr<T>(
-            reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))),
-            [](void * p) { ::free(p); });
-    return ret;
-}
 
 //===============================================================
 template <typename T>

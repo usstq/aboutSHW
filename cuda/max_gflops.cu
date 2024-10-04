@@ -16,13 +16,10 @@ M=32 K=409600 N=1024 ./a.exe
 */
 #include <fstream>
 
-void chrome_trace_dump(const char * dump_file_name,
-                       uint32_t* blk_x,
-                       uint32_t* blk_y,
-                       uint32_t* smid,
-                       uint64_t* clk_start,
-                       uint64_t* clk_dur,
-                       int N) {
+
+void chrome_trace_dump(const char * dump_file_name, tensorND<uint64_t>& C) {
+
+    // C : [M, N, 8]
     std::ofstream fw;
     // start dump
     fw.open(dump_file_name, std::ios::out);
@@ -31,20 +28,24 @@ void chrome_trace_dump(const char * dump_file_name,
     fw << "\"traceEvents\": [\n";
     fw.flush();
 
-    auto pid = 0;
     auto cat = "gpu";
-
-    for (int n = 0; n < N; n+=32) {
+    auto* pdata = C.to_cpu();
+    auto sz_last = C.size(-1);
+    auto N = C.numel()/sz_last;
+    // 32 threads from same warp (if block-size in X direction is larger than 32)
+    for (int n = 0; n < N; n+=32, pdata += sz_last*32) {
+        auto& blk_x = pdata[0];
+        auto& blk_y = pdata[1];
+        auto& smid = pdata[2];
+        auto& clk_start = pdata[3];
+        auto& clk_dur = pdata[4];
         std::stringstream ss;
-        ss << "kernel_block_" << 
-        auto duration = clk_dur[n];
-        auto start = clk_start[n];
-        auto sm = smid[n];
+        ss << "kernel(" << blk_x << "," << blk_y << ")";
         //auto end = tsc.tsc_to_usec(d.tsc_end);
 
-        fw << "{\"ph\": \"X\", \"name\": \"" << name << "\", \"cat\":\"" << cat << "\","
-            << "\"pid\": " << sm << ", \"tid\": \"thr" << n <<  "~" << n+31 << "\","
-            << "\"ts\": " << std::setprecision (15) << start << ", \"dur\": " << duration << "},\n";
+        fw << "{\"ph\": \"X\", \"name\": \"" << ss.str() << "\", \"cat\":\"" << cat << "\","
+            << "\"pid\": " << smid << ", \"tid\": \"thr" << n <<  "~" << n+31 << "\","
+            << "\"ts\": " << std::setprecision (15) << clk_start << ", \"dur\": " << clk_dur << "},\n";
     }
     fw << R"({
         "name": "Profiler End",
@@ -58,7 +59,6 @@ void chrome_trace_dump(const char * dump_file_name,
     fw << "}\n";
     auto total_size = fw.tellp();
     fw.close();
-
 }
 
 __forceinline__ __device__ unsigned get_smid()
@@ -71,34 +71,32 @@ __forceinline__ __device__ unsigned get_smid()
 
 #define FMACNT 16
 // mapping between threadIdx & (x,y) are transposed
-__global__ void sgemm_max_gflops(float * C,
-        uint32_t * blk_x,
-        uint32_t * blk_y,
-        uint32_t * smid,
-        uint64_t * cycles0,
-        uint64_t * cycles1,
-        int M, int N, int K) {
+__global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
     const int m = blockIdx.x * WRAP_SIZE + threadIdx.y;
     const int n = blockIdx.y * WRAP_SIZE + threadIdx.x;
 
     if (m < M && n < N) {
-        blk_x[m*N + n] = blockIdx.x;
-        blk_y[m*N + n] = blockIdx.y;
+        auto* pdata = C + (m*N + n)*8;
+        pdata[0] = blockIdx.x;
+        pdata[1] = blockIdx.y;
+        pdata[2] = get_smid();
+
         float tmp[FMACNT] = {0};
         float a = m;
         float b = n;
-        cycles0[m * N + n] = clock64();
+        pdata[3] = clock64();
         for (int k = 0; k < K; ++k) {
             for(int c = 0; c < FMACNT; c++)
                 tmp[c] = fma(a, b, tmp[c]);
         }
-        cycles1[m * N + n] = clock64() - cycles0[m * N + n];
-        smid[m * N + n] = get_smid();
-        if (tmp[0] == 0.0f) {
+        pdata[4] = clock64() - pdata[3];
+
+        // to prevent optimization
+        if (tmp[0] == 1.2134f) {
             float csum = 0;
             for(int c = 0; c < FMACNT; c++)
                 csum += tmp[c];
-            C[m * N + n] = csum;
+            printf("%f", csum);
         }
     }
 }
@@ -108,13 +106,8 @@ std::ostream& operator<<(std::ostream& os, const dim3& d) {
     return os;
 }
 
-void test_max_gflops(int64_t M, int64_t N, int64_t K) {
-    tensor2D<float> C(M, N, true);
-    tensor2D<uint64_t> clock0(M, N, true);
-    tensor2D<uint64_t> clock1(M, N, true);
-    tensor2D<uint32_t> smid(M, N, true);
-    tensor2D<uint32_t> blk_x(M, N, true);
-    tensor2D<uint32_t> blk_y(M, N, true);
+void test_max_gflops(size_t M, size_t N, size_t K) {
+    tensorND<uint64_t> C({M, N, 8});
 
     dim3 gridDim(CEIL_DIV(M, WRAP_SIZE), CEIL_DIV(N, WRAP_SIZE));
     dim3 blockDim(WRAP_SIZE, WRAP_SIZE);
@@ -123,28 +116,30 @@ void test_max_gflops(int64_t M, int64_t N, int64_t K) {
 
     auto flops = M*N*K*2*FMACNT;
     auto avg_dur_ns = cuda_timeit([&](int i, std::stringstream& ss){
-        sgemm_max_gflops<<<gridDim, blockDim>>>(C, blk_x, blk_y, smid, clock0, clock1, M, N, K);
+        sgemm_max_gflops<<<gridDim, blockDim>>>(C.to_gpu(), M, N, K);
     }, __func__, __LINE__, "sgemm_max_gflops", 0, flops, 3);
 
-
-    clock0.to_host();
-    clock1.to_host();
-    smid.to_host();
-    auto* pclock0 = clock0.ptr_host.get();
-    auto* pclocks = clock1.ptr_host.get();
+    auto* pdata = C.to_cpu();
 
     // calibrate all clocks from different SMs
     std::vector<uint64_t> t0(128, std::numeric_limits<uint64_t>::max());
-    for(int i = 0; i < M*N; i++) {
-        t0[smid[i]] = std::min(t0[smid[i]], clock0[i]);
+    for(int i = 0; i < M*N; i++, pdata += 8) {
+        auto& blk_x = pdata[0];
+        auto& blk_y = pdata[1];
+        auto& smid = pdata[2];
+        auto& clk_start = pdata[3];
+        auto& clk_dur = pdata[4];
+        
+        t0[smid] = std::min(t0[smid], clk_start);
     }
-    for(int i = 0; i < M*N; i++) {
-        pclock0[i] -= t0[smid[i]];
-        pclocks[i] = pclocks[i];
+    pdata = C.to_cpu();
+    for(int i = 0; i < M*N; i++, pdata += 8) {
+        auto& smid = pdata[2];
+        auto& clk_start = pdata[3];
+        clk_start -= t0[smid];
     }
-
+    /*
     auto blocksize = WRAP_SIZE*WRAP_SIZE;
-
     for (int i = 0; i <(M*N); i+=32, pclocks+=32, pclock0+=32) {
         if ((i % blocksize) == 0)
             std::cout << "============== thread block ============\n";
@@ -153,8 +148,9 @@ void test_max_gflops(int64_t M, int64_t N, int64_t K) {
                   << " GPU_freq:" << pclocks[0]/avg_dur_ns << "(GHz)?"
                   << " FMA:" << FMACNT*K/avg_dur_ns << "(GFMA/s/CUDA-core)?"
                   << std::endl;
-    }
-    chrome_trace_dump("ct.json", smid, clock0, clock1, (M*N));
+    }*/
+    
+    chrome_trace_dump("ct.json", C);
 }
 
 int main() {
@@ -168,3 +164,4 @@ int main() {
     test_max_gflops(M, N, K);
     return 0;
 }
+
