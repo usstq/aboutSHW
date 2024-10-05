@@ -3,6 +3,7 @@
 #include <string>
 #include <sstream>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <map>
 #include <cstdlib>
@@ -459,7 +460,7 @@ struct tensorND {
     }
 };
 
-
+//================================================================================
 template<class T>
 struct CArray {
     const T* data;
@@ -501,3 +502,44 @@ std::ostream& operator<<(std::ostream& os, const CArray<T>& arr) {
     return os;
 }
 
+//========================================================================
+struct ChromeTraceDumpper {
+    std::ofstream fw;
+    const char * dump_file_name;
+    ChromeTraceDumpper(const char * dump_file_name) : dump_file_name(dump_file_name) {
+        // start dump
+        fw.open(dump_file_name, std::ios::out);
+        fw << "{\n";
+        fw << "\"schemaVersion\": 1,\n";
+        fw << "\"traceEvents\": [\n";
+        fw.flush();
+    }
+    ~ChromeTraceDumpper() {
+        fw << R"({
+            "name": "Profiler End",
+            "ph": "i",
+            "s": "g",
+            "pid": "Traces",
+            "tid": "Trace OV Profiler",
+            "ts":)"
+            << 0 << "}",
+            fw << "]\n";
+        fw << "}\n";
+        auto total_size = fw.tellp()/1024.0f;
+        fw.close();
+        const char * unit = "(KB)";
+        if (total_size > 1024) {
+            total_size /= 1024.0f;
+            unit = "(MB)";
+        }
+        ECOUT("dumpped ", total_size, unit, " to ", dump_file_name);
+    }
+
+    template<typename PID, typename TID>
+    void phX(std::string name, std::string cat, PID pid, TID tid, double ts_us, double dur_us) {
+        fw << "{\"ph\": \"X\", \"name\": \"" << name << "\", \"cat\":\"" << cat << "\","
+            << "\"pid\": \"" << pid << "\","
+            << "\"tid\": \"" << tid << "\","
+            << "\"ts\": " << std::setprecision (15) << ts_us << ", \"dur\": " << dur_us << "},\n";
+    }
+};
