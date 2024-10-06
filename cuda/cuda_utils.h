@@ -230,3 +230,7 @@ std::stringstream& cuda_timeit_last_ps() {
     throw std::runtime_error(ss.str()); \
 }
 
+std::ostream& operator<<(std::ostream& os, const dim3& d) {
+    os << "dim3{" << d.x << ", " << d.y << ", " << d.z << "}";
+    return os;
+}

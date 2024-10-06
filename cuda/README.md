@@ -126,3 +126,10 @@ HW level:
 ## GPU frequency throttling
 
 All Compute Instances on a GPU share the same clock frequencies. To get consistent metric values with multi-pass collection, it is recommended to lock the GPU clocks during the profiling session. CLI tool nvidia-smi can be used to configure a fixed frequency for the whole GPU by calling `nvidia-smi --lock-gpu-clocks=tdp,tdp`. This sets the GPU clocks to the base TDP frequency until you reset the clocks by calling `nvidia-smi --reset-gpu-clocks`.
+
+
+## [./max_gflops.cu](./max_gflops.cu)
+
+This program try to reach the max throughput of FMA instruction. using `clock`/`clock64` and `cudaEventElapsedTime` to do active performance profiling, detailed thread-block scheduling results are dumpped.
+
+https://blog.speechmatics.com/cuda-timings

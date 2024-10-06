@@ -1,68 +1,16 @@
 #include "cuda_utils.h"
 /*
 nvcc --generate-line-info --keep --keep-dir build -O2 max_gflops.cu
-
-using only 
-
-M=1 K=409600 N=32 ./a.exe
-    thread 0 : CArray<__int64,32>{8295715...x32} 5854890.664(ns) GPU_freq:1.417(GHz)? FMA:1.119(GFMA/s/CUDA-core)?
-M=1 K=409600 N=2048 ./a.exe
-    thread 0 : CArray<__int64,32>{8295695...x32} 11787946.701(ns) GPU_freq:0.704(GHz)? FMA:0.556(GFMA/s/CUDA-core)?
-    the clocks almost doubled, because of over-subscription
-
-M=32 K=409600 N=1024 ./a.exe
-    this can keep clocks small, but M=33 cannot, why?
-
 */
-#include <fstream>
 
-
-void chrome_trace_dump(const char * dump_file_name, tensorND<uint64_t>& C) {
-
-    // C : [M, N, 8]
-    std::ofstream fw;
-    // start dump
-    fw.open(dump_file_name, std::ios::out);
-    fw << "{\n";
-    fw << "\"schemaVersion\": 1,\n";
-    fw << "\"traceEvents\": [\n";
-    fw.flush();
-
-    auto cat = "gpu";
-    auto* pdata = C.to_cpu();
-    auto sz_last = C.size(-1);
-    auto N = C.numel()/sz_last;
-    // 32 threads from same warp (if block-size in X direction is larger than 32)
-    for (int n = 0; n < N; n+=32, pdata += sz_last*32) {
-        auto& blk_x = pdata[0];
-        auto& blk_y = pdata[1];
-        auto& smid = pdata[2];
-        auto& clk_start = pdata[3];
-        auto& clk_dur = pdata[4];
-        std::stringstream ss;
-        ss << "kernel(" << blk_x << "," << blk_y << ")";
-        //auto end = tsc.tsc_to_usec(d.tsc_end);
-
-        fw << "{\"ph\": \"X\", \"name\": \"" << ss.str() << "\", \"cat\":\"" << cat << "\","
-            << "\"pid\": " << smid << ", \"tid\": \"thr" << n <<  "~" << n+31 << "\","
-            << "\"ts\": " << std::setprecision (15) << clk_start << ", \"dur\": " << clk_dur << "},\n";
-    }
-    fw << R"({
-        "name": "Profiler End",
-        "ph": "i",
-        "s": "g",
-        "pid": "Traces",
-        "tid": "Trace OV Profiler",
-        "ts":)"
-        << 0 << "}",
-        fw << "]\n";
-    fw << "}\n";
-    auto total_size = fw.tellp();
-    fw.close();
+__forceinline__ __device__ unsigned get_warpid() {
+    // this is not equal to threadIdx.x / 32
+    unsigned ret; 
+    asm volatile ("mov.u32 %0, %warpid;" : "=r"(ret));
+    return ret;
 }
 
-__forceinline__ __device__ unsigned get_smid()
-{
+__forceinline__ __device__ unsigned get_smid() {
     // this is not equal to threadIdx.x / 32
     unsigned ret; 
     asm volatile ("mov.u32 %0, %smid;" : "=r"(ret));
@@ -72,24 +20,28 @@ __forceinline__ __device__ unsigned get_smid()
 #define FMACNT 16
 // mapping between threadIdx & (x,y) are transposed
 __global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
-    const int m = blockIdx.x * WRAP_SIZE + threadIdx.y;
-    const int n = blockIdx.y * WRAP_SIZE + threadIdx.x;
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (m < M && n < N) {
-        auto* pdata = C + (m*N + n)*8;
+    if (y < M && x < N) {
+        auto* pdata = C + (y*N + x)*8;
         pdata[0] = blockIdx.x;
         pdata[1] = blockIdx.y;
         pdata[2] = get_smid();
 
         float tmp[FMACNT] = {0};
-        float a = m;
-        float b = n;
+        float a = y;
+        float b = x;
         pdata[3] = clock64();
         for (int k = 0; k < K; ++k) {
             for(int c = 0; c < FMACNT; c++)
                 tmp[c] = fma(a, b, tmp[c]);
         }
         pdata[4] = clock64() - pdata[3];
+
+        pdata[5] = threadIdx.x;
+        pdata[6] = threadIdx.y;
+        pdata[7] = get_warpid();
 
         // to prevent optimization
         if (tmp[0] == 1.2134f) {
@@ -101,15 +53,10 @@ __global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
     }
 }
 
-std::ostream& operator<<(std::ostream& os, const dim3& d) {
-    os << "dim3{" << d.x << ", " << d.y << ", " << d.z << "}";
-    return os;
-}
-
 void test_max_gflops(size_t M, size_t N, size_t K) {
-    tensorND<uint64_t> C({M, N, 8});
+    tensorND<uint64_t> C({M, N, 8}, 0);
 
-    dim3 gridDim(CEIL_DIV(M, WRAP_SIZE), CEIL_DIV(N, WRAP_SIZE));
+    dim3 gridDim(CEIL_DIV(N, WRAP_SIZE), CEIL_DIV(M, WRAP_SIZE));
     dim3 blockDim(WRAP_SIZE, WRAP_SIZE);
 
     std::cout << "gridDim=" << gridDim << " blockDim=" << blockDim << std::endl;
@@ -122,35 +69,98 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
     auto* pdata = C.to_cpu();
 
     // calibrate all clocks from different SMs
-    std::vector<uint64_t> t0(128, std::numeric_limits<uint64_t>::max());
+    std::vector<uint64_t> clock_min(128, std::numeric_limits<uint64_t>::max());
+    std::vector<uint64_t> clock_max(128, std::numeric_limits<uint64_t>::min());
+    std::vector<uint64_t> element_cnt(128, 0);
+    uint64_t sm_cnt = 0;
     for(int i = 0; i < M*N; i++, pdata += 8) {
         auto& blk_x = pdata[0];
         auto& blk_y = pdata[1];
         auto& smid = pdata[2];
         auto& clk_start = pdata[3];
         auto& clk_dur = pdata[4];
-        
-        t0[smid] = std::min(t0[smid], clk_start);
+        sm_cnt = std::max(sm_cnt, smid+1);
+        if (clk_dur > 0) {
+            clock_min[smid] = std::min(clock_min[smid], clk_start);
+            clock_max[smid] = std::max(clock_max[smid], clk_start + clk_dur);
+            element_cnt[smid] ++;
+        }
+        //ECOUT("SM ", smid , blk_x, ",", blk_y, " clock_start= ", clk_start, ", ", clk_dur);
     }
+    ECOUT("==========SM statistics:==========");
+    uint64_t clock_overall_dur = std::numeric_limits<uint64_t>::min();
+    for(uint64_t smid = 0; smid < sm_cnt; smid++) {
+        auto clock_dur = clock_max[smid] - clock_min[smid];
+        clock_overall_dur = std::max(clock_overall_dur, clock_dur);
+        ECOUT("SM ", smid , " clock_range = ", clock_min[smid], "~", clock_max[smid],
+              " duration: ", clock_dur, " elements: ", element_cnt[smid],
+              " FMA:", (FMACNT * K * element_cnt[smid])/clock_dur, " (FMA/cycle)");
+    }
+    ECOUT(" clock_overall_dur = ", clock_overall_dur);
+    ECOUT(" GPU_avg_frequency = ", clock_overall_dur / avg_dur_ns, " (GHz)");
+    ECOUT(" average FMA = ", double(FMACNT)*K*M*N/sm_cnt/clock_overall_dur, " (FMA/SM/cycle)");
+    ECOUT(" average FMA = ", double(FMACNT)*K*M*N/avg_dur_ns, " (GFMA/s)");
+
     pdata = C.to_cpu();
     for(int i = 0; i < M*N; i++, pdata += 8) {
         auto& smid = pdata[2];
         auto& clk_start = pdata[3];
-        clk_start -= t0[smid];
+        clk_start -= clock_min[smid];
     }
-    /*
-    auto blocksize = WRAP_SIZE*WRAP_SIZE;
-    for (int i = 0; i <(M*N); i+=32, pclocks+=32, pclock0+=32) {
-        if ((i % blocksize) == 0)
-            std::cout << "============== thread block ============\n";
-        std::cout << "thread " << i << " : " << carray(pclock0, 32) << carray(pclocks, 32)
-                  << " " << avg_dur_ns << "(ns)"
-                  << " GPU_freq:" << pclocks[0]/avg_dur_ns << "(GHz)?"
-                  << " FMA:" << FMACNT*K/avg_dur_ns << "(GFMA/s/CUDA-core)?"
-                  << std::endl;
-    }*/
-    
-    chrome_trace_dump("ct.json", C);
+
+    ChromeTraceDumpper dumpper("ct.json");
+    pdata = C.to_cpu();
+    // 32 threads from same warp (if block-size in X direction is larger than 32)
+    struct warp_info {
+        int64_t blk_x = -1;
+        int64_t blk_y = -1;
+        uint64_t smid = 0;
+        uint64_t clk_start = 0;
+        uint64_t clk_dur = 0;
+        uint64_t thr_x0 = 0;
+        uint64_t thr_y0 = 0;
+        uint64_t warpid = 0;
+
+        uint64_t thr_cnt = 0;
+    } warp;
+    auto dump = [&](warp_info* pw) {
+        if (pw->thr_cnt > 0) {
+            std::stringstream ss;
+            std::stringstream ss_tid;
+            ss << "block(" << pw->blk_x <<"," << pw->blk_y << ")";
+            //ss_tid << "thr(" << blk_x <<"," << blk_y << ")(" << thr_x0 << "+" << thr_cnt << "," << thr_y0 << ")";
+            //auto end = tsc.tsc_to_usec(d.tsc_end);
+            dumpper.phX(ss.str(), "", 
+                std::string("SM_") + std::to_string(pw->smid),
+                std::string("warp_") + std::to_string(pw->warpid),
+                pw->clk_start, pw->clk_dur,
+                {
+                    {"thr_x0",std::to_string(pw->thr_x0) + "+" + std::to_string(pw->thr_cnt)},
+                    {"thr_y0",std::to_string(pw->thr_y0)},
+                    {"OPS/cycle", std::to_string(double(FMACNT * K)/pw->clk_dur)}
+                });
+        }
+    };
+    for (int n = 0; n < M*N; n++, pdata += 8) {
+        auto* pw = reinterpret_cast<warp_info*>(pdata);
+        if (warp.blk_x == pw->blk_x
+            && warp.blk_y == pw->blk_y
+            && warp.smid == pw->smid
+            && warp.clk_start == pw->clk_start && warp.clk_dur == pw->clk_dur
+            && warp.warpid == pw->warpid
+            && warp.thr_y0 == pw->thr_y0) {
+            warp.thr_cnt++;
+            //if (warp.thr_cnt == WRAP_SIZE) {
+            //    warp.dump(dumpper);
+            //    warp.thr_cnt = 0;
+            //}
+        } else {
+            dump(&warp);
+            warp = *pw;
+            warp.thr_cnt = 1;
+        }
+    }
+    dump(&warp);
 }
 
 int main() {
