@@ -12,6 +12,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cassert>
+#include "../include/misc.hpp"
 
 static void _flush_cache() {
     static char _flush_cache1[32 * 1024 * 1024];
@@ -81,20 +82,20 @@ struct CLkernels {
         auto& k = kernel_map[kernel_name];
 
         std::cout << kernel_name << " [getWorkGroupInfo] :" << "\n";
-        std::cout << "      CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
-        std::cout << "      CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
-        //std::cout << "      CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
-        std::cout << "      CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
-        std::cout << "      CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
-        std::cout << "      CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
+        std::cout << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
+        std::cout << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
+        //std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
+        std::cout << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
+        std::cout << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
+        std::cout << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
         
         
         std::cout << kernel_name << " [getSubGroupInfo] :" << "\n";
-        std::cout << "      CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)  << "\n";
-        std::cout << "      CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)  << "\n";
-        std::cout << "      CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n";
-        std::cout << "      CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
-        std::cout << "      CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
+        std::cout << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)  << "\n";
+        std::cout << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)  << "\n";
+        std::cout << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n";
+        std::cout << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
+        std::cout << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
     }
 
     template<typename ...Args>
@@ -112,6 +113,14 @@ struct CLkernels {
     }
 };
 
+//https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_device_attribute_query.html
+#define CL_DEVICE_IP_VERSION_INTEL                0x4250
+#define CL_DEVICE_ID_INTEL                        0x4251
+#define CL_DEVICE_NUM_SLICES_INTEL                0x4252
+#define CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL  0x4253
+#define CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL     0x4254
+#define CL_DEVICE_NUM_THREADS_PER_EU_INTEL        0x4255
+#define CL_DEVICE_FEATURE_CAPABILITIES_INTEL      0x4256
 
 static cl::Platform select_default_platform(std::vector<std::string> exts = {}) {
     // Filter for a 2.0 or newer platform and set it as the default
@@ -129,11 +138,24 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
         int usable_devs = 0;
         for (int k = 0; k < devs.size(); k++) {
             auto& dev = devs[k];
-            std::cout << "\tdevice[" << k << "] : " << dev.getInfo<CL_DEVICE_NAME>() << " " << dev.getInfo<CL_DEVICE_VENDOR>() << std::endl;
-            std::cout << "\t\tCL_DEVICE_MAX_COMPUTE_UNITS: " << dev.getInfo <CL_DEVICE_MAX_COMPUTE_UNITS>() << std::endl;
-            std::cout << "\t\tCL_DEVICE_MAX_WORK_GROUP_SIZE: " << dev.getInfo <CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
-            std::cout << "\t\tCL_DEVICE_MAX_WORK_ITEM_DIMENSIONS: " << dev.getInfo <CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS>() << std::endl;
-            std::cout << "\t\tCL_DEVICE_MAX_WORK_ITEM_SIZES: ";
+            std::cout << "  device[" << k << "] : " << dev.getInfo<CL_DEVICE_NAME>() << " " << dev.getInfo<CL_DEVICE_VENDOR>() << std::endl;
+            std::cout << "    CL_DEVICE_MAX_COMPUTE_UNITS: " << dev.getInfo <CL_DEVICE_MAX_COMPUTE_UNITS>() << std::endl;
+            std::cout << "    CL_DEVICE_MAX_CLOCK_FREQUENCY: " << dev.getInfo <CL_DEVICE_MAX_CLOCK_FREQUENCY>() << "(MHz)" << std::endl;
+
+            std::cout << "     max total EU-cycles/second: " << 1e-6 * dev.getInfo <CL_DEVICE_MAX_COMPUTE_UNITS>() * dev.getInfo <CL_DEVICE_MAX_CLOCK_FREQUENCY>() << "(T-cycles/sec)" <<  std::endl;
+
+            cl_uint v;
+#define COUT_CL_INFO(qname) dev.getInfo(qname, &v); std::cout << "    " << #qname <<  ": " << v << std::endl;
+            COUT_CL_INFO(CL_DEVICE_ID_INTEL);
+            COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
+            COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
+            COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
+            COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
+
+            std::cout << "    CL_DEVICE_MAX_WORK_GROUP_SIZE: " << dev.getInfo <CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
+            std::cout << "    CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS: " << dev.getInfo <CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS>() << std::endl;
+            std::cout << "    CL_DEVICE_MAX_WORK_ITEM_SIZES: ";
             auto maxWorkItems = dev.getInfo<CL_DEVICE_MAX_WORK_ITEM_SIZES>();
             for (auto& sz : maxWorkItems) {
                 std::cout << sz << " ";
@@ -142,12 +164,12 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
             try {
                 std::array<size_t, 8> value={0};
                 dev.getInfo(CL_DEVICE_SUB_GROUP_SIZES_INTEL, &value);
-                std::cout << "\t\tCL_DEVICE_SUB_GROUP_SIZES_INTEL: " << value << std::endl;
+                std::cout << "    CL_DEVICE_SUB_GROUP_SIZES_INTEL: " << value << std::endl;
             } catch (...) {
-                std::cout << "\t\tCL_DEVICE_SUB_GROUP_SIZES_INTEL: " << "???" << std::endl;
+                std::cout << "    CL_DEVICE_SUB_GROUP_SIZES_INTEL: " << "???" << std::endl;
             }
 
-            std::cout << "\t\tCL_DEVICE_SVM_CAPABILITIES: ";
+            std::cout << "    CL_DEVICE_SVM_CAPABILITIES: ";
             auto svm_caps = dev.getInfo<CL_DEVICE_SVM_CAPABILITIES>();
             if (svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER) std::cout << " COARSE_GRAIN_BUFFER";
             if (svm_caps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER) std::cout << " FINE_GRAIN_BUFFER";
@@ -156,13 +178,13 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
             std::cout << std::endl;
 
             auto dev_exts = dev.getInfo < CL_DEVICE_EXTENSIONS>();
-            std::cout << "\t\tCL_DEVICE_EXTENSIONS: " << dev_exts << std::endl;
+            std::cout << "    CL_DEVICE_EXTENSIONS: " << dev_exts << std::endl;
 
             bool has_extension = true;
             for (auto& ext : exts) {
                 if (dev_exts.find(ext) == std::string::npos) {
                     has_extension = false;
-                    std::cout << "\t\t lacks extension : " << ext << std::endl;
+                    std::cout << "     lacks extension : " << ext << std::endl;
                     break;
                 }
             }
