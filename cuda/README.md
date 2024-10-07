@@ -132,4 +132,18 @@ All Compute Instances on a GPU share the same clock frequencies. To get consiste
 
 This program try to reach the max throughput of FMA instruction. using `clock`/`clock64` and `cudaEventElapsedTime` to do active performance profiling, detailed thread-block scheduling results are dumpped.
 
+we use (32,32) as thread-block size, and following tests show interesting results (by checking `ct.json`):
+
+| param `K=4096000 N=32`  | TFLOPS | comment |
+| ----------------------- | ------ | ------- |
+| `M=256`  |   3.5  | only 8 SM are used |
+| `M=512`  |   6.1  | all 16 SM are used equally <br> (every SM has 1 blocks) |
+| `M=544`  |   3.4  | most SM has 1 block,<br> but SM_0 got 2 blocks, <br>which is the bottleneck |
+| `M=1024` |   6.1  | all 16 SM are used equally <br> (every SM has 2 blocks) |
+
+theoretical peak perforamnce (6.7 TFLOPS/s) is not reached due to:
+ - average frequency is lower than clockRate;
+ - FMA/cycles of each SM is only 91% (117/128) of the theoretical;
+
 https://blog.speechmatics.com/cuda-timings
+

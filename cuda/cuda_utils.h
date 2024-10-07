@@ -32,12 +32,14 @@ struct CUDADevice {
         std::cout << "\t totalConstMem      : " << dev_prop.totalConstMem << std::endl;
         std::cout << "\t major          : " << dev_prop.major << std::endl;
         std::cout << "\t minor          : " << dev_prop.minor << std::endl;
-        std::cout << "\t clockRate              : " << dev_prop.clockRate << std::endl;
-        std::cout << "\t multiProcessorCount    : " << dev_prop.multiProcessorCount << std::endl;
+        std::cout << "\t clockRate              : " << dev_prop.clockRate << "(KHz)" << std::endl;
+        std::cout << "\t multiProcessorCount    : " << dev_prop.multiProcessorCount << " (each SM has 128 CUDA-cores)" << std::endl;
         std::cout << "\t kernelExecTimeoutEnabled: " << dev_prop.kernelExecTimeoutEnabled << std::endl;
         std::cout << "\t integrated         : " << dev_prop.integrated << std::endl;
         std::cout << "\t canMapHostMemory   : " << dev_prop.canMapHostMemory << std::endl;
         std::cout << "\t computeMode        : " << dev_prop.computeMode << std::endl;
+        // each SM has 128 CUDA cores which has 2*frequency FLOPS/s
+        std::cout << "\t ... peak performance        : " << 1e-9 * dev_prop.multiProcessorCount * dev_prop.clockRate * 128 * 2  << "(TFLOP/s)" << std::endl;
     }
 
     ~CUDADevice() {
