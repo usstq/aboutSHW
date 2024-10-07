@@ -78,7 +78,7 @@ __forceinline__ __device__ unsigned get_smid() {
     return ret;
 }
 
-#define FMACNT 16
+#define FMACNT 32
 // mapping between threadIdx & (x,y) are transposed
 __global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -122,7 +122,7 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
 
     std::cout << "gridDim=" << gridDim << " blockDim=" << blockDim << std::endl;
 
-    auto flops = M*N*K*2*FMACNT;
+    auto flops = M*N*K*2.0*FMACNT;
     auto avg_dur_ns = cuda_timeit([&](int i, std::stringstream& ss){
         sgemm_max_gflops<<<gridDim, blockDim>>>(C.to_gpu(), M, N, K);
     }, __func__, __LINE__, "sgemm_max_gflops", 0, flops, 3);

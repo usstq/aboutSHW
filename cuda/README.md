@@ -145,5 +145,9 @@ theoretical peak perforamnce (6.7 TFLOPS/s) is not reached due to:
  - average frequency is lower than clockRate;
  - FMA/cycles of each SM is only 91% (117/128) of the theoretical;
 
+why FMA usage is not 100%? because there are loop-overheads. if we unroll `fma` loop by 32 times instead of 16 times, the FMA/cycles improves from 117 to 121 and `6.5 TFLOPS` can be reached at `1.62GHz` (using `M=512 K=40960000 N=32`).
+
+**LOOP overhead**: due to the unaffordable complexity of out-of-order execution engine, GPU's execution engine cannot exploit instruction level paralism as goog as CPU can, and over-subscription can hide memory access latency, but cannot hide loop-overhead; computations must be much more than loop-overhead (>~20 cycles) to mitigate the loop-overhead issue.
+
 https://blog.speechmatics.com/cuda-timings
 
