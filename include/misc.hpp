@@ -57,17 +57,21 @@ struct Nanoseconds {
 
 template <typename... Ts>
 void easy_cout(const char* file, const char* func, int line, Ts... args) {
-    std::string file_path(file);
-    std::string file_name(file);
+    std::string tag;
+    if (file != nullptr) {
+        std::string file_path(file);
+        std::string file_name(file);
 
-    auto last_sep = file_path.find_last_of('/');
-    if (last_sep == std::string::npos)
-        last_sep = file_path.find_last_of('\\');
-    if (last_sep != std::string::npos)
-        file_name = file_path.substr(last_sep + 1);
+        auto last_sep = file_path.find_last_of('/');
+        if (last_sep == std::string::npos)
+            last_sep = file_path.find_last_of('\\');
+        if (last_sep != std::string::npos)
+            file_name = file_path.substr(last_sep + 1);
 
-    std::string file_name_with_line = file_name + ":" + std::to_string(line);
-    auto tag = file_name_with_line + " " + func + "()";
+        std::string file_name_with_line = file_name + ":" + std::to_string(line);
+        tag = file_name_with_line + " ";
+    }
+    if (func) tag = tag + func + "()";
 
     std::stringstream ss;
     int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
@@ -85,7 +89,7 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
 }
 
 #define ECOUT(...) easy_cout(__FILE__, __func__, __LINE__, __VA_ARGS__)
-
+#define ECOUT2(...) easy_cout(nullptr, __func__, __LINE__, __VA_ARGS__)
 
 //===============================================================
 // getenv

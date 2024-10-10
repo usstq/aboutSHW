@@ -236,3 +236,103 @@ std::ostream& operator<<(std::ostream& os, const dim3& d) {
     os << "dim3{" << d.x << ", " << d.y << ", " << d.z << "}";
     return os;
 }
+
+struct thread_info {
+    int64_t blk_x = -1;
+    int64_t blk_y = -1;
+    uint64_t thr_x0 = 0;
+    uint64_t thr_y0 = 0;
+    uint64_t smid = 0;
+    uint64_t warpid = 0;
+    uint64_t clk_start = 0;
+    uint64_t clk_dur = 0;
+
+    static void dump(thread_info * tinfo_base, int tnum, double avg_dur_ns, size_t thr_bytes = 0, size_t thr_ops = 0) {
+        auto* ptinfo = tinfo_base;
+        // calibrate all clocks from different SMs
+        std::vector<uint64_t> clock_min(128, std::numeric_limits<uint64_t>::max());
+        std::vector<uint64_t> clock_max(128, std::numeric_limits<uint64_t>::min());
+        std::vector<uint64_t> thread_cnt(128, 0);
+        uint64_t sm_cnt = 0;
+        for(int i = 0; i < tnum; i++, ptinfo ++) {
+            sm_cnt = std::max(sm_cnt, ptinfo->smid+1);
+            if (ptinfo->clk_dur > 0) {
+                clock_min[ptinfo->smid] = std::min(clock_min[ptinfo->smid], ptinfo->clk_start);
+                clock_max[ptinfo->smid] = std::max(clock_max[ptinfo->smid], ptinfo->clk_start + ptinfo->clk_dur);
+                thread_cnt[ptinfo->smid] ++;
+            }
+            //ECOUT("SM ", smid , blk_x, ",", blk_y, " clock_start= ", clk_start, ", ", clk_dur);
+        }
+        ECOUT2("==========SM statistics:==========");
+        uint64_t clock_overall_dur = std::numeric_limits<uint64_t>::min();
+        for(uint64_t smid = 0; smid < sm_cnt; smid++) {
+            auto clock_dur = clock_max[smid] - clock_min[smid];
+            clock_overall_dur = std::max(clock_overall_dur, clock_dur);
+            ECOUT2("SM ", std::fixed, std::setw(3), smid , " clock: ", clock_min[smid], " + ", clock_dur,
+                " ", thread_cnt[smid], "(threads)",
+                " ", (thread_cnt[smid]*thr_bytes)/clock_dur, " (bytes/cycle)",
+                " ", (thread_cnt[smid]*thr_ops)/clock_dur, " (ops/cycle)"
+                );
+        }
+        ECOUT2(" clock_overall_dur = ", clock_overall_dur);
+        ECOUT2(" avg_dur_ns = ", avg_dur_ns, "(ns)");
+        ECOUT2(" GPU_avg_frequency = ", clock_overall_dur / avg_dur_ns, " (GHz)");
+        if (thr_ops)
+            ECOUT2(" average compute   = ", (tnum * thr_ops)/avg_dur_ns, " (GOP/second)");
+        if (thr_bytes)
+            ECOUT2(" average Bandwidth = ", (tnum * thr_bytes)/avg_dur_ns, " (GB/second)");
+
+        ptinfo = tinfo_base;
+        for(int i = 0; i < tnum; i++, ptinfo ++) {
+            ptinfo->clk_start -= clock_min[ptinfo->smid];
+        }
+
+        // 32 threads from same warp (if block-size in X direction is larger than 32)
+        struct warp_info : public thread_info {
+            uint64_t thr_cnt = 0;
+            size_t thr_ops;
+            size_t thr_bytes;
+            ChromeTraceDumpper& dumpper;
+            warp_info(ChromeTraceDumpper& dumpper, size_t thr_ops, size_t thr_bytes) : dumpper(dumpper), thr_ops(thr_ops), thr_bytes(thr_bytes) {}
+            void dump() {
+                if (thr_cnt > 0) {
+                    std::stringstream ss;
+                    ss << "block(" << blk_x <<"," << blk_y << ")";
+                    dumpper.phX(ss.str(), "", 
+                        std::string("SM_") + std::to_string(thread_info::smid),
+                        std::string("warp_") + std::to_string(thread_info::warpid),
+                        clk_start, clk_dur,
+                        {
+                            {"thr_x0",std::to_string(thr_x0) + "+" + std::to_string(thr_cnt)},
+                            {"thr_y0",std::to_string(thr_y0)},
+                            {"ops/cycle", std::to_string(double(thr_ops * thr_cnt)/clk_dur)},
+                            {"bytes/cycle", std::to_string(double(thr_bytes * thr_cnt)/clk_dur)}
+                        });
+                }
+            }
+        };
+
+        ChromeTraceDumpper dumpper("ct.json");
+        warp_info warp(dumpper, thr_ops, thr_bytes);
+        ptinfo = tinfo_base;
+        for (int n = 0; n < tnum; n++, ptinfo ++) {
+            if (warp.blk_x == ptinfo->blk_x
+                && warp.blk_y == ptinfo->blk_y
+                && warp.smid == ptinfo->smid
+                && warp.clk_start == ptinfo->clk_start && warp.clk_dur == ptinfo->clk_dur
+                && warp.warpid == ptinfo->warpid
+                && warp.thr_y0 == ptinfo->thr_y0) {
+                warp.thr_cnt++;
+                //if (warp.thr_cnt == WRAP_SIZE) {
+                //    warp.dump(dumpper);
+                //    warp.thr_cnt = 0;
+                //}
+            } else {
+                warp.dump();
+                memcpy(&warp, ptinfo, sizeof(*ptinfo));
+                warp.thr_cnt = 1;
+            }
+        }
+        warp.dump();
+    }
+};
