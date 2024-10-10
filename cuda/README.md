@@ -149,5 +149,21 @@ why FMA usage is not 100%? because there are loop-overheads. if we unroll `fma` 
 
 **LOOP overhead**: due to the unaffordable complexity of out-of-order execution engine, GPU's execution engine cannot exploit instruction level paralism as goog as CPU can, and over-subscription can hide memory access latency, but cannot hide loop-overhead; computations must be much more than loop-overhead (>~20 cycles) to mitigate the loop-overhead issue.
 
+# [./max_membw.cu](./max_membw.cu)
+
+This program try to reach the max global/device memory read bandwith, but only reached ~90% of it.
+
+`ct.json` shows that all SMs are used equally and the bandwidth of each SM is also evenly distributed.
+
+we saw that compiler is very smart to unroll a for loop into chunk of 16/8/4/... to make the loop overhead smaller.
+and manually unroll is seldom required.
+
+```bash
+$ M=16k N=16k BM=64 BN=64 ./a.exe
+ [AutoCUDATimer # 0] @host   5.800 us | @device (+  0.000 us)   4.936 ms 217.545 GB/s     sgemm_max_membw (test_max_membw:0) 1073.742 MB 0.000 Gflops
+ [AutoCUDATimer # 0] @host   2.100 us | @device (+  2.048 us)   4.932 ms 217.729 GB/s     sgemm_max_membw (test_max_membw:0) 1073.742 MB 0.000 Gflops
+ [AutoCUDATimer # 0] @host   1.900 us | @device (+  2.080 us)   4.918 ms 218.317 GB/s     sgemm_max_membw (test_max_membw:0) 1073.742 MB 0.000 Gflops
+```
+
 https://blog.speechmatics.com/cuda-timings
 

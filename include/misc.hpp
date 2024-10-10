@@ -261,7 +261,7 @@ struct tensorND {
             return m_value[i];
         }
 
-        coordinate(tensorND<T, TENSORND_MAXDIMS>* p_tensor, const std::vector<int>& idx = {}) : m_tensor(p_tensor) {
+        coordinate(const tensorND<T, TENSORND_MAXDIMS>* p_tensor, const std::vector<int>& idx = {}) : m_tensor(p_tensor) {
             for(int i = 0; i < TENSORND_MAXDIMS; i++) {
                 if (i < idx.size())
                     m_value[i] = idx[i];
@@ -308,7 +308,7 @@ struct tensorND {
         }
     };
 
-    coordinate get_coordinate() {
+    coordinate get_coordinate() const {
         return coordinate(this);
     }
 
