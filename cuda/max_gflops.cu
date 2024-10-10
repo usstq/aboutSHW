@@ -78,31 +78,41 @@ __forceinline__ __device__ unsigned get_smid() {
     return ret;
 }
 
+struct thread_info {
+    int64_t blk_x = -1;
+    int64_t blk_y = -1;
+    uint64_t smid = 0;
+    uint64_t clk_start = 0;
+    uint64_t clk_dur = 0;
+    uint64_t thr_x0 = 0;
+    uint64_t thr_y0 = 0;
+    uint64_t warpid = 0;
+};
+
 #define FMACNT 32
 // mapping between threadIdx & (x,y) are transposed
-__global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
+__global__ void sgemm_max_gflops(thread_info * tinfo, size_t M, size_t N, size_t K) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (y < M && x < N) {
-        auto* pdata = C + (y*N + x)*8;
-        pdata[0] = blockIdx.x;
-        pdata[1] = blockIdx.y;
-        pdata[2] = get_smid();
+        auto* pt = tinfo + (y*N + x);
+        pt->blk_x = blockIdx.x;
+        pt->blk_y = blockIdx.y;
+        pt->thr_x0 = threadIdx.x;
+        pt->thr_y0 = threadIdx.y;
+        pt->smid = get_smid();
+        pt->warpid = get_warpid();
 
         float tmp[FMACNT] = {0};
         float a = y;
         float b = x;
-        pdata[3] = clock64();
+        pt->clk_start = clock64();
         for (int k = 0; k < K; ++k) {
             for(int c = 0; c < FMACNT; c++)
                 tmp[c] = fma(a, b, tmp[c]);
         }
-        pdata[4] = clock64() - pdata[3];
-
-        pdata[5] = threadIdx.x;
-        pdata[6] = threadIdx.y;
-        pdata[7] = get_warpid();
+        pt->clk_dur = clock64() - pt->clk_start;
 
         // to prevent optimization
         if (tmp[0] == 1.2134f) {
@@ -115,7 +125,7 @@ __global__ void sgemm_max_gflops(uint64_t * C, size_t M, size_t N, size_t K) {
 }
 
 void test_max_gflops(size_t M, size_t N, size_t K) {
-    tensorND<uint64_t> C({M, N, 8}, 0);
+    tensorND<thread_info> C({M, N}, thread_info());
 
     dim3 gridDim(CEIL_DIV(N, WRAP_SIZE), CEIL_DIV(M, WRAP_SIZE));
     dim3 blockDim(WRAP_SIZE, WRAP_SIZE);
@@ -127,24 +137,19 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
         sgemm_max_gflops<<<gridDim, blockDim>>>(C.to_gpu(), M, N, K);
     }, __func__, __LINE__, "sgemm_max_gflops", 0, flops, 3);
 
-    auto* pdata = C.to_cpu();
+    auto* ptinfo = C.to_cpu();
 
     // calibrate all clocks from different SMs
     std::vector<uint64_t> clock_min(128, std::numeric_limits<uint64_t>::max());
     std::vector<uint64_t> clock_max(128, std::numeric_limits<uint64_t>::min());
     std::vector<uint64_t> element_cnt(128, 0);
     uint64_t sm_cnt = 0;
-    for(int i = 0; i < M*N; i++, pdata += 8) {
-        auto& blk_x = pdata[0];
-        auto& blk_y = pdata[1];
-        auto& smid = pdata[2];
-        auto& clk_start = pdata[3];
-        auto& clk_dur = pdata[4];
-        sm_cnt = std::max(sm_cnt, smid+1);
-        if (clk_dur > 0) {
-            clock_min[smid] = std::min(clock_min[smid], clk_start);
-            clock_max[smid] = std::max(clock_max[smid], clk_start + clk_dur);
-            element_cnt[smid] ++;
+    for(int i = 0; i < M*N; i++, ptinfo ++) {
+        sm_cnt = std::max(sm_cnt, ptinfo->smid+1);
+        if (ptinfo->clk_dur > 0) {
+            clock_min[ptinfo->smid] = std::min(clock_min[ptinfo->smid], ptinfo->clk_start);
+            clock_max[ptinfo->smid] = std::max(clock_max[ptinfo->smid], ptinfo->clk_start + ptinfo->clk_dur);
+            element_cnt[ptinfo->smid] ++;
         }
         //ECOUT("SM ", smid , blk_x, ",", blk_y, " clock_start= ", clk_start, ", ", clk_dur);
     }
@@ -162,26 +167,15 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
     ECOUT(" average FMA = ", double(FMACNT)*K*M*N/sm_cnt/clock_overall_dur, " (FMA/SM/cycle)");
     ECOUT(" average FMA = ", double(FMACNT)*K*M*N/avg_dur_ns, " (GFMA/s)");
 
-    pdata = C.to_cpu();
-    for(int i = 0; i < M*N; i++, pdata += 8) {
-        auto& smid = pdata[2];
-        auto& clk_start = pdata[3];
-        clk_start -= clock_min[smid];
+    ptinfo = C.to_cpu();
+    for(int i = 0; i < M*N; i++, ptinfo ++) {
+        ptinfo->clk_start -= clock_min[ptinfo->smid];
     }
 
     ChromeTraceDumpper dumpper("ct.json");
-    pdata = C.to_cpu();
+    ptinfo = C.to_cpu();
     // 32 threads from same warp (if block-size in X direction is larger than 32)
-    struct warp_info {
-        int64_t blk_x = -1;
-        int64_t blk_y = -1;
-        uint64_t smid = 0;
-        uint64_t clk_start = 0;
-        uint64_t clk_dur = 0;
-        uint64_t thr_x0 = 0;
-        uint64_t thr_y0 = 0;
-        uint64_t warpid = 0;
-
+    struct warp_info : public thread_info {
         uint64_t thr_cnt = 0;
     } warp;
     auto dump = [&](warp_info* pw) {
@@ -202,14 +196,13 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
                 });
         }
     };
-    for (int n = 0; n < M*N; n++, pdata += 8) {
-        auto* pw = reinterpret_cast<warp_info*>(pdata);
-        if (warp.blk_x == pw->blk_x
-            && warp.blk_y == pw->blk_y
-            && warp.smid == pw->smid
-            && warp.clk_start == pw->clk_start && warp.clk_dur == pw->clk_dur
-            && warp.warpid == pw->warpid
-            && warp.thr_y0 == pw->thr_y0) {
+    for (int n = 0; n < M*N; n++, ptinfo ++) {
+        if (warp.blk_x == ptinfo->blk_x
+            && warp.blk_y == ptinfo->blk_y
+            && warp.smid == ptinfo->smid
+            && warp.clk_start == ptinfo->clk_start && warp.clk_dur == ptinfo->clk_dur
+            && warp.warpid == ptinfo->warpid
+            && warp.thr_y0 == ptinfo->thr_y0) {
             warp.thr_cnt++;
             //if (warp.thr_cnt == WRAP_SIZE) {
             //    warp.dump(dumpper);
@@ -217,7 +210,7 @@ void test_max_gflops(size_t M, size_t N, size_t K) {
             //}
         } else {
             dump(&warp);
-            warp = *pw;
+            memcpy(&warp, ptinfo, sizeof(*ptinfo));
             warp.thr_cnt = 1;
         }
     }
