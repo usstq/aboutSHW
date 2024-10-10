@@ -1,15 +1,59 @@
-
-## Build
+# Build
 
 ```bash
-$ g++ -O2 ./test_ndrange.cpp -lOpenCL
+$ g++ -O2 ./max_gflops.cpp -lOpenCL
+$ ./a.out
+# disassemble using ocloc tool from intel-opencl-icd
+$ ocloc disasm -file .build/bin_0
 ```
-## References
+
+# How OpenCL ICD(Installable Client Drivers) loader works?
+- user app links to ICD loader `libOpenCL.so` ([github repo](`https://github.com/KhronosGroup/OpenCL-ICD-Loader`)) to use OpenCL API, we can verify that by `readelf -Ws /lib/x86_64-linux-gnu/libOpenCL.so.1`
+
+- ICD (provided by GPGPU vendor) must provide `clGetExtensionFunctionAddress`, ICD loader will use this function to get function pointer to `clIcdGetPlatformIDsKHR`
+- `clIcdGetPlatformIDsKHR` returns the platform object (the root of OpenCL object hierarchy)
+   [src](https://github.com/KhronosGroup/OpenCL-ICD-Loader/blob/804b6f040503c47148bee535230070da6b857ae4/loader/icd.c#L108).
+- all OpenCL objects created from root object (Device/Context/Program/Queue/...) has been associated with a dispatch table pointer (like `vtable` in C++) as the first field, so following OpenCL API calls happens on them can be correctly dispatched ([source code](https://github.com/OCL-dev/ocl-icd/blob/fdde6677b21329432db8b481e2637cd10f7d3cb2/ocl_icd_loader.c#L633))
+
+# Intel(R) Graphics Compute Runtime for oneAPI Level Zero and OpenCL(TM) Driver
+
+ - Ubuntu package of Intel GPU ICD : `intel-opencl-icd` ([github repo](https://github.com/intel/compute-runtime)).
+
+```bash
+$ dpkg -L intel-opencl-icd
+/.
+/etc/OpenCL/vendors/intel.icd   # one-line: /usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so
+/usr/bin/ocloc                  # ocloc: important binary tools for OpenCL program binaries
+/usr/include/ocloc_api.h        # all functions of ocloc is in libocloc.so, this header provides C API
+/usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so # the actual OpenCL implementation
+/usr/lib/x86_64-linux-gnu/libocloc.so
+
+# ocloc can be used to disassemble the binaries dumped by clGetProgramInfo(..., CL_PROGRAM_BINARIES, ...)
+ocloc disasm -file .build/bin_0
+```
+
+
+# ARC A770 
+
+https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2024-1/xe-arch.html
+https://chipsandcheese.com/p/microbenchmarking-intels-arc-a770
+
+
+|  component name  |      count         | functions  |
+|-----------------:|:-------------------|:-----------|
+| Xe-HPG render slice   | 8             | `4x Xe-cores` + `graphics pipeline` |
+| XC(Xe-core)           | 8x4=32        | `16x (XVE + XMX)` + `Load/Store_Unit` + `L1$/SLM` @`2.1GHz~2.4GHz` |
+| XVE (EU)              | 8x4x16=512    | SIMD-8 ALU `8-FP32-MAD per-cycle` |
+| Threads               | 8x4x16x8=4096 | `4096*2*2.1G ~ 17.2 TFLOPS` |
+| XMX                   | 8x4x16=512    | `64-FP16-MAD per-cycle`/`128-INT8-MAD per-cycle`<br> totally `137.6/275.2 TFLOPS @2.1GHz` |
+
+
+
+# References
 
  - https://github.com/rsnemmen/OpenCL-examples/blob/master/Hello_World/hello.c
  - https://github.com/yohanesgultom/parallel-programming-assignment/blob/master/PR2/opencl/device_query.c
  - https://github.com/KhronosGroup/OpenCL-Guide/blob/main/chapters/opencl_programming_model.md
-
 
  - https://www.iwocl.org/wp-content/uploads/iwocl2017-ben-ashbaugh-subgroups.pdf
  - https://www.codeproject.com/Articles/994769/SGEMM-for-Intel-Processor-Graphics

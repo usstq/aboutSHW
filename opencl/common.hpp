@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <cassert>
 #include "../include/misc.hpp"
+#include <filesystem>
 
 static void _flush_cache() {
     static char _flush_cache1[32 * 1024 * 1024];
@@ -29,6 +30,18 @@ static void _flush_cache() {
 
 std::ostream& operator<<(std::ostream& os, const cl::detail::size_t_array& sz3) {
     os << "size_t_array[" << sz3[0] << "," << sz3[1] << "," << sz3[2] << "]";
+    return os;
+}
+
+template<typename T>
+std::ostream& operator<<(std::ostream& os, const cl::vector<T>& vt) {
+    os << "vector[";
+    const char * sep = "";
+    for(int i = 0; i < vt.size(); i++) {
+        os << sep << vt[i];
+        sep = ",";
+    }
+    os << "]";
     return os;
 }
 
@@ -68,6 +81,42 @@ struct CLkernels {
         if (Program.createKernels(&kernels) != CL_SUCCESS) {
             std::cerr << ANSI_COLOR_ERROR << "createKernels failed" << ANSI_COLOR_RESET << std::endl;
             abort();
+        }
+
+        {
+            std::string directoryPath = ".build";
+            if (!std::filesystem::exists(directoryPath)) {
+                if (std::filesystem::create_directory(directoryPath)) {
+                    std::cout << "Directory [" << directoryPath << "] created successfully!\n";
+                } else {
+                    std::cout << "Failed to create directory [" << directoryPath << "] .\n";
+                }
+            } else {
+                std::cout << "Directory [" << directoryPath << "] already exists.\n";
+            }
+            auto open_file = [](std::string file_name) {
+                std::ofstream fw;
+                fw.open(file_name, std::ios::out);
+                if (!fw.is_open()) {
+                    std::cout << "open [" << file_name << "] failed";
+                    abort();
+                }
+                return fw;
+            };
+
+            {
+                auto fw = open_file(directoryPath + "/" + "CL_PROGRAM_SOURCE.cl");
+                fw << Program.getInfo<CL_PROGRAM_SOURCE>();
+            }
+            {
+                auto bins = Program.getInfo<CL_PROGRAM_BINARIES>();
+                for(int i = 0; i < bins.size(); i++) {
+                    auto fw = open_file(directoryPath + "/bin_" + std::to_string(i));
+                    fw.write(reinterpret_cast<const char*>(&bins[i][0]), bins[i].size());
+                }
+            }
+            // Program.getInfo<CL_PROGRAM_KERNEL_NAMES>() 
+            std::cout << ANSI_COLOR_INFO << "Program source & binaries dumped to folder [" << directoryPath << "]" << ANSI_COLOR_RESET << std::endl;
         }
 
         for (auto& k : kernels) {

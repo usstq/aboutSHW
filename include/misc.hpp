@@ -29,6 +29,32 @@ inline float get_delta_ms() {
     return dt.count();
 }
 
+// unit: ns/us/ms/s
+struct Nanoseconds {
+    double m_tvalue;
+    const char * m_unit;
+    Nanoseconds(double _ns) : m_tvalue(_ns) {
+        const char * unit = "(ns)";
+        if (m_tvalue > 1e3) {
+            m_tvalue *= 1e-3;
+            unit = "(us)";
+        }
+        if (m_tvalue > 1e3) {
+            m_tvalue *= 1e-3;
+            unit = "(ms)";
+        }
+        if (m_tvalue > 1e3) {
+            m_tvalue *= 1e-3;
+            unit = "(sec)";
+        }
+        m_unit = unit;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const Nanoseconds& obj) {
+        os << obj.m_tvalue << obj.m_unit;
+        return os;
+    }
+};
+
 template <typename... Ts>
 void easy_cout(const char* file, const char* func, int line, Ts... args) {
     std::string file_path(file);
@@ -85,7 +111,7 @@ inline int64_t getenv(const char * var, int64_t default_value) {
 
             default_value = std::atoi(str_value) * unit_value;
         }
-        printf("\033[32mENV:\t %s = %lld %s\033[0m\n", var, default_value, p?"":"(default)");
+        printf("\033[32mENV:\t %s = %ld %s\033[0m\n", var, default_value, p?"":"(default)");
         envs[var] = default_value;
     }
     return envs[var];
