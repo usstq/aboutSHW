@@ -7,6 +7,8 @@
 #include <iomanip>
 #include <map>
 #include <cstdlib>
+#include <memory>
+#include <cassert>
 
 //========================================================================
 // ASSERT
