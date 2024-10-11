@@ -1,19 +1,5 @@
 #include "cuda_utils.h"
 
-__forceinline__ __device__ unsigned get_warpid() {
-    // this is not equal to threadIdx.x / 32
-    unsigned ret; 
-    asm volatile ("mov.u32 %0, %warpid;" : "=r"(ret));
-    return ret;
-}
-
-__forceinline__ __device__ unsigned get_smid() {
-    // this is not equal to threadIdx.x / 32
-    unsigned ret; 
-    asm volatile ("mov.u32 %0, %smid;" : "=r"(ret));
-    return ret;
-}
-
 /*
  elementwise inplace operation: C[y, x] += 1;
 
@@ -26,26 +12,15 @@ __forceinline__ __device__ unsigned get_smid() {
   so [M, N] is blocked as [M, N/BN, BN]
 */
 
-
 __global__ void sgemm_max_membw(thread_info * tinfo, float * C, size_t M, size_t N, size_t BM, size_t BN) {
     const int x = blockIdx.x * (blockDim.x * BN) + threadIdx.x;
     const int y = blockIdx.y * (blockDim.y * BM) + threadIdx.y;
 
     if (y < M && x < N) {
-        auto linear_id_x = blockIdx.x * blockDim.x + threadIdx.x;
-        auto linear_id_y = blockIdx.y * blockDim.y + threadIdx.y;
-        auto* pt = tinfo + linear_id_y * (gridDim.x * blockDim.x) + linear_id_x;
-        pt->blk_x = blockIdx.x;
-        pt->blk_y = blockIdx.y;
-        pt->thr_x0 = threadIdx.x;
-        pt->thr_y0 = threadIdx.y;
-        pt->smid = get_smid();
-        pt->warpid = get_warpid();
-
         auto* pdata = C + (y*N + x);
         float sum = 0;
 
-        pt->clk_start = clock64();
+        auto off = tinfo->start();
         for(int bm = 0; bm < BM; bm++, pdata += WRAP_SIZE*N) {
             auto* ptr = pdata;
             for(int bn = 0; bn < BN; bn++, ptr += WRAP_SIZE) {
@@ -53,7 +28,7 @@ __global__ void sgemm_max_membw(thread_info * tinfo, float * C, size_t M, size_t
                 sum += ptr[0];
             }
         }
-        pt->clk_dur = clock64() - pt->clk_start;
+        tinfo->end(off);
 
         if (sum == 1.0f) {
             printf("impossible, just to prevent optimization of sum");

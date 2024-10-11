@@ -237,6 +237,18 @@ std::ostream& operator<<(std::ostream& os, const dim3& d) {
     return os;
 }
 
+__forceinline__ __device__ unsigned get_smid() {
+    // this is not equal to threadIdx.x / 32
+    unsigned ret; 
+    asm volatile ("mov.u32 %0, %smid;" : "=r"(ret));
+    return ret;
+}
+__forceinline__ __device__ unsigned get_warpid() {
+    // this is not equal to threadIdx.x / 32
+    unsigned ret; 
+    asm volatile ("mov.u32 %0, %warpid;" : "=r"(ret));
+    return ret;
+}
 struct thread_info {
     int64_t blk_x = -1;
     int64_t blk_y = -1;
@@ -246,12 +258,41 @@ struct thread_info {
     uint64_t warpid = 0;
     uint64_t clk_start = 0;
     uint64_t clk_dur = 0;
+    uint64_t ns_start = 0;
+    uint64_t ns_dur = 0;
+    __device__ size_t start() {
+        auto linear_id_x = blockIdx.x * blockDim.x + threadIdx.x;
+        auto linear_id_y = blockIdx.y * blockDim.y + threadIdx.y;
+        size_t offset = linear_id_y * (gridDim.x * blockDim.x) + linear_id_x;
+        thread_info* pt = this + offset;
+        pt->blk_x = blockIdx.x;
+        pt->blk_y = blockIdx.y;
+        pt->thr_x0 = threadIdx.x;
+        pt->thr_y0 = threadIdx.y;
+        pt->smid = get_smid();
+        pt->warpid = get_warpid();
+        pt->clk_start = clock64();
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(pt->ns_start));
+        return offset;
+    }
+
+    __device__ void end(size_t offset) {
+        auto* pt = this + offset;
+        pt->clk_dur = clock64() - pt->clk_start;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(pt->ns_dur));
+        pt->ns_dur -= pt->ns_start;
+    }
 
     static void dump(thread_info * tinfo_base, int tnum, double avg_dur_ns, size_t thr_bytes = 0, size_t thr_ops = 0) {
         auto* ptinfo = tinfo_base;
         // calibrate all clocks from different SMs
         std::vector<uint64_t> clock_min(128, std::numeric_limits<uint64_t>::max());
         std::vector<uint64_t> clock_max(128, std::numeric_limits<uint64_t>::min());
+
+        uint64_t ns_min_global = std::numeric_limits<uint64_t>::max();
+        std::vector<uint64_t> ns_min(128, std::numeric_limits<uint64_t>::max());
+        std::vector<uint64_t> ns_max(128, std::numeric_limits<uint64_t>::min());
+
         std::vector<uint64_t> thread_cnt(128, 0);
         uint64_t sm_cnt = 0;
         for(int i = 0; i < tnum; i++, ptinfo ++) {
@@ -259,20 +300,60 @@ struct thread_info {
             if (ptinfo->clk_dur > 0) {
                 clock_min[ptinfo->smid] = std::min(clock_min[ptinfo->smid], ptinfo->clk_start);
                 clock_max[ptinfo->smid] = std::max(clock_max[ptinfo->smid], ptinfo->clk_start + ptinfo->clk_dur);
+                ns_min[ptinfo->smid] = std::min(ns_min[ptinfo->smid], ptinfo->ns_start);
+                ns_max[ptinfo->smid] = std::max(ns_max[ptinfo->smid], ptinfo->ns_start + ptinfo->ns_dur);
+                ns_min_global = std::min(ns_min_global, ptinfo->ns_start);
                 thread_cnt[ptinfo->smid] ++;
             }
             //ECOUT("SM ", smid , blk_x, ",", blk_y, " clock_start= ", clk_start, ", ", clk_dur);
         }
+        ChromeTraceDumpper dumpper("ct.json");
+
         ECOUT2("==========SM statistics:==========");
         uint64_t clock_overall_dur = std::numeric_limits<uint64_t>::min();
+        uint64_t ns_overall_dur = std::numeric_limits<uint64_t>::min();
         for(uint64_t smid = 0; smid < sm_cnt; smid++) {
             auto clock_dur = clock_max[smid] - clock_min[smid];
+            auto ns_dur = ns_max[smid] - ns_min[smid];
             clock_overall_dur = std::max(clock_overall_dur, clock_dur);
-            ECOUT2("SM ", std::fixed, std::setw(3), smid , " clock: ", clock_min[smid], " + ", clock_dur,
+            ns_overall_dur = std::max(ns_overall_dur, ns_dur);
+        }
+        dumpper.phX("GPU", "", 
+                    std::string("GPU"),
+                    std::string("GPU"),
+                    0, ns_overall_dur * 1e-3,
+                    {
+                        {"GPU_avg_frequency(GHz)",std::to_string(clock_overall_dur*1.0 / ns_overall_dur)},
+                        {"GOP/second",std::to_string((tnum * thr_ops * 1.0)/ns_overall_dur)},
+                        {"GB/second",std::to_string((tnum * thr_bytes * 1.0)/ns_overall_dur)},
+                    });        
+        for(uint64_t smid = 0; smid < sm_cnt; smid++) {
+            auto clock_dur = clock_max[smid] - clock_min[smid];
+            auto ns_dur = ns_max[smid] - ns_min[smid];
+            ECOUT2("SM ", std::fixed, std::setw(3), smid ,
+                " clock: ", clock_min[smid], " + ", clock_dur,
+                " ns: ", ns_min[smid] - ns_min_global, " + ", ns_dur,
+                " Freq: ", (clock_dur*1.0/ns_dur),
                 " ", thread_cnt[smid], "(threads)",
                 " ", (thread_cnt[smid]*thr_bytes)/clock_dur, " (bytes/cycle)",
+                " ", (thread_cnt[smid]*thr_bytes)/ns_dur, " (GB/s)",
                 " ", (thread_cnt[smid]*thr_ops)/clock_dur, " (ops/cycle)"
                 );
+
+            dumpper.phX("SM", "", 
+                        std::string("SM_") + std::to_string(smid),
+                        std::string("SM_") + std::to_string(smid),
+                        (ns_min[smid] - ns_min_global) * 1e-3, ns_dur * 1e-3,
+                        {
+                            {"frequency(GHz)",std::to_string(clock_dur*1.0/ns_dur)},
+                            {"clock_min",std::to_string(clock_min[smid])},
+                            {"clock_duration",std::to_string(clock_dur)},
+                            {"thread_cnts", std::to_string(thread_cnt[smid])},
+                            {"bytes/cycle", std::to_string((thread_cnt[smid]*thr_bytes)/clock_dur)},
+                            {"GB/s", std::to_string((thread_cnt[smid]*thr_bytes)/ns_dur)},
+                            {"ops/cycle", std::to_string((thread_cnt[smid]*thr_ops)/clock_dur)},
+                            {"Gops/s", std::to_string((thread_cnt[smid]*thr_ops)/ns_dur)},
+                        });            
         }
         ECOUT2(" clock_overall_dur = ", clock_overall_dur);
         ECOUT2(" avg_dur_ns = ", avg_dur_ns, "(ns)");
@@ -285,6 +366,7 @@ struct thread_info {
         ptinfo = tinfo_base;
         for(int i = 0; i < tnum; i++, ptinfo ++) {
             ptinfo->clk_start -= clock_min[ptinfo->smid];
+            ptinfo->ns_start -= ns_min_global;
         }
 
         // 32 threads from same warp (if block-size in X direction is larger than 32)
@@ -301,18 +383,21 @@ struct thread_info {
                     dumpper.phX(ss.str(), "", 
                         std::string("SM_") + std::to_string(thread_info::smid),
                         std::string("warp_") + std::to_string(thread_info::warpid),
-                        clk_start, clk_dur,
+                        ns_start * 1e-3, ns_dur * 1e-3,
                         {
                             {"thr_x0",std::to_string(thr_x0) + "+" + std::to_string(thr_cnt)},
                             {"thr_y0",std::to_string(thr_y0)},
+                            {"cycles",std::to_string(clk_dur)},
+                            {"frequency(GHz)",std::to_string((double)clk_dur/ns_dur)},
                             {"ops/cycle", std::to_string(double(thr_ops * thr_cnt)/clk_dur)},
-                            {"bytes/cycle", std::to_string(double(thr_bytes * thr_cnt)/clk_dur)}
+                            {"bytes/cycle", std::to_string(double(thr_bytes * thr_cnt)/clk_dur)},
+                            {"Gops/s", std::to_string(double(thr_ops * thr_cnt)/ns_dur)},
+                            {"GB/s", std::to_string(double(thr_bytes * thr_cnt)/ns_dur)}
                         });
                 }
             }
         };
 
-        ChromeTraceDumpper dumpper("ct.json");
         warp_info warp(dumpper, thr_ops, thr_bytes);
         ptinfo = tinfo_base;
         for (int n = 0; n < tnum; n++, ptinfo ++) {

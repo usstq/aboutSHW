@@ -64,20 +64,6 @@ cuda_timeit #0 test_max_gflops:119 sgemm_max_gflops x 3  0(bytes) 4294967296000(
 
 */
 
-__forceinline__ __device__ unsigned get_warpid() {
-    // this is not equal to threadIdx.x / 32
-    unsigned ret; 
-    asm volatile ("mov.u32 %0, %warpid;" : "=r"(ret));
-    return ret;
-}
-
-__forceinline__ __device__ unsigned get_smid() {
-    // this is not equal to threadIdx.x / 32
-    unsigned ret; 
-    asm volatile ("mov.u32 %0, %smid;" : "=r"(ret));
-    return ret;
-}
-
 #define FMACNT 32
 // mapping between threadIdx & (x,y) are transposed
 __global__ void sgemm_max_gflops(thread_info * tinfo, size_t M, size_t N, size_t K) {
@@ -85,23 +71,16 @@ __global__ void sgemm_max_gflops(thread_info * tinfo, size_t M, size_t N, size_t
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (y < M && x < N) {
-        auto* pt = tinfo + (y*N + x);
-        pt->blk_x = blockIdx.x;
-        pt->blk_y = blockIdx.y;
-        pt->thr_x0 = threadIdx.x;
-        pt->thr_y0 = threadIdx.y;
-        pt->smid = get_smid();
-        pt->warpid = get_warpid();
 
         float tmp[FMACNT] = {0};
         float a = y;
         float b = x;
-        pt->clk_start = clock64();
+        auto off = tinfo->start();
         for (int k = 0; k < K; ++k) {
             for(int c = 0; c < FMACNT; c++)
                 tmp[c] = fma(a, b, tmp[c]);
         }
-        pt->clk_dur = clock64() - pt->clk_start;
+        tinfo->end(off);
 
         // to prevent optimization
         if (tmp[0] == 1.2134f) {
