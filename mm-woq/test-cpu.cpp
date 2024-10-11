@@ -224,7 +224,7 @@ void mm_avx2_i8_reg_x1s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C
     }
 }
 
-
+template<int PREFETCH_ADV = 0>
 void mm_avx2_i8_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C) {
     auto M = A.size(0);
     auto K = A.size(1);
@@ -269,6 +269,9 @@ void mm_avx2_i8_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C
                 acc1 = _mm256_fmadd_ps(a0, b1, acc1);
                 acc2 = _mm256_fmadd_ps(a0, b2, acc2);
                 acc3 = _mm256_fmadd_ps(a0, b3, acc3);
+
+                if (PREFETCH_ADV > 0)
+                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T2);
             }
 
             _mm256_storeu_ps(pC0 + n, acc0);
@@ -280,6 +283,62 @@ void mm_avx2_i8_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C
 }
 
 
+template<int PREFETCH_ADV = 0>
+void mm_avx2_i4_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C) {
+    auto M = A.size(0);
+    auto K = A.size(1);
+    auto N = C.size(1);
+    auto nthr = omp_get_max_threads();
+
+    auto reg_blk_N = SIMD_WIDTH * 4;
+
+    ASSERT(((N/reg_blk_N) % nthr) == 0);
+    auto BN = ((N/reg_blk_N) / nthr) * reg_blk_N;
+
+    auto* pA0 = A.ptr();
+    auto* pC0 = C.ptr();
+    #pragma omp parallel
+    {
+        int ithr = omp_get_thread_num();
+        auto n0 = BN * ithr;
+        auto n1 = n0 + BN;
+        auto* pB = B.ptr() + ithr*(K * BN / 2);
+        auto stride_B = SIMD_WIDTH * 4 * SM / 2;
+        for(int n = n0; n < n1; n += reg_blk_N) {
+            auto acc0 = _mm256_setzero_ps();
+            auto acc1 = _mm256_setzero_ps();
+            auto acc2 = _mm256_setzero_ps();
+            auto acc3 = _mm256_setzero_ps();
+
+            // sub-block matmul: [1 x K] x [K, SIMD_WIDTH * 4] => [1 x SIMD_WIDTH * 4]
+            auto vmask = _mm256_set1_epi32(0xf0);
+            for(int k = 0; k < K; k++, pB += stride_B) {
+                auto bi80 = _mm256_cvtepu8_epi32(_mm_loadu_si128((const __m128i_u*)pB));
+                auto bi81 = _mm256_cvtepu8_epi32(_mm_loadu_si128((const __m128i_u*)(pB + SIMD_WIDTH)));
+
+                auto b0 = _mm256_cvtepi32_ps(_mm256_srli_epi32(bi80, 4));
+                auto b1 = _mm256_cvtepi32_ps(_mm256_srli_epi32(bi81, 4));
+                auto b2 = _mm256_cvtepi32_ps(_mm256_and_si256(bi80, vmask));
+                auto b3 = _mm256_cvtepi32_ps(_mm256_and_si256(bi81, vmask));
+
+                auto a0 = _mm256_broadcast_ss(pA0 + k);
+                acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                acc1 = _mm256_fmadd_ps(a0, b1, acc1);
+                acc2 = _mm256_fmadd_ps(a0, b2, acc2);
+                acc3 = _mm256_fmadd_ps(a0, b3, acc3);
+
+                if (PREFETCH_ADV > 0)
+                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T2);
+            }
+
+            _mm256_storeu_ps(pC0 + n, acc0);
+            _mm256_storeu_ps(pC0 + n + SIMD_WIDTH, acc1);
+            _mm256_storeu_ps(pC0 + n + SIMD_WIDTH*2, acc2);
+            _mm256_storeu_ps(pC0 + n + SIMD_WIDTH*3, acc3);
+        }
+    }
+}
+
 int main() {
     
     auto CLC = getenv("CLC", 1);
@@ -290,18 +349,22 @@ int main() {
     ECOUT("nthr=", nthr);
     tensorND<float> A({M, K}, 0.0f);
     tensorND<float> Bf32({K, N}, 0.0f);
-    tensorND<int8_t> Bi8({K, N}, 0);
     tensorND<float> C({M, N}, 0.0f);
+    tensorND<int8_t> Bi8({K, N}, 0);
+    tensorND<int8_t> Bi4({K, N/2}, 0);
 
     auto A_bytes = A.numel() * sizeof(float);
-    auto B_bytes = Bf32.numel() * sizeof(float);
     auto C_bytes = C.numel() * sizeof(float);
+    auto B_bytes = Bf32.numel() * sizeof(float);
     auto Bi8_bytes = Bi8.numel() * sizeof(int8_t);
+    auto Bi4_bytes = Bi4.numel() * sizeof(int8_t);
 
-    ECOUT("A matrix size = ", A_bytes * 1e-6, " MB(1,000,000 bytes)");
-    ECOUT("C matrix size = ", C_bytes * 1e-6, " MB(1,000,000 bytes)");
+    ECOUT("====================================");
+    ECOUT("   A matrix size = ", A_bytes * 1e-6, " MB(1,000,000 bytes)");
+    ECOUT("   C matrix size = ", C_bytes * 1e-6, " MB(1,000,000 bytes)");
     ECOUT("Bf32 matrix size = ", B_bytes * 1e-6, " MB(1,000,000 bytes)");
-    ECOUT("Bi8 matrix size = ", Bi8_bytes * 1e-6, " MB(1,000,000 bytes)");
+    ECOUT(" Bi8 matrix size = ", Bi8_bytes * 1e-6, " MB(1,000,000 bytes)");
+    ECOUT(" Bi4 matrix size = ", Bi4_bytes * 1e-6, " MB(1,000,000 bytes)");
 
     auto clr_cache = [&](){
         if (!CLC) return;
@@ -338,7 +401,7 @@ int main() {
             K*(N/SIMD_WIDTH)/nthr,
             [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                 auto bw = B_bytes * 1.0/duration_ns;
-                log += sprintf(log, " MemBW: %.2f(GB/s)", bw);
+                log += sprintf(log, " MemBW: %.2f(GB/s)  \t+ exploit HW-pefetcher", bw);
             });
 
         clr_cache();
@@ -348,17 +411,38 @@ int main() {
             K*(N/SIMD_WIDTH)/nthr,
             [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                 auto bw = Bi8_bytes * 1.0/duration_ns;
-                log += sprintf(log, " MemBW: %.2f(GB/s)", bw);
+                log += sprintf(log, " MemBW: %.2f(GB/s)  \t+ Weight-Compressed INT8", bw);
             });
 
         clr_cache();
         pevg.rdpmc(
-            [&]() { mm_avx2_i8_reg_x4s(A, Bi8, C); },
-            "mm_avx2_i8_reg_x4s",
+            [&]() { mm_avx2_i8_reg_x4s<0>(A, Bi8, C); },
+            "mm_avx2_i8_x4s<0>",
             K*(N/(SIMD_WIDTH*4))/nthr,
             [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                 auto bw = Bi8_bytes * 1.0/duration_ns;
-                log += sprintf(log, " MemBW: %.2f(GB/s)", bw);
+                log += sprintf(log, " MemBW: %.2f(GB/s)  \t+ register-blocking", bw);
+            });
+
+        // prefetch is helpful
+        clr_cache();
+        pevg.rdpmc(
+            [&]() { mm_avx2_i8_reg_x4s<4096>(A, Bi8, C); },
+            "mm_avx2_i8_x4s<4096>",
+            K*(N/(SIMD_WIDTH*4))/nthr,
+            [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
+                auto bw = Bi8_bytes * 1.0/duration_ns;
+                log += sprintf(log, " MemBW: %.2f(GB/s)  \t+ SW-prefetch across page boundary ", bw);
+            });
+
+        clr_cache();
+        pevg.rdpmc(
+            [&]() { mm_avx2_i4_reg_x4s<4096>(A, Bi4, C); },
+            "mm_avx2_i4_x4s<4096>",
+            K*(N/(SIMD_WIDTH*4))/nthr,
+            [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
+                auto bw = Bi4_bytes * 1.0/duration_ns;
+                log += sprintf(log, " MemBW: %.2f(GB/s)  \t+ Weight-Compressed INT4", bw);
             });
 
     }
