@@ -149,6 +149,49 @@ void mm_avx2_f32_reg_x1(tensorND<float> A, tensorND<float> B, tensorND<float> C)
     }
 }
 
+void mm_avx2_f32_reg_x1p(tensorND<float> A, tensorND<float> B, tensorND<float> C) {
+    auto M = A.size(0);
+    auto K = A.size(1);
+    auto N = C.size(1);
+    auto nthr = omp_get_max_threads();
+
+    auto reg_blk_N = SIMD_WIDTH;
+
+    ASSERT(((N/reg_blk_N) % nthr) == 0);
+    auto BN = ((N/reg_blk_N) / nthr) * reg_blk_N;
+
+    auto B_size_per_thr = K * BN * sizeof(float);
+
+    auto* pA0 = A.ptr();
+    auto* pB0 = B.ptr();
+    auto* pC0 = C.ptr();
+    #pragma omp parallel
+    {
+        int ithr = omp_get_thread_num();
+        auto n0 = BN * ithr;
+        auto n1 = n0 + BN;
+        auto stride_B = B.strides()[0] * SM;
+        for(int n = n0; n < n1; n += reg_blk_N) {
+            auto * pB = pB0 + n;
+            auto * pB_pf = pB0 + n + stride_B*25;
+            auto acc0 = _mm256_setzero_ps();
+
+            // sub-block matmul: [1 x K] x [K, SIMD_WIDTH] => [1 x SIMD_WIDTH]
+            for(int k = 0; k < K; k++, pB += stride_B, pB_pf += stride_B) {
+                // compute ~ 4.7 cycles (FMA latency 4)
+                // +load_from DDR ~50 cycles
+                auto b0 = _mm256_loadu_ps(pB);
+                auto a0 = _mm256_broadcast_ss(pA0 + k);
+                acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                //acc0 = _mm256_xor_ps(acc0, b0);
+                _mm_prefetch(pB_pf, _MM_HINT_T2);
+            }
+
+            _mm256_storeu_ps(pC0 + n, acc0);
+        }
+    }
+}
+
 void mm_avx2_f32_reg_x1s(tensorND<float> A, tensorND<float> B, tensorND<float> C) {
     auto M = A.size(0);
     auto K = A.size(1);
@@ -271,7 +314,7 @@ void mm_avx2_i8_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C
                 acc3 = _mm256_fmadd_ps(a0, b3, acc3);
 
                 if (PREFETCH_ADV > 0)
-                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T2);
+                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T0);
             }
 
             _mm256_storeu_ps(pC0 + n, acc0);
@@ -328,7 +371,7 @@ void mm_avx2_i4_reg_x4s(tensorND<float> A, tensorND<int8_t> B, tensorND<float> C
                 acc3 = _mm256_fmadd_ps(a0, b3, acc3);
 
                 if (PREFETCH_ADV > 0)
-                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T2);
+                    _mm_prefetch(pB + PREFETCH_ADV, _MM_HINT_T0);
             }
 
             _mm256_storeu_ps(pC0 + n, acc0);
@@ -378,16 +421,28 @@ int main() {
             for(size_t i = 0; i < Bi8_bytes; i += 64) {
                 _mm_clflush(src + i);
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     };
 
     pevg.show_header();
     for(int round = 0; round < 2; round++) {
         std::cout << "============== round " << round << " ===================" << std::endl;
+
         clr_cache();
         pevg.rdpmc(
             [&]() { mm_avx2_f32_reg_x1(A, Bf32, C); },
             "mm_avx2_f32_reg_x1",
+            K*(N/SIMD_WIDTH)/nthr,
+            [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
+                auto bw = B_bytes * 1.0/duration_ns;
+                log += sprintf(log, " MemBW: %.2f(GB/s)", bw);
+            });
+
+        clr_cache();
+        pevg.rdpmc(
+            [&]() { mm_avx2_f32_reg_x1p(A, Bf32, C); },
+            "mm_avx2_f32_reg_x1p",
             K*(N/SIMD_WIDTH)/nthr,
             [&](uint64_t duration_ns, uint64_t* pmc, char*& log){
                 auto bw = B_bytes * 1.0/duration_ns;

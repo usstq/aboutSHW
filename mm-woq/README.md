@@ -1,10 +1,40 @@
 # Prototyping Weight-only quantization of FC (with perf-tunning)
 
 ## [test-cpu.cpp](./test-cpu.cpp)
+
+Using `SM=0 CLC=0` config, no cache miss happens and we can measure the loop-kernel latency in clock cycles.
+based on the memory bind-width CPU frequency we can see how much cycles is allowed for CPU to decompress weights.
+
+On target machine, MLC shows 97GB/s peak DDR bandwidth, so we can estimate the throughput in terms of cycles per loop-kernel, using 8x P-cores we have 12.125GB/s bandwidth for each P-core
+
+| kernel name | data-load-size(bytes)| data-throuput <br>(ns) | data-throuput<br> (cycles @5.0GHz~@5.7GHz) | compute-cycles | comment |
+|-------------|----------------------|-------------|-------------|-------------|-------------|
+|mm_avx2_f32_reg_x1s | 8xf32=32  | 0.32 | 13~15     | 4   | memory-bound  |
+| mm_avx2_i8_reg_x1s | 8xi8=8    | 0.08 | 3.29~3.76 | 4   | compute-bound |
+| mm_avx2_i8_reg_x4s | 4x8xi8=32 | 0.32 | 13~15     | 4.3 | compute-bound |
+| mm_avx2_i4_reg_x4s | 4x8xi4=16 | 0.16 | 6.5~7.5   | 5   | memory-bound  |
+
+
+Even in the case where analysis shows memory-bound, we still need to take extra care to make sure DDR-access is really in parallel with ALU computation by:
+ - make each core access (physical) contiguous data, to best use HW-prefetcher and avoid cache-coherent protocol overhead
+ - prefetching ahead at by 4KB to help HW-prefetch when crossing page-boundary
+
 ```bash
 # on 8x P-Cores of RPL with 97GB/s DDR bandwidth
 #  Intel(R) Core(TM) i9-14900K
 $ g++ -fopenmp -O2 -march=native ./test.cpp
+
+# check Cycles per loop-kernel to see compute-cycles
+$ SM=0 CLC=0  numactl -C0,2,4,6,8,10,12,14 ./a.out
+============== round 1 ===================
+      8306345,        14687725,  [mm_avx2_f32_reg_x1] 1456.722 us CPU:5.70(GHz) CPI:0.57  CPK:4.0x2097152 MemBW: 368.55(GB/s)
+      8268451,        16785311,  [mm_avx2_f32_reg_x1s] 1452.234 us CPU:5.69(GHz) CPI:0.49 CPK:3.9x2097152 MemBW: 369.69(GB/s)   + exploit HW-pefetcher
+      8314721,        18881865,  [mm_avx2_i8_reg_x1s] 1458.295 us CPU:5.70(GHz) CPI:0.44  CPK:4.0x2097152 MemBW: 92.04(GB/s)    + Weight-Compressed INT8
+      2263130,        11538131,  [mm_avx2_i8_x4s<0>] 396.880 us CPU:5.70(GHz) CPI:0.20    CPK:4.3x524288 MemBW: 338.18(GB/s)    + register-blocking
+      2280403,        12062454,  [mm_avx2_i8_x4s<4096>] 399.937 us CPU:5.70(GHz) CPI:0.19 CPK:4.3x524288 MemBW: 335.60(GB/s)    + SW-prefetch across page boundary 
+      2636302,        12062461,  [mm_avx2_i4_x4s<4096>] 463.847 us CPU:5.68(GHz) CPI:0.22 CPK:5.0x524288 MemBW: 144.68(GB/s)    + Weight-Compressed INT4
+
+# 
 $ SM=1 CLC=1  numactl -C0,2,4,6,8,10,12,14 ./a.out
 ENV:     SM = 1 
 ENV:     CLC = 1 
