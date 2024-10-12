@@ -586,5 +586,25 @@ struct ChromeTraceDumpper {
         }
         fw << "},\n";
     }
-    
+
+    template<typename PID, typename TID>
+    void phb(std::string name, std::string cat, PID pid, TID tid, double ts_us, double dur_us,
+            const std::vector<std::pair<std::string, std::string>>& args = {}) {
+        fw << "{\"ph\": \"b\", \"name\": \"" << tid << "\", \"cat\":\"" << tid << "\","
+            << "\"pid\": \"" << pid << "\","
+            << "\"tid\": \"" << tid << "\","
+            << "\"id\": 100, "
+            << "\"ts\": " << std::setprecision (15) << ts_us;
+        
+        if (args.size()) {
+            fw << ",\"args\":{";
+            const char * sep = "";
+            for(const auto& p : args) {
+                fw << sep << "\"" << p.first << "\":\"" << p.second << "\"";
+                sep = ",";
+            }
+            fw << "}";
+        }
+        fw << "}, {\"ph\": \"e\", \"name\": \"" << tid << "\", \"id\": 100,  \"cat\":\"" << tid << "\", \"pid\": \"" << pid << "\",\"tid\": \"" << tid << "\", \"ts\":" << ts_us + dur_us << "},\n";
+    }
 };
