@@ -1,7 +1,5 @@
 
-#define CL_HPP_ENABLE_EXCEPTIONS
-
-#include "common.hpp"
+#include "../include/misc.hpp"
 
 int main() {
     tensorND<float> t;
@@ -10,5 +8,11 @@ int main() {
     t.at(0,1,2) = 1.22f;
     t.at(1,2,3) = 1.23f;
     std::cout << t.repr(3,6) << std::endl;
+
+    std::cout << "range-based-for-loops: {";
+    for(auto& v : t) {
+        std::cout << v << ",";
+    }
+    std::cout << "}" << std::endl;
     return 0;
 }

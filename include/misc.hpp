@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <memory>
 #include <cassert>
+#include <vector>
 
 //========================================================================
 // ASSERT
@@ -229,8 +230,8 @@ struct tensorND {
         auto * p_lhr = m_data.get();
         auto * p_rhr = rhs.m_data.get();
         
-        auto coord0 = get_coordinate();
-        auto coord1 = rhs.get_coordinate();
+        auto coord0 = begin();
+        auto coord1 = rhs.begin();
         for(size_t i = 0; i < m_numel; i++) {
             auto value0 = m_data.get()[coord0.offset()];
             auto value1 = rhs.m_data.get()[coord1.offset()];
@@ -253,7 +254,7 @@ struct tensorND {
     }
     const size_t* shape() const { return m_shape; }
     const size_t* strides() const { return m_strides; }
-
+    const size_t item_size() const { return sizeof(T); }
     // coordinate (can be designed as iterator too)
     struct coordinate {
         const tensorND<T, TENSORND_MAXDIMS>* m_tensor;
@@ -274,7 +275,26 @@ struct tensorND {
                 else
                     m_value[i] = 0;
             }
+            update_offset();
         }
+        bool operator==(const coordinate& rhs) {
+            if (m_tensor != rhs.m_tensor)
+                return false;
+            // fast-path for most compare
+            if (m_offset != rhs.m_offset)
+                return false;
+            auto ndims = m_tensor->ndims();
+            for(int r = 0; r < ndims; r++) {
+                if (m_value[r] != rhs.m_value[r])
+                    return false;
+            }
+            return true;
+        }
+        bool operator!=(const coordinate& rhs) {
+            return !((*this) == rhs);
+        }
+        const T& operator*() const { return m_tensor->m_data.get()[m_offset]; }
+        coordinate& operator++() { (*this) += 1; return *this; }
         coordinate& operator+=(int64_t carry) {
             auto* shape = m_tensor->shape();
             auto ndims = m_tensor->ndims();
@@ -283,21 +303,28 @@ struct tensorND {
                 carry = 0;
 
                 assert(m_value[r] >= 0);
-                // get carry for next-higher digit
-                while(m_value[r] >= shape[r]) {
-                    m_value[r] -= shape[r];
-                    carry ++;
+                // get carry for next-higher digit, unless for outer-most dimension: dim0, 
+                // in which it allows to be bigger than shape[0] to express the end() iterator
+                if (r > 0) {
+                    while(m_value[r] >= shape[r]) {
+                        m_value[r] -= shape[r];
+                        carry ++;
+                    }
                 }
 
                 if (carry == 0) break;
             }
-            // update offset
+            update_offset();
+            return *this;
+        }
+
+        void update_offset() {
+            auto ndims = m_tensor->ndims();
             auto* strides = m_tensor->strides();
             m_offset = 0;
             for (int r = 0; r < ndims; r++) {
                 m_offset += m_value[r] * strides[r];
             }
-            return *this;
         }
 
         std::string to_string() {
@@ -314,14 +341,50 @@ struct tensorND {
         }
     };
 
-    coordinate get_coordinate() const {
+    // iterator interface
+    coordinate begin() const {
         return coordinate(this);
     }
+    coordinate end() const {
+        return coordinate(this, { (int)(m_shape[0])});
+    }
 
-    void resize(const std::vector<size_t>& dims) {
+    template<class SizeContainer>
+    void resize(const SizeContainer& dims, const SizeContainer& strides, const T* ext_buff) {
+        auto it_dims = dims.begin();
+        auto it_dims_end = dims.end();
+        auto it_strides = strides.begin();
+        auto it_strides_end = strides.end();
+
+        m_ndims = dims.size();
+        m_offset = 0;
+        m_numel = 1;
+        for (int i = 0; i < m_ndims; i++) {
+            m_shape[i] = dims[i];
+            m_strides[i] = strides[i];
+            m_numel *= dims[i];
+        }
+        m_data = std::shared_ptr<T>(const_cast<T*>(ext_buff), [](T*) {});
+    }
+
+    template<class TS>
+    void resize(const std::vector<TS>& dims, const std::vector<TS>& strides, const T* ext_buff) {
+        m_ndims = dims.size();
+        m_offset = 0;
+        m_numel = 1;
+        for (int i = 0; i < m_ndims; i++) {
+            m_shape[i] = dims[i];
+            m_strides[i] = strides[i];
+            m_numel *= dims[i];
+        }
+        m_data = std::shared_ptr<T>(const_cast<T*>(ext_buff), [](T*) {});
+    }
+
+    template<class TS>
+    void resize(const std::vector<TS>& dims) {
         assert(dims.size() <= TENSORND_MAXDIMS);
         m_ndims = dims.size();
-        size_t s = 1;
+        TS s = 1;
         m_numel = 1;
         for(int64_t i = static_cast<int64_t>(m_ndims - 1); i >= 0; i--) {
             m_shape[i] = dims[i];
@@ -465,7 +528,7 @@ struct tensorND {
         ss << ") dtype=" << typeid(*pdata).name() << " [\n";
         if (precision >= 0) ss << std::setprecision(precision);
 
-        auto coord = get_coordinate();
+        auto coord = begin();
 
         for(int i = 0; i < m_numel; ) {
             if (m_ndims > 1) {
@@ -480,7 +543,7 @@ struct tensorND {
             for(int n = 0; n < m_shape[m_ndims - 1]; n++) {
                 if (width >= 0)
                     ss << std::fixed << std::setw(width);
-                ss << m_data.get()[coord.offset()];
+                ss << *coord;
                 // std::cout << coord.offset() << "\n";
                 coord += 1;
                 i += 1;
@@ -593,7 +656,7 @@ struct ChromeTraceDumpper {
         fw << "{\"ph\": \"b\", \"name\": \"" << tid << "\", \"cat\":\"" << tid << "\","
             << "\"pid\": \"" << pid << "\","
             << "\"tid\": \"" << tid << "\","
-            << "\"id\": 100, "
+            << "\"id\": \"" << pid << "\", "
             << "\"ts\": " << std::setprecision (15) << ts_us;
         
         if (args.size()) {
@@ -605,6 +668,6 @@ struct ChromeTraceDumpper {
             }
             fw << "}";
         }
-        fw << "}, {\"ph\": \"e\", \"name\": \"" << tid << "\", \"id\": 100,  \"cat\":\"" << tid << "\", \"pid\": \"" << pid << "\",\"tid\": \"" << tid << "\", \"ts\":" << ts_us + dur_us << "},\n";
+        fw << "}, {\"ph\": \"e\", \"name\": \"" << tid << "\", \"id\": \"" << pid << "\",  \"cat\":\"" << tid << "\", \"pid\": \"" << pid << "\",\"tid\": \"" << tid << "\", \"ts\":" << ts_us + dur_us << "},\n";
     }
 };

@@ -145,6 +145,12 @@ struct CLkernels {
         std::cout << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n";
         std::cout << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
         std::cout << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
+
+        auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
+        std::cout << " args " << nargs << " :" << std::endl;
+        for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
+            std::cout << "\t" << arg_idx << " " << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx) << std::endl;
+        }
     }
 
     template<typename ...Args>
@@ -170,6 +176,22 @@ struct CLkernels {
 #define CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL     0x4254
 #define CL_DEVICE_NUM_THREADS_PER_EU_INTEL        0x4255
 #define CL_DEVICE_FEATURE_CAPABILITIES_INTEL      0x4256
+
+struct dev_info {
+    std::string name;
+    size_t num_EUs;
+    size_t freq_MHz;
+    double Tcycles_ps;
+
+    dev_info() {
+        auto context = cl::Context::getDefault();
+        auto dev = context.getInfo<CL_CONTEXT_DEVICES>()[0];
+        name = dev.getInfo<CL_DEVICE_NAME>();
+        num_EUs = dev.getInfo <CL_DEVICE_MAX_COMPUTE_UNITS>();
+        freq_MHz = dev.getInfo <CL_DEVICE_MAX_CLOCK_FREQUENCY>();
+        Tcycles_ps = 1e-6 * num_EUs * freq_MHz;
+    }
+};
 
 static cl::Platform select_default_platform(std::vector<std::string> exts = {}) {
     // Filter for a 2.0 or newer platform and set it as the default
@@ -259,3 +281,147 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
     std::cout << "platform selected: " << plat.getInfo<CL_PLATFORM_VERSION>() << "; " << plat.getInfo<CL_PLATFORM_NAME>() << std::endl;
     return newP;
 }
+
+struct workitem_info {
+    uint32_t group_id0;
+    uint32_t group_id1;
+    uint32_t local_id0;
+    uint32_t local_id1;
+    uint32_t sub_group_id;
+    uint32_t sub_group_local_id;
+    uint32_t slice_id;
+    uint32_t sub_slice_id;
+    uint32_t eu_id;
+    uint32_t eu_slot_id;
+    uint64_t cycle_start;
+    uint64_t cycle_dur;
+    static void Dump(tensorND<workitem_info>& winfo, size_t latency_ns, size_t num_ops_per_workitem) {
+        ChromeTraceDumpper dumpper("ocl.json");
+
+        struct EUWork : workitem_info {
+            int thr_cnt = 0;
+            double num_OPs = 0;
+            void dump(ChromeTraceDumpper & dumpper) {
+                if (thr_cnt <= 0) return;
+                if (slice_id != 0 || sub_slice_id > 1) return;
+                std::stringstream ss;
+                std::stringstream ss_cat;
+                std::stringstream ss_pid;
+                std::stringstream ss_tid;
+                ss << "kernel(" << group_id0 << "," << group_id1 << ")";
+                ss_pid << "slice.subslice:" << slice_id << "." << sub_slice_id;
+                //ss_tid << "(" << local_id0 << "+" << thr_cnt << "," << local_id1 << ") EU" << eu_id;
+                //ss_tid << "(" << group_id0 << "," << group_id1 << ")." << sub_group_id;
+                ss_tid << "EU_" << eu_id << "." << eu_slot_id;
+                //ss << "(" << local_id0 << "+" << thr_cnt << "," << local_id1 << ") sub-group:" << sub_group_id << "." << sub_group_local_id;
+                dumpper.phb(ss.str(), ss_cat.str(), ss_pid.str(), ss_tid.str(), cycle_start, cycle_dur,
+                {
+                    {"local_id0",std::to_string(local_id0) + "+" + std::to_string(thr_cnt)},
+                    {"local_id1",std::to_string(local_id1)},
+                    {"OPS/cycle", std::to_string(num_OPs/cycle_dur)}
+                });
+            }
+        };
+        EUWork euwork;
+        euwork.group_id0 = std::numeric_limits<uint32_t>::max();
+        size_t total_thread_cnt = 0;
+
+        {
+            // collect & show some statistics
+            struct SubSliceStat {
+                uint64_t slice_id;
+                uint64_t sub_slice_id;
+                uint64_t thread_cnt = 0;
+                uint64_t cycles_min = std::numeric_limits<uint64_t>::max();
+                uint64_t cycles_max = std::numeric_limits<uint64_t>::min();
+                double num_ops = 0;
+            };
+            std::vector<std::vector<SubSliceStat>> subslice_state;
+            for(auto& w : winfo) {
+                if (subslice_state.size() < w.slice_id + 1) {
+                    subslice_state.resize(w.slice_id + 1);
+                }
+                auto& vs = subslice_state[w.slice_id];
+                if (vs.size() < w.sub_slice_id + 1) {
+                    vs.resize(w.sub_slice_id + 1);
+                }
+                auto& st = vs[w.sub_slice_id];
+
+                st.slice_id = w.slice_id;
+                st.sub_slice_id = w.sub_slice_id;
+                st.thread_cnt ++;
+                total_thread_cnt++;
+                st.cycles_min = std::min(st.cycles_min, w.cycle_start);
+                st.cycles_max = std::max(st.cycles_max, w.cycle_start + w.cycle_dur);
+                st.num_ops += num_ops_per_workitem;
+            }
+            for(auto& vs : subslice_state) {
+                for (auto& st : vs) {
+                    if (st.thread_cnt == 0) continue;
+                    std::cout << "subslice [" << st.slice_id << "." << st.sub_slice_id << "]:   "
+                            << " cycles_min: " << st.cycles_min
+                            << " cycles_dur: " << st.cycles_max - st.cycles_min
+                            << " thread_cnt: " << st.thread_cnt
+                            << " avg_OPS/cycle: " << st.num_ops/(st.cycles_max - st.cycles_min)
+                            << std::endl;
+
+                    std::stringstream ss;
+                    std::stringstream ss_pid;
+                    ss << "subslice[" << st.slice_id << "." << st.sub_slice_id << "]";
+                    ss_pid << "slice.subslice:" << st.slice_id << "." << st.sub_slice_id;
+                    dumpper.phX(ss.str(), "", ss_pid.str(), ss_pid.str(), st.cycles_min, st.cycles_max - st.cycles_min,
+                    {
+                        {"thread_cnt",std::to_string(st.thread_cnt)},
+                        {"OPS",std::to_string(st.num_ops)},
+                        {"OPS/per_thread",std::to_string(double(st.num_ops)/st.thread_cnt)},
+                        {"avg_OPS/cycle", std::to_string(st.num_ops/(st.cycles_max - st.cycles_min))}
+                    });
+                }
+            }
+        }
+
+        uint64_t min_cycle_start = std::numeric_limits<uint64_t>::max();
+        uint64_t max_cycle_end = std::numeric_limits<uint64_t>::min();
+        for(auto& w : winfo) {
+            min_cycle_start = std::min(min_cycle_start, w.cycle_start);
+            max_cycle_end = std::max(max_cycle_end, w.cycle_start + w.cycle_dur);
+        }
+        
+        dev_info di;
+
+        ECOUT(" total_thread_cnt : ", total_thread_cnt);
+        ECOUT(" thread_per_EU : ", total_thread_cnt/8/di.num_EUs, " (assuming SIMD-8)");
+        auto avg_freq_GHz = double(max_cycle_end - min_cycle_start)/latency_ns;
+        auto normal_freq_GHz = di.freq_MHz*1e-3;
+        ECOUT(" GPU_avg_freq : ", avg_freq_GHz, " (GHz)");
+        ECOUT("              : ", avg_freq_GHz*100/(normal_freq_GHz), "% of ", normal_freq_GHz, "(GHz)");
+        auto avg_gops = double(num_ops_per_workitem) * winfo.numel() /latency_ns;
+        ECOUT(" GFLOPS/s     : ", avg_gops);
+        ECOUT("              : ", avg_gops*100/(di.Tcycles_ps*1e3*8), "% of ", di.Tcycles_ps*8, "(Tcycles/s)");
+
+        for(auto& w : winfo) {
+            //std::cout << "(" << m << "," << n << ")  group(" << pw->group_id0 << "," << pw->group_id1 << ")(" << pw->local_id0 << "," << pw->local_id1 << ")(" << pw->sub_group_id << "," << pw->sub_group_local_id
+            //          << ")  slice:" << pw->slice_id << "." << pw->sub_slice_id << " EU:" << pw->eu_id << "." << pw->eu_slot_id
+            //          << " clock:" << pw->cycle_start << "+" << pw->cycle_dur
+            //          << std::endl;
+            //w.cycle_start -= min_cycle_start;
+            if (euwork.group_id0 == w.group_id0 &&
+                euwork.group_id1 == w.group_id1 &&
+                euwork.sub_group_id == w.sub_group_id) {
+                ASSERT(euwork.slice_id == w.slice_id);
+                ASSERT(euwork.sub_slice_id == w.sub_slice_id);
+                ASSERT(euwork.eu_id == w.eu_id);
+                ASSERT(euwork.cycle_start == w.cycle_start);
+                ASSERT(euwork.cycle_dur == w.cycle_dur);
+                euwork.thr_cnt ++;
+                euwork.num_OPs += num_ops_per_workitem;
+            } else {
+                euwork.dump(dumpper);
+                reinterpret_cast<workitem_info&>(euwork) = w;
+                euwork.thr_cnt = 1;
+                euwork.num_OPs = num_ops_per_workitem;
+            }
+        }
+        euwork.dump(dumpper);        
+    }
+};

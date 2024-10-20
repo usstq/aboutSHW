@@ -48,6 +48,18 @@ https://chipsandcheese.com/p/microbenchmarking-intels-arc-a770
 | XMX                   | 8x4x16=512    | `64-FP16-MAD per-cycle`/`128-INT8-MAD per-cycle`<br> totally `137.6/275.2 TFLOPS @2.1GHz` |
 
 
+# Develop & Debug kernels inside torch framework
+Torch is a good framework to test & optimize kernels because it's easy to add new kernel (or even backend) and integrate with existing models,
+there are few references:
+
+ - https://pytorch.org/tutorials/advanced/privateuseone.html
+ - https://pytorch.org/tutorials/advanced/torch_script_custom_ops.html#
+ - https://github.com/artyom-beilis/pytorch_dlprim
+ - https://github.com/inducer/pyopencl
+
+To our needs, we just want to test & optimize a sub-graph inside a real-model, so the best & simplest choice is just wrap our kernel into a
+torch extension and integrate it into a real-model to do testing. `pyopencl` is also a choice but it adds another layer of complexity and
+requires additional learning since original OpenCL is C-API.
 
 # References
 
