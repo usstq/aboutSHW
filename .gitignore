@@ -2,3 +2,5 @@
 build
 **/.build/
 **/dump/
+**/*.egg-info
+*.so

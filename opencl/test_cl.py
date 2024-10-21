@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 import cl
 import numpy as np
-import os
+import sys
 
 print(dir(cl))
 
@@ -27,13 +27,13 @@ src = '''
 
 k = cl.kernels(src, "")
 
-k.call("set_ids", t.shape,[1,1], t)
+k.enqueue("set_ids", t.shape,[1,1], t)
 
 print("+++++++++++2222")
 print(t.numpy())
 
 
-os.exit(0)
+sys.exit(0)
 
 def test():
     t1 = cl.tensor_f32([10,20])

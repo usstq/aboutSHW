@@ -2,26 +2,26 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <iostream>
+#include <map>
+#include <vector>
+
 #include "common.hpp"
 
-#include <iostream>
-#include <vector>
-#include <map>
-
+#define CL_HPP_ENABLE_EXCEPTIONS
 #define CL_HPP_TARGET_OPENCL_VERSION 300
 #include <CL/opencl.hpp>
 
 #ifndef ASSERT
-#define ASSERT(cond) if (!(cond)) {\
-    std::stringstream ss; \
-    ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
-    throw std::runtime_error(ss.str()); \
-}
+#    define ASSERT(cond)                                                     \
+        if (!(cond)) {                                                       \
+            std::stringstream ss;                                            \
+            ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
+            throw std::runtime_error(ss.str());                              \
+        }
 #endif
 
 namespace py = pybind11;
-
-
 
 // CPU side generates GPU tasks:
 //  - shape-infer
@@ -31,7 +31,7 @@ namespace py = pybind11;
 //
 // and CPU can do this w/o waiting for GPU to finish, so CPU is like a JIT compiler spills GPU tasks on the fly.
 // so CPU logic is simple and we can use python for that purpose w/o worry about performance
-// 
+//
 // CPU can also break anytime on any GPU tensor by waiting queue to finish, and copy data back to CPU side numpy array to check results
 //
 // because CPU does shape-infer, we need combine shape-information with cl::Buffer to form a clTensor python object
@@ -41,11 +41,13 @@ namespace py = pybind11;
 //    - can fill with numpy array data with compatible shape
 //    - can copy from GPU back to CPU side
 //    - can be passed to a OpenCL kernel
-// 
+//
 // to keep things simpler, we don't use out-of-order queue so no event concept is used too.
 // (just relying on out-side profiling tools to optimize)
-// 
+//
 static auto CLDEBUG = getenv("CLDEBUG", 0);
+
+#define DEBUG_MEMPOOL (CLDEBUG & 1)
 
 // create temp cl_tensor (from pool since we want it to be fast)
 struct cl_buffer_pool {
@@ -57,22 +59,22 @@ struct cl_buffer_pool {
         auto it = pool.find(sz);
         if (it != pool.end()) {
             pool.erase(it);
-            if (CLDEBUG)
+            if (DEBUG_MEMPOOL)
                 std::cout << "[cl_buffer_pool] alloc from pool " << sz << " bytes, cl_mem: " << it->second.get() << std::endl;
             return it->second;
         }
         // allocate a new one
         total_size += sz;
-        total_count ++;
-        cl::Buffer ret (CL_MEM_READ_WRITE, sz);
-        if (CLDEBUG)
+        total_count++;
+        cl::Buffer ret(CL_MEM_READ_WRITE, sz);
+        if (DEBUG_MEMPOOL)
             std::cout << "[cl_buffer_pool] alloc new " << sz << " bytes, cl_mem: " << ret.get() << std::endl;
         return ret;
     }
     void free(cl::Buffer buff) {
         size_t sz = buff.getInfo<CL_MEM_SIZE>();
         pool.emplace(sz, buff);
-        if (CLDEBUG)
+        if (DEBUG_MEMPOOL)
             std::cout << "[cl_buffer_pool] free " << sz << " bytes, cl_mem: " << buff.get() << std::endl;
     }
     void show() {
@@ -82,22 +84,20 @@ struct cl_buffer_pool {
             std::cout << "\t" << p.first << " bytes, cl_mem: " << p.second.get() << std::endl;
             pool_size += p.first;
         }
-        std::cout << "=== totally : " << pool.size() << "/" << total_count << " buffers, "
-                  << pool_size << "/" << total_size << " bytes ===" << std::endl;
+        std::cout << "=== totally : " << pool.size() << "/" << total_count << " buffers, " << pool_size << "/" << total_size << " bytes ===" << std::endl;
     }
 
     ~cl_buffer_pool() {
-        if (CLDEBUG)
+        if (DEBUG_MEMPOOL)
             show();
     }
 };
 
 static cl_buffer_pool g_buff_pool;
 
-
 // composite of cl::Buffer & layout information
 // like numpy array
-template<class T>
+template <class T>
 struct cl_tensor {
     std::vector<cl_uint> shape;
     std::vector<cl_uint> strides;
@@ -107,10 +107,10 @@ struct cl_tensor {
     cl_tensor() = default;
     ~cl_tensor() = default;
 
-    const std::vector<cl_uint> & get_shape() const {
+    const std::vector<cl_uint>& get_shape() const {
         return shape;
     }
-    template<class SizeContainer>
+    template <class SizeContainer>
     void resize(const SizeContainer& dims) {
         auto it_dims = dims.begin();
         auto it_dims_end = dims.end();
@@ -130,30 +130,28 @@ struct cl_tensor {
         update_buff();
     }
 
-    template<class SizeContainer>
+    template <class SizeContainer>
     cl_tensor(const SizeContainer& dims) {
         resize(dims);
     }
     void update_buff() {
         auto* p = new cl::Buffer(g_buff_pool.alloc(numel * sizeof(T)));
-        p_buff = std::shared_ptr<cl::Buffer>(p,
-            [](cl::Buffer * pbuff) {
-                g_buff_pool.free(*pbuff);
-            }
-        );
+        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {
+            g_buff_pool.free(*pbuff);
+        });
     }
 
     void resize(py::array b) {
         py::buffer_info info = b.request();
         ASSERT(sizeof(T) == info.itemsize);
-        cl_uint expect_stride = 1; 
+        cl_uint expect_stride = 1;
         numel = 1;
         shape.resize(info.ndim);
         strides.resize(info.ndim);
-        for(int i = info.ndim-1; i >= 0 ; --i) {
+        for (int i = info.ndim - 1; i >= 0; --i) {
             numel *= info.shape[i];
             shape[i] = info.shape[i];
-            strides[i] = info.strides[i]/sizeof(T);
+            strides[i] = info.strides[i] / sizeof(T);
             ASSERT(strides[i] == expect_stride);
             expect_stride *= shape[i];
         }
@@ -174,131 +172,32 @@ struct cl_tensor {
     }
 };
 
-
-
-#if 0
-// create from numpy array 
-cl::Buffer& from_array() {
-    if (ocl_buffer() == NULL) {
-        ocl_buffer = cl::Buffer(m_data.get(), m_data.get() + m_numel, false);
-        m_on_gpu = false;
-    }
-    if (!m_on_gpu) {
-        cl::copy(m_data.get(), m_data.get() + m_numel, ocl_buffer);
-        m_on_gpu = true;
-    }
-    return ocl_buffer;
-}
-
-py::array * to_numpy() {
-    // this shouldn't be a very frequent operation which requires optimizations
-    // so we just allocate 
-    auto* p_shr_ptr = ;
-    py::capsule free_when_done(p_shr_ptr, [](void* ptr) {
-        delete reinterpret_cast<std::shared_ptr<void>*>(ptr);
-    });
-
-    auto ndims = t.ndims();
-    auto* p_shape = t.shape();
-    auto* p_strides = t.strides();
-    std::vector<ssize_t> shape(p_shape, p_shape + ndims);
-    std::vector<ssize_t> strides(p_strides, p_strides + ndims);
-
-    cl::copy(ocl_buffer, m_data.get(), m_data.get() + m_numel);
-    return py::array(shape, strides, t.ptr(), free_when_done);
-}
-
-template <class T>
-const char* py_format() {
-    return "?";
-}
-template <>
-const char* py_format<float>() {
-    return "f";
-}
-template <>
-const char* py_format<int32_t>() {
-    return "i";
-}
-
-template <class T>
-py::buffer_info to_py_buffer(tensorND<T>& t) {
-    auto ndims = t.ndims();
-    std::vector<ssize_t> shape(ndims);
-    std::vector<ssize_t> strides_in_bytes(ndims);
-    for (size_t i = 0; i < ndims; i++) {
-        shape[i] = t.shape()[i];
-        strides_in_bytes[i] = t.strides()[i] * t.item_size();
-    }
-
-    return py::buffer_info(t.ptr(),         /* Pointer to buffer */
-                           t.item_size(),   /* Size of one scalar */
-                           py_format<T>(),  /* Python struct-style format descriptor */
-                           ndims,           /* Number of dimensions */
-                           shape,           /* Buffer dimensions */
-                           strides_in_bytes /* Strides (in bytes) for each index */
-    );
-}
-
-template <class T>
-tensorND<T> from_array(py::array b, bool copy = false) {
-    py::buffer_info info = b.request();
-    tensorND<T> ret;
-    auto strides = info.strides;
-    for (auto& v : strides)
-        v /= sizeof(T);
-    if (copy) {
-        tensorND<T> src;
-        src.resize(info.shape, strides, reinterpret_cast<T*>(info.ptr));
-        ret.resize(info.shape);
-        ret = src;
-    } else {
-        ret.resize(info.shape, strides, reinterpret_cast<T*>(info.ptr));
-    }
-    return ret;
-}
-
-template <class T>
-py::array to_numpy(tensorND<T>& t) {
-    // https://stackoverflow.com/questions/44659924/returning-numpy-arrays-via-pybind11
-    // Create a Python object that will free the allocated memory when destroyed:
-    auto* p_shr_ptr = new std::shared_ptr<void>(t.m_data);
-    py::capsule free_when_done(p_shr_ptr, [](void* ptr) {
-        delete reinterpret_cast<std::shared_ptr<void>*>(ptr);
-    });
-
-    auto ndims = t.ndims();
-    auto* p_shape = t.shape();
-    auto* p_strides = t.strides();
-    std::vector<ssize_t> shape(p_shape, p_shape + ndims);
-    std::vector<ssize_t> strides(p_strides, p_strides + ndims);
-
-    return py::array(shape, strides, t.ptr(), free_when_done);
-}
-#endif
 //======================================================================================================
 
 static cl::CommandQueue cmd_queue;
+static std::vector<cl::Event> all_events;
 
 struct cl_kernels {
     std::map<std::string, cl::Kernel> kernel_map;
     cl::Program Program;
 
     cl_kernels(std::string source, std::string options) : Program(source.c_str()) {
-        auto show_build_info = [&](const char * ansi_color) {
+        auto throw_build_error = [&](const char* ansi_color) {
+            std::stringstream ss;
             cl_int buildErr = CL_SUCCESS;
             auto buildInfo = Program.getBuildInfo<CL_PROGRAM_BUILD_LOG>(&buildErr);
             for (auto& pair : buildInfo)
-                std::cerr << ansi_color << "[BUILD_LOG]:" << pair.second << ANSI_COLOR_RESET << std::endl;
+                ss << ansi_color << "[BUILD_LOG]:" << pair.second << ANSI_COLOR_RESET << std::endl;
+            throw std::runtime_error(ss.str());
         };
+        cl_int build_error = CL_SUCCESS;
         try {
-            Program.build((options + " -cl-std=CL3.0").c_str());
+            build_error = Program.build((options + " -cl-std=CL3.0").c_str());
+        } catch (...) {
+            throw_build_error(ANSI_COLOR_ERROR);
         }
-        catch (...) {
-            show_build_info(ANSI_COLOR_ERROR);
-            abort();
-        }
-        show_build_info(ANSI_COLOR_INFO);
+        if (build_error != CL_SUCCESS)
+            throw_build_error(ANSI_COLOR_ERROR);
 
         cl::vector<cl::Kernel> kernels;
         if (Program.createKernels(&kernels) != CL_SUCCESS) {
@@ -333,12 +232,12 @@ struct cl_kernels {
             }
             {
                 auto bins = Program.getInfo<CL_PROGRAM_BINARIES>();
-                for(int i = 0; i < bins.size(); i++) {
+                for (int i = 0; i < bins.size(); i++) {
                     auto fw = open_file(directoryPath + "/bin_" + std::to_string(i));
                     fw.write(reinterpret_cast<const char*>(&bins[i][0]), bins[i].size());
                 }
             }
-            // Program.getInfo<CL_PROGRAM_KERNEL_NAMES>() 
+            // Program.getInfo<CL_PROGRAM_KERNEL_NAMES>()
             std::cout << ANSI_COLOR_INFO << "Program source & binaries dumped to folder [" << directoryPath << "]" << ANSI_COLOR_RESET << std::endl;
         }
 
@@ -353,14 +252,14 @@ struct cl_kernels {
         }
     }
 
-    void call(std::string kernel_name,
-              const std::vector<int>& global_size,
-              const std::vector<int>& local_size,
-              py::args args) {
+    void enqueue(std::string kernel_name, const std::vector<int>& global_size, const std::vector<int>& local_size, py::args args) {
         auto& kernel = kernel_map[kernel_name];
 
+        auto nargs = kernel.getInfo<CL_KERNEL_NUM_ARGS>();
         int arg_idx = 0;
-        for(auto& arg : args) {
+        for (auto& arg : args) {
+            if (arg_idx >= nargs)
+                throw std::runtime_error(std::string("arg index ") + std::to_string(arg_idx) + " exceeds nargs=" + std::to_string(nargs));
             if (py::isinstance<py::int_>(arg)) {
                 auto i = arg.cast<int>();
                 kernel.setArg(arg_idx, i);
@@ -373,63 +272,70 @@ struct cl_kernels {
             } else {
                 throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
             }
-            arg_idx ++;
+            arg_idx++;
+            
         }
+        if (arg_idx < nargs)
+            throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
 
         const cl::NDRange offset_;
         cl::NDRange global_;
         cl::NDRange local_;
-        if (global_size.size() == 1) global_ = cl::NDRange(global_size[0]);
-        if (global_size.size() == 2) global_ = cl::NDRange(global_size[0], global_size[1]);
-        if (global_size.size() == 3) global_ = cl::NDRange(global_size[0], global_size[1], global_size[2]);
+        if (global_size.size() == 1)
+            global_ = cl::NDRange(global_size[0]);
+        if (global_size.size() == 2)
+            global_ = cl::NDRange(global_size[0], global_size[1]);
+        if (global_size.size() == 3)
+            global_ = cl::NDRange(global_size[0], global_size[1], global_size[2]);
 
-        if (local_size.size() == 1) local_ = cl::NDRange(local_size[0]);
-        if (local_size.size() == 2) local_ = cl::NDRange(local_size[0], local_size[1]);
-        if (local_size.size() == 3) local_ = cl::NDRange(local_size[0], local_size[1], local_size[2]);
+        if (local_size.size() == 1)
+            local_ = cl::NDRange(local_size[0]);
+        if (local_size.size() == 2)
+            local_ = cl::NDRange(local_size[0], local_size[1]);
+        if (local_size.size() == 3)
+            local_ = cl::NDRange(local_size[0], local_size[1], local_size[2]);
 
         std::vector<cl::Event> events_;
-        cl::Event event;
-        cmd_queue.enqueueNDRangeKernel(
-            kernel,
-            offset_,
-            global_,
-            local_,
-            &events_,
-            &event);
+        all_events.emplace_back();
+        cmd_queue.enqueueNDRangeKernel(kernel, offset_, global_, local_, &events_, &all_events.back());
         return;
     }
 
-/*
-    void show_info(std::string kernel_name, cl::NDRange local_work_size, size_t sub_groups) {
-        auto device = cl::Device::getDefault();
-        auto& k = kernel_map[kernel_name];
+    /*
+        void show_info(std::string kernel_name, cl::NDRange local_work_size, size_t sub_groups) {
+            auto device = cl::Device::getDefault();
+            auto& k = kernel_map[kernel_name];
 
-        std::cout << kernel_name << " [getWorkGroupInfo] :" << "\n";
-        std::cout << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
-        std::cout << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
-        //std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
-        std::cout << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
-        std::cout << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
-        std::cout << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
-        
-        
-        std::cout << kernel_name << " [getSubGroupInfo] :" << "\n";
-        std::cout << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)  << "\n";
-        std::cout << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)  << "\n";
-        std::cout << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n";
-        std::cout << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
-        std::cout << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
-    }
-*/
+            std::cout << kernel_name << " [getWorkGroupInfo] :" << "\n";
+            std::cout << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
+            std::cout << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
+            //std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
+            std::cout << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
+            std::cout << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
+            std::cout << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
 
+
+            std::cout << kernel_name << " [getSubGroupInfo] :" << "\n";
+            std::cout << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device,
+       local_work_size)  << "\n"; std::cout << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " <<
+       k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)  << "\n"; std::cout << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << "
+       is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n"; std::cout << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " <<
+       k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n"; std::cout << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " <<
+       k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
+        }
+    */
 };
 
-
 PYBIND11_MODULE(cl, m) {
-    select_default_platform({"cl_intel_subgroups","cl_intel_required_subgroup_size"});
+    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
 
-    cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
-    cmd_queue = cl::CommandQueue::getDefault();
+    // disable out-of-order execution
+    //cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
+    cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
+
+    m.def("profiling", [](bool enable) {
+        cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
+    });
 
     py::class_<cl_tensor<float>>(m, "tensor_f32")
         .def(py::init([](py::array b) {
@@ -443,16 +349,25 @@ PYBIND11_MODULE(cl, m) {
         .def("numpy", &cl_tensor<float>::to_numpy)
         .def_property_readonly("shape", &cl_tensor<float>::get_shape);
 
+    py::class_<cl_kernels>(m, "kernels").def(py::init<std::string, std::string>()).def("enqueue", &cl_kernels::enqueue);
 
-    py::class_<cl_kernels>(m, "kernels")
-        .def(py::init<std::string, std::string>())
-        .def("call",  &cl_kernels::call);
-
-    m.def("flush", [](){
+    m.def("flush", []() {
         cmd_queue.flush();
     });
 
-    m.def("finish", [](){
+    m.def("finish", []() {
         cmd_queue.finish();
+        // return all event time-stamps
+        std::vector<std::array<uint64_t, 5>> ret;
+        for(auto& evt : all_events) {
+            ret.emplace_back();
+            ret.back()[0] = evt.getProfilingInfo<CL_PROFILING_COMMAND_QUEUED>();
+            ret.back()[1] = evt.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>();
+            ret.back()[2] = evt.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+            ret.back()[3] = evt.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+            ret.back()[4] = evt.getProfilingInfo<CL_PROFILING_COMMAND_COMPLETE>();
+        }
+        all_events.clear();
+        return ret;
     });
 }
