@@ -4,3 +4,5 @@ build
 **/dump/
 **/*.egg-info
 *.so
+a.out
+*.pyc

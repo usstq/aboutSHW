@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from functools import partial
 from contextlib import nullcontext
 
-import cl_ops
+import clops
 
 # We design empty Layer on purpose, this make the network hierarchy flatten and easier/more clear to see & optimize
 # although it's an object, but we prefer the whole network topology & logic to be in a more functional style
@@ -29,35 +29,35 @@ class LlamaModel:
 
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
-        self.norm = cl_ops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
+        self.norm = clops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
         # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
-        self.lm_head = cl_ops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
+        self.lm_head = clops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
 
         self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
         self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
         self.inv_freq = 1.0 / (rope_base ** (torch.arange(0, self.rotary_dim, 2).float().to("cpu") / self.rotary_dim))
-        self.rope = cl_ops.ROPE(self.inv_freq, self.rotary_dim,
+        self.rope = clops.ROPE(self.inv_freq, self.rotary_dim,
                                 hf_model.config.num_attention_heads,
                                 hf_model.config.num_key_value_heads,
                                 self.head_size)
         self.layers = []
         for l in hf_model.model.layers:
             d = Layer()
-            d.input_layernorm = cl_ops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
+            d.input_layernorm = clops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             # combine qkv : 
             qkv_weight = torch.cat([l.self_attn.q_proj.weight, l.self_attn.k_proj.weight, l.self_attn.v_proj.weight], dim=0)
             assert(l.self_attn.q_proj.bias == None)
             assert(l.self_attn.k_proj.bias == None)
             assert(l.self_attn.v_proj.bias == None)
-            d.qkv_proj = cl_ops.Linear(weight=qkv_weight, bias=None)
+            d.qkv_proj = clops.Linear(weight=qkv_weight, bias=None)
 
-            d.o_proj = cl_ops.Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
-            d.post_attention_layernorm = cl_ops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            d.gate_proj = cl_ops.Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
-            d.up_proj = cl_ops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
-            d.down_proj = cl_ops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
+            d.o_proj = clops.Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
+            d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
+            d.gate_proj = clops.Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
+            d.up_proj = clops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
+            d.down_proj = clops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
-            d.mha = cl_ops.MHA(self.hf_config.num_attention_heads,
+            d.mha = clops.MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
                               self.head_size,
                               max_kv_len)
@@ -98,7 +98,7 @@ class LlamaModel:
         # embedding is done on CPU so far (to save GPU memory since embedding is memory-bounded)
         inputs_embeds = self.embed_tokens(input_ids)
         # the rest is done on GPU
-        hidden_states = cl_ops.to_cl(inputs_embeds)
+        hidden_states = clops.to_cl(inputs_embeds)
         for layer in self.layers:
             hidden_states = self.forward_layer(layer, hidden_states, attn_mask)
 
