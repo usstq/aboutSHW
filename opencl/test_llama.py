@@ -73,6 +73,10 @@ class LlamaModel:
                                 hf_model.config.num_attention_heads,
                                 hf_model.config.num_key_value_heads,
                                 self.head_size)
+        self.op_mha = cl_ops.MHA(self.hf_config.num_attention_heads,
+                              self.hf_config.num_key_value_heads,
+                              self.head_size,
+                              256)
 
     def mha(self, layer, qkv, kv_cache, attention_mask):
         layer_idx = layer.id
@@ -80,7 +84,7 @@ class LlamaModel:
         hidden_size = self.hf_config.hidden_size
         num_heads = self.hf_config.num_attention_heads
         num_key_value_heads = self.hf_config.num_key_value_heads
-        
+
         head_dim = hidden_size//num_heads
         # https://github.com/huggingface/transformers/blob/cc3e4781854a52cf090ffde28d884a527dab6708/src/transformers/models/llama/modeling_llama.py#L331
         # query_states : B, L, (H*S)+(H*S)+(H*S)
@@ -94,6 +98,8 @@ class LlamaModel:
         kv_seq_len0 = kv_seq_len - q_len
 
         qkv = self.rope(qkv, kv_seq_len0)
+
+        return self.op_mha(qkv, attention_mask)
 
         query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
         key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)

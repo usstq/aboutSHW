@@ -68,6 +68,85 @@ cl_kernel_sources = '''
             src[i1] = sx * x0 + cx * x1;
         }
     }
+
+    // global_id [Hq, batch_size]
+    __kernel void MHA(__global float * qkv,         // [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
+                      int batch_size,
+                      int q_len,
+                      __global float * output,      // [batch_size, q_len, Hq * head_size]
+                      __global float * cache_k,     // [batch_size, Hk, max_kv_len, head_size]
+                      __global float * cache_v,     // [batch_size, Hk, max_kv_len, head_size]
+                      __global float * attn_score,  // [batch_size, Hq, max_kv_len]
+                      int kv_seq_len0,
+                      int Hq,
+                      int Hk,
+                      int max_kv_len,
+                      int head_size,
+                      int head_group_size,
+                      float head_size_scaler
+                      ) {
+        int h = get_global_id(0);
+        int batch = get_global_id(1);
+        int Hqkv = Hq + Hk + Hk;
+
+        int hkv = h / head_group_size;
+
+        __global float * q = qkv + ((batch * q_len + 0) * Hqkv + h) * head_size;
+        
+        cache_k += (batch * Hk + hkv)*max_kv_len*head_size;
+        cache_v += (batch * Hk + hkv)*max_kv_len*head_size;
+        attn_score += (batch * Hq + h)*max_kv_len;
+        output += ((batch * q_len + 0)*Hq + h)*head_size;
+
+        // q: head_size
+        // k: head_size
+        // v: head_size
+
+        // concat k & v into cache
+        __global float * dst_k = cache_k + kv_seq_len0*head_size;
+        __global float * dst_v = cache_v + kv_seq_len0*head_size;
+
+        for(int qi = 0; qi < q_len; qi++) {
+            __global float * cur_k = qkv + ((batch * q_len + qi) * Hqkv + Hq + hkv) * head_size;
+            __global float * cur_v = (cur_k + Hk*head_size);
+            for(int i = 0; i < head_size; i++) {
+                *dst_k++ = cur_k[i];
+                *dst_v++ = cur_v[i];
+            }
+        }
+
+        for(int qi = 0; qi < q_len; qi++, q += (Hqkv * head_size), output += (Hq*head_size)) {
+            // q * cache_k
+            __global float * pk = cache_k;
+            float max_attn_score = -1e9f;
+            for(int p = 0; p <= kv_seq_len0; p++, pk += head_size) {
+                float dot_prod = 0;
+                for(int i = 0; i < head_size; i++) {
+                    dot_prod += q[i] * pk[i];
+                }
+                attn_score[p] = dot_prod * head_size_scaler;
+                if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+            }
+
+            // softmax
+            float softmax_scale = 0;
+            for(int p = 0; p <= kv_seq_len0; p++) {
+                float a = exp(attn_score[p] - max_attn_score);
+                attn_score[p] = a;
+                softmax_scale += a;
+            }
+            softmax_scale = 1.0f / softmax_scale;
+
+            // attn_score * v
+            __global float * pv = cache_v;
+            for(int i = 0; i < head_size; i++) output[i] = 0.0f;
+            for(int p = 0; p <= kv_seq_len0; p++, pv += head_size) {
+                float scale = attn_score[p] * softmax_scale;
+                for(int i = 0; i < head_size; i++)
+                    output[i] += scale * pv[i];
+            }
+        }
+    }
 '''
 
 cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
@@ -111,18 +190,20 @@ class ROPE:
         self.head_cnt_qkv = head_cnt_q + 2*head_cnt_k
         self.head_size = head_size
     
-    def __call__(self, input, position_id_base):
-        input = to_cltensor(input)
-        # no shape change, inplace on VRAM
-        # input is 4D, layout is 
-        batch_size, q_len, S = input.shape
+    def __call__(self, qkv, position_id_base):
+        '''
+         no shape change, inplace on VRAM
+         input : [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
+        '''
+        qkv = to_cltensor(qkv)
+        batch_size, q_len, S = qkv.shape
 
         assert(S == (self.head_cnt_qkv * self.head_size))
 
         cl_kernels.enqueue("ROPE",
                             [self.head_cnt_q + self.head_cnt_k, q_len, batch_size],
                             [1, 1],
-                            input,
+                            qkv,
                             self.inv_freq,
                             self.half_rotary_dim,
                             batch_size,
@@ -130,4 +211,63 @@ class ROPE:
                             self.head_cnt_qkv,
                             self.head_size,
                             position_id_base)
-        return torch.from_numpy(input.numpy())
+        return torch.from_numpy(qkv.numpy())
+
+
+class MHA:
+    def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len):
+        '''
+            kv-cache is allocated internally here
+        '''
+        self.head_cnt_q = head_cnt_q  # query heads
+        self.head_cnt_k = head_cnt_k
+        self.head_cnt_qkv = head_cnt_q + 2*head_cnt_k
+        self.head_size = head_size
+        self.max_kv_len = max_kv_len
+        self.head_group_size = head_cnt_q//head_cnt_k
+        self.cache_k = None
+        self.cache_v = None
+        self.head_size_scaler = 1.0/(head_size ** 0.5)
+
+    def __call__(self, qkv, attention_mask):
+
+        '''
+            qkv : [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
+            output: [batch_size, q_len, Hq * head_size]
+        '''
+        qkv = to_cltensor(qkv)
+        # shape infer
+        kv_seq_len = attention_mask.shape[-1]
+        batch_size, q_len, S = qkv.shape
+        assert(S == (self.head_cnt_qkv * self.head_size))
+        kv_seq_len0 = kv_seq_len - q_len
+
+        output = cl.tensor([batch_size, q_len, self.head_cnt_q * self.head_size], np.dtype(np.float32))
+
+        if self.cache_k is None:
+            kv_cache_size = [batch_size, self.head_cnt_k, self.max_kv_len, self.head_size]
+            self.cache_k = cl.tensor(kv_cache_size, np.dtype(np.float32))
+            self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float32))
+            self.attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
+
+        # print(self.head_size_scaler, kv_seq_len0, qkv.shape, self.head_cnt_q, self.head_cnt_k, self.head_size,  self.head_group_size, self.cache_k.shape, self.attn_score.shape)
+
+        cl_kernels.enqueue("MHA",
+                           [self.head_cnt_q, batch_size],
+                           [1, 1],
+                           qkv,
+                           batch_size,
+                           q_len,
+                           output,
+                           self.cache_k,
+                           self.cache_v,
+                           self.attn_score,
+                           kv_seq_len0,
+                           self.head_cnt_q,
+                           self.head_cnt_k,
+                           self.max_kv_len,
+                           self.head_size,
+                           self.head_group_size,
+                           self.head_size_scaler
+                           )
+        return torch.from_numpy(output.numpy())
