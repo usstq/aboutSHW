@@ -48,6 +48,15 @@ class LlamaModel:
         self.norm = partial(rms_norm, weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
         # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
         self.lm_head = cl_ops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
+
+        self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
+        self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
+        self.inv_freq = 1.0 / (rope_base ** (torch.arange(0, self.rotary_dim, 2).float().to("cpu") / self.rotary_dim))
+        self.rope = cl_ops.ROPE(self.inv_freq, self.rotary_dim,
+                                hf_model.config.num_attention_heads,
+                                hf_model.config.num_key_value_heads,
+                                self.head_size)
+
         self.layers = []
         for l in hf_model.model.layers:
             d = Layer()
@@ -65,18 +74,12 @@ class LlamaModel:
             d.up_proj = cl_ops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
             d.down_proj = cl_ops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
-            self.layers.append(d)
-        self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
-        self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
-        self.inv_freq = 1.0 / (rope_base ** (torch.arange(0, self.rotary_dim, 2).float().to("cpu") / self.rotary_dim))
-        self.rope = cl_ops.ROPE(self.inv_freq, self.rotary_dim,
-                                hf_model.config.num_attention_heads,
-                                hf_model.config.num_key_value_heads,
-                                self.head_size)
-        self.op_mha = cl_ops.MHA(self.hf_config.num_attention_heads,
+            d.mha = cl_ops.MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
                               self.head_size,
                               256)
+
+            self.layers.append(d)
 
     def mha(self, layer, qkv, kv_cache, attention_mask):
         layer_idx = layer.id
@@ -99,7 +102,7 @@ class LlamaModel:
 
         qkv = self.rope(qkv, kv_seq_len0)
 
-        return self.op_mha(qkv, attention_mask)
+        return layer.mha(qkv, attention_mask)
 
         query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
         key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
@@ -223,8 +226,8 @@ def simple_pipeline(hf_model_path, prompt0):
                     prompt = input(">")
                 except EOFError:
                     break
-            # inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
-            inputs = tokenizer(f"{prompt}", return_tensors="pt", padding=True, return_token_type_ids=False)
+            inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+            #inputs = tokenizer(f"{prompt}", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
             input_ids = inputs["input_ids"]
             # zero means valid, np.finfo(np.float32).min means invalid(padding-part)

@@ -97,8 +97,8 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
     int Hqkv = Hq + Hk + Hk;
     int hkv = h / head_group_size;
 
-    __global float * cache_k = param_cache_k + (b * Hk + h)*max_kv_len*head_size;
-    __global float * cache_v = param_cache_v + (b * Hk + h)*max_kv_len*head_size;
+    __global float * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
+    __global float * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
     __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
 
     // q: head_size
@@ -256,7 +256,7 @@ class MHA:
         output = cl.tensor([batch_size, q_len, self.head_cnt_q * self.head_size], np.dtype(np.float32))
 
         if self.cache_k is None:
-            kv_cache_size = [batch_size, self.head_cnt_q, self.max_kv_len, self.head_size]
+            kv_cache_size = [batch_size, self.head_cnt_k, self.max_kv_len, self.head_size]
             self.cache_k = cl.tensor(kv_cache_size, np.dtype(np.float32))
             self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float32))
 
