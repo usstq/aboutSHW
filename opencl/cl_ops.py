@@ -79,9 +79,6 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
     if (h >= Hq) return;
     if (b >= batch_size) return;
 
-    for(b = 0; b < batch_size; b++) {
-        for(h=0; h<Hq; h++) {
-
     int Hqkv = Hq + Hk + Hk;
     int hkv = h / head_group_size;
 
@@ -109,16 +106,19 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
     __global float * q = param_qkv + ((b * L + 0) * Hqkv + h) * head_size;
     __global float * output = param_output + ((b * L + 0)*Hq + h)*head_size;
 
-    for(int l = 0; l < L; l++, q += (Hqkv * head_size), output += (Hq*head_size)) {
+    for(int ql = 0; ql < L; ql++, q += (Hqkv * head_size), output += (Hq*head_size)) {
         //////////// q * cache_k
         __global float * pk = cache_k;
         float max_attn_score = -1e9f;
 
-        for(int p = 0; p <= kv_seq_len0; p++, pk += head_size) {
+        // causal_mask & attn_mask is not applied explicitly
+        int kv_len = ql + kv_seq_len0;
+
+        for(int p = 0; p <= kv_len; p++, pk += head_size) {
             float dot_prod = 0;
-            for(int i = 0; i < head_size; i++) {
+            for(int i = 0; i < head_size; i++)
                 dot_prod += q[i] * pk[i];
-            }
+
             dot_prod *= head_size_scaler;
             attn_score[p] = dot_prod;
             if (max_attn_score < dot_prod) max_attn_score = dot_prod;
@@ -126,7 +126,7 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
 
         //////////// softmax
         float softmax_scale = 0;
-        for(int p = 0; p <= kv_seq_len0; p++) {
+        for(int p = 0; p <= kv_len; p++) {
             float a = exp(attn_score[p] - max_attn_score);
             attn_score[p] = a;
             softmax_scale += a;
@@ -137,13 +137,11 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
         for(int i = 0; i < head_size; i++) output[i] = 0.0f;
 
         __global float * pv = cache_v;
-        for(int p = 0; p <= kv_seq_len0; p++, pv += head_size) {
+        for(int p = 0; p <= kv_len; p++, pv += head_size) {
             float scale = attn_score[p] * softmax_scale;
             for(int i = 0; i < head_size; i++)
                 output[i] += scale * pv[i];
         }
-    }
-    }
     }
 }
 
@@ -184,46 +182,7 @@ __kernel void iSilu(__global float * input, int size) {
 
 cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
 
-class ActivationTensor:
-    def __init__(self, tensor):
-        self.t = tensor
-
-    def iadd_(self, b):
-        if isinstance(self.t, cl.tensor):
-            cl_kernels.enqueue("iAdd", [self.t.numel], [1], self.t, b.t, self.t.numel)
-        elif isinstance(self.t, torch.Tensor):
-            self.t.iadd_(b)
-        else:
-            assert(False)
-        return self
-
-    def mul_(self, b):
-        if isinstance(self.t, cl.tensor):
-            cl_kernels.enqueue("iMul", [self.t.numel], [1], self.t, b.t, self.t.numel)
-        elif isinstance(self.t, torch.Tensor):
-            self.t.mul_(b.torch())
-        else:
-            assert(False)
-        return self
-
-    def silu_(self):
-        if isinstance(self.t, cl.tensor):
-            cl_kernels.enqueue("iSilu", [self.t.numel], [1], self.t, self.t.numel)
-        elif isinstance(self.t, torch.Tensor):
-            self.t = torch.nn.functional.silu(self.t)
-        else:
-            assert(False)
-        return self
-
-    def torch(self):
-        if isinstance(self.t, cl.tensor):
-            return torch.from_numpy(self.t.numpy())
-        return self.t
-
 def to_cl(input):
-    if isinstance(input, ActivationTensor):
-        input = input.t
-
     if isinstance(input, cl.tensor):
         return input
     if input is None:
@@ -353,8 +312,7 @@ class MHA:
         # attn_score is just a temp/scratch cl-buffer
         attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
         cl_kernels.enqueue("MHA",
-                           #[self.head_cnt_q, batch_size],
-                           [1, 1],
+                           [self.head_cnt_q, batch_size],
                            [1, 1],
                            qkv,
                            batch_size,

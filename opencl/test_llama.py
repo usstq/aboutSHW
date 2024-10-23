@@ -153,7 +153,7 @@ class LlamaModel:
         kv_seq_len0 = kv_seq_len - q_len
         qkv = self.rope(qkv, kv_seq_len0)
 
-        if 0:
+        if 1:
             attn_output = layer.mha(qkv, attn_mask)
         else:
             qkv = cl_ops.to_torch(qkv)
@@ -227,7 +227,7 @@ def simple_pipeline(hf_model_path, prompt0):
                 except EOFError:
                     break
             inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
-            #inputs = tokenizer(f"{prompt}", return_tensors="pt", padding=True, return_token_type_ids=False)
+            #inputs = tokenizer(f"Hi,", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
             input_ids = inputs["input_ids"]
             # zero means valid, np.finfo(np.float32).min means invalid(padding-part)
