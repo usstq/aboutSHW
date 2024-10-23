@@ -77,3 +77,7 @@ requires additional learning since original OpenCL is C-API.
 
  - ocloc tools: C:\Program Files (x86)\Intel\oneAPI\compiler\2023.2.1\windows\lib\ocloc\gen9-11
  - clintercept-3.0.3-win64: https://github.com/intel/opencl-intercept-layer
+
+
+# Occupancy
+https://oneapi-src.github.io/oneAPI-samples/Tools/GPU-Occupancy-Calculator/index.html

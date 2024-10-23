@@ -94,15 +94,17 @@ struct cl_buffer_pool {
 };
 
 static cl_buffer_pool g_buff_pool;
+static cl::CommandQueue cmd_queue;
+static std::vector<cl::Event> all_events;
 
 // composite of cl::Buffer & layout information
 // like numpy array
-template <class T>
 struct cl_tensor {
     std::vector<cl_uint> shape;
     std::vector<cl_uint> strides;
     cl_uint numel;
     std::shared_ptr<cl::Buffer> p_buff;
+    py::dtype dt;
 
     cl_tensor() = default;
     ~cl_tensor() = default;
@@ -111,7 +113,8 @@ struct cl_tensor {
         return shape;
     }
     template <class SizeContainer>
-    void resize(const SizeContainer& dims) {
+    void resize(const SizeContainer& dims, py::dtype dtype) {
+        dt = dtype;
         auto it_dims = dims.begin();
         auto it_dims_end = dims.end();
         numel = 1;
@@ -131,19 +134,26 @@ struct cl_tensor {
     }
 
     template <class SizeContainer>
-    cl_tensor(const SizeContainer& dims) {
-        resize(dims);
+    cl_tensor(const SizeContainer& dims, py::dtype dtype) {
+        resize(dims, dtype);
+    }
+
+    cl_tensor(const py::array& arr) {
+        resize(arr);
+    }
+    cl_tensor(const std::vector<size_t>& dims, py::dtype dtype) {
+        resize(dims, dtype);
     }
     void update_buff() {
-        auto* p = new cl::Buffer(g_buff_pool.alloc(numel * sizeof(T)));
+        auto* p = new cl::Buffer(g_buff_pool.alloc(numel * dt.itemsize()));
         p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {
             g_buff_pool.free(*pbuff);
         });
     }
 
-    void resize(py::array b) {
+    void resize(const py::array& b) {
         py::buffer_info info = b.request();
-        ASSERT(sizeof(T) == info.itemsize);
+        dt = b.dtype();
         cl_uint expect_stride = 1;
         numel = 1;
         shape.resize(info.ndim);
@@ -151,37 +161,37 @@ struct cl_tensor {
         for (int i = info.ndim - 1; i >= 0; --i) {
             numel *= info.shape[i];
             shape[i] = info.shape[i];
-            strides[i] = info.strides[i] / sizeof(T);
+            strides[i] = info.strides[i] / info.itemsize;
             ASSERT(strides[i] == expect_stride);
             expect_stride *= shape[i];
         }
         update_buff();
-        auto* p = reinterpret_cast<T*>(info.ptr);
-        cl::copy(p, p + numel, *p_buff);
+        auto* p = reinterpret_cast<uint8_t*>(info.ptr);
+        cl::copy(p, p + numel * dt.itemsize(), *p_buff);
     }
 
     py::array to_numpy() {
         // this shouldn't be a very frequent operation which requires optimizations
         // so we just allocate
-        std::vector<ssize_t> nshape(shape.begin(), shape.end());
-        py::array_t<T> ret(nshape);
+        py::array ret(dt, shape);
         py::buffer_info info = ret.request();
-        auto* p = reinterpret_cast<T*>(info.ptr);
-        cl::copy(*p_buff, p, p + numel);
+        auto* p = reinterpret_cast<uint8_t*>(info.ptr);
+
+        // make sure data is ready
+        cmd_queue.finish();
+
+        cl::copy(*p_buff, p, p + numel * dt.itemsize());
         return ret;
     }
 };
 
 //======================================================================================================
 
-static cl::CommandQueue cmd_queue;
-static std::vector<cl::Event> all_events;
-
 struct cl_kernels {
     std::map<std::string, cl::Kernel> kernel_map;
     cl::Program Program;
 
-    cl_kernels(std::string source, std::string options) : Program(source.c_str()) {
+    cl_kernels(std::string source, std::string options, std::string dump_dir) : Program(source.c_str()) {
         auto throw_build_error = [&](const char* ansi_color) {
             std::stringstream ss;
             cl_int buildErr = CL_SUCCESS;
@@ -205,8 +215,13 @@ struct cl_kernels {
             abort();
         }
 
-        {
-            std::string directoryPath = ".build";
+        if (dump_dir.size() > 0) {
+            std::string kernel_names = "";
+            for (auto& k : kernels) {
+                kernel_names += k.getInfo<CL_KERNEL_FUNCTION_NAME>();
+                kernel_names += ".";
+            }
+            std::string directoryPath = dump_dir + "/" + kernel_names;
             if (!std::filesystem::exists(directoryPath)) {
                 if (std::filesystem::create_directory(directoryPath)) {
                     std::cout << "Directory [" << directoryPath << "] created successfully!\n";
@@ -227,14 +242,29 @@ struct cl_kernels {
             };
 
             {
-                auto fw = open_file(directoryPath + "/" + "CL_PROGRAM_SOURCE.cl");
+                auto fw = open_file(directoryPath + "/src.cl");
                 fw << Program.getInfo<CL_PROGRAM_SOURCE>();
             }
             {
+                auto exec = [](std::string cmd) {
+                    std::array<char, 128> buffer;
+                    std::string result;
+                    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+                    if (!pipe) {
+                        throw std::runtime_error("popen() failed!");
+                    }
+                    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) != nullptr) {
+                        result += buffer.data();
+                    }
+                    return result;
+                };
                 auto bins = Program.getInfo<CL_PROGRAM_BINARIES>();
                 for (int i = 0; i < bins.size(); i++) {
-                    auto fw = open_file(directoryPath + "/bin_" + std::to_string(i));
+                    auto dump_bin_fpath = directoryPath + "/dev" + std::to_string(i) + ".bin";
+                    auto fw = open_file(dump_bin_fpath);
                     fw.write(reinterpret_cast<const char*>(&bins[i][0]), bins[i].size());
+                    fw.close();
+                    exec(std::string("ocloc disasm -file ") + dump_bin_fpath + " -dump " + directoryPath);
                 }
             }
             // Program.getInfo<CL_PROGRAM_KERNEL_NAMES>()
@@ -266,14 +296,13 @@ struct cl_kernels {
             } else if (py::isinstance<py::float_>(arg)) {
                 auto f = arg.cast<float>();
                 kernel.setArg(arg_idx, f);
-            } else if (py::isinstance<cl_tensor<float>>(arg)) {
-                const auto& t = arg.cast<cl_tensor<float>>();
+            } else if (py::isinstance<cl_tensor>(arg)) {
+                const auto& t = arg.cast<cl_tensor>();
                 kernel.setArg(arg_idx, *(t.p_buff));
             } else {
                 throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
             }
             arg_idx++;
-            
         }
         if (arg_idx < nargs)
             throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
@@ -327,29 +356,25 @@ struct cl_kernels {
 };
 
 PYBIND11_MODULE(cl, m) {
-    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
+    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size", "cl_intel_subgroup_matrix_multiply_accumulate"});
 
     // disable out-of-order execution
-    //cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
+    // cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
     cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
 
     m.def("profiling", [](bool enable) {
         cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
     });
 
-    py::class_<cl_tensor<float>>(m, "tensor_f32")
-        .def(py::init([](py::array b) {
-            cl_tensor<float> t;
-            t.resize(b);
-            return t;
-        }))
-        .def(py::init([](std::vector<size_t> shape) {
-            return cl_tensor<float>(shape);
-        }))
-        .def("numpy", &cl_tensor<float>::to_numpy)
-        .def_property_readonly("shape", &cl_tensor<float>::get_shape);
+    py::class_<cl_tensor>(m, "tensor")
+        .def(py::init<const py::array&>())
+        .def(py::init<const std::vector<size_t>&, py::dtype>())
+        .def("numpy", &cl_tensor::to_numpy)
+        .def_property_readonly("shape", &cl_tensor::get_shape);
 
-    py::class_<cl_kernels>(m, "kernels").def(py::init<std::string, std::string>()).def("enqueue", &cl_kernels::enqueue);
+    py::class_<cl_kernels>(m, "kernels")
+        .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
+        .def("enqueue", &cl_kernels::enqueue);
 
     m.def("flush", []() {
         cmd_queue.flush();
@@ -359,7 +384,7 @@ PYBIND11_MODULE(cl, m) {
         cmd_queue.finish();
         // return all event time-stamps
         std::vector<std::array<uint64_t, 5>> ret;
-        for(auto& evt : all_events) {
+        for (auto& evt : all_events) {
             ret.emplace_back();
             ret.back()[0] = evt.getProfilingInfo<CL_PROFILING_COMMAND_QUEUED>();
             ret.back()[1] = evt.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>();
