@@ -119,6 +119,13 @@ struct cl_tensor {
     const std::vector<cl_uint>& get_shape() const {
         return shape;
     }
+    cl_uint get_numel() const {
+        return numel;
+    }
+    py::dtype get_dtype() const {
+        return dt;
+    }
+
     template <class SizeContainer>
     void resize(const SizeContainer& dims, py::dtype dtype) {
         dt = dtype;
@@ -377,7 +384,9 @@ PYBIND11_MODULE(cl, m) {
         .def(py::init<const py::array&>())
         .def(py::init<const std::vector<size_t>&, py::dtype>())
         .def("numpy", &cl_tensor::to_numpy)
-        .def_property_readonly("shape", &cl_tensor::get_shape);
+        .def_property_readonly("shape", &cl_tensor::get_shape)
+        .def_property_readonly("numel", &cl_tensor::get_numel)
+        .def_property_readonly("dtype", &cl_tensor::get_dtype);
 
     py::class_<cl_kernels>(m, "kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")

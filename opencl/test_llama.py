@@ -13,13 +13,6 @@ from contextlib import nullcontext
 
 import cl_ops
 
-def rms_norm(input, weight, epsilon, name_suffix=''):
-    input_dtype = input.dtype
-    input = input.to(torch.float32)
-    variance = input.pow(2).mean(-1, keepdim=True)
-    input = input * torch.rsqrt(variance + epsilon)
-    return weight * input.to(input_dtype)
-
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -30,6 +23,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 
 class Layer:
     pass
@@ -42,10 +36,10 @@ class LlamaModel:
         #assert(hf_model.config.num_key_value_heads == hf_model.config.num_attention_heads)
         assert(hf_model.config.hidden_act in ['silu'])
         assert(hf_model.config.rope_scaling is None)
-        
+
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
-        self.norm = partial(rms_norm, weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
+        self.norm = cl_ops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
         # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
         self.lm_head = cl_ops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
 
@@ -56,11 +50,10 @@ class LlamaModel:
                                 hf_model.config.num_attention_heads,
                                 hf_model.config.num_key_value_heads,
                                 self.head_size)
-
         self.layers = []
         for l in hf_model.model.layers:
             d = Layer()
-            d.input_layernorm = partial(rms_norm, weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
+            d.input_layernorm = cl_ops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             # combine qkv : 
             qkv_weight = torch.cat([l.self_attn.q_proj.weight, l.self_attn.k_proj.weight, l.self_attn.v_proj.weight], dim=0)
             assert(l.self_attn.q_proj.bias == None)
@@ -69,7 +62,7 @@ class LlamaModel:
             d.qkv_proj = cl_ops.Linear(weight=qkv_weight, bias=None)
 
             d.o_proj = cl_ops.Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
-            d.post_attention_layernorm = partial(rms_norm, weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
+            d.post_attention_layernorm = cl_ops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             d.gate_proj = cl_ops.Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
             d.up_proj = cl_ops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
             d.down_proj = cl_ops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
@@ -99,10 +92,6 @@ class LlamaModel:
         # apply_rotary_pos_emb to key_states/value_states
         kv_seq_len = attention_mask.shape[-1]
         kv_seq_len0 = kv_seq_len - q_len
-
-        qkv = self.rope(qkv, kv_seq_len0)
-
-        return layer.mha(qkv, attention_mask)
 
         query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
         key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
@@ -159,35 +148,46 @@ class LlamaModel:
 
         qkv = layer.qkv_proj(input_layernorm)
 
-        attn_output = self.mha(layer, qkv, kv_cache, attn_mask)
+        _, q_len, _ = qkv.shape
+        kv_seq_len = attn_mask.shape[-1]
+        kv_seq_len0 = kv_seq_len - q_len
+        qkv = self.rope(qkv, kv_seq_len0)
 
+        if 0:
+            attn_output = layer.mha(qkv, attn_mask)
+        else:
+            qkv = cl_ops.to_torch(qkv)
+            attn_output = self.mha(layer, qkv, kv_cache, attn_mask)
+            attn_output = cl_ops.to_cl(attn_output)
+        
         attn_output = layer.o_proj(attn_output)
 
-        attn_output = hidden_states + attn_output
+        cl_ops.iAdd(attn_output, hidden_states)
 
         post_attention_layernorm = layer.post_attention_layernorm(attn_output)
 
         def mlp(states):
             gate_proj = layer.gate_proj(states)
             up_proj = layer.up_proj(states)
-            mul = F.silu(gate_proj) * up_proj
-            down_proj = layer.down_proj(mul)
+            cl_ops.iSilu(gate_proj)
+            cl_ops.iMul(gate_proj, up_proj)
+            down_proj = layer.down_proj(gate_proj)
             return down_proj
 
         mlp_output = mlp(post_attention_layernorm)
         # residual connection.
-        output = attn_output + mlp_output
-        return output
+        cl_ops.iAdd(attn_output, mlp_output)
+        return attn_output
 
     def forward(self, input_ids, attn_mask, kv_cache):
         inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        hidden_states = cl_ops.to_cl(inputs_embeds)
         for layer in self.layers:
             hidden_states = self.forward_layer(layer, hidden_states, attn_mask, kv_cache)
 
         final_layernorm = self.norm(hidden_states)
         logits = self.lm_head(final_layernorm)
-        return logits
+        return cl_ops.to_torch(logits)
 
 def simple_pipeline(hf_model_path, prompt0):
     global inv_freq

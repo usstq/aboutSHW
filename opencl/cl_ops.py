@@ -4,18 +4,6 @@ import numpy as np
 import torch
 
 
-def to_cltensor(input):
-    if isinstance(input, cl.tensor):
-        return input
-    if input is None:
-        return None
-    if isinstance(input, torch.nn.parameter.Parameter):
-        return cl.tensor(input.detach().numpy())
-    if isinstance(input, torch.Tensor):
-        return cl.tensor(input.detach().numpy())
-    assert("to_cltensor(): Unexpected input ", input)
-
-
 cl_kernel_sources = '''
 ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
 
@@ -158,25 +146,129 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
     }
     }
 }
+
+__kernel void RMSNorm(__global float * input, __global float * output, __global float * weight, int size, float epsilon) {
+    int row = get_global_id(0);
+    input += row * size;
+    output += row * size;
+    float variance = 0;
+    for(int i = 0; i < size; i++) {
+        variance += input[i] * input[i];
+    }
+    float scale = rsqrt((variance / size) + epsilon);
+    for(int i = 0; i < size; i++) {
+        output[i] = input[i] * scale * weight[i];
+    }
+}
+
+__kernel void iAdd(__global float * input, __global float * rhs, int size) {
+    int i = get_global_linear_id();
+    if (i < size)
+        input[i] += rhs[i];
+}
+
+__kernel void iMul(__global float * input, __global float * rhs, int size) {
+    int i = get_global_linear_id();
+    if (i < size)
+        input[i] *= rhs[i];
+}
+
+__kernel void iSilu(__global float * input, int size) {
+    int i = get_global_linear_id();
+    if (i < size) {
+        float x = input[i];
+        input[i] = x / (1.0f + exp(-x));
+    }
+}
 '''
 
 cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
 
+class ActivationTensor:
+    def __init__(self, tensor):
+        self.t = tensor
+
+    def iadd_(self, b):
+        if isinstance(self.t, cl.tensor):
+            cl_kernels.enqueue("iAdd", [self.t.numel], [1], self.t, b.t, self.t.numel)
+        elif isinstance(self.t, torch.Tensor):
+            self.t.iadd_(b)
+        else:
+            assert(False)
+        return self
+
+    def mul_(self, b):
+        if isinstance(self.t, cl.tensor):
+            cl_kernels.enqueue("iMul", [self.t.numel], [1], self.t, b.t, self.t.numel)
+        elif isinstance(self.t, torch.Tensor):
+            self.t.mul_(b.torch())
+        else:
+            assert(False)
+        return self
+
+    def silu_(self):
+        if isinstance(self.t, cl.tensor):
+            cl_kernels.enqueue("iSilu", [self.t.numel], [1], self.t, self.t.numel)
+        elif isinstance(self.t, torch.Tensor):
+            self.t = torch.nn.functional.silu(self.t)
+        else:
+            assert(False)
+        return self
+
+    def torch(self):
+        if isinstance(self.t, cl.tensor):
+            return torch.from_numpy(self.t.numpy())
+        return self.t
+
+def to_cl(input):
+    if isinstance(input, ActivationTensor):
+        input = input.t
+
+    if isinstance(input, cl.tensor):
+        return input
+    if input is None:
+        return None
+    if isinstance(input, torch.nn.parameter.Parameter):
+        return cl.tensor(input.detach().numpy())
+    if isinstance(input, torch.Tensor):
+        return cl.tensor(input.detach().numpy())
+    assert("to_cl(): Unexpected input ", input)
+
+def to_torch(input):
+    return torch.from_numpy(input.numpy())
+
+def iAdd(input, rhs):
+    cl_kernels.enqueue("iAdd", [input.numel], [1], input, rhs, input.numel)
+
+def iSilu(input):
+    cl_kernels.enqueue("iSilu", [input.numel], [1], input, input.numel)
+
+def iMul(input, b):
+    cl_kernels.enqueue("iMul", [input.numel], [1], input, b, input.numel)
+
 # GPU needs weight-compression to work : INT8 at least
+class RMSNorm:
+    def __init__(self, weight, epsilon):
+        self.weight = to_cl(weight)
+        self.n_channels = weight.shape[-1]
+        self.epsilon = epsilon
+
+    def __call__(self, input):
+        output = cl.tensor(input.shape, input.dtype)
+        cl_kernels.enqueue("RMSNorm", [input.numel], [1], input, output, self.weight, self.n_channels, self.epsilon)
+        return output
 
 class Linear:
     # weight: [N, K]
     def __init__(self, weight, bias):
-        self.weight = to_cltensor(weight)
-        self.bias = to_cltensor(bias)
+        self.weight = to_cl(weight)
+        self.bias = to_cl(bias)
 
         self.N = self.weight.shape[0]
         self.K = self.weight.shape[1]
         assert(self.bias is None)
 
     def __call__(self, input):
-        input = to_cltensor(input)
-
         # shape inference
         i_shape = input.shape
         o_shape = list(i_shape)
@@ -188,13 +280,12 @@ class Linear:
         #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
 
         cl_kernels.enqueue("Linear_f32", [self.N, M], [32, 32], input, self.weight, output, M, self.K, self.N)
-
-        return torch.from_numpy(output.numpy())
-
+        
+        return output
 
 class ROPE:
     def __init__(self, inv_freq, rotary_dim, head_cnt_q, head_cnt_k, head_size):
-        self.inv_freq = to_cltensor(inv_freq)
+        self.inv_freq = to_cl(inv_freq)
         self.half_rotary_dim = rotary_dim//2
         self.head_cnt_q = head_cnt_q
         self.head_cnt_k = head_cnt_k
@@ -206,7 +297,6 @@ class ROPE:
          no shape change, inplace on VRAM
          input : [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
         '''
-        qkv = to_cltensor(qkv)
         batch_size, q_len, S = qkv.shape
 
         assert(S == (self.head_cnt_qkv * self.head_size))
@@ -222,8 +312,7 @@ class ROPE:
                             self.head_cnt_qkv,
                             self.head_size,
                             position_id_base)
-        return torch.from_numpy(qkv.numpy())
-
+        return qkv
 
 class MHA:
     def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len):
@@ -246,7 +335,6 @@ class MHA:
             qkv : [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
             output: [batch_size, q_len, Hq * head_size]
         '''
-        qkv = to_cltensor(qkv)
         # shape infer
         kv_seq_len = attention_mask.shape[-1]
         batch_size, q_len, S = qkv.shape
@@ -283,4 +371,5 @@ class MHA:
                            self.head_group_size,
                            self.head_size_scaler
                            )
-        return torch.from_numpy(output.numpy())
+
+        return output
