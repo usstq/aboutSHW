@@ -20,8 +20,6 @@ def rms_norm(input, weight, epsilon, name_suffix=''):
     input = input * torch.rsqrt(variance + epsilon)
     return weight * input.to(input_dtype)
 
-inv_freq = None
-
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -37,7 +35,7 @@ class Layer:
     pass
 
 class LlamaModel:
-    def __init__(self, hf_model_id):
+    def __init__(self, hf_model_id, rope_base = 10000):
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
 
         print(hf_model.config)
@@ -70,9 +68,13 @@ class LlamaModel:
             self.layers.append(d)
         self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
         self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
+        self.inv_freq = 1.0 / (rope_base ** (torch.arange(0, self.rotary_dim, 2).float().to("cpu") / self.rotary_dim))
+        self.rope = cl_ops.ROPE(self.inv_freq, self.rotary_dim,
+                                hf_model.config.num_attention_heads,
+                                hf_model.config.num_key_value_heads,
+                                self.head_size)
 
     def mha(self, layer, qkv, kv_cache, attention_mask):
-        global inv_freq
         layer_idx = layer.id
         rotary_dim = self.rotary_dim
         hidden_size = self.hf_config.hidden_size
@@ -86,24 +88,25 @@ class LlamaModel:
 
         q_size = self.head_size * num_heads
         kv_size = self.head_size * num_key_value_heads
-        query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
-        key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
-        value_states = qkv[:,:,q_size+kv_size:].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
-
-        # q/k/v states : [batch, nHead, q_len, head_dim]
-
         # derive total kv length from attn (has limitation)
         # apply_rotary_pos_emb to key_states/value_states
         kv_seq_len = attention_mask.shape[-1]
         kv_seq_len0 = kv_seq_len - q_len
 
+        qkv = self.rope(qkv, kv_seq_len0)
+
+        query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
+        key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+        value_states = qkv[:,:,q_size+kv_size:].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+
+        # q/k/v states : [batch, nHead, q_len, head_dim]
         def rope_embedd(x):
             half_rotary_dim = rotary_dim//2
             for k in range(q_len):
                 position_idx = kv_seq_len0 + k
                 for i0 in range(half_rotary_dim):
                     i1 = i0 + half_rotary_dim
-                    xita = (inv_freq[i0] * position_idx)
+                    xita = (self.inv_freq[i0] * position_idx)
                     vcos = math.cos(xita)
                     vsin = math.sin(xita)
                     y0 = vcos * x[:, :, k, i0] - vsin * x[:, :, k, i1]
@@ -111,8 +114,8 @@ class LlamaModel:
                     x[:, :, k, i0] = y0
                     x[:, :, k, i1] = y1
 
-        rope_embedd(query_states)
-        rope_embedd(key_states)
+        #rope_embedd(query_states)
+        #rope_embedd(key_states)
 
         # kv_cache [2 * n_layers, batch, n_head, max_kv_len, head_size]
         kv_cache[2*layer_idx + 0, :, :, kv_seq_len0:kv_seq_len, :] = key_states
@@ -187,11 +190,9 @@ def simple_pipeline(hf_model_path, prompt0):
 
     streamer = TextStreamer(tokenizer)
 
+
     print(f"load config/weight from HF model {hf_model_path} ...")
     model = LlamaModel(hf_model_path)
-
-    rope_base = 10000
-    inv_freq = 1.0 / (rope_base ** (torch.arange(0, model.rotary_dim, 2).float().to("cpu") / model.rotary_dim))
 
     batch_size = 1
     max_kv_len = 2048
