@@ -189,7 +189,7 @@ class LlamaModel:
         logits = self.lm_head(final_layernorm)
         return cl_ops.to_torch(logits)
 
-def simple_pipeline(hf_model_path, prompt0):
+def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens):
     global inv_freq
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
@@ -211,7 +211,6 @@ def simple_pipeline(hf_model_path, prompt0):
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
     new_tokens = 0
-    do_trace = prompt0 is not None
     if do_trace:
         from viztracer import VizTracer
 
@@ -255,7 +254,7 @@ def simple_pipeline(hf_model_path, prompt0):
                 logits = model.forward(input_ids, attn_mask, kv_cache)
                 next_tokens = torch.argmax(logits, dim=-1)
                 new_tokens += 1
-                if new_tokens > 8:
+                if new_tokens > max_new_tokens:
                     break
             t2 = time.time()
             streamer.put(next_tokens)
@@ -266,6 +265,7 @@ def simple_pipeline(hf_model_path, prompt0):
             print("\033[00m")
 
 # HF_TOKEN=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 python3 ./test_llama.py -p "What's Oxygen?"
+# cliloader -d -cdt --dump-dir ./dump/ python3 ./test_llama.py -p "What's Oxygen?"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
@@ -274,6 +274,8 @@ if __name__ == "__main__":
     # /mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0
     # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch
     parser.add_argument('-p', "--prompt0", type=str, default=None)
+    parser.add_argument('-t', "--trace", action="store_true")
+    parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
-    simple_pipeline(args.hf_model_path, args.prompt0)
+    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens)
