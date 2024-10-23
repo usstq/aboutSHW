@@ -81,21 +81,3 @@ requires additional learning since original OpenCL is C-API.
 
 # Occupancy
 https://oneapi-src.github.io/oneAPI-samples/Tools/GPU-Occupancy-Calculator/index.html
-
-# [test_llama.py](./test_llama.py)
-
-```bash
-pip install pybind11
-pip install -e .
-
-# one-shot greedy search
-$ python3 ./test_llama.py -p "What's Oxygen?"
-
-# profiling with opencl-intercept-layer
-$ git clone https://github.com/intel/opencl-intercept-layer
-$ mkdir build && cd build
-$ cmake ..
-$ cmake --build . --config RelWithDebInfo --target install
-
-$ cliloader -d -cdt  --dump-dir ./dump/ python3 ./test_llama.py -p "What's Oxygen?"
-```
