@@ -12,7 +12,7 @@ z[1,0] = 1.4
 z[1,1] = 2.4
 print(z)
 
-t = cl.tensor_f32(z)
+t = cl.tensor(z)
 print("+++++++++++")
 print(f"t.shape={t.shape}, t.numpy()={t.numpy()}")
 

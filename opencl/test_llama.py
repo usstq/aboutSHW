@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 import numpy as np
 import sys, os
 import argparse
@@ -10,6 +9,9 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from functools import partial
+from contextlib import nullcontext
+
+import cl_ops
 
 def rms_norm(input, weight, epsilon, name_suffix=''):
     input_dtype = input.dtype
@@ -46,25 +48,30 @@ class LlamaModel:
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
         self.norm = partial(rms_norm, weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
-        self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
+        # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
+        self.lm_head = cl_ops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
         self.layers = []
         for l in hf_model.model.layers:
             d = Layer()
             d.input_layernorm = partial(rms_norm, weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            d.q_proj = partial(F.linear, weight=l.self_attn.q_proj.weight, bias=l.self_attn.q_proj.bias)
-            d.k_proj = partial(F.linear, weight=l.self_attn.k_proj.weight, bias=l.self_attn.k_proj.bias)
-            d.v_proj = partial(F.linear, weight=l.self_attn.v_proj.weight, bias=l.self_attn.v_proj.bias)
-            d.o_proj = partial(F.linear, weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
+            # combine qkv : 
+            qkv_weight = torch.cat([l.self_attn.q_proj.weight, l.self_attn.k_proj.weight, l.self_attn.v_proj.weight], dim=0)
+            assert(l.self_attn.q_proj.bias == None)
+            assert(l.self_attn.k_proj.bias == None)
+            assert(l.self_attn.v_proj.bias == None)
+            d.qkv_proj = cl_ops.Linear(weight=qkv_weight, bias=None)
+
+            d.o_proj = cl_ops.Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = partial(rms_norm, weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            d.gate_proj = partial(F.linear, weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
-            d.up_proj = partial(F.linear, weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
-            d.down_proj = partial(F.linear, weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
+            d.gate_proj = cl_ops.Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
+            d.up_proj = cl_ops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
+            d.down_proj = cl_ops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
             self.layers.append(d)
         self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
         self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
 
-    def mha(self, layer, query_states, key_states, value_states, kv_cache, attention_mask):
+    def mha(self, layer, qkv, kv_cache, attention_mask):
         global inv_freq
         layer_idx = layer.id
         rotary_dim = self.rotary_dim
@@ -74,11 +81,14 @@ class LlamaModel:
         
         head_dim = hidden_size//num_heads
         # https://github.com/huggingface/transformers/blob/cc3e4781854a52cf090ffde28d884a527dab6708/src/transformers/models/llama/modeling_llama.py#L331
-        # query_states : B, L, H*S
-        bsz, q_len, _ = query_states.size()
-        query_states = query_states.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+        # query_states : B, L, (H*S)+(H*S)+(H*S)
+        bsz, q_len, _ = qkv.size()
+
+        q_size = self.head_size * num_heads
+        kv_size = self.head_size * num_key_value_heads
+        query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
+        key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+        value_states = qkv[:,:,q_size+kv_size:].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
 
         # q/k/v states : [batch, nHead, q_len, head_dim]
 
@@ -135,11 +145,9 @@ class LlamaModel:
         # layerNorm operation
         input_layernorm = layer.input_layernorm(hidden_states)
 
-        q = layer.q_proj(input_layernorm)
-        k = layer.k_proj(input_layernorm)
-        v = layer.v_proj(input_layernorm)
+        qkv = layer.qkv_proj(input_layernorm)
 
-        attn_output = self.mha(layer, q, k, v, kv_cache, attn_mask)
+        attn_output = self.mha(layer, qkv, kv_cache, attn_mask)
 
         attn_output = layer.o_proj(attn_output)
 
@@ -193,8 +201,11 @@ def simple_pipeline(hf_model_path, prompt0):
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
     new_tokens = 0
+    do_trace = prompt0 is not None
+    if do_trace:
+        from viztracer import VizTracer
 
-    with torch.no_grad():
+    with torch.no_grad(), VizTracer(output_file="optional.json") if do_trace else nullcontext() as tracer:
         while True:
             # attn_mask : [batch, query_len+past_len]
             print("\033[0;32m")
@@ -205,12 +216,14 @@ def simple_pipeline(hf_model_path, prompt0):
                     prompt = input(">")
                 except EOFError:
                     break
-            inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
+            inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+            #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
             input_ids = inputs["input_ids"]
             # zero means valid, np.finfo(np.float32).min means invalid(padding-part)
             _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
             attn_mask = torch.cat([attn_mask, _amask], dim=-1)
 
+            t0 = time.time()
             # logits    : [batch, q_len, vocab_size]
             logits = model.forward(input_ids, attn_mask, kv_cache)
 
@@ -219,6 +232,7 @@ def simple_pipeline(hf_model_path, prompt0):
             next_tokens = torch.argmax(next_token_logits, dim=-1)
 
             print("\033[0;33m")
+            t1 = time.time()
             while tokenizer.eos_token_id not in next_tokens:
                 next_tokens = next_tokens.reshape(batch_size, 1)
                 input_ids = next_tokens
@@ -232,19 +246,23 @@ def simple_pipeline(hf_model_path, prompt0):
                 new_tokens += 1
                 if new_tokens > 8:
                     break
-
-            if prompt0:
-                break
+            t2 = time.time()
             streamer.put(next_tokens)
             streamer.end()
+            if prompt0:
+                print(f"\033[00m  {(t1-t0):.3f} s + [{(t2-t1)/new_tokens*1e3:.3f} ms/tok x {new_tokens} tokens]")
+                break
             print("\033[00m")
+
+# HF_TOKEN=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 python3 ./test_llama.py -p "What's Oxygen?"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
     # meta-llama/Llama-2-7b-chat-hf
     # TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    # 
+    # /mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch
     parser.add_argument('-p', "--prompt0", type=str, default=None)
-    parser.add_argument('--hf_model_path', type=str, nargs='?', default='meta-llama/Llama-2-7b-chat-hf')
+    parser.add_argument('--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
     simple_pipeline(args.hf_model_path, args.prompt0)
