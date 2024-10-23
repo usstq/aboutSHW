@@ -223,7 +223,8 @@ def simple_pipeline(hf_model_path, prompt0):
                     prompt = input(">")
                 except EOFError:
                     break
-            inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+            # inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+            inputs = tokenizer(f"{prompt}", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
             input_ids = inputs["input_ids"]
             # zero means valid, np.finfo(np.float32).min means invalid(padding-part)

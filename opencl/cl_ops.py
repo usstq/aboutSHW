@@ -17,136 +17,147 @@ def to_cltensor(input):
 
 
 cl_kernel_sources = '''
-    ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
+ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
 
+// global_id [N, M]
+//
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void Linear_f32(__global float * A, __global float * B, __global float * C, int M, int K, int N) {
+    int m = get_global_id(1);
+    int n = get_global_id(0);
+    if (m < M && n < N) {
+        float sum = 0;
+        __global float * pA = A + m*K;
+        __global float * pB = B + n*K;
+        for(int k = 0; k < K; k++) {
+            sum += pA[k] * pB[k];
+        }
+        C[m*N + n] = sum;
+    }
+}
 
-    // global_id [N, M]
-    //
-    __attribute__((intel_reqd_sub_group_size(8)))
-    __kernel void Linear_f32(__global float * A, __global float * B, __global float * C, int M, int K, int N) {
-        int m = get_global_id(1);
-        int n = get_global_id(0);
-        if (m < M && n < N) {
-            float sum = 0;
-            __global float * pA = A + m*K;
-            __global float * pB = B + n*K;
-            for(int k = 0; k < K; k++) {
-                sum += pA[k] * pB[k];
-            }
-            C[m*N + n] = sum;
+// global_id : [Hq + Hk, q_len, batch_size]
+//
+// inv_freq : [half_rotary_dim]
+//
+//    input : [batch_size, q_len, (Hq + Hk + Hv)*S)]
+__kernel void ROPE(__global float * input,
+                    __global float * inv_freq,
+                    int half_rotary_dim,
+                    int batch_size,
+                    int q_len,
+                    int head_cnt_qkv,
+                    int head_size,
+                    int pos0) {
+    int h = get_global_id(0);
+    int q_offset = get_global_id(1);
+    int batch = get_global_id(2);
+    float position_idx = pos0 + q_offset;
+
+    __global float * src = input + ((batch * q_len + q_offset) * head_cnt_qkv +  h) * head_size;
+
+    for(int i0=0; i0 < half_rotary_dim; i0++) {
+        int i1 = i0 + half_rotary_dim;
+        float xita = position_idx * inv_freq[i0];
+        float cx = cos(xita);
+        float sx = sin(xita);
+        float x0 = src[i0];
+        float x1 = src[i1];
+        src[i0] = cx * x0 - sx * x1;
+        src[i1] = sx * x0 + cx * x1;
+    }
+}
+
+// global_id [Hq, batch_size]
+__kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+                    int batch_size,
+                    int L,                        // input seq-length
+                    __global float * param_output,      // [batch_size, L, Hq * head_size]
+                    __global float * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global float * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global float * param_attn_score,  // [batch_size, Hq, max_kv_len]
+                    int kv_seq_len0,
+                    int Hq,
+                    int Hk,
+                    int max_kv_len,
+                    int head_size,
+                    int head_group_size,
+                    float head_size_scaler
+                    ) {
+    
+    int h = get_global_id(0);
+    int b = get_global_id(1);
+
+    if (h >= Hq) return;
+    if (b >= batch_size) return;
+
+    for(b = 0; b < batch_size; b++) {
+        for(h=0; h<Hq; h++) {
+
+    int Hqkv = Hq + Hk + Hk;
+    int hkv = h / head_group_size;
+
+    __global float * cache_k = param_cache_k + (b * Hk + h)*max_kv_len*head_size;
+    __global float * cache_v = param_cache_v + (b * Hk + h)*max_kv_len*head_size;
+    __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
+
+    // q: head_size
+    // k: head_size
+    // v: head_size
+
+    // concat k & v into cache
+    __global float * dst_k = cache_k + kv_seq_len0*head_size;
+    __global float * dst_v = cache_v + kv_seq_len0*head_size;
+
+    for(int l = 0; l < L; l++) {
+        __global float * cur_k = param_qkv + ((b * L + l) * Hqkv + Hq + hkv) * head_size;
+        __global float * cur_v = cur_k + Hk*head_size;
+        for(int i = 0; i < head_size; i++) {
+            *dst_k++ = cur_k[i];
+            *dst_v++ = cur_v[i];
         }
     }
 
-    // global_id : [Hq + Hk, q_len, batch_size]
-    //
-    // inv_freq : [half_rotary_dim]
-    //
-    //    input : [batch_size, q_len, (Hq + Hk + Hv)*S)]
-    __kernel void ROPE(__global float * input,
-                       __global float * inv_freq,
-                       int half_rotary_dim,
-                       int batch_size,
-                       int q_len,
-                       int head_cnt_qkv,
-                       int head_size,
-                       int pos0) {
-        int h = get_global_id(0);
-        int q_offset = get_global_id(1);
-        int batch = get_global_id(2);
-        float position_idx = pos0 + q_offset;
+    __global float * q = param_qkv + ((b * L + 0) * Hqkv + h) * head_size;
+    __global float * output = param_output + ((b * L + 0)*Hq + h)*head_size;
 
-        __global float * src = input + ((batch * q_len + q_offset) * head_cnt_qkv +  h) * head_size;
+    for(int l = 0; l < L; l++, q += (Hqkv * head_size), output += (Hq*head_size)) {
+        //////////// q * cache_k
+        __global float * pk = cache_k;
+        float max_attn_score = -1e9f;
 
-        for(int i0=0; i0 < half_rotary_dim; i0++) {
-            int i1 = i0 + half_rotary_dim;
-            float xita = position_idx * inv_freq[i0];
-            float cx = cos(xita);
-            float sx = sin(xita);
-            float x0 = src[i0];
-            float x1 = src[i1];
-            src[i0] = cx * x0 - sx * x1;
-            src[i1] = sx * x0 + cx * x1;
-        }
-    }
-
-    // global_id [Hq, batch_size]
-    __kernel void MHA(__global float * qkv,         // [batch_size, q_len, (Hq + Hk + Hv) * head_size)]
-                      int batch_size,
-                      int q_len,
-                      __global float * output,      // [batch_size, q_len, Hq * head_size]
-                      __global float * cache_k,     // [batch_size, Hk, max_kv_len, head_size]
-                      __global float * cache_v,     // [batch_size, Hk, max_kv_len, head_size]
-                      __global float * attn_score,  // [batch_size, Hq, max_kv_len]
-                      int kv_seq_len0,
-                      int Hq,
-                      int Hk,
-                      int max_kv_len,
-                      int head_size,
-                      int head_group_size,
-                      float head_size_scaler
-                      ) {
-        int h = get_global_id(0);
-        int batch = get_global_id(1);
-        int Hqkv = Hq + Hk + Hk;
-
-        int hkv = h / head_group_size;
-
-        __global float * q = qkv + ((batch * q_len + 0) * Hqkv + h) * head_size;
-        
-        cache_k += (batch * Hk + hkv)*max_kv_len*head_size;
-        cache_v += (batch * Hk + hkv)*max_kv_len*head_size;
-        attn_score += (batch * Hq + h)*max_kv_len;
-        output += ((batch * q_len + 0)*Hq + h)*head_size;
-
-        // q: head_size
-        // k: head_size
-        // v: head_size
-
-        // concat k & v into cache
-        __global float * dst_k = cache_k + kv_seq_len0*head_size;
-        __global float * dst_v = cache_v + kv_seq_len0*head_size;
-
-        for(int qi = 0; qi < q_len; qi++) {
-            __global float * cur_k = qkv + ((batch * q_len + qi) * Hqkv + Hq + hkv) * head_size;
-            __global float * cur_v = (cur_k + Hk*head_size);
+        for(int p = 0; p <= kv_seq_len0; p++, pk += head_size) {
+            float dot_prod = 0;
             for(int i = 0; i < head_size; i++) {
-                *dst_k++ = cur_k[i];
-                *dst_v++ = cur_v[i];
+                dot_prod += q[i] * pk[i];
             }
+            dot_prod *= head_size_scaler;
+            attn_score[p] = dot_prod;
+            if (max_attn_score < dot_prod) max_attn_score = dot_prod;
         }
 
-        for(int qi = 0; qi < q_len; qi++, q += (Hqkv * head_size), output += (Hq*head_size)) {
-            // q * cache_k
-            __global float * pk = cache_k;
-            float max_attn_score = -1e9f;
-            for(int p = 0; p <= kv_seq_len0; p++, pk += head_size) {
-                float dot_prod = 0;
-                for(int i = 0; i < head_size; i++) {
-                    dot_prod += q[i] * pk[i];
-                }
-                attn_score[p] = dot_prod * head_size_scaler;
-                if (max_attn_score < dot_prod) max_attn_score = dot_prod;
-            }
+        //////////// softmax
+        float softmax_scale = 0;
+        for(int p = 0; p <= kv_seq_len0; p++) {
+            float a = exp(attn_score[p] - max_attn_score);
+            attn_score[p] = a;
+            softmax_scale += a;
+        }
+        softmax_scale = 1.0f / softmax_scale;
 
-            // softmax
-            float softmax_scale = 0;
-            for(int p = 0; p <= kv_seq_len0; p++) {
-                float a = exp(attn_score[p] - max_attn_score);
-                attn_score[p] = a;
-                softmax_scale += a;
-            }
-            softmax_scale = 1.0f / softmax_scale;
+        //////////// attn_score * cache_v
+        for(int i = 0; i < head_size; i++) output[i] = 0.0f;
 
-            // attn_score * v
-            __global float * pv = cache_v;
-            for(int i = 0; i < head_size; i++) output[i] = 0.0f;
-            for(int p = 0; p <= kv_seq_len0; p++, pv += head_size) {
-                float scale = attn_score[p] * softmax_scale;
-                for(int i = 0; i < head_size; i++)
-                    output[i] += scale * pv[i];
-            }
+        __global float * pv = cache_v;
+        for(int p = 0; p <= kv_seq_len0; p++, pv += head_size) {
+            float scale = attn_score[p] * softmax_scale;
+            for(int i = 0; i < head_size; i++)
+                output[i] += scale * pv[i];
         }
     }
+    }
+    }
+}
 '''
 
 cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
@@ -245,15 +256,17 @@ class MHA:
         output = cl.tensor([batch_size, q_len, self.head_cnt_q * self.head_size], np.dtype(np.float32))
 
         if self.cache_k is None:
-            kv_cache_size = [batch_size, self.head_cnt_k, self.max_kv_len, self.head_size]
+            kv_cache_size = [batch_size, self.head_cnt_q, self.max_kv_len, self.head_size]
             self.cache_k = cl.tensor(kv_cache_size, np.dtype(np.float32))
             self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float32))
-            self.attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
 
         # print(self.head_size_scaler, kv_seq_len0, qkv.shape, self.head_cnt_q, self.head_cnt_k, self.head_size,  self.head_group_size, self.cache_k.shape, self.attn_score.shape)
 
+        # attn_score is just a temp/scratch cl-buffer
+        attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
         cl_kernels.enqueue("MHA",
-                           [self.head_cnt_q, batch_size],
+                           #[self.head_cnt_q, batch_size],
+                           [1, 1],
                            [1, 1],
                            qkv,
                            batch_size,
@@ -261,7 +274,7 @@ class MHA:
                            output,
                            self.cache_k,
                            self.cache_v,
-                           self.attn_score,
+                           attn_score,
                            kv_seq_len0,
                            self.head_cnt_q,
                            self.head_cnt_k,

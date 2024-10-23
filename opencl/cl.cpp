@@ -54,8 +54,13 @@ struct cl_buffer_pool {
     std::multimap<size_t, cl::Buffer> pool;
     size_t total_size = 0;
     size_t total_count = 0;
+    size_t total_alloc_size = 0;
+    size_t total_alloc_count = 0;
 
     cl::Buffer alloc(size_t sz) {
+        total_size += sz;
+        total_count++;
+
         auto it = pool.find(sz);
         if (it != pool.end()) {
             pool.erase(it);
@@ -64,8 +69,9 @@ struct cl_buffer_pool {
             return it->second;
         }
         // allocate a new one
-        total_size += sz;
-        total_count++;
+        total_alloc_size += sz;
+        total_alloc_count ++;
+        
         cl::Buffer ret(CL_MEM_READ_WRITE, sz);
         if (DEBUG_MEMPOOL)
             std::cout << "[cl_buffer_pool] alloc new " << sz << " bytes, cl_mem: " << ret.get() << std::endl;
@@ -84,7 +90,8 @@ struct cl_buffer_pool {
             std::cout << "\t" << p.first << " bytes, cl_mem: " << p.second.get() << std::endl;
             pool_size += p.first;
         }
-        std::cout << "=== totally : " << pool.size() << "/" << total_count << " buffers, " << pool_size << "/" << total_size << " bytes ===" << std::endl;
+        std::cout << "=== totally pool/total/actual:  " << pool.size() << "/" << total_count << "/" << total_alloc_count << " buffers"
+                  <<" pool/total/actual = " << pool_size/1e6 << "/" << total_size/1e6 << "/" << total_alloc_size/1e6 << " MB  ===" << std::endl;
     }
 
     ~cl_buffer_pool() {
