@@ -180,6 +180,7 @@ __kernel void iSilu(__global float * input, int size) {
 }
 '''
 
+
 cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
 
 def to_cl(input):
@@ -198,12 +199,21 @@ def to_torch(input):
 
 def iAdd(input, rhs):
     cl_kernels.enqueue("iAdd", [input.numel], [1], input, rhs, input.numel)
+    return input
 
 def iSilu(input):
     cl_kernels.enqueue("iSilu", [input.numel], [1], input, input.numel)
+    return input
 
 def iMul(input, b):
     cl_kernels.enqueue("iMul", [input.numel], [1], input, b, input.numel)
+    return input
+
+# cl.tensor supports +=,*=
+setattr(cl.tensor, '__iadd__', iAdd)
+setattr(cl.tensor, '__imul__', iMul)
+setattr(cl.tensor, 'iSilu', iSilu)
+setattr(cl.tensor, 'torch', to_torch)
 
 # GPU needs weight-compression to work : INT8 at least
 class RMSNorm:

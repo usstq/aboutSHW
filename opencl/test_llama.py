@@ -13,23 +13,13 @@ from contextlib import nullcontext
 
 import cl_ops
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
+# We design empty Layer on purpose, this make the network hierarchy flatten and easier/more clear to see & optimize
+# although it's an object, but we prefer the whole network topology & logic to be in a more functional style
 class Layer:
     pass
 
 class LlamaModel:
-    def __init__(self, hf_model_id, rope_base = 10000):
+    def __init__(self, hf_model_id, max_kv_len, rope_base = 10000):
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
 
         print(hf_model.config)
@@ -70,126 +60,53 @@ class LlamaModel:
             d.mha = cl_ops.MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
                               self.head_size,
-                              256)
+                              max_kv_len)
 
             self.layers.append(d)
 
-    def mha(self, layer, qkv, kv_cache, attention_mask):
-        layer_idx = layer.id
-        rotary_dim = self.rotary_dim
-        hidden_size = self.hf_config.hidden_size
-        num_heads = self.hf_config.num_attention_heads
-        num_key_value_heads = self.hf_config.num_key_value_heads
-
-        head_dim = hidden_size//num_heads
-        # https://github.com/huggingface/transformers/blob/cc3e4781854a52cf090ffde28d884a527dab6708/src/transformers/models/llama/modeling_llama.py#L331
-        # query_states : B, L, (H*S)+(H*S)+(H*S)
-        bsz, q_len, _ = qkv.size()
-
-        q_size = self.head_size * num_heads
-        kv_size = self.head_size * num_key_value_heads
-        # derive total kv length from attn (has limitation)
-        # apply_rotary_pos_emb to key_states/value_states
-        kv_seq_len = attention_mask.shape[-1]
-        kv_seq_len0 = kv_seq_len - q_len
-
-        query_states = qkv[:,:,:q_size].view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
-        key_states = qkv[:,:,q_size:q_size+kv_size].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
-        value_states = qkv[:,:,q_size+kv_size:].view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
-
-        # q/k/v states : [batch, nHead, q_len, head_dim]
-        def rope_embedd(x):
-            half_rotary_dim = rotary_dim//2
-            for k in range(q_len):
-                position_idx = kv_seq_len0 + k
-                for i0 in range(half_rotary_dim):
-                    i1 = i0 + half_rotary_dim
-                    xita = (self.inv_freq[i0] * position_idx)
-                    vcos = math.cos(xita)
-                    vsin = math.sin(xita)
-                    y0 = vcos * x[:, :, k, i0] - vsin * x[:, :, k, i1]
-                    y1 = vsin * x[:, :, k, i0] + vcos * x[:, :, k, i1]
-                    x[:, :, k, i0] = y0
-                    x[:, :, k, i1] = y1
-
-        #rope_embedd(query_states)
-        #rope_embedd(key_states)
-
-        # kv_cache [2 * n_layers, batch, n_head, max_kv_len, head_size]
-        kv_cache[2*layer_idx + 0, :, :, kv_seq_len0:kv_seq_len, :] = key_states
-        kv_cache[2*layer_idx + 1, :, :, kv_seq_len0:kv_seq_len, :] = value_states
-
-        # us beam_idx to gather(reorder kv cache), skipped in greedy case
-        key_states = kv_cache[2*layer_idx + 0, :, :, :kv_seq_len, :]
-        value_states = kv_cache[2*layer_idx + 1, :, :, :kv_seq_len, :]
-
-        num_key_value_groups = num_heads // num_key_value_heads
-
-        key_states = repeat_kv(key_states, num_key_value_groups)
-        value_states = repeat_kv(value_states, num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-
-        attn_weights = attn_weights + attention_mask
-
-        # apply causal mask, only the last q-token can access all kv-cache
-        # [batch, num_heads, q_len ,kv_len] 
-        for k in range(q_len-1):
-            attn_weights[:, :, k, (k - q_len + 1):] = torch.finfo(torch.float32).min
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, hidden_size)
-        return attn_output
-
-    def forward_layer(self, layer, hidden_states, attn_mask, kv_cache):
+    def forward_layer(self, layer, hidden_states, attn_mask):
         # layerNorm operation
         input_layernorm = layer.input_layernorm(hidden_states)
 
         qkv = layer.qkv_proj(input_layernorm)
 
-        _, q_len, _ = qkv.shape
+        query_seq_len = qkv.shape[1]
         kv_seq_len = attn_mask.shape[-1]
-        kv_seq_len0 = kv_seq_len - q_len
-        qkv = self.rope(qkv, kv_seq_len0)
+        qkv = self.rope(qkv, kv_seq_len - query_seq_len)
 
-        if 1:
-            attn_output = layer.mha(qkv, attn_mask)
-        else:
-            qkv = cl_ops.to_torch(qkv)
-            attn_output = self.mha(layer, qkv, kv_cache, attn_mask)
-            attn_output = cl_ops.to_cl(attn_output)
-        
+        attn_output = layer.mha(qkv, attn_mask)
         attn_output = layer.o_proj(attn_output)
 
-        cl_ops.iAdd(attn_output, hidden_states)
+        attn_output += hidden_states
 
         post_attention_layernorm = layer.post_attention_layernorm(attn_output)
 
         def mlp(states):
             gate_proj = layer.gate_proj(states)
             up_proj = layer.up_proj(states)
-            cl_ops.iSilu(gate_proj)
-            cl_ops.iMul(gate_proj, up_proj)
+            gate_proj.iSilu()
+            gate_proj *= up_proj
             down_proj = layer.down_proj(gate_proj)
             return down_proj
 
         mlp_output = mlp(post_attention_layernorm)
         # residual connection.
-        cl_ops.iAdd(attn_output, mlp_output)
+        attn_output += mlp_output
         return attn_output
 
-    def forward(self, input_ids, attn_mask, kv_cache):
+    def forward(self, input_ids, attn_mask):
+        # embedding is done on CPU so far (to save GPU memory since embedding is memory-bounded)
         inputs_embeds = self.embed_tokens(input_ids)
+        # the rest is done on GPU
         hidden_states = cl_ops.to_cl(inputs_embeds)
         for layer in self.layers:
-            hidden_states = self.forward_layer(layer, hidden_states, attn_mask, kv_cache)
+            hidden_states = self.forward_layer(layer, hidden_states, attn_mask)
 
         final_layernorm = self.norm(hidden_states)
         logits = self.lm_head(final_layernorm)
-        return cl_ops.to_torch(logits)
+        return logits.torch()
 
-def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens):
+def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len):
     global inv_freq
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
@@ -199,16 +116,12 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens):
 
     streamer = TextStreamer(tokenizer)
 
-
-    print(f"load config/weight from HF model {hf_model_path} ...")
-    model = LlamaModel(hf_model_path)
-
     batch_size = 1
-    max_kv_len = 2048
-
-    kv_cache = torch.zeros(model.hf_config.num_hidden_layers * 2, batch_size, model.hf_config.num_key_value_heads, max_kv_len, model.head_size, dtype=torch.float32)
     position_id = 0
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
+
+    print(f"load config/weight from HF model {hf_model_path} ...")
+    model = LlamaModel(hf_model_path, max_kv_len)
 
     new_tokens = 0
     if do_trace:
@@ -235,7 +148,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens):
 
             t0 = time.time()
             # logits    : [batch, q_len, vocab_size]
-            logits = model.forward(input_ids, attn_mask, kv_cache)
+            logits = model.forward(input_ids, attn_mask)
 
             # only the last token
             next_token_logits = logits[:, -1, :]
@@ -251,7 +164,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens):
 
                 attn_mask = torch.cat([attn_mask, torch.zeros(batch_size, 1, dtype=torch.float32)], dim=-1)
 
-                logits = model.forward(input_ids, attn_mask, kv_cache)
+                logits = model.forward(input_ids, attn_mask)
                 next_tokens = torch.argmax(logits, dim=-1)
                 new_tokens += 1
                 if new_tokens > max_new_tokens:
@@ -276,6 +189,7 @@ if __name__ == "__main__":
     parser.add_argument('-p', "--prompt0", type=str, default=None)
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
-    parser.add_argument('--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
+    parser.add_argument('-c', "--max_kv_len", type=int, default=256)
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
-    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens)
+    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len)
