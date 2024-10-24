@@ -4018,6 +4018,45 @@ inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx
 #        endif
     return mask_vec;
 }
+
+ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
+uint __attribute__((overloadable)) intel_get_slice_id( void );
+uint __attribute__((overloadable)) intel_get_subslice_id( void );
+uint __attribute__((overloadable)) intel_get_dual_subslice_id( void );
+uint __attribute__((overloadable)) intel_get_eu_id( void );
+uint __attribute__((overloadable)) intel_get_eu_thread_id( void );
+
+#define uint32_t uint
+#define uint64_t ulong
+
+struct workitem_info {
+	uint32_t group_id0;
+	uint32_t group_id1;
+	uint32_t group_id2;
+	uint32_t local_id2;
+	uint32_t sub_group_id;
+	uint32_t sub_group_local_id;
+	uint32_t slice_id;
+	uint32_t sub_slice_id;
+	uint32_t eu_id;
+	uint32_t eu_slot_id;
+	uint64_t cycle_start;
+	uint64_t cycle_dur;
+};
+
+void set_winfo(struct workitem_info * pw) {
+	pw->group_id0 = get_group_id(0);
+	pw->group_id1 = get_group_id(1);
+	pw->group_id2 = get_group_id(2);
+	pw->local_id2 = get_local_id(2);
+	pw->sub_group_id = get_sub_group_id();
+	pw->sub_group_local_id = get_sub_group_local_id();
+	pw->slice_id = intel_get_slice_id();
+	pw->sub_slice_id = intel_get_dual_subslice_id();
+	pw->eu_id = intel_get_eu_id();
+	pw->eu_slot_id = intel_get_eu_thread_id();
+}
+
 REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
 KERNEL(sdpa_opt)
 (OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
@@ -4046,7 +4085,8 @@ KERNEL(sdpa_opt)
 #        else
  __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums,
  __global SOFTMAX_ACCUMULATOR_TYPE* max_logits,
- __global OUTPUT_TYPE* tmp_out
+ __global OUTPUT_TYPE* tmp_out,
+ __global struct workitem_info * winfo
 #        endif
 ) {
 #        if TARGET_SEQ_LEN_BLOCK_SIZE != 16
@@ -4070,8 +4110,19 @@ KERNEL(sdpa_opt)
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
 
-	if (get_global_linear_id()==0)
-		printf("==============================================entery WI%d ==============================================\\n", get_global_linear_id());
+	struct workitem_info *pw = winfo + get_global_linear_id();
+	set_winfo(pw);
+    // if (get_global_linear_id() == 0) {
+    //     for (int i = 0; i < 44; i++) {
+    //         printf("shape_info %d : %d, %f\\n", i, shape_info[i], query_input[i]);
+    //     }
+    // }
+	// if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+	// 	printf("==============================================entery sub_group_local_id%d Ls=%d, Ld=%d==============================================\\n", 
+    //             pw->sub_group_local_id, SOURCE_SEQ_LEN, TARGET_SEQ_LEN);
+	// }
+
+	pw->cycle_start = intel_get_cycle_counter();
     {
 #        if IS_PAGED_ATTENTION
         const uint block_start_pos = blocked_indexes_start[target_seq_dim];
@@ -4527,8 +4578,10 @@ KERNEL(sdpa_opt)
         }
     }
 
-	if (get_global_linear_id()==0)
-		printf("==============================================exit WI%d ==============================================\\n", get_global_linear_id());
+	pw->cycle_dur = intel_get_cycle_counter() - pw->cycle_start;
+	// if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+	// 	printf("==============================================exit sub_group_local_id%d duration %ld cycles==============================================\\n", pw->sub_group_local_id, pw->cycle_dur);
+	// }
 }
 #    endif
 #endif
