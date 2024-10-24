@@ -169,7 +169,7 @@ int main(void) {
 
     auto latency_ns = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() - evt.getProfilingInfo<CL_PROFILING_COMMAND_START>());
 
-    workitem_info::Dump(winfo, latency_ns, K);
+    workitem_info::Dump(winfo, latency_ns, K, 8);
 
     return 0;
 }

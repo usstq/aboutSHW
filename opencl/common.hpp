@@ -295,7 +295,7 @@ struct workitem_info {
     uint32_t eu_slot_id;
     uint64_t cycle_start;
     uint64_t cycle_dur;
-    static void Dump(tensorND<workitem_info>& winfo, size_t latency_ns, size_t num_ops_per_workitem) {
+    static void Dump(tensorND<workitem_info>& winfo, size_t latency_ns, size_t num_ops_per_workitem, size_t simd_lanes) {
         ChromeTraceDumpper dumpper("ocl.json");
 
         struct EUWork : workitem_info {
@@ -390,14 +390,14 @@ struct workitem_info {
         dev_info di;
 
         ECOUT(" total_thread_cnt : ", total_thread_cnt);
-        ECOUT(" thread_per_EU : ", total_thread_cnt/8/di.num_EUs, " (assuming SIMD-8)");
+        ECOUT(" thread_per_EU : ", total_thread_cnt/simd_lanes/di.num_EUs, " (SIMD-", simd_lanes, ")");
         auto avg_freq_GHz = double(max_cycle_end - min_cycle_start)/latency_ns;
         auto normal_freq_GHz = di.freq_MHz*1e-3;
         ECOUT(" GPU_avg_freq : ", avg_freq_GHz, " (GHz)");
         ECOUT("              : ", avg_freq_GHz*100/(normal_freq_GHz), "% of ", normal_freq_GHz, "(GHz)");
         auto avg_gops = double(num_ops_per_workitem) * winfo.numel() /latency_ns;
-        ECOUT(" GFLOPS/s     : ", avg_gops);
-        ECOUT("              : ", avg_gops*100/(di.Tcycles_ps*1e3*8), "% of ", di.Tcycles_ps*8, "(Tcycles/s)");
+        ECOUT(" GFLOPS/s     : ", avg_gops, ", winfo.numel() = ", winfo.numel(), ", latency_ns = ", latency_ns, ", di.Tcycles_ps = ", di.Tcycles_ps );
+        ECOUT("              : ", avg_gops*100/(di.Tcycles_ps*1e3*simd_lanes), "% of ", di.Tcycles_ps*simd_lanes, "(Tcycles/s)");
 
         for(auto& w : winfo) {
             //std::cout << "(" << m << "," << n << ")  group(" << pw->group_id0 << "," << pw->group_id1 << ")(" << pw->local_id0 << "," << pw->local_id1 << ")(" << pw->sub_group_id << "," << pw->sub_group_local_id

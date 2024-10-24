@@ -48,7 +48,27 @@ https://chipsandcheese.com/p/microbenchmarking-intels-arc-a770
 | XMX                   | 8x4x16=512    | `64-FP16-MAD per-cycle`/`128-INT8-MAD per-cycle`<br> totally `137.6/275.2 TFLOPS @2.1GHz` |
 
 
+# MTL and SDPA
+
+https://chipsandcheese.com/p/intels-ambitious-meteor-lake-igpu?utm_source=publication-search
+
+|  component name  |      count         | functions  |
+|-----------------:|:-------------------|:-----------|
+| Xe-LP render slice    | 2             | `4x Xe-cores` + `graphics pipeline` |
+| XC(Xe-core)           | 2x4=8         | `16x (XVE)` + `Load/Store_Unit` + `L1$/SLM` @`0.8GHz~2.3GHz` |
+| XVE (EU)              | 2x4x16=128    | SIMD-8 ALU `8-FP32-MAD per-cycle` |
+| Threads               | 2x4x16x8=1024 | `1024*2*2.3G ~ 4.7 TFLOPS` |
+
+
+Say 8K input length for QWen2 sdpa first token, the measured perf so far -
+1. Gemm gflops / layer : 2x gemms of [1, 28, 8553, 128]  : 28*8553*128*2*8553/1024/1024/1024*2 = 976.7 Gflops / layer  => 27.328 Tflops / infer
+2. Softmax gflops / layer : 28*8553*8553*2/1024/1024/1024 => 3.8 Gflops / layer => 106.8 Gflops / infer
+3. Ideal time of softmax : 3.8/80G  = 47 ms / layer => 1.3 sec / infer
+3. Ideal time of 2 Gemms : 976.7/4.7T = 207ms / layer => 5.8 sec / infer
+
+
 # Develop & Debug & Profile kernels inside torch framework
+
 Torch is a good framework to test & optimize kernels because it's easy to add new kernel (or even backend) and integrate with existing models,
 there are few references:
 
