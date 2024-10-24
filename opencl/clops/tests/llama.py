@@ -12,6 +12,7 @@ from functools import partial
 from contextlib import nullcontext
 
 import clops
+from tqdm import tqdm
 
 # We design empty Layer on purpose, this make the network hierarchy flatten and easier/more clear to see & optimize
 # although it's an object, but we prefer the whole network topology & logic to be in a more functional style
@@ -20,9 +21,10 @@ class Layer:
 
 class LlamaModel:
     def __init__(self, hf_model_id, max_kv_len, quant_type, rope_base = 10000):
+        print(f"loading {hf_model_id}...")
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
-
         print(hf_model.config)
+
         #assert(hf_model.config.num_key_value_heads == hf_model.config.num_attention_heads)
         assert(hf_model.config.hidden_act in ['silu'])
         assert(hf_model.config.rope_scaling is None)
@@ -34,6 +36,7 @@ class LlamaModel:
         else:
             assert(f"quant_type {quant_type} is unexpected!")
 
+        print(f"converting & loading model into GPGPU : {hf_model_id} ...")
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
         self.norm = clops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
@@ -48,7 +51,7 @@ class LlamaModel:
                                 hf_model.config.num_key_value_heads,
                                 self.head_size)
         self.layers = []
-        for l in hf_model.model.layers:
+        for l in tqdm(hf_model.model.layers):
             d = Layer()
             d.input_layernorm = clops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             # combine qkv : 
@@ -83,9 +86,7 @@ class LlamaModel:
 
         attn_output = layer.mha(qkv, attn_mask)
         attn_output = layer.o_proj(attn_output)
-
         attn_output += hidden_states
-
         post_attention_layernorm = layer.post_attention_layernorm(attn_output)
 
         def mlp(states):
@@ -97,7 +98,6 @@ class LlamaModel:
             return down_proj
 
         mlp_output = mlp(post_attention_layernorm)
-        # residual connection.
         attn_output += mlp_output
         return attn_output
 
@@ -127,7 +127,6 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     position_id = 0
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
-    print(f"load config/weight from HF model {hf_model_path} ...")
     model = LlamaModel(hf_model_path, max_kv_len, quant_type)
 
     new_tokens = 0
@@ -148,29 +147,22 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
             inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
+
             input_ids = inputs["input_ids"]
-            # zero means valid, np.finfo(np.float32).min means invalid(padding-part)
             _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
-            attn_mask = torch.cat([attn_mask, _amask], dim=-1)
+            attn_mask = torch.cat([attn_mask, _amask], dim=-1) # [batch, query_len+past_len] 0:valid, -max: invalid
 
             t0 = time.time()
-            # logits    : [batch, q_len, vocab_size]
-            logits = model.forward(input_ids, attn_mask)
-
-            # only the last token
-            next_token_logits = logits[:, -1, :]
+            logits = model.forward(input_ids, attn_mask) # [batch, q_len, vocab_size]
+            next_token_logits = logits[:, -1, :]         # only the last token
             next_tokens = torch.argmax(next_token_logits, dim=-1)
-
             print("\033[0;33m")
             t1 = time.time()
             while tokenizer.eos_token_id not in next_tokens:
                 next_tokens = next_tokens.reshape(batch_size, 1)
                 input_ids = next_tokens
-
                 streamer.put(next_tokens)
-
                 attn_mask = torch.cat([attn_mask, torch.zeros(batch_size, 1, dtype=torch.float32)], dim=-1)
-
                 logits = model.forward(input_ids, attn_mask)
                 next_tokens = torch.argmax(logits, dim=-1)
                 new_tokens += 1
@@ -184,22 +176,14 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
                 break
             print("\033[00m")
 
-# HF_TOKEN=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 python3 ./test_llama.py -p "What's Oxygen?"
-# cliloader -d -cdt --dump-dir ./dump/ python3 ./test_llama.py -p "What's Oxygen?"
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
-    # meta-llama/Llama-2-7b-chat-hf
-    # TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    # /mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch
     parser.add_argument('-p', "--prompt0", type=str, default=None)
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
     parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'w4a'])
 
-    # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch/
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
     simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type)
