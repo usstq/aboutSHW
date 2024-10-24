@@ -1,16 +1,16 @@
 #!/usr/bin/python3
-import cl
+from clops import cl
 import numpy as np
 import sys
 
 print(dir(cl))
 
 # Open the file in read mode
-with open("sdpa.cl", "r") as file:
+with open("cl_kernels/sdpa.cl", "r") as file:
     # Read the entire file content into a string
     sdpa_src = file.read()
 
-print(sdpa_src[:1000])
+print(sdpa_src[:100])
 
 # [kernel] sdpa_opt_multi_tokens_sa args 10 :
 #         0 int* shape_info
@@ -24,8 +24,11 @@ print(sdpa_src[:1000])
 #         8 float* max_logits
 #         9 half* tmp_out
 
+cl.profiling(True)
 sdpa_kernel = cl.kernels(sdpa_src, "")
 
+TARGET_SEQ_LEN_BLOCK_SIZE=16
+SG_SCALE_FACTOR=2
 SUBGROUP_SIZE=16
 GQA_SIZE=4
 B=1
@@ -66,8 +69,8 @@ tmp_out = cl.tensor(np.zeros([2], dtype=np.float16))
 
 output = cl.tensor(np.zeros([B, H, Lq, S], dtype=np.float16))
 
-GWS = [B*H, int(Lq/SUBGROUP_SIZE), S]
-LWS = [1, 1, S]
+GWS = [B*H, int(Lq/TARGET_SEQ_LEN_BLOCK_SIZE), S*SG_SCALE_FACTOR]
+LWS = [1, 1, S*SG_SCALE_FACTOR]
 
 print(f"query_input.shape={query_input.shape}, key_input.numpy()={query_input.numpy()[0,0,0,:]}")
 print(f"GWS={GWS}, LWS={LWS}")

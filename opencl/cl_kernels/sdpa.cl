@@ -3836,6 +3836,8 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SDPA_STAGE_0                       1
 #define SG_SCALE_FACTOR                    2
 
+#define DUMP_WORKINFO                      1
+
 inline uint FUNC(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #if INPUT0_SIMPLE
     return GET_DATA_INDEX_6D(INPUT0, b, f, w, z, y, x);
@@ -4059,7 +4061,11 @@ void set_winfo(struct workitem_info * pw) {
 
 REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
 KERNEL(sdpa_opt)
-(OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
+(
+#        if DUMP_WORKINFO == 1
+ __global struct workitem_info * winfo,
+#        endif
+OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
  const __global INPUT1_TYPE* key_input,
  const __global INPUT2_TYPE* value_input,
 #        if IS_PAGED_ATTENTION
@@ -4085,8 +4091,7 @@ KERNEL(sdpa_opt)
 #        else
  __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums,
  __global SOFTMAX_ACCUMULATOR_TYPE* max_logits,
- __global OUTPUT_TYPE* tmp_out,
- __global struct workitem_info * winfo
+ __global OUTPUT_TYPE* tmp_out
 #        endif
 ) {
 #        if TARGET_SEQ_LEN_BLOCK_SIZE != 16
@@ -4110,17 +4115,22 @@ KERNEL(sdpa_opt)
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
 
+#        if DUMP_WORKINFO == 1
 	struct workitem_info *pw = winfo + get_global_linear_id();
+#        else
+    struct workitem_info winfo;
+    struct workitem_info *pw = &winfo;
+#        endif
 	set_winfo(pw);
-    // if (get_global_linear_id() == 0) {
-    //     for (int i = 0; i < 44; i++) {
-    //         printf("shape_info %d : %d, %f\\n", i, shape_info[i], query_input[i]);
-    //     }
-    // }
-	// if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-	// 	printf("==============================================entery sub_group_local_id%d Ls=%d, Ld=%d==============================================\\n", 
-    //             pw->sub_group_local_id, SOURCE_SEQ_LEN, TARGET_SEQ_LEN);
-	// }
+    if (get_global_linear_id() == 0) {
+        for (int i = 0; i < 44; i++) {
+            printf("shape_info %d : %d, %f\\n", i, shape_info[i], query_input[i]);
+        }
+    }
+	if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+		printf("==============================================entery sub_group_local_id%d Ls=%d, Ld=%d==============================================\\n", 
+                pw->sub_group_local_id, SOURCE_SEQ_LEN, TARGET_SEQ_LEN);
+	}
 
 	pw->cycle_start = intel_get_cycle_counter();
     {

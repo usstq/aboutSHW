@@ -1,3 +1,6 @@
+// compile command: 
+// g++ -O2 ./sdpa_gflops.cpp -lOpenCL -o sdpa_gflops
+// 
 #include <string>
 #include <fstream>
 #include <streambuf>
@@ -27,6 +30,8 @@ int main(void) {
     // std::cout << cl_source << std::endl;
     CLkernels kernel(cl_source.c_str());
 
+    const std::string kernel_name("sdpa_opt_multi_tokens_6761455398808095608_0_0__sa");
+
     // execution
     const int32_t B = getenv("B", 1);
     const int32_t H = getenv("H", 28);
@@ -45,7 +50,7 @@ int main(void) {
     auto lws = LWS.get();
     ECOUT("GWS={", *gws, ",", *(gws+1), ",", *(gws+2), "},",
           "LWS={", *lws, ",", *(lws+1), ",", *(lws+2), "}");
-    kernel.show_info("sdpa_opt_multi_tokens_6761455398808095608_0_0__sa", LWS, SUBGROUP_SIZE);
+    kernel.show_info(kernel_name.c_str(), LWS, SUBGROUP_SIZE);
 
     tensorND<workitem_info> winfo({static_cast<size_t>(B*H), static_cast<size_t>(int(Lq/TARGET_SEQ_LEN_BLOCK_SIZE)), static_cast<size_t>(SG_SCALE_FACTOR*S)}, workitem_info());
     const std::vector<int32_t> shape_info_data = {
@@ -78,22 +83,33 @@ int main(void) {
     tensorND<cl_half> output({static_cast<size_t>(B), static_cast<size_t>(H), static_cast<size_t>(Lq), static_cast<size_t>(S)}, 0.0f);
 
     cl::EnqueueArgs enqArgs(GWS, LWS);
-    auto evt = kernel.call("sdpa_opt_multi_tokens_6761455398808095608_0_0__sa", enqArgs, shape_info.to_gpu(),
+    cl::Event evt;
+    auto kernel_nargs = [&](const std::string& kernel_name) {
+        auto k = kernel.kernel_map[kernel_name];
+            return k.getInfo<CL_KERNEL_NUM_ARGS>();
+    };
+    auto nargs = kernel_nargs(kernel_name);
+    if (nargs <= 10) {
+        evt = kernel.call(kernel_name.c_str(), enqArgs, shape_info.to_gpu(),
                             query.to_gpu(), key.to_gpu(), value.to_gpu(),
                             attn_mask.to_gpu(), scale.to_gpu(), output.to_gpu(),
-                            exp_sums.to_gpu(), max_logits.to_gpu(), tmp_out.to_gpu(), winfo.to_gpu());
+                            exp_sums.to_gpu(), max_logits.to_gpu(), tmp_out.to_gpu());
+    } else {
+        evt = kernel.call(kernel_name.c_str(), enqArgs, winfo.to_gpu(), shape_info.to_gpu(),
+                            query.to_gpu(), key.to_gpu(), value.to_gpu(),
+                            attn_mask.to_gpu(), scale.to_gpu(), output.to_gpu(),
+                            exp_sums.to_gpu(), max_logits.to_gpu(), tmp_out.to_gpu());
+    }
     evt.wait();
 
 
     ECOUT("=========================== end of execution ================================");
     cl_ulong last_evt_ns = 0;
-    auto delta_ns = [&](cl_ulong ns){
+    auto delta_ns = [&](cl_ulong ns) {
         auto delta = ns - last_evt_ns;
         last_evt_ns = ns;
         return Nanoseconds(delta);
     };
-
-    winfo.to_cpu();
 
     ECOUT("CL_PROFILING_COMMAND_QUEUED  :  ", delta_ns(evt.getProfilingInfo<CL_PROFILING_COMMAND_QUEUED>()));
     ECOUT("CL_PROFILING_COMMAND_SUBMIT  : +", delta_ns(evt.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>()));
@@ -104,7 +120,11 @@ int main(void) {
     auto latency_ns = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() - evt.getProfilingInfo<CL_PROFILING_COMMAND_START>());
     size_t num_ops_per_workitem = TARGET_SEQ_LEN_BLOCK_SIZE*Lk*2;
     ECOUT("num_ops_per_workitem = ", (double)num_ops_per_workitem/1024/1024/1024, " GFLOPS, latency = ", (double)latency_ns / 1000 / 1000, " ms");
-    workitem_info::Dump(winfo, latency_ns, num_ops_per_workitem, SUBGROUP_SIZE);
+
+    if (nargs > 10) {
+        winfo.to_cpu();
+        workitem_info::Dump(winfo, latency_ns, num_ops_per_workitem, SUBGROUP_SIZE);
+    }
 
     return 0;
 }

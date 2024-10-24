@@ -61,7 +61,7 @@ https://chipsandcheese.com/p/intels-ambitious-meteor-lake-igpu?utm_source=public
 
 
 Say 8K input length for QWen2 sdpa first token, the measured perf so far -
-1. Gemm gflops / layer : 2x gemms of [1, 28, 8553, 128]  : 28*8553*128*2*8553/1024/1024/1024*2 = 976.7 Gflops / layer  => 27.328 Tflops / infer
+1. Gemm gflops / layer : 2x gemms of [1, 28, 8553, 128]  : 28\*8553*128*2*8553/1024/1024/1024*2 = 976.7 Gflops / layer  => 27.328 Tflops / infer
 2. Softmax gflops / layer : 28*8553*8553*2/1024/1024/1024 => 3.8 Gflops / layer => 106.8 Gflops / infer
 3. Ideal time of softmax : 3.8/80G  = 47 ms / layer => 1.3 sec / infer
 3. Ideal time of 2 Gemms : 976.7/4.7T = 207ms / layer => 5.8 sec / infer
