@@ -66,7 +66,9 @@ Say 8K input length for QWen2 sdpa first token, the measured perf so far -
 3. Ideal time of softmax : 3.8/80G  = 47 ms / layer => 1.3 sec / infer
 3. Ideal time of 2 Gemms : 976.7/4.7T = 207ms / layer => 5.8 sec / infer
 
-# Develop & Debug kernels inside torch framework
+
+# Develop & Debug & Profile kernels inside torch framework
+
 Torch is a good framework to test & optimize kernels because it's easy to add new kernel (or even backend) and integrate with existing models,
 there are few references:
 
@@ -78,6 +80,11 @@ there are few references:
 To our needs, we just want to test & optimize a sub-graph inside a real-model, so the best & simplest choice is just wrap our kernel into a
 torch extension and integrate it into a real-model to do testing. `pyopencl` is also a choice but it adds another layer of complexity and
 requires additional learning since original OpenCL is C-API.
+
+The [unitrace](https://github.com/intel/pti-gpu/tree/master/tools/unitrace) could be used to profile the performance. The following command line would generate a `python.pid.json` in folder `trace` and it could be viewed by chrome tracing tool:
+```bash
+unitrace --output-dir-path trace -d -h --opencl --chrome-call-logging  --chrome-kernel-logging --chrome-device-logging python -m clops.tests.llama -p "What's Oxygen"`
+```
 
 # References
 

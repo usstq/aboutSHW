@@ -7,16 +7,17 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 __version__ = "0.1"
 
 ext_modules = [
-    Pybind11Extension("cl",
-        ["cl.cpp"],
+    Pybind11Extension("clops.cl",
+        ["./clops/cl.cpp"],
         define_macros = [('VERSION_INFO', __version__)],
         extra_link_args=['-lOpenCL']
         ),
 ]
 
 setuptools.setup(
-    name='cl',
+    name='clops',
     version="0.1",
+    packages=["clops"],
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     #setup_requires=["pybind11"]
