@@ -29,7 +29,7 @@ __kernel void RMSNorm(__global half * input, __global half * output, __global ha
     }
 }
 '''
-cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
+cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
 class RMSNorm:
     def __init__(self, weight, epsilon):

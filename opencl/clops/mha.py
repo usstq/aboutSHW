@@ -91,7 +91,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     }
 }
 '''
-cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
+cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
 class MHA:
     def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len):

@@ -19,7 +19,7 @@ class Layer:
     pass
 
 class LlamaModel:
-    def __init__(self, hf_model_id, max_kv_len, rope_base = 10000):
+    def __init__(self, hf_model_id, max_kv_len, quant_type, rope_base = 10000):
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
 
         print(hf_model.config)
@@ -27,11 +27,18 @@ class LlamaModel:
         assert(hf_model.config.hidden_act in ['silu'])
         assert(hf_model.config.rope_scaling is None)
 
+        if quant_type == "f16":
+            Linear = clops.Linear
+        elif quant_type == "w4a":
+            Linear = clops.Linear_woq_I4  # INT4 ASYN
+        else:
+            assert(f"quant_type {quant_type} is unexpected!")
+
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
         self.norm = clops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
         # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
-        self.lm_head = clops.Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
+        self.lm_head = Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
 
         self.rotary_dim = int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
         self.head_size = hf_model.config.hidden_size // hf_model.config.num_attention_heads
@@ -49,13 +56,13 @@ class LlamaModel:
             assert(l.self_attn.q_proj.bias == None)
             assert(l.self_attn.k_proj.bias == None)
             assert(l.self_attn.v_proj.bias == None)
-            d.qkv_proj = clops.Linear(weight=qkv_weight, bias=None)
+            d.qkv_proj = Linear(weight=qkv_weight, bias=None)
 
-            d.o_proj = clops.Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
+            d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            d.gate_proj = clops.Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
-            d.up_proj = clops.Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
-            d.down_proj = clops.Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
+            d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
+            d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
+            d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
             d.mha = clops.MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
@@ -106,7 +113,7 @@ class LlamaModel:
         logits = self.lm_head(final_layernorm)
         return logits.torch().float()
 
-def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len):
+def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type):
     global inv_freq
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
@@ -121,7 +128,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
     print(f"load config/weight from HF model {hf_model_path} ...")
-    model = LlamaModel(hf_model_path, max_kv_len)
+    model = LlamaModel(hf_model_path, max_kv_len, quant_type)
 
     new_tokens = 0
     if do_trace:
@@ -190,7 +197,9 @@ if __name__ == "__main__":
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
+    parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'w4a'])
+
     # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch/
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
-    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len)
+    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type)
