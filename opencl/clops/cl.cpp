@@ -343,6 +343,9 @@ struct cl_tensor {
         }
         update_buff();
         auto* p = reinterpret_cast<uint8_t*>(info.ptr);
+        // manually sync the queue because cl::copy() will be performed
+        // asynchronously using [enqueueMapBuffer + cpu-copy].
+        cmd_queue.finish();
         cl::copy(p, p + numel * dt.itemsize(), *p_buff);
     }
 

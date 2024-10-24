@@ -128,8 +128,6 @@ class Linear_woq_I4:
         self.scales = cl.tensor([N, K//group_size], np.dtype(np.float16)) # scales
         self.zps = cl.tensor([N, K//group_size], np.dtype(np.float16))    # zero-points
         cl_kernels.enqueue("Linear_quant_I4", [K//group_size, N], [1, 1], weight_half, self.weight_i4, self.scales, self.zps, N, K, group_size)
-        # why we need this finish is unknown, but it's required to avoid bugs
-        cl.finish()
 
         self.bias = to_cl(bias)
         self.group_size = group_size
