@@ -83,7 +83,7 @@ requires additional learning since original OpenCL is C-API.
 
 The [unitrace](https://github.com/intel/pti-gpu/tree/master/tools/unitrace) could be used to profile the performance. The following command line would generate a `python.pid.json` in folder `trace` and it could be viewed by chrome tracing tool:
 ```bash
-unitrace --output-dir-path trace -d -h --opencl --chrome-call-logging  --chrome-kernel-logging --chrome-device-logging python -m clops.tests.llama -p "What's Oxygen"`
+unitrace --output-dir-path trace -d --opencl --chrome-kernel-logging python -m clops.tests.llama -p "What's Oxygen"`
 ```
 
 # References
