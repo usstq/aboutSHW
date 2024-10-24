@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import cl
+from clops import cl
 import numpy as np
 import sys
 
@@ -68,8 +68,8 @@ def test_max_gflops():
     N = 32
     k.enqueue("max_fma", [M, N],[1, N], t, K)
     profiling = cl.finish()
-
-    dur_ns = profiling[0][-2] - profiling[0][-3]
+    print(profiling)
+    dur_ns = profiling[0]
 
     print(f" {dur_ns}ns  {2*M*N*K*1e-3/dur_ns: .2f} TFLOPS")
 

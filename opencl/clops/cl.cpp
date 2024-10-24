@@ -454,10 +454,13 @@ struct cl_kernels {
             auto kname = k.getInfo<CL_KERNEL_FUNCTION_NAME>();
             kernel_map[kname] = k;
             auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
-            std::cout << "[kernel] " << kname << " args " << nargs << " :" << std::endl;
+            std::cout << "[kernel] " << kname << "(";
+            const char * sep = "";
             for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
-                std::cout << "\t" << arg_idx << " " << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx) << std::endl;
+                std::cout << sep << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx);
+                sep = ", ";
             }
+            std::cout << ")" << std::endl;
         }
     }
 
@@ -564,14 +567,12 @@ PYBIND11_MODULE(cl, m) {
     m.def("finish", []() {
         cmd_queue.finish();
         // return all event time-stamps
-        std::vector<std::array<uint64_t, 5>> ret;
+        std::vector<uint64_t> ret;
         for (auto& evt : all_events) {
             ret.emplace_back();
-            ret.back()[0] = evt.getProfilingInfo<CL_PROFILING_COMMAND_QUEUED>();
-            ret.back()[1] = evt.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>();
-            ret.back()[2] = evt.getProfilingInfo<CL_PROFILING_COMMAND_START>();
-            ret.back()[3] = evt.getProfilingInfo<CL_PROFILING_COMMAND_END>();
-            ret.back()[4] = evt.getProfilingInfo<CL_PROFILING_COMMAND_COMPLETE>();
+            auto start = evt.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+            auto end = evt.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+            ret.back() = end - start;
         }
         all_events.clear();
         return ret;
