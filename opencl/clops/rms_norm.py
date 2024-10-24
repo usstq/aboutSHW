@@ -4,7 +4,7 @@ import math
 from .utils import *
 
 cl_kernel_sources = '''
-__kernel void RMSNorm(__global float * input, __global float * output, __global float * weight, int size, float epsilon) {
+__kernel void RMSNorm(__global half * input, __global half * output, __global half * weight, int size, float epsilon) {
     int row = get_global_id(0);
     input += row * size;
     output += row * size;
@@ -12,7 +12,7 @@ __kernel void RMSNorm(__global float * input, __global float * output, __global 
     for(int i = 0; i < size; i++) {
         variance += input[i] * input[i];
     }
-    float scale = rsqrt((variance / size) + epsilon);
+    half scale = rsqrt((variance / size) + epsilon);
     for(int i = 0; i < size; i++) {
         output[i] = input[i] * scale * weight[i];
     }
@@ -22,7 +22,7 @@ cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4", "./dump")
 
 class RMSNorm:
     def __init__(self, weight, epsilon):
-        self.weight = to_cl(weight)
+        self.weight = to_cl(weight.half())
         self.n_channels = weight.shape[-1]
         self.epsilon = epsilon
 

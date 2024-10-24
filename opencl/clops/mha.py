@@ -3,13 +3,13 @@ import numpy as np
 
 cl_kernel_sources = '''
 // global_id [Hq, batch_size]
-__kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+__kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
                     int batch_size,
                     int L,                        // input seq-length
-                    __global float * param_output,      // [batch_size, L, Hq * head_size]
-                    __global float * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
-                    __global float * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
-                    __global float * param_attn_score,  // [batch_size, Hq, max_kv_len]
+                    __global half * param_output,      // [batch_size, L, Hq * head_size]
+                    __global half * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global half * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global half * param_attn_score,  // [batch_size, Hq, max_kv_len]
                     int kv_seq_len0,
                     int Hq,
                     int Hk,
@@ -28,34 +28,34 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
     int Hqkv = Hq + Hk + Hk;
     int hkv = h / head_group_size;
 
-    __global float * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
-    __global float * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
-    __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
+    __global half * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
+    __global half * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
+    __global half * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
 
     // q: head_size
     // k: head_size
     // v: head_size
 
     // concat k & v into cache
-    __global float * dst_k = cache_k + kv_seq_len0*head_size;
-    __global float * dst_v = cache_v + kv_seq_len0*head_size;
+    __global half * dst_k = cache_k + kv_seq_len0*head_size;
+    __global half * dst_v = cache_v + kv_seq_len0*head_size;
 
     for(int l = 0; l < L; l++) {
-        __global float * cur_k = param_qkv + ((b * L + l) * Hqkv + Hq + hkv) * head_size;
-        __global float * cur_v = cur_k + Hk*head_size;
+        __global half * cur_k = param_qkv + ((b * L + l) * Hqkv + Hq + hkv) * head_size;
+        __global half * cur_v = cur_k + Hk*head_size;
         for(int i = 0; i < head_size; i++) {
             *dst_k++ = cur_k[i];
             *dst_v++ = cur_v[i];
         }
     }
 
-    __global float * q = param_qkv + ((b * L + 0) * Hqkv + h) * head_size;
-    __global float * output = param_output + ((b * L + 0)*Hq + h)*head_size;
+    __global half * q = param_qkv + ((b * L + 0) * Hqkv + h) * head_size;
+    __global half * output = param_output + ((b * L + 0)*Hq + h)*head_size;
 
     for(int ql = 0; ql < L; ql++, q += (Hqkv * head_size), output += (Hq*head_size)) {
         //////////// q * cache_k
-        __global float * pk = cache_k;
-        float max_attn_score = -1e9f;
+        __global half * pk = cache_k;
+        half max_attn_score = -1e9f;
 
         // causal_mask & attn_mask is not applied explicitly
         int kv_len = ql + kv_seq_len0;
@@ -71,9 +71,9 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
         }
 
         //////////// softmax
-        float softmax_scale = 0;
+        half softmax_scale = 0;
         for(int p = 0; p <= kv_len; p++) {
-            float a = exp(attn_score[p] - max_attn_score);
+            half a = exp(attn_score[p] - max_attn_score);
             attn_score[p] = a;
             softmax_scale += a;
         }
@@ -82,9 +82,9 @@ __kernel void MHA(__global float * param_qkv,         // [batch_size, L, (Hq + H
         //////////// attn_score * cache_v
         for(int i = 0; i < head_size; i++) output[i] = 0.0f;
 
-        __global float * pv = cache_v;
+        __global half * pv = cache_v;
         for(int p = 0; p <= kv_len; p++, pv += head_size) {
-            float scale = attn_score[p] * softmax_scale;
+            half scale = attn_score[p] * softmax_scale;
             for(int i = 0; i < head_size; i++)
                 output[i] += scale * pv[i];
         }
@@ -120,17 +120,17 @@ class MHA:
         assert(S == (self.head_cnt_qkv * self.head_size))
         kv_seq_len0 = kv_seq_len - q_len
 
-        output = cl.tensor([batch_size, q_len, self.head_cnt_q * self.head_size], np.dtype(np.float32))
+        output = cl.tensor([batch_size, q_len, self.head_cnt_q * self.head_size], qkv.dtype)
 
         if self.cache_k is None:
             kv_cache_size = [batch_size, self.head_cnt_k, self.max_kv_len, self.head_size]
-            self.cache_k = cl.tensor(kv_cache_size, np.dtype(np.float32))
-            self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float32))
+            self.cache_k = cl.tensor(kv_cache_size, np.dtype(np.float16))
+            self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float16))
 
         # print(self.head_size_scaler, kv_seq_len0, qkv.shape, self.head_cnt_q, self.head_cnt_k, self.head_size,  self.head_group_size, self.cache_k.shape, self.attn_score.shape)
 
         # attn_score is just a temp/scratch cl-buffer
-        attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
+        attn_score = cl.tensor([batch_size, self.head_cnt_q, self.max_kv_len], np.dtype(np.float16))
         cl_kernels.enqueue("MHA",
                            [self.head_cnt_q, batch_size],
                            [1, 1],

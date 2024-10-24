@@ -202,7 +202,8 @@ namespace py = pybind11;
 //
 static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 
-#define DEBUG_MEMPOOL (CLDEBUG & 1)
+#define DEBUG_MEMPOOL_SUMMARY (CLDEBUG & 1)
+#define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
 
 // create temp cl_tensor (from pool since we want it to be fast)
 struct cl_buffer_pool {
@@ -219,7 +220,7 @@ struct cl_buffer_pool {
         auto it = pool.find(sz);
         if (it != pool.end()) {
             pool.erase(it);
-            if (DEBUG_MEMPOOL)
+            if (DEBUG_MEMPOOL_VERBOSE)
                 std::cout << "[cl_buffer_pool] alloc from pool " << sz << " bytes, cl_mem: " << it->second.get() << std::endl;
             return it->second;
         }
@@ -228,29 +229,35 @@ struct cl_buffer_pool {
         total_alloc_count++;
 
         cl::Buffer ret(CL_MEM_READ_WRITE, sz);
-        if (DEBUG_MEMPOOL)
+        if (DEBUG_MEMPOOL_VERBOSE)
             std::cout << "[cl_buffer_pool] alloc new " << sz << " bytes, cl_mem: " << ret.get() << std::endl;
         return ret;
     }
     void free(cl::Buffer buff) {
         size_t sz = buff.getInfo<CL_MEM_SIZE>();
         pool.emplace(sz, buff);
-        if (DEBUG_MEMPOOL)
+        if (DEBUG_MEMPOOL_VERBOSE)
             std::cout << "[cl_buffer_pool] free " << sz << " bytes, cl_mem: " << buff.get() << std::endl;
     }
     void show() {
         std::cout << "=== cl_buffer_pool ===" << std::endl;
         size_t pool_size = 0;
+        std::map<size_t, int> summary;
         for (auto const& p : pool) {
-            std::cout << "\t" << p.first << " bytes, cl_mem: " << p.second.get() << std::endl;
+            auto sz = p.first;
+            if (summary.count(sz) == 0) summary[sz] = 0;
+            summary[sz] ++;
             pool_size += p.first;
+        }
+        for (auto const& p : summary) {
+            std::cout << "\t " << p.first << " bytes x " << p.second << std::endl;
         }
         std::cout << "=== totally pool/total/actual:  " << pool.size() << "/" << total_count << "/" << total_alloc_count << " buffers"
                   << " pool/total/actual = " << pool_size / 1e6 << "/" << total_size / 1e6 << "/" << total_alloc_size / 1e6 << " MB  ===" << std::endl;
     }
 
     ~cl_buffer_pool() {
-        if (DEBUG_MEMPOOL)
+        if (DEBUG_MEMPOOL_SUMMARY)
             show();
     }
 };

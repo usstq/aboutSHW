@@ -10,7 +10,7 @@ ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
 // inv_freq : [half_rotary_dim]
 //
 //    input : [batch_size, q_len, (Hq + Hk + Hv)*S)]
-__kernel void ROPE(__global float * input,
+__kernel void ROPE(__global half * input,
                     __global float * inv_freq,
                     int half_rotary_dim,
                     int batch_size,
@@ -23,7 +23,7 @@ __kernel void ROPE(__global float * input,
     int batch = get_global_id(2);
     float position_idx = pos0 + q_offset;
 
-    __global float * src = input + ((batch * q_len + q_offset) * head_cnt_qkv +  h) * head_size;
+    __global half * src = input + ((batch * q_len + q_offset) * head_cnt_qkv +  h) * head_size;
 
     for(int i0=0; i0 < half_rotary_dim; i0++) {
         int i1 = i0 + half_rotary_dim;
@@ -37,19 +37,19 @@ __kernel void ROPE(__global float * input,
     }
 }
 
-__kernel void iAdd(__global float * input, __global float * rhs, int size) {
+__kernel void iAdd(__global half * input, __global half * rhs, int size) {
     int i = get_global_linear_id();
     if (i < size)
         input[i] += rhs[i];
 }
 
-__kernel void iMul(__global float * input, __global float * rhs, int size) {
+__kernel void iMul(__global half * input, __global half * rhs, int size) {
     int i = get_global_linear_id();
     if (i < size)
         input[i] *= rhs[i];
 }
 
-__kernel void iSilu(__global float * input, int size) {
+__kernel void iSilu(__global half * input, int size) {
     int i = get_global_linear_id();
     if (i < size) {
         float x = input[i];

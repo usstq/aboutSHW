@@ -98,13 +98,13 @@ class LlamaModel:
         # embedding is done on CPU so far (to save GPU memory since embedding is memory-bounded)
         inputs_embeds = self.embed_tokens(input_ids)
         # the rest is done on GPU
-        hidden_states = clops.to_cl(inputs_embeds)
+        hidden_states = clops.to_cl(inputs_embeds.half())
         for layer in self.layers:
             hidden_states = self.forward_layer(layer, hidden_states, attn_mask)
 
         final_layernorm = self.norm(hidden_states)
         logits = self.lm_head(final_layernorm)
-        return logits.torch()
+        return logits.torch().float()
 
 def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len):
     global inv_freq
@@ -190,6 +190,7 @@ if __name__ == "__main__":
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
+    # /mnt/llm_irs/models_original/llama-2-7b-chat/pytorch/
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
     args = parser.parse_args()
     simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len)
