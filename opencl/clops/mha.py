@@ -1,4 +1,4 @@
-import cl
+from . import cl
 import numpy as np
 
 cl_kernel_sources = '''

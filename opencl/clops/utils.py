@@ -1,4 +1,4 @@
-import cl
+from . import cl
 import torch
 
 def to_cl(input):
