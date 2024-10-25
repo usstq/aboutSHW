@@ -23,7 +23,11 @@ $ cmake ..
 $ cmake --build . --config RelWithDebInfo --target install
 
 # profiling with opencl-intercept-layer: profiling
-$ cliloader -d -cdt  --dump-dir ./dump/ python3 -m clops.tests.llama -p "What's Oxygen?" -n 32
+$ cliloader -dv -cdt  --dump-dir ./dump/ python3 -m clops.tests.llama -p "What's Oxygen?" -n 32
+
+# https://github.com/intel/pti-gpu/tree/master/tools/unitrace
+$ pti-gpu/tools/unitrace/build/unitrace --output-dir-path trace -d -h --opencl --chrome-call-logging  --chrome-kernel-logging --chrome-device-logging   python -m clops.tests.llama -p "What's Oxygen"
+ 
 ```
 
 ## References
