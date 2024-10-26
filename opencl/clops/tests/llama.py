@@ -144,9 +144,10 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
                     prompt = input(">")
                 except EOFError:
                     break
-            inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+            #inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
             #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
+            inputs = tokenizer(f"{prompt}", return_tensors="pt", padding=True, return_token_type_ids=False)
 
             input_ids = inputs["input_ids"]
             _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
@@ -184,6 +185,6 @@ if __name__ == "__main__":
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
     parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'w4a'])
 
-    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0')
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/llama-2-7b-hf/pytorch/')
     args = parser.parse_args()
     simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type)
