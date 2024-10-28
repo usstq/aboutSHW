@@ -114,7 +114,6 @@ class LlamaModel:
         return logits.torch().float()
 
 def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type):
-    global inv_freq
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -124,7 +123,6 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     streamer = TextStreamer(tokenizer)
 
     batch_size = 1
-    position_id = 0
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
     model = LlamaModel(hf_model_path, max_kv_len, quant_type)
@@ -153,6 +151,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
             _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
             attn_mask = torch.cat([attn_mask, _amask], dim=-1) # [batch, query_len+past_len] 0:valid, -max: invalid
 
+            prompt_tok_length = input_ids.shape[-1]
             t0 = time.time()
             logits = model.forward(input_ids, attn_mask) # [batch, q_len, vocab_size]
             next_token_logits = logits[:, -1, :]         # only the last token
@@ -173,7 +172,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
             streamer.put(next_tokens)
             streamer.end()
             if prompt0:
-                print(f"\033[00m  {(t1-t0):.3f} s + [{(t2-t1)/new_tokens*1e3:.3f} ms/tok x {new_tokens} tokens]")
+                print(f"\033[00m {prompt_tok_length} + {new_tokens} tokens,  [{prompt_tok_length/(t1-t0):.3f} tok/sec + {(t2-t1)/new_tokens*1e3:.3f} ms/tok]")
                 break
             print("\033[00m")
 

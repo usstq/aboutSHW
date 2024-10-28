@@ -14,6 +14,9 @@
 #include <sstream>
 #include <vector>
 
+#include <dlfcn.h>
+#include <omp.h>
+
 #define CL_HPP_ENABLE_EXCEPTIONS
 #define CL_HPP_TARGET_OPENCL_VERSION 300
 #include <CL/opencl.hpp>
@@ -537,6 +540,101 @@ struct cl_kernels {
     */
 };
 
+//======================================================================================================================
+// [gcc + omp] based CPP kernels
+union KArg {
+    int64_t i;
+    float f;
+    void* p;
+};
+typedef void (*KERNEL_FUNC)(const int, const int, const std::vector<KArg>&);
+
+static int global_so_id = 0;
+
+struct cpp_kernels {
+    std::string so_fname;
+    void * dl_handle = nullptr;
+    ~cpp_kernels() {
+        if (dl_handle) {
+            dlclose(dl_handle);
+        }
+    }
+
+    cpp_kernels(std::string src, std::string options, std::string name) {
+        std::stringstream ss;
+        std::string so_fname;
+
+        so_fname = "./lib-ckjit-gen-";
+        so_fname += name;
+        so_fname += std::to_string(global_so_id);
+        so_fname += ".so";
+
+        ss << "gcc -shared -o " << so_fname << " -march=native -Wall -fpic -x c++ - -lstdc++ ";
+        ss << options;
+        FILE *pipe = popen(ss.str().c_str(), "w");
+        if (pipe == NULL) {
+            perror("popen Error");
+            abort();
+        }
+
+        fwrite(src.c_str(), src.size(), 1, pipe);
+        if (pclose(pipe)) {
+            perror("pclose Error");
+            abort();
+        }
+
+        dl_handle = dlopen(so_fname.c_str(), RTLD_LAZY);
+        if (!dl_handle) {
+            fprintf(stderr, "dlopen Error: %s\n", dlerror());
+            abort();
+        }
+    }
+
+    std::map<std::string, KERNEL_FUNC> kernels;
+
+    void call(std::string name, py::args args) {
+        KERNEL_FUNC func;
+        auto it = kernels.find(name);
+        if (it == kernels.end()) {
+            func = reinterpret_cast<KERNEL_FUNC>(dlsym(dl_handle, name.c_str()));
+            if (!func) {
+                fprintf(stderr, "Error: %s\n", dlerror());
+                abort();
+            }
+            kernels[name] = func;
+        } else {
+            func = it->second;
+        }
+
+        std::vector<KArg> kargs;
+
+        int arg_id = 0;
+        for (auto& arg : args) {
+            kargs.emplace_back();
+            auto& karg = kargs.back();
+            if (py::isinstance<py::int_>(arg)) {
+                karg.i = arg.cast<int64_t>();
+            } else if (py::isinstance<py::float_>(arg)) {
+                karg.f = arg.cast<float>();
+            } else if (py::isinstance<py::array>(arg)) {
+                const auto& b = arg.cast<py::array>();
+                py::buffer_info info = b.request();
+                karg.p = info.ptr;
+            } else {
+                throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(kargs.size()));
+            }
+        }
+
+        int nthr = omp_get_max_threads();
+        #pragma omp parallel
+        {
+            int ithr = omp_get_thread_num();
+            func(ithr, nthr, kargs);
+        }
+    }
+};
+//======================================================================================================================
+
 PYBIND11_MODULE(cl, m) {
     select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size", "cl_intel_subgroup_matrix_multiply_accumulate"});
 
@@ -559,6 +657,10 @@ PYBIND11_MODULE(cl, m) {
     py::class_<cl_kernels>(m, "kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
         .def("enqueue", &cl_kernels::enqueue);
+
+    py::class_<cpp_kernels>(m, "cpp_kernels")
+        .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("name") = "")
+        .def("call", &cpp_kernels::call);
 
     m.def("flush", []() {
         cmd_queue.flush();

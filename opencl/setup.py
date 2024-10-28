@@ -10,7 +10,8 @@ ext_modules = [
     Pybind11Extension("clops.cl",
         ["./clops/cl.cpp"],
         define_macros = [('VERSION_INFO', __version__)],
-        extra_link_args=['-lOpenCL']
+        extra_compile_args=['-fopenmp'],
+        extra_link_args=["-fopenmp", "-lOpenCL"]
         ),
 ]
 
