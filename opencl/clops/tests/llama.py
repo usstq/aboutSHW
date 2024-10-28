@@ -29,13 +29,9 @@ class LlamaModel:
         assert(hf_model.config.hidden_act in ['silu'])
         assert(hf_model.config.rope_scaling is None)
 
-        if quant_type == "f16":
-            Linear = clops.Linear
-        elif quant_type == "w4a":
-            Linear = clops.Linear_woq_I4  # INT4 ASYN
-        else:
-            assert(f"quant_type {quant_type} is unexpected!")
-
+        Linear = getattr(clops, f"Linear_{quant_type}")
+        MHA = clops.MHA
+        #MHA = clops.MHA_cpu
         print(f"converting & loading model into GPGPU : {hf_model_id} ...")
         self.hf_config = hf_model.config
         self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
@@ -67,7 +63,7 @@ class LlamaModel:
             d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
             d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
-            d.mha = clops.MHA(self.hf_config.num_attention_heads,
+            d.mha = MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
                               self.head_size,
                               max_kv_len)
@@ -182,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
-    parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'w4a'])
+    parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu'])
 
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/llama-2-7b-hf/pytorch/')
     args = parser.parse_args()
