@@ -153,7 +153,7 @@ import numpy as np
 from .utils import *
 
 GROUP_SIZE = 128
-cl_kernels_WOQ_I4 = cl.kernels(cl_kernel_sources, f"-D GROUP_SIZE={GROUP_SIZE}", "./dump")
+cl_kernels_WOQ_I4 = kernel_cache(cl_kernel_sources, f"-D GROUP_SIZE={GROUP_SIZE}", "./dump")
 
 # weight-only-quantization to INT4
 class Linear_w4a:

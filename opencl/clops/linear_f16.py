@@ -24,7 +24,7 @@ from . import cl
 import numpy as np
 from .utils import *
 
-cl_kernels = cl.kernels(cl_kernel_sources)
+cl_kernels = kernel_cache(cl_kernel_sources)
 
 # collect linear weight shapes
 Linear_shapes = {}

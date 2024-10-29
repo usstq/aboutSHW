@@ -57,7 +57,7 @@ __kernel void iSilu(__global half * input, int size) {
     }
 }
 '''
-cl_kernels = cl.kernels(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
+cl_kernels = kernel_cache(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
 def iAdd(input, rhs):
     cl_kernels.enqueue("iAdd", [input.numel], [1], input, rhs, input.numel)

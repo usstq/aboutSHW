@@ -93,7 +93,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     }
 }
 '''
-cl_kernels_ref = cl.kernels(cl_kernel_sources_ref, "-D FMACNT=4 -D UNROLL=4")
+cl_kernels_ref = kernel_cache(cl_kernel_sources_ref, "-D FMACNT=4 -D UNROLL=4")
 
 cl_kernel_sources = r'''
 __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv) * S)]
@@ -408,7 +408,7 @@ class MHA:
         self.sub_group_size = 16
         options = f'-D FMACNT=4 -DUNROLL=4 -DS={head_size} -DSGS={self.sub_group_size} -DHQ={head_cnt_q} -DHK={head_cnt_k} \
                     -DMAX_KV_LEN={max_kv_len} -DKV_BLOCK={self.kv_block}'
-        self.cl_kernels = cl.kernels(cl_kernel_sources, options)
+        self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
     def __call__(self, qkv, attention_mask):
 
@@ -422,7 +422,7 @@ class MHA:
         B, L1, S = qkv.shape
         assert(S == (self.head_cnt_qkv * self.S))
         L0 = kv_seq_len - L1
-        assert kv_seq_len <= self.max_kv_len, "kv cache length is not enough"
+        assert kv_seq_len <= self.max_kv_len, f"kv cache length {self.max_kv_len} is not enough for kv_seq_len {kv_seq_len}"
 
         output = cl.tensor([B, L1, self.head_cnt_q * self.S], qkv.dtype)
 

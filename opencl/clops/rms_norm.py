@@ -67,7 +67,7 @@ __kernel void RMSNorm(__global half * input, __global half * output, __global ha
 '''
 # choose work-group size to be 128 (16EU x SIMD-8)
 C_WG_SIZE = 128
-cl_kernels = cl.kernels(cl_kernel_sources, f"-D C_WG_SIZE={C_WG_SIZE}")
+cl_kernels = kernel_cache(cl_kernel_sources, f"-D C_WG_SIZE={C_WG_SIZE}")
 
 class RMSNorm:
     def __init__(self, weight, epsilon):

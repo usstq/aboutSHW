@@ -43,7 +43,7 @@ class LlamaLikeModel:
 
         Linear = getattr(clops, f"Linear_{quant_type}")
         MHA = clops.MHA
-        MHA = clops.MHA_cpu
+        #MHA = clops.MHA_cpu
         ROPE = clops.ROPE
         print(f"converting & loading model into GPGPU : {hf_model_id} ...")
         self.hf_config = hf_model.config
@@ -138,10 +138,11 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     batch_size = len(prompt0)
     attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
+    # overwrite max_kv_len according to [prompt length + max_new_tokens]
     if prompt0:
         inputs = tokenizer(prompt0, return_tensors="pt", padding=True, return_token_type_ids=False)
         input_ids = inputs["input_ids"]
-        max_kv_len = input_ids.shape[-1] + max_new_tokens + 4
+        max_kv_len = (input_ids.shape[-1] + max_new_tokens + 31 )//32*32
 
     model = LlamaLikeModel(hf_model_path, max_kv_len, quant_type)
     print(f" batch_size, max_kv_len = {batch_size}, {max_kv_len} ")
@@ -157,7 +158,6 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
             print("\033[0;32m")
             if prompt0:
                 prompt = prompt0
-                print(f"prompt: {prompt0}")
             else:
                 try:
                     prompt = input(">")
@@ -181,10 +181,12 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
             t1 = time.time()
             while tokenizer.eos_token_id not in next_tokens:
                 next_tokens = next_tokens.reshape(batch_size, 1)
-                gen_tokens = torch.cat([gen_tokens, next_tokens], dim=1)
                 input_ids = next_tokens
                 if batch_size == 1:
                     streamer.put(next_tokens[0,:])
+                else:
+                    gen_tokens = torch.cat([gen_tokens, next_tokens], dim=1)
+
                 new_tokens += 1
                 if new_tokens >= max_new_tokens:
                     break
@@ -197,7 +199,7 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
                 streamer.put(next_tokens[0,:])
             streamer.end()
             if prompt0:
-                if (batch_size > 1):
+                if (gen_tokens.numel() > 0):
                     print("\033[00m")
                     for i in range(batch_size):
                         out = tokenizer.decode(gen_tokens[i,:], skip_special_tokens=True)
@@ -209,13 +211,11 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
     parser.add_argument('-p', "--prompt0", type=str, default=None)
-    parser.add_argument('-pn', "--prompt_tokens", type=str, default=None)
+    parser.add_argument('-x', "--prompt_tokens", type=str, default=None)
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
     parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu'])
-
-    # '/mnt/llm_irs/models_original/llama-2-7b-hf/pytorch/'
 
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
     args = parser.parse_args()

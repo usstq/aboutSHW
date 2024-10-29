@@ -2,6 +2,20 @@ from . import cl
 import torch
 import numpy as np
 
+class KernelCache:
+    def __init__(self):
+        self.cache = {}
+    
+    def __call__(self, cl_kernel_sources, options="", dump=""):
+        key = (cl_kernel_sources, options, dump)
+        if key in self.cache:
+            return self.cache[key]
+        
+        self.cache[key] = cl.kernels(cl_kernel_sources, options)
+        return self.cache[key]
+
+kernel_cache = KernelCache()
+
 def to_cl(input):
     if isinstance(input, cl.tensor):
         return input

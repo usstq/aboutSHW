@@ -123,7 +123,7 @@ import numpy as np
 from .utils import *
 
 K_groups = 16
-cl_kernels = cl.kernels(cl_kernel_sources, f"-D K_groups={K_groups}")
+cl_kernels = kernel_cache(cl_kernel_sources, f"-D K_groups={K_groups}")
 
 class Linear_f16b1:
     def __init__(self, weight, bias = None):

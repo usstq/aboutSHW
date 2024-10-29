@@ -13,8 +13,9 @@ some highlights in the design:
 pip install pybind11
 pip install -e .
 
-# test llama inference
-python3 -m clops.tests.llama -p "What's Oxygen?" -n 32
+# test llama2/qwen2 inference
+python -m clops.tests.llama -p "What's Oxygen?" -n 32
+python -m clops.tests.llama -hf /mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/ -x 16x32 -n 1
 
 # profiling with opencl-intercept-layer: build from source
 $ git clone https://github.com/intel/opencl-intercept-layer
