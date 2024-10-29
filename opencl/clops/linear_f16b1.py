@@ -14,7 +14,12 @@ __kernel void ReorderB(__global half * in, __global half * out, int N, int K) {
 opt2: blocked read & memory-layout
 ****************************************************************************************************************************/
 __attribute__((intel_reqd_sub_group_size(16)))
-__kernel void Linear_f16_b1(__global half * A, __global half * B, __global half * C, int M, int K, int N, int K_group_size) {
+__kernel void Linear_f16_b1(
+    __global half * A,
+    __global half * B,
+    __global float * bias,
+    __global half * C,
+    int M, int K, int N, int K_group_size) {
     int m = get_global_id(1);
     int n = get_global_id(0);
     int ngid = get_group_id(0);
@@ -50,10 +55,11 @@ __kernel void Linear_f16_b1(__global half * A, __global half * B, __global half 
 
     sum = 0;
     for(int i = 0; i < K_groups; i++) sum += all_sum[ng][i];
+    if (bias) sum += bias[n];
     C[m*N + n] = sum;
 }
 
-__kernel void Linear_f16(__global half * A, __global half * B, __global half * C, int M, int K, int N) {
+__kernel void Linear_f16(__global half * A, __global half * B, __global float * bias, __global half * C, int M, int K, int N) {
     int m = get_global_id(1);
     int n = get_global_id(0);
     float sum = 0;
@@ -63,6 +69,50 @@ __kernel void Linear_f16(__global half * A, __global half * B, __global half * C
         for(int unroll = 0; unroll < 8; unroll++)
             sum += pA[k+unroll] * pB[k+unroll];
     }
+    if (bias) sum += bias[n];
+    C[m*N + n] = sum;
+}
+
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void Linear_f16_b1_opt(__global half * A, __global half * B, __global float * bias, __global half * C, int M, int K, int N, int K_group_size) {
+    int n = get_global_id(0);
+    int m = get_global_id(1);
+
+    int ngid = get_group_id(0);
+
+    int n_local_id = get_local_id(0);
+    int k_local_id = get_local_id(2);
+
+    __global half * pA = A + m*K;
+    __global half * pB = B + ngid * (K*16);
+
+    float sum = 0;
+    for(int k = k_local_id*8; k < K; k += 8*K_groups) {
+        // load src, sharing for all sub-groups
+        // half vB = as_half(intel_sub_group_block_read_us((const __global ushort*)(pB + k*16)));
+        ushort vAs = intel_sub_group_block_read_us((const __global ushort*)(pA + k));
+        half8 vBs = as_half8(intel_sub_group_block_read_us8((const __global ushort*)(pB + k*16)));
+        sum += as_half(intel_sub_group_broadcast(vAs, 0)) * vBs.s0;
+        sum += as_half(intel_sub_group_broadcast(vAs, 1)) * vBs.s1;
+        sum += as_half(intel_sub_group_broadcast(vAs, 2)) * vBs.s2;
+        sum += as_half(intel_sub_group_broadcast(vAs, 3)) * vBs.s3;
+        sum += as_half(intel_sub_group_broadcast(vAs, 4)) * vBs.s4;
+        sum += as_half(intel_sub_group_broadcast(vAs, 5)) * vBs.s5;
+        sum += as_half(intel_sub_group_broadcast(vAs, 6)) * vBs.s6;
+        sum += as_half(intel_sub_group_broadcast(vAs, 7)) * vBs.s7;
+    }
+
+    __local float all_sum[16][K_groups];
+    all_sum[n_local_id][k_local_id] = sum;
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // only the first one responsible for reduce & output
+    if (k_local_id != 0) return;
+
+    sum = 0;
+    for(int i = 0; i < K_groups; i++) sum += all_sum[n_local_id][i];
+    if (bias) sum += bias[n];
     C[m*N + n] = sum;
 }
 
@@ -77,15 +127,12 @@ cl_kernels = cl.kernels(cl_kernel_sources, f"-D K_groups={K_groups}")
 
 class Linear_f16b1:
     def __init__(self, weight, bias = None):
-        assert(bias is None)
         self.N, self.K = weight.shape # weight: [N, K]
 
         assert(self.K % K_groups == 0)
         assert(self.N % 16 == 0)
 
         self.weight0 = to_cl(weight.half())
-
-        self.bias = to_cl(bias)
         weight_raw = to_cl(weight.half())
         self.weight = cl.tensor(weight_raw.shape, weight_raw.dtype)
         self.bias = to_cl(bias)
@@ -103,11 +150,22 @@ class Linear_f16b1:
         M = input.numel // self.K
         #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
         #cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight0, output, M, self.K, self.N)
-        cl_kernels.enqueue("Linear_f16_b1", [self.N, M, K_groups], [16, 1, K_groups], input, self.weight, output, M, self.K, self.N, self.K // K_groups)
+        cl_kernels.enqueue("Linear_f16_b1", # "Linear_f16_b1",
+                           [self.N, M, K_groups],
+                           [16, 1, K_groups], 
+                           input,
+                           self.weight,
+                           self.bias,
+                           output,
+                           M,
+                           self.K,
+                           self.N,
+                           self.K // K_groups)
 
         return output
 
 if __name__ == "__main__":
+    import sys
     cl.profiling(True)
     def test_acc(shape, Bcnt = 0):
         M, K, N = shape
@@ -133,6 +191,7 @@ if __name__ == "__main__":
         res = output.numpy()
         compare(ref, res)
 
+    test_acc([1, 2048, 2048], 10); sys.exit(0)
 
     for b in [7, 1]:
         test_acc([b, 2048, 2560], 10)
@@ -140,7 +199,4 @@ if __name__ == "__main__":
         test_acc([b, 2048, 5632], 10)
         test_acc([b, 5632, 2048], 10)
         test_acc([b, 2048, 32000], 10)
-
-    import sys
-    sys.exit(0)
 

@@ -5,7 +5,7 @@ naive implementation:
 problem in 2nd token: not enough work-global size to use all EUs when M=1
 ****************************************************************************************************************************/
 //__attribute__((intel_reqd_sub_group_size(8)))
-__kernel void Linear_f16(__global half * A, __global half * B, __global half * C, int M, int K, int N) {
+__kernel void Linear_f16(__global half * A, __global half * B, __global float * bias, __global half * C, int M, int K, int N) {
     int m = get_global_id(1);
     int n = get_global_id(0);
     float sum = 0;
@@ -15,6 +15,7 @@ __kernel void Linear_f16(__global half * A, __global half * B, __global half * C
         for(int unroll = 0; unroll < 8; unroll++)
             sum += pA[k+unroll] * pB[k+unroll];
     }
+    if (bias != NULL) sum += bias[n];
     C[m*N + n] = sum;
 }
 '''
@@ -42,9 +43,7 @@ atexit.register(show_linear_shapes)
 
 
 class Linear_f16:
-
     def __init__(self, weight, bias):
-        assert(bias is None)
         self.N, self.K = weight.shape # weight: [N, K]
         self.weight = to_cl(weight.half())
         self.bias = to_cl(bias)
@@ -59,5 +58,5 @@ class Linear_f16:
         M = input.numel // self.K
         add_shape(M, self.K, self.N)
         #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
-        cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight, output, M, self.K, self.N)
+        cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight, self.bias, output, M, self.K, self.N)
         return output

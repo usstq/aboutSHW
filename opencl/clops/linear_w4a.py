@@ -48,6 +48,7 @@ __kernel void Linear_w4a_ref(__global half * A,
                              __global uchar * B,
                              __global half * scales,
                              __global char * zps,
+                             __global float * bias,
                              int M, int N, int K) {
     // global: [N, M]
     // local:  [1, 1]
@@ -72,6 +73,7 @@ __kernel void Linear_w4a_ref(__global half * A,
             sum += (*A++) * w1;
         }
     }
+    if (bias) sum += bias[n];
     C[m*N + n] = sum;
 }
 
@@ -81,6 +83,7 @@ __kernel void Linear_woq_I4(__global half * A,
                             __global uchar * B,
                             __global half * scales,
                             __global char * zps,
+                            __global float * bias,
                             int M, int N, int K) {
     int n = get_global_id(0);
     int m = get_global_id(1);
@@ -140,6 +143,7 @@ __kernel void Linear_woq_I4(__global half * A,
     for(int i = 0; i < K_groups; i++) {
         sum += all_sum[gn][i];
     }
+    if (bias) sum += bias[n];
     C[m*N + n] = sum;
 }
 '''
@@ -155,8 +159,6 @@ cl_kernels_WOQ_I4 = cl.kernels(cl_kernel_sources, f"-D GROUP_SIZE={GROUP_SIZE}",
 class Linear_w4a:
     # weight: [N, K], 
     def __init__(self, weight, bias=None):
-        assert(bias is None)
-
         # quantize weight into groupped INT4 format:(sym)
         N, K = weight.shape
         assert((K % GROUP_SIZE) == 0)   # 2 element packed into a INT8
@@ -167,9 +169,6 @@ class Linear_w4a:
         self.scales = cl.tensor([N, K//GROUP_SIZE], np.dtype(np.float16)) # scales
         self.zps = cl.tensor([N, K//GROUP_SIZE], np.dtype(np.float16))    # zero-points
         cl_kernels_WOQ_I4.enqueue("Linear_quant_I4", [K//GROUP_SIZE, N], [1, 1], weight_half, self.weight_i4, self.scales, self.zps, N, K)
-
-        #print("==============") print(weight.transpose(1,0)[:8,:8])
-        #print("==============") print(np.where(np.isnan(self.weight_i4.numpy())))
 
         self.bias = to_cl(bias)
         self.N = N
@@ -191,12 +190,12 @@ class Linear_w4a:
             cl_kernels_WOQ_I4.enqueue("Linear_woq_I4",
                                     [self.N, M, self.K//GROUP_SIZE],
                                     [8, 1, self.K//GROUP_SIZE],
-                                    input, output, self.weight_i4, self.scales, self.zps,
+                                    input, output, self.weight_i4, self.scales, self.zps, self.bias,
                                     M, self.N, self.K)
         else:
             cl_kernels_WOQ_I4.enqueue("Linear_w4a_ref",
                                     [self.N, M], [1, 1],
-                                    input, output, self.weight_i4, self.scales, self.zps,
+                                    input, output, self.weight_i4, self.scales, self.zps, self.bias,
                                     M, self.N, self.K)
         return output
 

@@ -71,7 +71,8 @@ class MHA_cpu:
         value_states = self.repeat_kv(value_states, num_key_value_groups)
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
 
-        attn_weights = attn_weights + attention_mask
+        # [B, H, q_len, kv_len] [B, kv_len]
+        attn_weights = attn_weights + attention_mask[:, None, None, :]
 
         # apply causal mask, only the last q-token can access all kv-cache
         # [batch, num_heads, q_len ,kv_len] 
@@ -79,6 +80,7 @@ class MHA_cpu:
             attn_weights[:, :, k, (k - q_len + 1):] = torch.finfo(torch.float32).min
 
         attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, hidden_size)

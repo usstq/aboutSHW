@@ -274,11 +274,17 @@ static std::vector<cl::Event> all_events;
 struct cl_tensor {
     std::vector<cl_uint> shape;
     std::vector<cl_uint> strides;
-    cl_uint numel;
+    cl_uint numel = 0;
     std::shared_ptr<cl::Buffer> p_buff;
     py::dtype dt;
 
-    cl_tensor() = default;
+    cl_tensor() {
+        // empty cl::Buffer
+        auto* p = new cl::Buffer();
+        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {
+        });
+    }
+
     ~cl_tensor() = default;
 
     const std::vector<cl_uint>& get_shape() const {
@@ -484,6 +490,8 @@ struct cl_kernels {
             } else if (py::isinstance<cl_tensor>(arg)) {
                 const auto& t = arg.cast<cl_tensor>();
                 kernel.setArg(arg_idx, *(t.p_buff));
+            } else if (arg.is_none()) {
+                kernel.setArg(arg_idx, sizeof(cl::Buffer), nullptr);
             } else {
                 throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
             }
@@ -647,6 +655,7 @@ PYBIND11_MODULE(cl, m) {
     });
 
     py::class_<cl_tensor>(m, "tensor")
+        .def(py::init<>())
         .def(py::init<const py::array&>())
         .def(py::init<const std::vector<size_t>&, py::dtype>())
         .def("numpy", &cl_tensor::to_numpy)
