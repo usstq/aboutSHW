@@ -1,5 +1,7 @@
 // compile command: 
 // g++ -O2 ./sdpa_gflops.cpp -lOpenCL -o sdpa_gflops
+// OCL_EnablePreviewFeatures=1 ./sdpa_gflops
+//s
 // 
 #include <string>
 #include <fstream>
@@ -10,13 +12,33 @@
 
 #include "common.hpp"
 
+void CL_CALLBACK NotifyFunction( const char * pErrInfo, const void * pPrivateInfo, size_t size, void * pUserData )
+{
+    if( pErrInfo != NULL )
+    {
+        std::cerr << ANSI_COLOR_ERROR << "[cl_intel_driver_diagnostics]:" << pErrInfo << ANSI_COLOR_RESET << std::endl;;
+    }
+};
+
 // https://github.com/intel/pti-gpu
 
 int main(void) {
     // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups.html
     //
     //
-    select_default_platform({"cl_intel_subgroups","cl_intel_required_subgroup_size"});
+    auto selected_platform = select_default_platform({"cl_intel_subgroups","cl_intel_required_subgroup_size"});
+
+    // https://community.intel.com/t5/OpenCL-for-CPU/private-memory-spills-and-loop-unrolling-on-HD-Graphics/td-p/1116378
+    // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_driver_diagnostics.txt
+    //
+    // https://community.intel.com/t5/OpenCL-for-CPU/CL-KERNEL-SPILL-MEM-SIZE-INTEL-interpretation/td-p/1120834
+    cl_context_properties properties[] =
+    {
+        CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL, (cl_context_properties)CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL,
+        CL_CONTEXT_PLATFORM, (cl_context_properties)selected_platform(),
+        0
+    };
+    cl::Context::setDefault(cl::Context(CL_DEVICE_TYPE_GPU, &properties[0], NotifyFunction));
 
     cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::Profiling));
 
@@ -126,8 +148,9 @@ int main(void) {
 
     auto latency_ns = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() - evt.getProfilingInfo<CL_PROFILING_COMMAND_START>());
     // size_t num_ops_per_workitem = 133120; //TARGET_SEQ_LEN_BLOCK_SIZE*Lk*2;
-    size_t num_ops_per_workitem = std::ceil(float(Lk)/SOURCE_SEQ_LEN_BLOCK_SIZE) * (S/SUBGROUP_SIZE) * (TARGET_SEQ_LEN_BLOCK_SIZE * SUBGROUP_SIZE);
-    num_ops_per_workitem *= 2;
+    size_t num_ops_mm1_per_workitem = std::ceil(float(Lk)/SOURCE_SEQ_LEN_BLOCK_SIZE) * (S/SUBGROUP_SIZE) * (TARGET_SEQ_LEN_BLOCK_SIZE * SUBGROUP_SIZE);
+    size_t num_ops_mm2_per_workitem = std::ceil(float(Lk)/SOURCE_SEQ_LEN_BLOCK_SIZE) * std::ceil(float(SOURCE_SEQ_LEN_BLOCK_SIZE)/(SUBGROUP_SIZE*SG_SCALE_FACTOR)) * (TARGET_SEQ_LEN_BLOCK_SIZE * SUBGROUP_SIZE);
+    size_t num_ops_per_workitem = num_ops_mm1_per_workitem + num_ops_mm2_per_workitem;
     ECOUT("num_ops_per_workitem = ", num_ops_per_workitem, ", latency = ", (double)latency_ns / 1000 / 1000, " ms");
     ECOUT("[A770] vtune measured benchmark sdpa_model = 498ms latency mode, 194ms throughput mode, 31.9% XVE active, 68.1% stalled.");
     ECOUT("[A770] vtune measured unittest sdpa model kernel = 77ms, 75.3% XVE active, 24.2% stalled.");
