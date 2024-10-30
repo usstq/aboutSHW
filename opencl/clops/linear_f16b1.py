@@ -164,6 +164,40 @@ class Linear_f16b1:
 
         return output
 
+'''
+from tracing: 
+
+   cliloader -dv -cdt  --dump-dir ./dump/  python -m clops.tests.llama -hf ../../Qwen2-0.5B-Instruct/ -p 大家  -n 32 -q f16b1
+
+(1, 896, 1152) 35 us     59 GB/s
+(1, 896, 896)  26 us     61 GB/s
+(1, 896, 4864) 99 us     89 GB/s
+(1, 4864, 896) 97 us     89 GB/s
+(1, 896, 151936) 2910 us 93 GB/s
+
+
+ M,K,N
+we can observe that for some reason GPU needs some time to get into it's best performance
+
+Linear_shapes: {(1, 896, 1152): 768, (1, 896, 896): 768, (1, 896, 4864): 1536, (1, 4864, 896): 768, (1, 896, 151936): 32}
+
+...
+[1, 2048, 2048] 8.397 MB 4.381 ms, BW:  1.92 GB/s
+[1, 2048, 2048] 8.397 MB 4.060 ms, BW:  2.07 GB/s
+[1, 2048, 2048] 8.397 MB 4.225 ms, BW:  1.99 GB/s
+[1, 2048, 2048] 8.397 MB 4.066 ms, BW:  2.07 GB/s
+[1, 2048, 2048] 8.397 MB 0.115 ms, BW:  73.08 GB/s
+[1, 2048, 2048] 8.397 MB 0.115 ms, BW:  72.75 GB/s
+[1, 2048, 2048] 8.397 MB 0.115 ms, BW:  73.08 GB/s
+....
+[1, 2048, 2048] 8.397 MB 0.114 ms, BW:  73.95 GB/s
+[1, 2048, 2048] 8.397 MB 0.114 ms, BW:  73.35 GB/s
+[1, 2048, 2048] 8.397 MB 0.111 ms, BW:  75.69 GB/s
+[1, 2048, 2048] 8.397 MB 0.094 ms, BW:  88.97 GB/s
+[1, 2048, 2048] 8.397 MB 0.096 ms, BW:  87.24 GB/s
+[1, 2048, 2048] 8.397 MB 0.095 ms, BW:  88.00 GB/s
+'''
+
 if __name__ == "__main__":
     import sys
     cl.profiling(True)
@@ -173,7 +207,7 @@ if __name__ == "__main__":
         B = torch.randint(-8, 8, [N, K]).half()
         ref = torch.matmul(A, B.transpose(1,0)).numpy()
 
-        Bsize = K*N*2
+        Bsize = K*N*2 + M*K*2 + M*N*2
         if (Bcnt <= 0): Bcnt = int(500e6)//(Bsize)
         linears = [Linear_f16b1(B) for _ in range(Bcnt)]
 
@@ -191,7 +225,7 @@ if __name__ == "__main__":
         res = output.numpy()
         compare(ref, res)
 
-    test_acc([1, 2048, 2048], 10); sys.exit(0)
+    test_acc([1, 896, 4864], 100); sys.exit(0)
 
     for b in [7, 1]:
         test_acc([b, 2048, 2560], 10)
