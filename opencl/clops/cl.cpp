@@ -4,7 +4,7 @@
 
 #define CL_HPP_ENABLE_EXCEPTIONS
 #define CL_HPP_TARGET_OPENCL_VERSION 300
-#include <CL/opencl.hpp>
+#include "opencl.hpp"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
@@ -112,12 +112,12 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
 #define COUT_CL_INFO(qname) \
     dev.getInfo(qname, &v); \
     std::cout << "    " << #qname << ": " << v << std::endl;
-            COUT_CL_INFO(CL_DEVICE_ID_INTEL);
-            COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
-            COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
-            COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
-            COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_ID_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
+            //COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
 
             std::cout << "    CL_DEVICE_MAX_WORK_GROUP_SIZE: " << dev.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
             std::cout << "    CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS: " << dev.getInfo<CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS>() << std::endl;

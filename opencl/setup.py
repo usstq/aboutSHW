@@ -10,8 +10,8 @@ import os
 include_dirs = []
 library_dirs = []
 if os.name == 'nt':
-    include_dirs.append('C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2023.2.1\\windows\\include\\sycl\\')
-    library_dirs.append('C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2023.2.1\\windows\\lib\\')
+    include_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/2024.2/include\sycl/')
+    library_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/2024.2/lib/')
 
 ext_modules = [
     Pybind11Extension("clops.cl",
