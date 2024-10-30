@@ -2,6 +2,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#define CL_HPP_ENABLE_EXCEPTIONS
+#define CL_HPP_TARGET_OPENCL_VERSION 300
 #include <CL/opencl.hpp>
 #include <algorithm>
 #include <cassert>
@@ -14,12 +16,11 @@
 #include <sstream>
 #include <vector>
 
+#ifdef __linux__
 #include <dlfcn.h>
+#endif
 #include <omp.h>
 
-#define CL_HPP_ENABLE_EXCEPTIONS
-#define CL_HPP_TARGET_OPENCL_VERSION 300
-#include <CL/opencl.hpp>
 
 #ifndef ASSERT
 #    define ASSERT(cond)                                                     \
@@ -433,6 +434,7 @@ struct cl_kernels {
                 auto fw = open_file(directoryPath + "/src.cl");
                 fw << Program.getInfo<CL_PROGRAM_SOURCE>();
             }
+#ifdef __linux__
             {
                 auto exec = [](std::string cmd) {
                     std::array<char, 128> buffer;
@@ -455,6 +457,7 @@ struct cl_kernels {
                     exec(std::string("ocloc disasm -file ") + dump_bin_fpath + " -dump " + directoryPath);
                 }
             }
+#endif
             // Program.getInfo<CL_PROGRAM_KERNEL_NAMES>()
             std::cout << ANSI_COLOR_INFO << "Program source & binaries dumped to folder [" << directoryPath << "]" << ANSI_COLOR_RESET << std::endl;
         }
@@ -548,6 +551,7 @@ struct cl_kernels {
     */
 };
 
+#ifdef __linux__
 //======================================================================================================================
 // [gcc + omp] based CPP kernels
 union KArg {
@@ -641,10 +645,23 @@ struct cpp_kernels {
         }
     }
 };
+#else
+
+struct cpp_kernels {
+    ~cpp_kernels() {
+    }
+    cpp_kernels(std::string src, std::string options, std::string name) {
+
+    }
+    void call(std::string name, py::args args) {
+        throw std::runtime_error(std::string("cpp_kernels only works on Linux"));
+    }
+};
+#endif
 //======================================================================================================================
 
 PYBIND11_MODULE(cl, m) {
-    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size", "cl_intel_subgroup_matrix_multiply_accumulate"});
+    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
 
     // disable out-of-order execution
     // cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));

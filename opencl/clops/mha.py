@@ -227,7 +227,10 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
         __global half* pk = cache_k + i * S;
         float sum = 0;
         for (int j = 0; j < S; j += SGS) {
-            half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
+            // intel_sub_group_block_read_us cannot take __local pointer according to:
+            // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
+            //   half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
+            half q_val = query[j + id_sg_local];
             half k_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pk + j));
             sum += q_val * k_val;
         }
@@ -292,11 +295,14 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     // 4 compute W*V(one token) dot product in each wg, SGS tokens at the same time in wg
     float sum = 0;
     for (int i = 0; i < cur_kv_len; i += SGS) {
-        ushort weight = intel_sub_group_block_read_us((const __local ushort*)weights + i);
+        // intel_sub_group_block_read_us cannot take __local pointer according to:
+        // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
+        //  ushort weight = intel_sub_group_block_read_us((const __local ushort*)weights + i);
         __global half* pv = cache_v + i * S + id_sg * SGS;
         for (int j = 0; j < SGS; j++) {
             half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
-            half w = as_half(intel_sub_group_broadcast(weight, j));
+            // half w = as_half(intel_sub_group_broadcast(weight, j));
+            half w = weights[i + j];
             sum += w * v_val;
         }
     }
