@@ -18,6 +18,40 @@ uint __attribute__((overloadable)) intel_get_eu_thread_id( void );
 #define BLOCK_F 8
 #define TILE_B 8
 
+void print_input_int8(int8 result) {
+    char4 temp[8];
+    unroll_for(uint i = 0; i < 8; i++) {
+        temp[i] = as_char4(result[i]);
+    }
+    uint sglid = (uint)get_sub_group_local_id();
+    printf("input[%d] = [%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d]\n", sglid,
+            temp[0][0], temp[0][1],temp[0][2],temp[0][3],
+            temp[1][0], temp[1][1],temp[1][2],temp[1][3],
+            temp[2][0], temp[2][1],temp[2][2],temp[2][3],
+            temp[3][0], temp[3][1],temp[3][2],temp[3][3],
+            temp[4][0], temp[4][1],temp[4][2],temp[4][3],
+            temp[5][0], temp[5][1],temp[5][2],temp[5][3],
+            temp[6][0], temp[6][1],temp[6][2],temp[6][3],
+            temp[7][0], temp[7][1],temp[7][2],temp[7][3]);
+}
+
+void print_result_int8(int8 result) {
+    uint sglid = (uint)get_sub_group_local_id();
+    printf("result[%d] = [%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d]\n", sglid,
+            result[0], result[1],result[2],result[3],
+            result[4], result[5],result[6],result[7]);
+}
+
+
+void print_wi_info(uint out_b, uint out_f) {
+    printf("global_id = (%d,%d,%d), local_id = (%d,%d,%d), group_id = (%d,%d,%d), subgroup_id=%d, subgroup_size=%d, subgroup_local_id=%d, out_b = %d, out_f = %d\n",
+                get_global_id(0), get_global_id(1),get_global_id(2),
+                get_local_id(0), get_local_id(1),get_local_id(2),
+                get_group_id(0), get_group_id(1),get_group_id(2),
+                get_sub_group_id(),get_sub_group_size(),
+                get_sub_group_local_id(), out_b, out_f);
+}
+
 /****************************************************************************************************************************
 XVE version:
    1. Tile 8x4 for wi, 8x32 for subgroup/SIMD
@@ -151,9 +185,9 @@ XMX version 2
      3. M=1024, N=1024, K=2560, 0.219 ms
 ****************************************************************************************************************************/
 __attribute__((intel_reqd_sub_group_size(8)))
-__kernel void matmul_bf_xmx_2(__global char* input,
+__kernel void matmul_bf_xmx_2(__global const char* input,
                              __global const char* weights,
-                             __global char* biases,
+                             __global const char* biases,
                              __global int* output,
                              int M, int N, int K) {
     uint gid = (uint)get_global_id(0);
@@ -164,8 +198,9 @@ __kernel void matmul_bf_xmx_2(__global char* input,
     uint sg_block_b = sg_id / (N / SIMD);
     uint out_f = sg_block_f * BLOCK_F;
     uint out_b = sg_block_b * BLOCK_B;
-    
-    int8 result, c;
+    // print_wi_info(out_f, out_b);
+
+    int8 result = {}, c = {};
     unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
         uint input_offset = out_b * K + ki;
         int8 a, b;
@@ -173,10 +208,13 @@ __kernel void matmul_bf_xmx_2(__global char* input,
             a[bi] = as_int(intel_sub_group_block_read((const __global uint*)(input + input_offset)));
             input_offset += K;
         }
+        // print_input_int8(a);
         b=*(const __global int8*)(weights + out_f * K + sglid * K + ki );
+        // print_input_int8(b);
         result += intel_sub_group_i8_i8_matrix_mad_k32(a,b,c);
+        // print_result_int8(result);
     }
-
+    // print_result_int8(result);
     uint bias_offset = out_b * N + out_f;
     unroll_for(uint bi = 0; bi < BLOCK_B; bi++) {
         result[bi] += biases[bias_offset + sglid];
@@ -211,7 +249,7 @@ __kernel void matmul_bf_xmx_3(__global char* input,
     uint sg_block_b = sg_id / (N / SIMD);
     uint out_f = sg_block_f * BLOCK_F;
     uint out_b = sg_block_b * BLOCK_B;
-    int8 a, b, c, wei, result;
+    int8 a, b, c, wei, result = {};
 
     unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
         uint input_offset = out_b * K + ki;
@@ -225,7 +263,7 @@ __kernel void matmul_bf_xmx_3(__global char* input,
             input_offset += K;
         }
 
-        #if 0
+        #if 1
         int8 data[8];
         unroll_for(uint bi = 0; bi < BLOCK_B; bi++) {
             unroll_for(uint i = 0; i < BLOCK_F; i ++) {
@@ -278,7 +316,7 @@ __kernel void matmul_bf_xmx_4(__global char* input,
     uint out_f = sg_block_f * BLOCK_F;
     uint out_b = sg_block_b * BLOCK_B * BLOCK_NUM;
 
-    int8 result[BLOCK_NUM], c;
+    int8 result[BLOCK_NUM] = {}, c;
     unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
         uint input_offset = out_b * K + ki;
         int8 a[BLOCK_NUM], b;
@@ -337,7 +375,7 @@ __kernel void matmul_bf_xmx_5(__global char* input,
     uint sg_block_b = (sg_id / (N / SIMD) / SUBGROUP_TILE_B ) * SUBGROUP_TILE_B + sg_id % SUBGROUP_TILE_B;
     uint out_f = sg_block_f * BLOCK_F;
     uint out_b = sg_block_b * BLOCK_B;
-    int8 result,c;
+    int8 result = {},c = {};
     __local int8 wei_slm[BLOCK_F];
 
     unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
@@ -389,7 +427,7 @@ __kernel void matmul_bf_xmx_6(__global char* input,
     uint sg_block_b = (sg_id / (N / SIMD) / 2 ) * 2 + sg_id % 2;
     uint out_f = sg_block_f * BLOCK_F;
     uint out_b = sg_block_b * BLOCK_B / 2;
-    int8 result, c;
+    int8 result = {}, c = {};
 
     unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
         uint input_offset = out_b * K + ki;
@@ -568,10 +606,10 @@ if __name__ == "__main__":
     cl.profiling(True)
     def test_matmul(shape, Bcnt = 0, kernel_id = 7):
         M, N, K = shape
-        A = torch.randint(0, 1, [M, K], dtype=torch.int8)
-        B = torch.randint(0, 1, [N, K], dtype=torch.int8)
-        C = torch.randint(0, 1, [M, N], dtype=torch.int8)
-        ref = torch.matmul(A, B.transpose(1,0))
+        A = torch.randint(-2, 2, [M, K], dtype=torch.int8)
+        B = torch.randint(-2, 2, [N, K], dtype=torch.int8)
+        C = torch.randint(-2, 2, [M, N], dtype=torch.int8)
+        ref = torch.matmul(A.int(), B.int().transpose(1,0))
         ref = torch.add(ref, C).int().numpy()
         Bsize = K*N*1 + M*K*1 + M*N*1
         if (Bcnt <= 0): Bcnt = int(500e6)//(Bsize)
@@ -593,11 +631,9 @@ if __name__ == "__main__":
 
         res = output.numpy()
         if kernel_id < 7:
-            compare(res, ref, 0, 0)
-
+            compare(ref, res, 0, 0)
 
     test_matmul([1024, 1024, 2560], 20, 7)
-    #test_matmul([1024, 1024, 2560], 20, 8)
     sys.exit(0)
 
     for id in range(8):
