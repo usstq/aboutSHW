@@ -66,6 +66,7 @@ https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2024-
 #   float8 intel_sub_group_f16_f16_matrix_mad_k16(int8 a, int8 b, float8 acc);
 
 torch.manual_seed(0)
+cl.profiling(True)
 
 def compare(ref, opt, atol=0.01, rtol=0.01):
     if not np.allclose(ref, opt, atol=atol, rtol=rtol):
@@ -112,29 +113,28 @@ def XMX_basic():
         }
         
         __attribute__((intel_reqd_sub_group_size(8)))
-        __kernel void XMX_tput_8x16x8(__global half * A, __global half * B, __global float * C, int p) {
-            int glid = get_global_linear_id();
-            
+        __kernel void XMX_tput_8x16x8(__global half * A, __global half * B, __global float * C, int loop_count, int p) {
             int8 a = as_int8(intel_sub_group_block_read8((__global uint*) A));
             int8 b = as_int8(intel_sub_group_block_read8((__global uint*) B));
-            #define ACC_CNT 7
+
             float8 acc[ACC_CNT];
+
             for(int i = 0; i < 8; i++) acc[i] = (float8)i;
 
-            ulong t0 = intel_get_cycle_counter();
-            for(int i = 0; i < 64; i++) {
+            __attribute__((opencl_unroll_hint(1)))
+            for(int i = 0; i < loop_count; i++) {
+                
                 __attribute__((opencl_unroll_hint(ACC_CNT)))
                 for(int k = 0; k < ACC_CNT; k++)
                     acc[k] = intel_sub_group_f16_f16_matrix_mad_k16(a, b, acc[k]);
             }
-            ulong t1 = intel_get_cycle_counter();
-            
-            printf("[%d] : %ld cyckes/instruction\n", glid, (t1-t0)/(ACC_CNT*64));
 
             intel_sub_group_block_write8((__global uint*)C, as_uint8(acc[p]));
+            barrier(CLK_LOCAL_MEM_FENCE);
         }
     '''
-    k = cl.kernels(src, "-D FMACNT=4 -D UNROLL=4")
+    ACC_CNT = 10
+    k = cl.kernels(src, f"-D ACC_CNT={ACC_CNT}", "./dump/")
     M = 8   #
     N = 8   #
     K = 16  # each GRF register is 32bytes/16half
@@ -152,8 +152,18 @@ def XMX_basic():
 
     compare(C, tC.numpy())
 
-    k.enqueue("XMX_tput_8x16x8", [1, 8],[1, 8], tA, tB, tC, 0)
+    cl.finish()
 
+    loop_cnt = 1280
+    num_sub_groups = 16*8
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    latency_ns = cl.finish()
+    for ns in latency_ns:
+        flops = loop_cnt * ACC_CNT * num_sub_groups * (M*K*N) * 2
+        print(f" {flops} / {ns} = {flops/ns:.3f} GFlops/s")
 '''
 only 1 EU, 8 thread, 8*8 work-items
 
