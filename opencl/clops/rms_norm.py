@@ -67,7 +67,6 @@ __kernel void RMSNorm(__global half * input, __global half * output, __global ha
 '''
 # choose work-group size to be 128 (16EU x SIMD-8)
 C_WG_SIZE = 128
-cl_kernels = kernel_cache(cl_kernel_sources, f"-D C_WG_SIZE={C_WG_SIZE}")
 
 class RMSNorm:
     def __init__(self, weight, epsilon):
@@ -75,12 +74,13 @@ class RMSNorm:
         self.n_channels = weight.shape[-1]
         self.epsilon = epsilon
         assert(self.n_channels % C_WG_SIZE == 0)
+        self.cl_kernels = kernel_cache(cl_kernel_sources, f"-D C_WG_SIZE={C_WG_SIZE}")
 
     def __call__(self, input):
         # return self.reference_impl(input)
         output = cl.tensor(input.shape, input.dtype)
         #cl_kernels.enqueue("RMSNorm_v0", [input.numel // self.n_channels], [1], input, output, self.weight, self.n_channels, self.epsilon)
-        cl_kernels.enqueue("RMSNorm", [input.numel // self.n_channels * C_WG_SIZE], [C_WG_SIZE], input, output, self.weight, self.n_channels, self.epsilon)
+        self.cl_kernels.enqueue("RMSNorm", [input.numel // self.n_channels * C_WG_SIZE], [C_WG_SIZE], input, output, self.weight, self.n_channels, self.epsilon)
         return output
 
     # this is torch-cpu reference for debugging purpose

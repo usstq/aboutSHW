@@ -24,8 +24,6 @@ from . import cl
 import numpy as np
 from .utils import *
 
-cl_kernels = kernel_cache(cl_kernel_sources)
-
 # collect linear weight shapes
 Linear_shapes = {}
 import atexit
@@ -47,6 +45,7 @@ class Linear_f16:
         self.N, self.K = weight.shape # weight: [N, K]
         self.weight = to_cl(weight.half())
         self.bias = to_cl(bias)
+        self.cl_kernels = kernel_cache(cl_kernel_sources, options="")
 
     def __call__(self, input):
         # shape inference
@@ -58,5 +57,5 @@ class Linear_f16:
         M = input.numel // self.K
         add_shape(M, self.K, self.N)
         #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
-        cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight, self.bias, output, M, self.K, self.N)
+        self.cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight, self.bias, output, M, self.K, self.N)
         return output

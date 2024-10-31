@@ -123,7 +123,6 @@ import numpy as np
 from .utils import *
 
 K_groups = 16
-cl_kernels = kernel_cache(cl_kernel_sources, f"-D K_groups={K_groups}")
 
 class Linear_f16b1:
     def __init__(self, weight, bias = None):
@@ -136,8 +135,8 @@ class Linear_f16b1:
         weight_raw = to_cl(weight.half())
         self.weight = cl.tensor(weight_raw.shape, weight_raw.dtype)
         self.bias = to_cl(bias)
-
-        cl_kernels.enqueue("ReorderB", [self.K, self.N], [1, 1], self.weight0, self.weight, self.N, self.K)
+        self.cl_kernels = kernel_cache(cl_kernel_sources, f"-D K_groups={K_groups}")
+        self.cl_kernels.enqueue("ReorderB", [self.K, self.N], [1, 1], self.weight0, self.weight, self.N, self.K)
 
     def __call__(self, input):
         # shape inference
@@ -150,7 +149,7 @@ class Linear_f16b1:
         M = input.numel // self.K
         #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
         #cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight0, output, M, self.K, self.N)
-        cl_kernels.enqueue("Linear_f16_b1", # "Linear_f16_b1",
+        self.cl_kernels.enqueue("Linear_f16_b1", # "Linear_f16_b1",
                            [self.N, M, K_groups],
                            [16, 1, K_groups], 
                            input,

@@ -80,12 +80,14 @@ class LlamaLikeModel:
             d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
             d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
+            d.is_last = False
             d.mha = MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
                               self.head_size,
                               max_kv_len)
 
             self.layers.append(d)
+        self.layers[-1].is_last = True
 
     def forward_layer(self, layer, hidden_states, attn_mask):
         # layerNorm operation
@@ -97,6 +99,12 @@ class LlamaLikeModel:
         qkv = self.rope(qkv, kv_seq_len - query_seq_len)
 
         attn_output = layer.mha(qkv, attn_mask)
+
+        # slice the last token for first-token [batch, query_seq_len, hidden_states]
+        if layer.is_last and query_seq_len > 1:
+            attn_output = attn_output.slice(1, query_seq_len-1, query_seq_len)
+            hidden_states = hidden_states.slice(1, query_seq_len-1, query_seq_len)
+
         attn_output = layer.o_proj(attn_output)
 
         attn_output += hidden_states

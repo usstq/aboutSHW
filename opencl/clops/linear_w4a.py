@@ -169,7 +169,6 @@ import numpy as np
 from .utils import *
 
 GROUP_SIZE = 128
-cl_kernels_WOQ_I4 = kernel_cache(cl_kernel_sources, f"-D GROUP_SIZE={GROUP_SIZE}", "./dump")
 
 # weight-only-quantization to INT4
 class Linear_w4a:
@@ -180,11 +179,13 @@ class Linear_w4a:
         assert (K % GROUP_SIZE) == 0, f"{K} % {GROUP_SIZE} != 0"   # 2 element packed into a INT8
         assert (N % 8) == 0, f"{N} % 8 != 0"            # 8 element in N in one sub-group
 
+        self.cl_kernels_WOQ_I4 = kernel_cache(cl_kernel_sources, f"-D GROUP_SIZE={GROUP_SIZE}", "./dump")
+
         weight_half = to_cl(weight.half())  # copy to GPU
         self.weight_i4 = cl.tensor([N//8, K//2, 8], np.dtype(np.uint8))         # two int4 packed into a uint8
         self.scales = cl.tensor([N, K//GROUP_SIZE], np.dtype(np.float16)) # scales
         self.zps = cl.tensor([N, K//GROUP_SIZE], np.dtype(np.float16))    # zero-points
-        cl_kernels_WOQ_I4.enqueue("Linear_quant_I4", [K//GROUP_SIZE, N], [1, 1], weight_half, self.weight_i4, self.scales, self.zps, N, K)
+        self.cl_kernels_WOQ_I4.enqueue("Linear_quant_I4", [K//GROUP_SIZE, N], [1, 1], weight_half, self.weight_i4, self.scales, self.zps, N, K)
 
         self.bias = to_cl(bias)
         self.N = N
@@ -208,13 +209,13 @@ class Linear_w4a:
             # 
             # this also means, each work-thread (sub-group running on one EU thread) should handle
             # a few k-groups based on the actual k-group count
-            cl_kernels_WOQ_I4.enqueue("Linear_w4a",
+            self.cl_kernels_WOQ_I4.enqueue("Linear_w4a",
                                     [self.N, M, 32],
                                     [8, 1, 32],
                                     input, output, self.weight_i4, self.scales, self.zps, self.bias,
                                     M, self.N, self.K)
         else:
-            cl_kernels_WOQ_I4.enqueue("Linear_w4a_ref",
+            self.cl_kernels_WOQ_I4.enqueue("Linear_w4a_ref",
                                     [self.N, M], [1, 1],
                                     input, output, self.weight_i4, self.scales, self.zps, self.bias,
                                     M, self.N, self.K)

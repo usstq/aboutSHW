@@ -93,7 +93,6 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     }
 }
 '''
-cl_kernels_ref = kernel_cache(cl_kernel_sources_ref, "-D FMACNT=4 -D UNROLL=4")
 
 cl_kernel_sources = r'''
 __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv) * S)]
@@ -606,6 +605,7 @@ class MHA:
         options = f'-D FMACNT=4 -DUNROLL=4 -DS={head_size} -DSGS={self.sub_group_size} -DHQ={head_cnt_q} -DHK={head_cnt_k} \
                     -DMAX_KV_LEN={max_kv_len} -DKV_BLOCK={self.kv_block}'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
+        self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
     def __call__(self, qkv, attention_mask):
 
@@ -633,7 +633,7 @@ class MHA:
         # attn_score is just a temp/scratch cl-buffer
         attn_score = cl.tensor([B, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
         if self.use_ref:
-            cl_kernels_ref.enqueue("MHA",
+            self.cl_kernels_ref.enqueue("MHA",
                                    [self.head_cnt_q, B],
                                    [1, 1],
                                    qkv,

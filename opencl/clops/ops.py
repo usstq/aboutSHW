@@ -2,7 +2,7 @@ from . import cl
 import numpy as np
 from .utils import *
 
-cl_kernel_sources = '''
+cl_kernel_sources = r'''
 ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
 
 // global_id : [Hq + Hk, q_len, batch_size]
@@ -56,6 +56,31 @@ __kernel void iSilu(__global half * input, int size) {
         input[i] = x / (1.0f + exp(-x));
     }
 }
+
+//# [batch, step, ele_size] => [batch, 1, ele_size]
+//# global/local [ele_size]/[16*8?]
+//#
+__kernel void Slice(__global half * input, __global half * output,
+                    int batch_size,
+                    int axis_size,
+                    int ele_size,
+                    int start,
+                    int step,
+                    int stop) {
+    int off = get_global_id(0);
+   
+    int i_step = step * ele_size;
+    for(int b=0; b < batch_size; b++) {
+        __global half * src = input + start * ele_size;
+        for(int i = start; i < stop; i += step) {
+            output[off] = src[off];
+            src += i_step;
+            output += ele_size;
+        }
+        input += axis_size * ele_size;
+    }
+}
+
 '''
 cl_kernels = kernel_cache(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
@@ -71,11 +96,36 @@ def iMul(input, b):
     cl_kernels.enqueue("iMul", [input.numel], [1], input, b, input.numel)
     return input
 
+def Slice(input, axis, start, step, stop=-1):
+    oshape = list(input.shape)
+    axis_size = oshape[axis]
+    if axis_size == 1:
+        return input
+    if stop < 0 or stop > axis_size:
+        stop = axis_size
+    oshape[axis] = 1
+    output = cl.tensor(oshape, input.dtype)
+    elesize = 1
+    for dim in oshape[axis:]:
+        elesize *= dim
+    batch = output.numel//elesize
+    cl_kernels.enqueue("Slice", [elesize], [8],
+                        input, output,
+                        batch,
+                        axis_size,
+                        elesize,
+                        start,
+                        step,
+                        stop)
+    return output
+
 # cl.tensor supports +=,*=
 setattr(cl.tensor, '__iadd__', iAdd)
 setattr(cl.tensor, '__imul__', iMul)
 setattr(cl.tensor, 'iSilu', iSilu)
 setattr(cl.tensor, 'torch', to_torch)
+setattr(cl.tensor, 'slice', Slice)
+
 
 # GPU needs weight-compression to work : INT8 at least
 
