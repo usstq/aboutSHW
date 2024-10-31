@@ -122,67 +122,212 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
     }
 }
 
-// global_id [Hq, B]
-__kernel void MHA(__global half * param_qkv,           // [B, L1, (Hq + Hk + Hv) * S)]
-                    int L1,                            // input seq-length
-                    __global half * param_output,      // [B, L1, Hq * S]
-                    __global half * param_cache_k,     // [B, Hk, max_kv_len, S]
-                    __global half * param_cache_v,     // [B, Hk, max_kv_len, S]
-                    __global float* param_attn_score,  // [B, Hq, max_kv_len]
-                    int L0
-                    ) {
-    int h = get_global_id(0);
-    int b = get_global_id(1);
+__attribute__((intel_reqd_sub_group_size(SGS)))
+__kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + HK) * S)]
+                       __global half * param_output,      // [B, L1, HQ * S]
+                       uint L1                            // input seq-length
+                       ) {
+    // global: [B, HQ, S * mb_blocks_num]
+    // local: [1, 1, S]
+    const int b = get_global_id(0);
+    const int h = get_global_id(1);
+    const int mb_blocks_num = get_num_groups(2);
+    const int cur_mb_blocks_num = get_group_id(2);
+    const int id_sg = get_sub_group_id();
+    const int id_sg_local = get_sub_group_local_id();
+    const int id_local = get_local_id(2);
 
-    int HQKV = HQ + HK + HK;
-    int head_group_size = HQ / HK;
-    int hkv = h / head_group_size;
+    const int HQKV = HQ + HK + HK;
+    const int head_group_size = HQ / HK;
+    const int hkv = h / head_group_size;
     const float head_size_scaler = 1.0f / sqrt(convert_float(S));
+    const int query_len = cur_mb_blocks_num + 1 < mb_blocks_num ? SGS : L1 - cur_mb_blocks_num * SGS;  // rows for A to be handled
+    const int query_start = cur_mb_blocks_num * SGS;
+    const int query_end = query_start + query_len;
+    const int kv_block = S / SGS * SGS;    // the number of kv rows the outer loop will be processed: sg * items number processed in sg
+    const int qkv_stride = HQKV * S;
 
-    __global half * cache_k = param_cache_k + (b * HK + hkv) * MAX_KV_LEN * S;
-    __global half * cache_v = param_cache_v + (b * HK + hkv) * MAX_KV_LEN * S;
-    __global float * attn_score = param_attn_score + (b * HQ + h) * MAX_KV_LEN;
+    __global half* cur_q = param_qkv + ((b * L1 + query_start) * HQKV + h) * S;
+    __global half* cur_k = param_qkv + (b * L1 * HQKV + HQ + hkv) * S;
+    __global half* cur_v = cur_k + HK * S;
+    __global half* output = param_output + ((b * L1 + query_start) * HQ + h) * S;
 
-    __global half * q = param_qkv + ((b * L1 + 0) * HQKV + h) * S;
-    __global half * output = param_output + ((b * L1 + 0) * HQ + h) * S;
+    // store prev iteration state
+    __local float old_max_attn_score[2][SGS];
+    __local float old_exp_sum[2][SGS];
+    __local float old_output[SGS][S];
 
-    for(int ql = 0; ql < L1; ql++, q += (HQKV * S), output += (HQ * S)) {
-        //////////// q * cache_k
-        __global half * pk = cache_k;
-        float max_attn_score = -1e9f;
+    __local float max_qk_dot_share[SGS][S / SGS];
+    __local float qk_dot_share[SGS][kv_block];
 
-        // causal_mask & attn_mask is not applied explicitly
-        int kv_len = ql + L0;
-
-        for(int p = 0; p <= kv_len; p++, pk += S) {
-            float dot_prod = 0;
-            for(int i = 0; i < S; i++)
-                dot_prod += q[i] * pk[i];
-
-            dot_prod *= head_size_scaler;
-            attn_score[p] = dot_prod;
-            if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+    // m, n, k corresponding to loop index for M, N, K, A(query) shape: [M, K], B(key, value) shape: [N, K]
+    // 1 cache query
+    __local half q_share[S][SGS];                       // transpose query, prepare for dot(k, q)
+    for (int m = 0; m < SGS; m++) {
+        if (m < query_len) {
+            half q_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_q + m * qkv_stride + id_sg * SGS));
+            q_share[id_local][m] = q_val;
+        } else {
+            // avoid q*k to check if M is varying
+            q_share[id_local][m] = 0;
         }
-
-        //////////// softmax
-        float softmax_scale = 0;
-        for(int p = 0; p <= kv_len; p++) {
-            float a = exp(attn_score[p] - max_attn_score);
-            attn_score[p] = a;
-            softmax_scale += a;
-        }
-        softmax_scale = 1.0f / softmax_scale;
-
-        //////////// attn_score * cache_v
-        for(int i = 0; i < S; i++) {
-            __global half * pv = cache_v;
-            float sum = 0;
-            for(int p = 0; p <= kv_len; p++, pv += S) {
-                float scale = attn_score[p] * softmax_scale;
-                sum += scale * pv[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    // loop in kv_len, each sg will compute A([16, K]) * B([16, K]')
+    uint kv_block_num = (L1 + kv_block - 1) / kv_block;
+    for (int i = 0, key_n_start = 0; i < kv_block_num; i++, key_n_start += kv_block) {
+        // 2 compute q*k, each sg will compute: dot(A([16, K]), B([L1 / kv_block, 16, K])) = C([L1 / kv_block, 16, 16])
+        // each sg will process SGS key lines
+        const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
+        const int key_n_start_sg = key_n_start + id_sg * SGS;
+        float dot_prod[SGS] = {0};
+        if (key_n_start_sg <= query_start) {
+            const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
+            // loop whole token, SGS items each
+            for (uint k = 0; k < S; k += SGS) {
+                half query_val[SGS];
+                for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                    query_val[k_sub] = q_share[k + k_sub][id_sg_local];
+                }
+                // loop key, get one key to SGS querys dot product results
+                for (uint n = 0; n < key_len_in_sg; n++) {
+                    ushort key_val = intel_sub_group_block_read_us((const __global ushort*)cur_k + (key_n_start_sg + n) * qkv_stride + k);
+                    // accumulation along key direction
+                    for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                        // a_val[m] contains one column in query, so need to broadcast one element in key
+                        // dot_prod[n] will store: dot_product(one row of key, all query rows)
+                        dot_prod[n] += query_val[k_sub] * as_half(intel_sub_group_broadcast(key_val, k_sub));
+                    }
+                }
             }
-            output[i] = sum;
+            float max_attn_score_in_wg = -1e9f;
+            // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+            for (uint n = 0; n < key_len_in_sg; n++) {
+                dot_prod[n] *= head_size_scaler;
+                // casual mask
+                if (key_n_start_sg + n <= query_start + id_sg_local)
+                    max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
+                else
+                    dot_prod[n] = -1e9f;
+            }
+            max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
+            // change layout to M*key_len_in_sg
+            for (uint n = 0; n < key_len_in_sg; n++) {
+                qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
+            }
+        } else {
+            max_qk_dot_share[id_sg_local][id_sg] = -1e9f;
         }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // reduce across sg
+        float max_qk_dot[SGS];
+        for (uint m = 0; m < SGS; m++) {
+            max_qk_dot[m] = -1e9f;
+            if (id_sg_local < S / SGS) {
+                max_qk_dot[m] = max_qk_dot_share[m][id_sg_local];
+            }
+            max_qk_dot[m] = sub_group_reduce_max(max_qk_dot[m]);
+        }
+
+        // 4 softmax
+        float exp_sum[SGS] = {0};
+        for (uint m = 0; m < query_len; m++) {
+            for (uint n = id_local; n < key_len_in_kv_block; n += S) {
+                float a = native_exp(qk_dot_share[m][n] - max_qk_dot[m]);
+                qk_dot_share[m][n] = a;
+                exp_sum[m] += a;
+            }
+            // reduce in sg
+            exp_sum[m] = sub_group_reduce_add(exp_sum[m]);
+            if (id_sg_local == 0) {
+                // reuse max_qk_dot_share
+#define exp_sum_share_reuse max_qk_dot_share
+                exp_sum_share_reuse[m][id_sg] = exp_sum[m];
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        // reduce across sg
+        for (uint m = 0; m < query_len; m++) {
+            exp_sum[m] = 0;
+            if (id_sg_local < S / SGS) {
+                exp_sum[m] = exp_sum_share_reuse[m][id_sg_local];
+            }
+            exp_sum[m] = sub_group_reduce_add(exp_sum[m]);
+            float scale = 1.0f / exp_sum[m];
+            for (uint n = id_local; n < key_len_in_kv_block; n += S) {
+                qk_dot_share[m][n] = convert_half(qk_dot_share[m][n] * scale);
+            }
+        }
+        // save state, free regs
+        if (id_local < query_len) {
+            old_max_attn_score[i % 2][id_local] = max_qk_dot[id_local];
+            old_exp_sum[i % 2][id_local] = exp_sum[id_local];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // 5 w*v
+        uint value_len_in_kv_block = key_len_in_kv_block;
+        float sum[SGS] = {0};
+        uint k = 0;
+        for (; k + SGS <= value_len_in_kv_block; k += SGS) {
+            const uint v_row = key_n_start + k;
+            half cur_weights[SGS];
+            for (uint m = 0; m < SGS; m++) {
+                cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+            }
+            for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_v + (v_row + k_sub) * qkv_stride + id_sg * SGS));
+                for (uint m = 0; m < SGS; m++) {
+                    sum[m] += v_val * sub_group_broadcast(cur_weights[m], k_sub);
+                }
+            }
+        }
+        if (k < value_len_in_kv_block) {
+            const uint v_row = key_n_start + k;
+            half cur_weights[SGS];
+            for (uint m = 0; m < SGS; m++) {
+                if (k + id_sg_local < value_len_in_kv_block)
+                    cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+                else
+                    cur_weights[m] = 0;
+            }
+            for (uint k_sub = 0; k_sub < value_len_in_kv_block - k; k_sub++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_v + (v_row + k_sub) * qkv_stride + id_sg * SGS));
+                for (uint m = 0; m < SGS; m++) {
+                    sum[m] += v_val * sub_group_broadcast(cur_weights[m], k_sub);
+                }
+            }
+        }
+
+        // 6 output
+        for (uint m = 0; m < query_len; m++) {
+            // need to update sum
+            if (kv_block_num > 1) {
+                if (i > 0) {
+                    float cur_max_attn_score = old_max_attn_score[i % 2][m];
+                    float pre_max_attn_score = old_max_attn_score[1 - i % 2][m];
+                    float cur_exp_sum = old_exp_sum[i % 2][m];
+                    float pre_exp_sum = old_exp_sum[1 - i % 2][m];
+                    float pre_sum = old_output[m][id_local];
+                    float max_attn_score = fmax(cur_max_attn_score, pre_max_attn_score);
+                    float pre_exp_sum_fixed = pre_exp_sum * native_exp(pre_max_attn_score - max_attn_score);
+                    float cur_exp_sum_fixed = cur_exp_sum * native_exp(cur_max_attn_score - max_attn_score);
+                    sum[m] = (pre_sum * pre_exp_sum_fixed + sum[m] * cur_exp_sum_fixed) / (pre_exp_sum_fixed + cur_exp_sum_fixed);
+                    barrier(CLK_LOCAL_MEM_FENCE);
+                    old_max_attn_score[i % 2][m] = max_attn_score;
+                    old_exp_sum[i % 2][m] = (pre_exp_sum_fixed + cur_exp_sum_fixed);
+                }
+                old_output[m][id_local] = sum[m];
+            }
+            // last kv_block, output
+            if (i == kv_block_num - 1) {
+                __global ushort* dst = output + m * HQ * S + id_sg * SGS;
+                half acc = sum[m];
+                intel_sub_group_block_write_us((const __global ushort*)dst, as_short(acc));
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
 
@@ -195,7 +340,7 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
                         __global float* param_sum,         // [B, HQ, part_num]
                         int kv_len
                         ) {
-    // global: [B, H, S * part_num]
+    // global: [B, HQ, S * part_num]
     // local:  [1, 1, S]
     const uint b = get_global_id(0);
     const uint h = get_global_id(1);
@@ -499,16 +644,13 @@ class MHA:
                                        part_sum,
                                        part_num)
             else:
-                cl_kernels.enqueue("MHA",
-                                   [self.head_cnt_q, B],
-                                   [1, 1],
+                mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
+                cl_kernels.enqueue("MHAFirst",
+                                   [B, self.head_cnt_q, self.S * mb_blocks_num],
+                                   [1, 1, self.S],
                                    qkv,
-                                   L1,
                                    output,
-                                   self.cache_k,
-                                   self.cache_v,
-                                   attn_score,
-                                   L0
+                                   L1
                                    )
         return output
 
@@ -519,12 +661,12 @@ if __name__ == "__main__":
     H = 32
     HK = 32
     S = 128
-    MAX_KV_LEN = 256
+    MAX_KV_LEN = 256*8
     B = 1
     KV_BLOCK = 32
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
-    first_token = KV_BLOCK - 2
+    first_token = 128*2-4  #KV_BLOCK - 2
     second_token_num = 80
     KV_LEN = 0
     for idx in range(second_token_num):
@@ -544,7 +686,7 @@ if __name__ == "__main__":
         result_ref1_cpu = result_ref1.numpy()
         result_opt1_cpu = result_opt1.numpy()
         if not np.allclose(result_ref1_cpu, result_opt1_cpu, atol=0.01, rtol=0.01):
-            print(f'{d=}\n{result_ref1_cpu=}\n{result_opt1_cpu=}')
+            print(f'{result_ref1_cpu=}\n{result_opt1_cpu=}')
             pos = np.where(np.abs(result_ref1_cpu - result_opt1_cpu) > 0.01)
             print(f'failed at {L0=} {L1=}, shape = {result_opt1_cpu.shape}')
             print(f'pos = {pos}')
