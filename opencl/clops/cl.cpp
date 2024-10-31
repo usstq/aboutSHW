@@ -4,7 +4,6 @@
 
 #define CL_HPP_ENABLE_EXCEPTIONS
 #define CL_HPP_TARGET_OPENCL_VERSION 300
-#include "opencl.hpp"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
@@ -16,11 +15,12 @@
 #include <sstream>
 #include <vector>
 
+#include "opencl.hpp"
+
 #ifdef __linux__
-#include <dlfcn.h>
+#    include <dlfcn.h>
 #endif
 #include <omp.h>
-
 
 #ifndef ASSERT
 #    define ASSERT(cond)                                                     \
@@ -73,11 +73,11 @@ std::ostream& operator<<(std::ostream& os, const cl::NDRange& nd) {
     return os;
 }
 
-template<typename T, std::size_t N>
+template <typename T, std::size_t N>
 std::ostream& operator<<(std::ostream& os, const std::array<T, N>& nd) {
     os << "std::array<T=" << typeid(nd[0]).name() << ", N=" << N << ">{";
-    const char * sep = "";
-    for (int i= 0; i < N; i++) {
+    const char* sep = "";
+    for (int i = 0; i < N; i++) {
         os << sep << nd[i];
         sep = ",";
     }
@@ -107,17 +107,18 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
 
             std::cout << "     max total EU-cycles/second: " << 1e-6 * dev.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>() * dev.getInfo<CL_DEVICE_MAX_CLOCK_FREQUENCY>() << "(T-cycles/sec)"
                       << std::endl;
+            std::cout << "    CL_DEVICE_LOCAL_MEM_SIZE: " << dev.getInfo<CL_DEVICE_LOCAL_MEM_SIZE>() << std::endl;
 
             cl_uint v;
 #define COUT_CL_INFO(qname) \
     dev.getInfo(qname, &v); \
     std::cout << "    " << #qname << ": " << v << std::endl;
-            //COUT_CL_INFO(CL_DEVICE_ID_INTEL);
-            //COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
-            //COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
-            //COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
-            //COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
-            //COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_ID_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
+            // COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
 
             std::cout << "    CL_DEVICE_MAX_WORK_GROUP_SIZE: " << dev.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
             std::cout << "    CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS: " << dev.getInfo<CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS>() << std::endl;
@@ -249,8 +250,9 @@ struct cl_buffer_pool {
         std::map<size_t, int> summary;
         for (auto const& p : pool) {
             auto sz = p.first;
-            if (summary.count(sz) == 0) summary[sz] = 0;
-            summary[sz] ++;
+            if (summary.count(sz) == 0)
+                summary[sz] = 0;
+            summary[sz]++;
             pool_size += p.first;
         }
         for (auto const& p : summary) {
@@ -282,8 +284,7 @@ struct cl_tensor {
     cl_tensor() {
         // empty cl::Buffer
         auto* p = new cl::Buffer();
-        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {
-        });
+        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {});
     }
 
     ~cl_tensor() = default;
@@ -467,7 +468,7 @@ struct cl_kernels {
             kernel_map[kname] = k;
             auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
             std::cout << "[kernel] " << kname << "(";
-            const char * sep = "";
+            const char* sep = "";
             for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
                 std::cout << sep << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx);
                 sep = ", ";
@@ -565,7 +566,7 @@ static int global_so_id = 0;
 
 struct cpp_kernels {
     std::string so_fname;
-    void * dl_handle = nullptr;
+    void* dl_handle = nullptr;
     ~cpp_kernels() {
         if (dl_handle) {
             dlclose(dl_handle);
@@ -583,7 +584,7 @@ struct cpp_kernels {
 
         ss << "gcc -shared -o " << so_fname << " -march=native -Wall -fpic -x c++ - -lstdc++ ";
         ss << options;
-        FILE *pipe = popen(ss.str().c_str(), "w");
+        FILE* pipe = popen(ss.str().c_str(), "w");
         if (pipe == NULL) {
             perror("popen Error");
             abort();
@@ -638,7 +639,7 @@ struct cpp_kernels {
         }
 
         int nthr = omp_get_max_threads();
-        #pragma omp parallel
+#    pragma omp parallel
         {
             int ithr = omp_get_thread_num();
             func(ithr, nthr, kargs);
@@ -648,20 +649,34 @@ struct cpp_kernels {
 #else
 
 struct cpp_kernels {
-    ~cpp_kernels() {
-    }
-    cpp_kernels(std::string src, std::string options, std::string name) {
-
-    }
+    ~cpp_kernels() {}
+    cpp_kernels(std::string src, std::string options, std::string name) {}
     void call(std::string name, py::args args) {
         throw std::runtime_error(std::string("cpp_kernels only works on Linux"));
     }
 };
 #endif
 //======================================================================================================================
+// https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_driver_diagnostics.txt
+void CL_CALLBACK NotifyFunction(const char* pErrInfo, const void* pPrivateInfo, size_t size, void* pUserData) {
+    if (pErrInfo != NULL) {
+        std::cerr << ANSI_COLOR_ERROR << "[cl_intel_driver_diagnostics]:" << pErrInfo << ANSI_COLOR_RESET << std::endl;
+    }
+};
 
 PYBIND11_MODULE(cl, m) {
-    select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
+    auto selected_platform = select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
+
+    auto show_hint = std::getenv("cl_intel_driver_diagnostics") ? atoi(std::getenv("cl_intel_driver_diagnostics")) : 0;
+    if (show_hint) {
+        cl_context_properties properties[] = {
+            CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL,
+            (cl_context_properties)CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL,
+            CL_CONTEXT_PLATFORM,
+            (cl_context_properties)selected_platform(),
+            0};
+        cl::Context::setDefault(cl::Context(CL_DEVICE_TYPE_GPU, &properties[0], NotifyFunction));
+    }
 
     // disable out-of-order execution
     // cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
