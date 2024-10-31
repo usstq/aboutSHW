@@ -119,7 +119,7 @@ def XMX_basic():
 
             float8 acc[ACC_CNT];
 
-            for(int i = 0; i < 8; i++) acc[i] = (float8)i;
+            //for(int i = 0; i < 8; i++) acc[i] = (float8)i;
 
             __attribute__((opencl_unroll_hint(1)))
             for(int i = 0; i < loop_count; i++) {
@@ -156,14 +156,17 @@ def XMX_basic():
 
     loop_cnt = 1280
     num_sub_groups = 16*8
-    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
-    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
-    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
-    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    num_work_groups = 32*8
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8, num_work_groups],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8, num_work_groups],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8, num_work_groups],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
+    k.enqueue("XMX_tput_8x16x8", [num_sub_groups, 8, num_work_groups],[num_sub_groups, 8], tA, tB, tC, loop_cnt, 0)
     latency_ns = cl.finish()
     for ns in latency_ns:
-        flops = loop_cnt * ACC_CNT * num_sub_groups * (M*K*N) * 2
-        print(f" {flops} / {ns} = {flops/ns:.3f} GFlops/s")
+        flops = num_work_groups * loop_cnt * ACC_CNT * num_sub_groups * (M*K*N) * 2
+        print(f" {flops} / {ns} = {flops/ns*1e-3:.3f} TFlops/s")
+    
+    print(k.info("XMX_tput_8x16x8", [num_sub_groups, 8], 8))
 '''
 only 1 EU, 8 thread, 8*8 work-items
 

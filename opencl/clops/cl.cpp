@@ -477,6 +477,17 @@ struct cl_kernels {
         }
     }
 
+    cl::NDRange to_ndrange(const std::vector<int>& global_size) {
+        cl::NDRange global_;
+        if (global_size.size() == 1)
+            global_ = cl::NDRange(global_size[0]);
+        if (global_size.size() == 2)
+            global_ = cl::NDRange(global_size[0], global_size[1]);
+        if (global_size.size() == 3)
+            global_ = cl::NDRange(global_size[0], global_size[1], global_size[2]);
+        return global_;
+    }
+
     void enqueue(std::string kernel_name, const std::vector<int>& global_size, const std::vector<int>& local_size, py::args args) {
         auto& kernel = kernel_map[kernel_name];
 
@@ -505,51 +516,45 @@ struct cl_kernels {
             throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
 
         const cl::NDRange offset_;
-        cl::NDRange global_;
-        cl::NDRange local_;
-        if (global_size.size() == 1)
-            global_ = cl::NDRange(global_size[0]);
-        if (global_size.size() == 2)
-            global_ = cl::NDRange(global_size[0], global_size[1]);
-        if (global_size.size() == 3)
-            global_ = cl::NDRange(global_size[0], global_size[1], global_size[2]);
-
-        if (local_size.size() == 1)
-            local_ = cl::NDRange(local_size[0]);
-        if (local_size.size() == 2)
-            local_ = cl::NDRange(local_size[0], local_size[1]);
-        if (local_size.size() == 3)
-            local_ = cl::NDRange(local_size[0], local_size[1], local_size[2]);
-
+        cl::NDRange global_ = to_ndrange(global_size);
+        cl::NDRange local_ = to_ndrange(local_size);
         std::vector<cl::Event> events_;
         all_events.emplace_back();
         cmd_queue.enqueueNDRangeKernel(kernel, offset_, global_, local_, &events_, &all_events.back());
         return;
     }
 
-    /*
-        void show_info(std::string kernel_name, cl::NDRange local_work_size, size_t sub_groups) {
-            auto device = cl::Device::getDefault();
-            auto& k = kernel_map[kernel_name];
+    std::string info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
+        std::stringstream ss;
+        cl::NDRange local_work_size = to_ndrange(local_size);
+        auto device = cl::Device::getDefault();
+        auto& k = kernel_map[kernel_name];
 
-            std::cout << kernel_name << " [getWorkGroupInfo] :" << "\n";
-            std::cout << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
-            std::cout << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
-            //std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
-            std::cout << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
-            std::cout << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
-            std::cout << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
+        ss << kernel_name << " [getWorkGroupInfo] :" << "\n";
+        ss << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
+        ss << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
+        // std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
+        ss << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
+        ss << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
+        ss << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
+        ss << "    CL_KERNEL_SPILL_MEM_SIZE_INTEL: " << k.getWorkGroupInfo<CL_KERNEL_SPILL_MEM_SIZE_INTEL>(device) << "\n";
 
+        ss << kernel_name << " [getSubGroupInfo] :" << "\n";
+        ss << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)
+           << "\n";
+        ss << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)
+           << "\n";
+        ss << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups) << "\n";
+        ss << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
+        ss << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
 
-            std::cout << kernel_name << " [getSubGroupInfo] :" << "\n";
-            std::cout << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device,
-       local_work_size)  << "\n"; std::cout << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " <<
-       k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)  << "\n"; std::cout << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << "
-       is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups)  << "\n"; std::cout << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " <<
-       k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size)  << "\n"; std::cout << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " <<
-       k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size)  << "\n";
+        auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
+        ss << " args " << nargs << " :" << std::endl;
+        for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
+            ss << "\t" << arg_idx << " " << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx) << std::endl;
         }
-    */
+        return ss.str();
+    }
 };
 
 #ifdef __linux__
@@ -697,7 +702,8 @@ PYBIND11_MODULE(cl, m) {
 
     py::class_<cl_kernels>(m, "kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
-        .def("enqueue", &cl_kernels::enqueue);
+        .def("enqueue", &cl_kernels::enqueue)
+        .def("info", &cl_kernels::info);
 
     py::class_<cpp_kernels>(m, "cpp_kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("name") = "")
