@@ -183,35 +183,76 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         float dot_prod[SGS] = {0};
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
-            // loop whole token, SGS items each
+            // loop whole token, 16 items each due to key can be loaded 16 items at a time by using one SIMD read
             for (uint k = 0; k < S; k += SGS) {
                 half query_val[SGS];
                 for (uint k_sub = 0; k_sub < SGS; k_sub++) {
                     query_val[k_sub] = q_share[k + k_sub][id_sg_local];
                 }
-                // loop key, get one key to SGS querys dot product results
+                // loop key, read one key(16 items), get 16 results of dot(key, query_val[0-15]). Full reuse key_val due to it's in DDR.
                 for (uint n = 0; n < key_len_in_sg; n++) {
                     ushort key_val = intel_sub_group_block_read_us((const __global ushort*)cur_k + (key_n_start_sg + n) * qkv_stride + k);
                     // accumulation along key direction
                     for (uint k_sub = 0; k_sub < SGS; k_sub++) {
-                        // a_val[m] contains one column in query, so need to broadcast one element in key
-                        // dot_prod[n] will store: dot_product(one row of key, all query rows)
                         dot_prod[n] += query_val[k_sub] * as_half(intel_sub_group_broadcast(key_val, k_sub));
                     }
                 }
             }
             float max_attn_score_in_wg = -1e9f;
-            // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+            // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod
+            // some var layouts in the following steps:
+            // assume A([M=3, S]) * B([N=3, S]), the result(dot_prod[0-15]):
+            //     M0 M1 M2 M3 M4...M14 M15   apply causal->      M0   M1  M2  M3 M4...M14 M15
+            //  N0 v  v  v  0  0     0  0                     N0  v    v   v   0  0     0  0
+            //  N1 v  v  v  0  0     0  0                     N1 -inf  v   v   0  0     0  0 
+            //  N2 v  v  v  0  0     0  0                     N2 -inf -inf v   0  0     0  0
+            //  N3 ?  ?  ?  ?  ?     ?  ?                     N3  ?    ?   ?   ?  ?     ?  ?
+            //  ...                                           ...
+            // N14 ?  ?  ?  ?  ?     ?  ?                     N14 ?    ?   ?   ?  ?     ?  ?
+            // N15 ?  ?  ?  ?  ?     ?  ?                     N15 ?    ?   ?   ?  ?     ?  ?
+            //
+            // max_attn_score_in_wg:
+            // M0   M1  M2  M3 M4...M14 M15
+            // v    v   v   0  0 ... 0  0
+            //
+            // max_qk_dot_share[M][sg_num]:
+            //     sg0
+            // M0  v
+            // M1  v
+            // M2  v
+            // M3  0
+            // ...
+            // M15 0
+            //
+            // qk_dot_share[M][kv_len](before softmax:):
+            //     N0   N1  N2  N3 N4...N14 N15
+            // M0  v  -inf -inf ?  ?     ?  ?
+            // M1  v    v  -inf ?  ?     ?  ? 
+            // M2  v    v   v   ?  ?     ?  ?
+            // M3  0    0   0   ?  ?     ?  ?
+            // ...
+            // M14 0    0   0   ?  ?     ?  ?
+            // M15 0    0   0   ?  ?     ?  ?
+            //
+            // qk_dot_share[M][kv_len](after softmax+scale):
+            //     N0   N1  N2  N3 N4...N14 N15
+            // M0  v'   0   0   ?  ?     ?  ?
+            // M1  v'   v'  0   ?  ?     ?  ? 
+            // M2  v'   v'  v'  ?  ?     ?  ?
+            // M3  0    0   0   ?  ?     ?  ?
+            // ...
+            // M14 0    0   0   ?  ?     ?  ?
+            // M15 0    0   0   ?  ?     ?  ?
             for (uint n = 0; n < key_len_in_sg; n++) {
                 dot_prod[n] *= head_size_scaler;
-                // casual mask
+                // casual mask: valid only if query <= kv_len
                 if (key_n_start_sg + n <= query_start + id_sg_local)
                     max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
                 else
                     dot_prod[n] = -1e9f;
             }
-            max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
             // change layout to M*key_len_in_sg
+            max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
             for (uint n = 0; n < key_len_in_sg; n++) {
                 qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
             }
@@ -287,10 +328,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             const uint v_row = key_n_start + k;
             half cur_weights[SGS];
             for (uint m = 0; m < SGS; m++) {
-                if (k + id_sg_local < value_len_in_kv_block)
-                    cur_weights[m] = qk_dot_share[m][k + id_sg_local];
-                else
-                    cur_weights[m] = 0;
+                cur_weights[m] = qk_dot_share[m][k + id_sg_local];
             }
             for (uint k_sub = 0; k_sub < value_len_in_kv_block - k; k_sub++) {
                 half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_v + (v_row + k_sub) * qkv_stride + id_sg * SGS));
@@ -322,9 +360,9 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             }
             // last kv_block, output
             if (i == kv_block_num - 1) {
-                __global ushort* dst = output + m * HQ * S + id_sg * SGS;
+                __global half* dst = output + m * HQ * S + id_sg * SGS;
                 half acc = sum[m];
-                intel_sub_group_block_write_us((const __global ushort*)dst, as_short(acc));
+                intel_sub_group_block_write_us((__global ushort*)dst, as_short(acc));
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
@@ -442,13 +480,21 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     for (int i = 0; i < cur_kv_len; i += SGS) {
         // intel_sub_group_block_read_us cannot take __local pointer according to:
         // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
-        //  ushort weight = intel_sub_group_block_read_us((const __local ushort*)weights + i);
+        //ushort weight = intel_sub_group_block_read_us((const __local ushort*)weights + i);
+        half weight = weights[i + id_sg_local];
         __global half* pv = cache_v + i * S + id_sg * SGS;
-        for (int j = 0; j < SGS; j++) {
-            half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
-            // half w = as_half(intel_sub_group_broadcast(weight, j));
-            half w = weights[i + j];
-            sum += w * v_val;
+        if (i + SGS <= cur_kv_len) {
+            for (int j = 0; j < SGS; j++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
+                half w = as_half(intel_sub_group_broadcast(as_ushort(weight), j));
+                sum += w * v_val;
+            }
+        } else {
+            for (int j = 0; j < cur_kv_len - i; j++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
+                half w = as_half(intel_sub_group_broadcast(as_ushort(weight), j));
+                sum += w * v_val;
+            }
         }
     }
     half acc = sum;
