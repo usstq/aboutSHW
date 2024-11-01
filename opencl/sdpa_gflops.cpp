@@ -61,11 +61,14 @@ int main(void) {
     #define SG_SCALE_FACTOR 2
     #define SOURCE_SEQ_LEN_BLOCK_SIZE (S*SG_SCALE_FACTOR)
     #define TARGET_SEQ_LEN_BLOCK_SIZE 16
+    #define NUM_HEADS                          28
+    #define NUM_KV_HEADS                       7
     const int32_t B = getenv("B", 1);
-    const int32_t Hq = getenv("Hq", 28);
-    const int32_t Hk = getenv("Hq", 7);
     const int32_t Lq = getenv("Lq", 8416);
     const int32_t Lk = getenv("Lk", 8416);
+
+    const int32_t Hq = NUM_HEADS;
+    const int32_t Hk = NUM_KV_HEADS;
 
     assert(Hq % Hk == 0);     // implied
     assert(S % SUBGROUP_SIZE == 0);     // implied
