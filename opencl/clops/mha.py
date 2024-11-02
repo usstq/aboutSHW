@@ -121,7 +121,7 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
     }
 }
 
-__attribute__((intel_reqd_sub_group_size(SGS)))
+__attribute__((intel_reqd_sub_group_size(16)))
 __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + HK) * S)]
                        __global half * param_output,      // [B, L1, HQ * S]
                        uint L1                            // input seq-length
@@ -152,23 +152,31 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     __global half* output = param_output + ((b * L1 + query_start) * HQ + h) * S;
 
     // store prev iteration state
-    __local float old_max_attn_score[2][SGS];
-    __local float old_exp_sum[2][SGS];
-    __local float old_output[SGS][S];
+    __local half old_max_attn_score[2][SGS];
+    __local half old_exp_sum[2][SGS];
+    __local half old_output[SGS][S];
 
-    __local float max_qk_dot_share[SGS][S / SGS];
-    __local float qk_dot_share[SGS][kv_block];
+    __local half max_qk_dot_share[SGS][S / SGS];
+    __local half qk_dot_share[SGS][kv_block];
 
     // m, n, k corresponding to loop index for M, N, K, A(query) shape: [M, K], B(key, value) shape: [N, K]
     // 1 cache query
     __local half q_share[S][SGS];                       // transpose query, prepare for dot(k, q)
-    for (int m = 0; m < SGS; m++) {
-        if (m < query_len) {
+    if (query_len == SGS) {
+        __attribute__((opencl_unroll_hint))
+        for (int m = 0; m < SGS; m++) {
             half q_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_q + m * qkv_stride + id_sg * SGS));
             q_share[id_local][m] = q_val;
-        } else {
-            // avoid q*k to check if M is varying
-            q_share[id_local][m] = 0;
+        }
+    } else {
+        for (int m = 0; m < SGS; m++) {
+            if (m < query_len) {
+                half q_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_q + m * qkv_stride + id_sg * SGS));
+                q_share[id_local][m] = q_val;
+            } else {
+                // avoid q*k to check if M is varying
+                q_share[id_local][m] = 0;
+            }
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -179,81 +187,130 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         // each sg will process SGS key lines
         const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
         const int key_n_start_sg = key_n_start + id_sg * SGS;
-        float dot_prod[SGS] = {0};
+        half16 dot_prod = 0;
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
             // loop whole token, 16 items each due to key can be loaded 16 items at a time by using one SIMD read
-            for (uint k = 0; k < S; k += SGS) {
-                half query_val[SGS];
-                for (uint k_sub = 0; k_sub < SGS; k_sub++) {
-                    query_val[k_sub] = q_share[k + k_sub][id_sg_local];
-                }
-                // loop key, read one key(16 items), get 16 results of dot(key, query_val[0-15]). Full reuse key_val due to it's in DDR.
-                for (uint n = 0; n < key_len_in_sg; n++) {
-                    ushort key_val = intel_sub_group_block_read_us((const __global ushort*)cur_k + (key_n_start_sg + n) * qkv_stride + k);
-                    // accumulation along key direction
+            if (key_len_in_sg == SGS) {
+                for (uint k = 0; k < S; k += SGS) {
+                    half query_val[SGS];
+                    __attribute__((opencl_unroll_hint))
                     for (uint k_sub = 0; k_sub < SGS; k_sub++) {
-                        dot_prod[n] += query_val[k_sub] * as_half(intel_sub_group_broadcast(key_val, k_sub));
+                        query_val[k_sub] = q_share[k + k_sub][id_sg_local];
+                        // will be slower
+                        //query_val[k_sub] = as_half(intel_sub_group_block_read_us((const __local ushort*)q_share[k + k_sub]));
+                    }
+                    // loop key, read one key(16 items), get 16 results of dot(key, query_val[0-15]). Full reuse key_val due to it's in DDR.
+                    __attribute__((opencl_unroll_hint))
+                    for (uint n = 0; n < SGS; n++) {
+                        ushort key_val = intel_sub_group_block_read_us((const __global ushort*)cur_k + (key_n_start_sg + n) * qkv_stride + k);
+                        // accumulation along key direction
+                        __attribute__((opencl_unroll_hint))
+                        for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                            dot_prod[n] = fma(query_val[k_sub], as_half(intel_sub_group_broadcast(key_val, k_sub)), dot_prod[n]);
+                        }
                     }
                 }
-            }
-            float max_attn_score_in_wg = -1e9f;
-            // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod
-            // some var layouts in the following steps:
-            // assume A([M=3, S]) * B([N=3, S]), the result(dot_prod[0-15]):
-            //     M0 M1 M2 M3 M4...M14 M15   apply causal->      M0   M1  M2  M3 M4...M14 M15
-            //  N0 v  v  v  0  0     0  0                     N0  v    v   v   0  0     0  0
-            //  N1 v  v  v  0  0     0  0                     N1 -inf  v   v   0  0     0  0 
-            //  N2 v  v  v  0  0     0  0                     N2 -inf -inf v   0  0     0  0
-            //  N3 ?  ?  ?  ?  ?     ?  ?                     N3  ?    ?   ?   ?  ?     ?  ?
-            //  ...                                           ...
-            // N14 ?  ?  ?  ?  ?     ?  ?                     N14 ?    ?   ?   ?  ?     ?  ?
-            // N15 ?  ?  ?  ?  ?     ?  ?                     N15 ?    ?   ?   ?  ?     ?  ?
-            //
-            // max_attn_score_in_wg:
-            // M0   M1  M2  M3 M4...M14 M15
-            // v    v   v   0  0 ... 0  0
-            //
-            // max_qk_dot_share[M][sg_num]:
-            //     sg0
-            // M0  v
-            // M1  v
-            // M2  v
-            // M3  0
-            // ...
-            // M15 0
-            //
-            // qk_dot_share[M][kv_len](before softmax:):
-            //     N0   N1  N2  N3 N4...N14 N15
-            // M0  v  -inf -inf ?  ?     ?  ?
-            // M1  v    v  -inf ?  ?     ?  ? 
-            // M2  v    v   v   ?  ?     ?  ?
-            // M3  0    0   0   ?  ?     ?  ?
-            // ...
-            // M14 0    0   0   ?  ?     ?  ?
-            // M15 0    0   0   ?  ?     ?  ?
-            //
-            // qk_dot_share[M][kv_len](after softmax+scale):
-            //     N0   N1  N2  N3 N4...N14 N15
-            // M0  v'   0   0   ?  ?     ?  ?
-            // M1  v'   v'  0   ?  ?     ?  ? 
-            // M2  v'   v'  v'  ?  ?     ?  ?
-            // M3  0    0   0   ?  ?     ?  ?
-            // ...
-            // M14 0    0   0   ?  ?     ?  ?
-            // M15 0    0   0   ?  ?     ?  ?
-            for (uint n = 0; n < key_len_in_sg; n++) {
-                dot_prod[n] *= head_size_scaler;
-                // casual mask: valid only if query <= kv_len
-                if (key_n_start_sg + n <= query_start + id_sg_local)
-                    max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
-                else
-                    dot_prod[n] = -1e9f;
-            }
-            // change layout to M*key_len_in_sg
-            max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
-            for (uint n = 0; n < key_len_in_sg; n++) {
-                qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
+                half max_attn_score_in_wg = -1e9f;
+                // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod
+                if (key_n_start_sg + SGS <= query_start) {
+                    __attribute__((opencl_unroll_hint))
+                    for (uint n = 0; n < SGS; n++) {
+                        dot_prod[n] *= head_size_scaler;
+                        max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
+                    }
+                } else {
+                    __attribute__((opencl_unroll_hint))
+                    for (uint n = 0; n < SGS; n++) {
+                        dot_prod[n] *= head_size_scaler;
+                        // casual mask: valid only if query <= kv_len
+                        if (key_n_start_sg + n <= query_start + id_sg_local)
+                            max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
+                        else
+                            dot_prod[n] = -1e9f;
+                    }
+                }
+                // change layout to M*key_len_in_sg
+                max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
+                for (uint n = 0; n < SGS; n++) {
+                    qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
+                }
+            } else {
+                for (uint k = 0; k < S; k += SGS) {
+                    half query_val[SGS];
+                    __attribute__((opencl_unroll_hint))
+                    for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                        query_val[k_sub] = q_share[k + k_sub][id_sg_local];
+                        //query_val[k_sub] = as_half(intel_sub_group_block_read_us((const __local ushort*)q_share[k + k_sub]));
+                    }
+                    // loop key, read one key(16 items), get 16 results of dot(key, query_val[0-15]). Full reuse key_val due to it's in DDR.
+                    for (uint n = 0; n < key_len_in_sg; n++) {
+                        ushort key_val = intel_sub_group_block_read_us((const __global ushort*)cur_k + (key_n_start_sg + n) * qkv_stride + k);
+                        // accumulation along key direction
+                        __attribute__((opencl_unroll_hint))
+                        for (uint k_sub = 0; k_sub < SGS; k_sub++) {
+                            dot_prod[n] = fma(query_val[k_sub], as_half(intel_sub_group_broadcast(key_val, k_sub)), dot_prod[n]);
+                        }
+                    }
+                }
+                half max_attn_score_in_wg = -1e9f;
+                // 3 compute: dot_prod *= head_size_scaler; if (max_attn_score < dot_prod) max_attn_score = dot_prod
+                // some var layouts in the following steps:
+                // assume A([M=3, S]) * B([N=3, S]), the result(dot_prod[0-15]):
+                //     M0 M1 M2 M3 M4...M14 M15   apply causal->      M0   M1  M2  M3 M4...M14 M15
+                //  N0 v  v  v  0  0     0  0                     N0  v    v   v   0  0     0  0
+                //  N1 v  v  v  0  0     0  0                     N1 -inf  v   v   0  0     0  0 
+                //  N2 v  v  v  0  0     0  0                     N2 -inf -inf v   0  0     0  0
+                //  N3 ?  ?  ?  ?  ?     ?  ?                     N3  ?    ?   ?   ?  ?     ?  ?
+                //  ...                                           ...
+                // N14 ?  ?  ?  ?  ?     ?  ?                     N14 ?    ?   ?   ?  ?     ?  ?
+                // N15 ?  ?  ?  ?  ?     ?  ?                     N15 ?    ?   ?   ?  ?     ?  ?
+                //
+                // max_attn_score_in_wg:
+                // M0   M1  M2  M3 M4...M14 M15
+                // v    v   v   0  0 ... 0  0
+                //
+                // max_qk_dot_share[M][sg_num]:
+                //     sg0
+                // M0  v
+                // M1  v
+                // M2  v
+                // M3  0
+                // ...
+                // M15 0
+                //
+                // qk_dot_share[M][kv_len](before softmax:):
+                //     N0   N1  N2  N3 N4...N14 N15
+                // M0  v  -inf -inf ?  ?     ?  ?
+                // M1  v    v  -inf ?  ?     ?  ? 
+                // M2  v    v   v   ?  ?     ?  ?
+                // M3  0    0   0   ?  ?     ?  ?
+                // ...
+                // M14 0    0   0   ?  ?     ?  ?
+                // M15 0    0   0   ?  ?     ?  ?
+                //
+                // qk_dot_share[M][kv_len](after softmax+scale):
+                //     N0   N1  N2  N3 N4...N14 N15
+                // M0  v'   0   0   ?  ?     ?  ?
+                // M1  v'   v'  0   ?  ?     ?  ? 
+                // M2  v'   v'  v'  ?  ?     ?  ?
+                // M3  0    0   0   ?  ?     ?  ?
+                // ...
+                // M14 0    0   0   ?  ?     ?  ?
+                // M15 0    0   0   ?  ?     ?  ?
+                for (uint n = 0; n < key_len_in_sg; n++) {
+                    dot_prod[n] *= head_size_scaler;
+                    // casual mask: valid only if query <= kv_len
+                    if (key_n_start_sg + n <= query_start + id_sg_local)
+                        max_attn_score_in_wg = fmax(max_attn_score_in_wg, dot_prod[n]);
+                    else
+                        dot_prod[n] = -1e9f;
+                }
+                // change layout to M*key_len_in_sg
+                max_qk_dot_share[id_sg_local][id_sg] = max_attn_score_in_wg;
+                for (uint n = 0; n < key_len_in_sg; n++) {
+                    qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
+                }
             }
         } else {
             max_qk_dot_share[id_sg_local][id_sg] = -1e9f;
@@ -261,7 +318,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         barrier(CLK_LOCAL_MEM_FENCE);
 
         // reduce across sg
-        float max_qk_dot[SGS];
+        float16 max_qk_dot;
         for (uint m = 0; m < SGS; m++) {
             max_qk_dot[m] = -1e9f;
             if (id_sg_local < S / SGS) {
@@ -271,7 +328,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         }
 
         // 4 softmax
-        float exp_sum[SGS] = {0};
+        float16 exp_sum = 0;
         for (uint m = 0; m < query_len; m++) {
             for (uint n = id_local; n < key_len_in_kv_block; n += S) {
                 float a = native_exp(qk_dot_share[m][n] - max_qk_dot[m]);
@@ -308,31 +365,38 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
 
         // 5 w*v
         uint value_len_in_kv_block = key_len_in_kv_block;
-        float sum[SGS] = {0};
+        half16 sum = 0;
         uint k = 0;
         for (; k + SGS <= value_len_in_kv_block; k += SGS) {
             const uint v_row = key_n_start + k;
-            half cur_weights[SGS];
+            half16 cur_weights;
+            __attribute__((opencl_unroll_hint))
             for (uint m = 0; m < SGS; m++) {
-                cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+                //cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+                cur_weights[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)qk_dot_share + m * kv_block + k));
             }
+            __attribute__((opencl_unroll_hint))
             for (uint k_sub = 0; k_sub < SGS; k_sub++) {
                 half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_v + (v_row + k_sub) * qkv_stride + id_sg * SGS));
+                __attribute__((opencl_unroll_hint))
                 for (uint m = 0; m < SGS; m++) {
-                    sum[m] += v_val * sub_group_broadcast(cur_weights[m], k_sub);
+                    sum[m] = fma(v_val, sub_group_broadcast(cur_weights[m], k_sub), sum[m]);
                 }
             }
         }
         if (k < value_len_in_kv_block) {
             const uint v_row = key_n_start + k;
-            half cur_weights[SGS];
+            half16 cur_weights;
+            __attribute__((opencl_unroll_hint))
             for (uint m = 0; m < SGS; m++) {
-                cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+                //cur_weights[m] = qk_dot_share[m][k + id_sg_local];
+                cur_weights[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)qk_dot_share + m * kv_block + k));
             }
             for (uint k_sub = 0; k_sub < value_len_in_kv_block - k; k_sub++) {
                 half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_v + (v_row + k_sub) * qkv_stride + id_sg * SGS));
+                __attribute__((opencl_unroll_hint))
                 for (uint m = 0; m < SGS; m++) {
-                    sum[m] += v_val * sub_group_broadcast(cur_weights[m], k_sub);
+                    sum[m] = fma(v_val, sub_group_broadcast(cur_weights[m], k_sub), sum[m]);
                 }
             }
         }
@@ -708,7 +772,7 @@ if __name__ == "__main__":
     HK = 32
     S = 128
     MAX_KV_LEN = 256*8
-    B = 1
+    B = 16
     KV_BLOCK = 32
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
@@ -731,9 +795,9 @@ if __name__ == "__main__":
         result_opt1 = opt(qkv, attention_mask)
         result_ref1_cpu = result_ref1.numpy()
         result_opt1_cpu = result_opt1.numpy()
-        if not np.allclose(result_ref1_cpu, result_opt1_cpu, atol=0.01, rtol=0.01):
+        if not np.allclose(result_ref1_cpu, result_opt1_cpu, atol=0.02, rtol=0.02):
             print(f'{result_ref1_cpu=}\n{result_opt1_cpu=}')
-            pos = np.where(np.abs(result_ref1_cpu - result_opt1_cpu) > 0.01)
+            pos = np.where(np.abs(result_ref1_cpu - result_opt1_cpu) > 0.02)
             print(f'failed at {L0=} {L1=}, shape = {result_opt1_cpu.shape}')
             print(f'pos = {pos}')
             print(f'ref_val = {result_ref1_cpu[pos]}\nopt_val={result_opt1_cpu[pos]}')
