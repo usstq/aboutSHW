@@ -81,6 +81,19 @@ __kernel void Slice(__global half * input, __global half * output,
     }
 }
 
+
+__kernel void Embedding(__global uint * input_ids, 
+                        __global half * weight,
+                        __global half * output,
+                        int num_tokens,
+                        int hidden_states) {
+    int s = get_global_id(0);   // which states
+    int i = get_global_id(1);   // which token
+    
+    uint id = input_ids[i];
+    output[i*hidden_states + s] = weight[id*hidden_states + s];
+}
+
 '''
 cl_kernels = kernel_cache(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
@@ -126,8 +139,19 @@ setattr(cl.tensor, 'iSilu', iSilu)
 setattr(cl.tensor, 'torch', to_torch)
 setattr(cl.tensor, 'slice', Slice)
 
+class Embedding:
+    def __init__(self, weight):
+        self.weight = to_cl(weight.half())
+        self.vocab_size, self.hidden_states = self.weight.shape
 
-# GPU needs weight-compression to work : INT8 at least
+    def __call__(self, input):
+        # [batch, length] int64
+        # [batch, length, hidden_states] half
+        B, L = input.shape
+        o_shape = [B, L, self.hidden_states]
+        output = cl.tensor(o_shape, np.dtype(np.float16))
+        cl_kernels.enqueue("Embedding", [self.hidden_states, L*B], [128, 1], input, self.weight, output, B*L, self.hidden_states)
+        return output
 
 class ROPE:
     def __init__(self, inv_freq, rotary_dim, head_cnt_q, head_cnt_k, head_size):

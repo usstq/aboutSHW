@@ -47,7 +47,8 @@ class LlamaLikeModel:
         ROPE = clops.ROPE
         print(f"converting & loading model into GPGPU : {hf_model_id} ...")
         self.hf_config = hf_model.config
-        self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
+        # self.embed_tokens = partial(F.embedding, weight=hf_model.model.embed_tokens.weight)
+        self.embed_tokens = clops.Embedding(weight=hf_model.model.embed_tokens.weight)
         self.norm = clops.RMSNorm(weight=hf_model.model.norm.weight, epsilon = hf_model.config.rms_norm_eps)
         # self.lm_head = partial(F.linear, weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
         self.lm_head = Linear(weight=hf_model.lm_head.weight, bias=hf_model.lm_head.bias)
@@ -136,9 +137,8 @@ class LlamaLikeModel:
 
     def forward(self, input_ids, attn_mask):
         # embedding is done on CPU so far (to save GPU memory since embedding is memory-bounded)
-        inputs_embeds = self.embed_tokens(input_ids)
-        # the rest is done on GPU
-        hidden_states = clops.to_cl(inputs_embeds.half())
+        cl_input_ids = clops.to_cl(input_ids.int())
+        hidden_states = self.embed_tokens(cl_input_ids)
         for layer in self.layers:
             hidden_states = self.forward_layer(layer, hidden_states, attn_mask)
 
@@ -146,7 +146,7 @@ class LlamaLikeModel:
         logits = self.lm_head(final_layernorm)
         return logits.torch().float()
 
-def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type):
+def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type, repeat):
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -156,7 +156,6 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     streamer = TextStreamer(tokenizer)
 
     batch_size = len(prompt0)
-    attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
 
     # overwrite max_kv_len according to [prompt length + max_new_tokens]
     if prompt0:
@@ -167,66 +166,68 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
     model = LlamaLikeModel(hf_model_path, max_kv_len, quant_type)
     print(f" batch_size, max_kv_len = {batch_size}, {max_kv_len} ")
 
-    new_tokens = 0
-    gen_tokens = torch.zeros(batch_size, 0, dtype=torch.int64)
     if do_trace:
         from viztracer import VizTracer
 
     with torch.no_grad(), VizTracer(output_file="optional.json") if do_trace else nullcontext() as tracer:
-        while True:
-            # attn_mask : [batch, query_len+past_len]
-            print("\033[0;32m")
-            if prompt0:
-                prompt = prompt0
-            else:
-                try:
-                    prompt = input(">")
-                except EOFError:
-                    break
-            #inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
-            #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
-            #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True, return_token_type_ids=False)
+        for r in range(repeat):
+            new_tokens = 0
+            gen_tokens = torch.zeros(batch_size, 0, dtype=torch.int64)
+            attn_mask = torch.zeros(batch_size, 0, dtype=torch.float32)
+            while True:
+                # attn_mask : [batch, query_len+past_len]
+                print("\033[0;32m")
+                if prompt0:
+                    prompt = prompt0
+                else:
+                    try:
+                        prompt = input(">")
+                    except EOFError:
+                        break
+                #inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
+                #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
+                #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
+                inputs = tokenizer(prompt, return_tensors="pt", padding=True, return_token_type_ids=False)
 
-            input_ids = inputs["input_ids"]
-            _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
-            attn_mask = torch.cat([attn_mask, _amask], dim=-1) # [batch, query_len+past_len] 0:valid, -max: invalid
+                input_ids = inputs["input_ids"]
+                _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
+                attn_mask = torch.cat([attn_mask, _amask], dim=-1) # [batch, query_len+past_len] 0:valid, -max: invalid
 
-            prompt_tok_length = input_ids.shape[-1]
-            t0 = time.time()
-            logits = model.forward(input_ids, attn_mask) # [batch, q_len, vocab_size]
-            next_token_logits = logits[:, -1, :]         # only the last token
-            next_tokens = torch.argmax(next_token_logits, dim=-1)
-            print("\033[0;33m")
-            t1 = time.time()
-            while tokenizer.eos_token_id not in next_tokens:
-                next_tokens = next_tokens.reshape(batch_size, 1)
-                input_ids = next_tokens
+                prompt_tok_length = input_ids.shape[-1]
+                t0 = time.time()
+                logits = model.forward(input_ids, attn_mask) # [batch, q_len, vocab_size]
+                next_token_logits = logits[:, -1, :]         # only the last token
+                next_tokens = torch.argmax(next_token_logits, dim=-1)
+                print("\033[0;33m")
+                t1 = time.time()
+                while tokenizer.eos_token_id not in next_tokens:
+                    next_tokens = next_tokens.reshape(batch_size, 1)
+                    input_ids = next_tokens
+                    if batch_size == 1:
+                        streamer.put(next_tokens[0,:])
+                    else:
+                        gen_tokens = torch.cat([gen_tokens, next_tokens], dim=1)
+
+                    new_tokens += 1
+                    if new_tokens >= max_new_tokens:
+                        break
+
+                    attn_mask = torch.cat([attn_mask, torch.zeros(batch_size, 1, dtype=torch.float32)], dim=-1)
+                    logits = model.forward(input_ids, attn_mask)
+                    next_tokens = torch.argmax(logits, dim=-1)
+                t2 = time.time()
                 if batch_size == 1:
                     streamer.put(next_tokens[0,:])
-                else:
-                    gen_tokens = torch.cat([gen_tokens, next_tokens], dim=1)
-
-                new_tokens += 1
-                if new_tokens >= max_new_tokens:
+                streamer.end()
+                if prompt0:
+                    if (gen_tokens.numel() > 0):
+                        print("\033[00m")
+                        for i in range(batch_size):
+                            out = tokenizer.decode(gen_tokens[i,:], skip_special_tokens=True)
+                            print(f"[{i}] \033[0;32m{prompt0[i]}\033[0;33m{out}\033[00m")
+                    print(f"\033[00m {batch_size} x ({prompt_tok_length} + {new_tokens}) tokens,  [{t1-t0:.3f} sec + {t2-t1:.3f} sec]     [{batch_size*prompt_tok_length/(t1-t0):.3f} tok/sec + {(t2-t1)/(batch_size*new_tokens)*1e3:.3f} ms/tok]")
                     break
-
-                attn_mask = torch.cat([attn_mask, torch.zeros(batch_size, 1, dtype=torch.float32)], dim=-1)
-                logits = model.forward(input_ids, attn_mask)
-                next_tokens = torch.argmax(logits, dim=-1)
-            t2 = time.time()
-            if batch_size == 1:
-                streamer.put(next_tokens[0,:])
-            streamer.end()
-            if prompt0:
-                if (gen_tokens.numel() > 0):
-                    print("\033[00m")
-                    for i in range(batch_size):
-                        out = tokenizer.decode(gen_tokens[i,:], skip_special_tokens=True)
-                        print(f"[{i}] \033[0;32m{prompt0[i]}\033[0;33m{out}\033[00m")
-                print(f"\033[00m {batch_size} x ({prompt_tok_length} + {new_tokens}) tokens,  [{t1-t0:.3f} sec + {t2-t1:.3f} sec]     [{batch_size*prompt_tok_length/(t1-t0):.3f} tok/sec + {(t2-t1)/(batch_size*new_tokens)*1e3:.3f} ms/tok]")
-                break
-            print("\033[00m")
+                print("\033[00m")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
@@ -235,6 +236,7 @@ if __name__ == "__main__":
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
+    parser.add_argument('-r', "--repeat", type=int, default=1)
     parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx'])
 
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
@@ -248,4 +250,4 @@ if __name__ == "__main__":
             args.prompt0 = [args.prompt0] * shapes[0]
     else:
         args.prompt0 = [args.prompt0]
-    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type)
+    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type, repeat = args.repeat)
