@@ -85,15 +85,15 @@ __kernel void Slice(__global half * input, __global half * output,
 cl_kernels = kernel_cache(cl_kernel_sources, "-D FMACNT=4 -D UNROLL=4")
 
 def iAdd(input, rhs):
-    cl_kernels.enqueue("iAdd", [input.numel], [1], input, rhs, input.numel)
+    cl_kernels.enqueue("iAdd", [input.numel], [8*8], input, rhs, input.numel)
     return input
 
 def iSilu(input):
-    cl_kernels.enqueue("iSilu", [input.numel], [1], input, input.numel)
+    cl_kernels.enqueue("iSilu", [input.numel], [8*8], input, input.numel)
     return input
 
 def iMul(input, b):
-    cl_kernels.enqueue("iMul", [input.numel], [1], input, b, input.numel)
+    cl_kernels.enqueue("iMul", [input.numel], [8*8], input, b, input.numel)
     return input
 
 def Slice(input, axis, start, step, stop=-1):
