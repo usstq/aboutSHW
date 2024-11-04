@@ -101,9 +101,12 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
                     __global half * param_cache_v,     // [B, Hk, max_kv_len, S]
                     int L0
                     ) {
+    // global: [hkv, B, L1 * CONCAT_BLOCK],
+    // local: [1, 1, CONCAT_BLOCK],
     int hkv = get_global_id(0);
     int b = get_global_id(1);
-    int l = get_global_id(2);
+    int l = get_group_id(2);
+    int id_local = get_local_id(2);
 
     int HQKV = HQ + HK + HK;
 
@@ -115,7 +118,8 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
 
     __global half * cur_k = param_qkv + ((b * L1 + l) * HQKV + HQ + hkv) * S;
     __global half * cur_v = cur_k + HK * S;
-    for(int i = 0; i < S; i++) {
+    __attribute__((opencl_unroll_hint(16)))
+    for(int i = id_local; i < S; i += CONCAT_BLOCK) {
         dst_k[i] = cur_k[i];
         dst_v[i] = cur_v[i];
     }
@@ -649,8 +653,9 @@ class MHA:
         self.use_ref = use_ref
         self.kv_block = kv_block
         self.sub_group_size = 16
+        self.concat_block = 256
         options = f'-D FMACNT=4 -DUNROLL=4 -DS={head_size} -DSGS={self.sub_group_size} -DHQ={head_cnt_q} -DHK={head_cnt_k} \
-                    -DMAX_KV_LEN={max_kv_len} -DKV_BLOCK={self.kv_block}'
+                    -DMAX_KV_LEN={max_kv_len} -DKV_BLOCK={self.kv_block} -DCONCAT_BLOCK={self.concat_block}'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
@@ -701,8 +706,8 @@ class MHA:
         else:
             cl_kernels = self.cl_kernels
             cl_kernels.enqueue("concat",
-                               [self.head_cnt_k, B, L1],
-                               [1, 1, 1],
+                               [self.head_cnt_k, B, L1 * self.concat_block],
+                               [1, 1, self.concat_block],
                                qkv,
                                L1,
                                self.cache_k,
