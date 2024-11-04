@@ -152,9 +152,9 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     __global half* output = param_output + ((b * L1 + query_start) * HQ + h) * S;
 
     // store prev iteration state
-    __local half old_max_attn_score[2][SGS];
-    __local half old_exp_sum[2][SGS];
-    __local half old_output[SGS][S];
+    __local half prev_output_share[SGS][S];
+    __local half prev_max_attn_score_share[SGS];
+    __local half prev_exp_sum_share[SGS];
 
     __local half max_qk_dot_share[SGS][S / SGS];
     __local half qk_dot_share[SGS][kv_block];
@@ -178,6 +178,10 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 q_share[id_local][m] = 0;
             }
         }
+    }
+    if (id_local < SGS) {
+        prev_max_attn_score_share[id_local] = -1e9f;
+        prev_exp_sum_share[id_local] = 0;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     // loop in kv_len, each sg will compute A([16, K]) * B([16, K]')
@@ -317,55 +321,53 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        // reduce across sg
-        float16 max_qk_dot;
-        for (uint m = 0; m < SGS; m++) {
-            max_qk_dot[m] = -1e9f;
+        // each sg will compute a whole row of query
+        for (uint m = id_sg; m < query_len; m += S / SGS) {
+            // reduce across sg
+            float max_qk_dot;
             if (id_sg_local < S / SGS) {
-                max_qk_dot[m] = max_qk_dot_share[m][id_sg_local];
+                max_qk_dot = max_qk_dot_share[m][id_sg_local];
+            } else {
+                max_qk_dot = -1e9f;
             }
-            max_qk_dot[m] = sub_group_reduce_max(max_qk_dot[m]);
-        }
+            max_qk_dot = sub_group_reduce_max(max_qk_dot);
+            float prev_max_attn_score = prev_max_attn_score_share[m];
+            max_qk_dot = fmax(max_qk_dot, prev_max_attn_score);
 
-        // 4 softmax
-        float16 exp_sum = 0;
-        for (uint m = 0; m < query_len; m++) {
-            for (uint n = id_local; n < key_len_in_kv_block; n += S) {
-                float a = native_exp(qk_dot_share[m][n] - max_qk_dot[m]);
-                qk_dot_share[m][n] = a;
-                exp_sum[m] += a;
+            // 4 softmax
+            float exp_sum = 0;
+            for (uint k = id_sg_local; k < key_len_in_kv_block; k += SGS) {
+                float a = native_exp(qk_dot_share[m][k] - max_qk_dot);
+                qk_dot_share[m][k] = a;
+                exp_sum += a;
             }
             // reduce in sg
-            exp_sum[m] = sub_group_reduce_add(exp_sum[m]);
-            if (id_sg_local == 0) {
-                // reuse max_qk_dot_share
-#define exp_sum_share_reuse max_qk_dot_share
-                exp_sum_share_reuse[m][id_sg] = exp_sum[m];
+            exp_sum = sub_group_reduce_add(exp_sum);
+
+            // compensation
+            float pre_exp_sum = prev_exp_sum_share[m];
+            float pre_exp_sum_fixed = pre_exp_sum * native_exp(prev_max_attn_score - max_qk_dot);
+            exp_sum += pre_exp_sum_fixed;
+            float scale_fixed = pre_exp_sum_fixed / exp_sum;
+            float scale = 1.0f / exp_sum;
+            for (uint k = id_sg_local; k < key_len_in_kv_block; k += SGS) {
+                qk_dot_share[m][k] = convert_half(qk_dot_share[m][k] * scale);
             }
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
-        // reduce across sg
-        for (uint m = 0; m < query_len; m++) {
-            exp_sum[m] = 0;
-            if (id_sg_local < S / SGS) {
-                exp_sum[m] = exp_sum_share_reuse[m][id_sg_local];
+            for (uint k = id_sg_local; k < S; k += SGS) {
+                prev_output_share[m][k] = convert_half(prev_output_share[m][k] * scale_fixed);
             }
-            exp_sum[m] = sub_group_reduce_add(exp_sum[m]);
-            float scale = 1.0f / exp_sum[m];
-            for (uint n = id_local; n < key_len_in_kv_block; n += S) {
-                qk_dot_share[m][n] = convert_half(qk_dot_share[m][n] * scale);
-            }
-        }
-        // save state, free regs
-        if (id_local < query_len) {
-            old_max_attn_score[i % 2][id_local] = max_qk_dot[id_local];
-            old_exp_sum[i % 2][id_local] = exp_sum[id_local];
+
+            prev_max_attn_score_share[m] = max_qk_dot;
+            prev_exp_sum_share[m] = exp_sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
         // 5 w*v
         uint value_len_in_kv_block = key_len_in_kv_block;
-        half16 sum = 0;
+        half16 sum;
+        for (uint m = 0; m < query_len; m++) {
+            sum[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS));
+        }
         uint k = 0;
         for (; k + SGS <= value_len_in_kv_block; k += SGS) {
             const uint v_row = key_n_start + k;
@@ -400,35 +402,16 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 }
             }
         }
-
-        // 6 output
         for (uint m = 0; m < query_len; m++) {
-            // need to update sum
-            if (kv_block_num > 1) {
-                if (i > 0) {
-                    float cur_max_attn_score = old_max_attn_score[i % 2][m];
-                    float pre_max_attn_score = old_max_attn_score[1 - i % 2][m];
-                    float cur_exp_sum = old_exp_sum[i % 2][m];
-                    float pre_exp_sum = old_exp_sum[1 - i % 2][m];
-                    float pre_sum = old_output[m][id_local];
-                    float max_attn_score = fmax(cur_max_attn_score, pre_max_attn_score);
-                    float pre_exp_sum_fixed = pre_exp_sum * native_exp(pre_max_attn_score - max_attn_score);
-                    float cur_exp_sum_fixed = cur_exp_sum * native_exp(cur_max_attn_score - max_attn_score);
-                    sum[m] = (pre_sum * pre_exp_sum_fixed + sum[m] * cur_exp_sum_fixed) / (pre_exp_sum_fixed + cur_exp_sum_fixed);
-                    barrier(CLK_LOCAL_MEM_FENCE);
-                    old_max_attn_score[i % 2][m] = max_attn_score;
-                    old_exp_sum[i % 2][m] = (pre_exp_sum_fixed + cur_exp_sum_fixed);
-                }
-                old_output[m][id_local] = sum[m];
-            }
-            // last kv_block, output
-            if (i == kv_block_num - 1) {
+            intel_sub_group_block_write_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS, as_short(sum[m]));
+        }
+        // 6 output
+        if (i == kv_block_num - 1) {
+            for (uint m = 0; m < query_len; m++) {
                 __global half* dst = output + m * HQ * S + id_sg * SGS;
-                half acc = sum[m];
-                intel_sub_group_block_write_us((__global ushort*)dst, as_short(acc));
+                intel_sub_group_block_write_us((__global ushort*)dst, as_short(sum[m]));
             }
         }
-        barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
 
