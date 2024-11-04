@@ -5,4 +5,5 @@ from .linear_w4a import Linear_w4a
 from .linear_w4a_cpu import Linear_w4a_cpu
 from .linear_f16 import Linear_f16
 from .linear_f16b1 import Linear_f16b1
+from .linear_f16xmx import Linear_f16xmx
 from .rms_norm import RMSNorm

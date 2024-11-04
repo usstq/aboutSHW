@@ -357,7 +357,7 @@ struct cl_tensor {
         // manually sync the queue because cl::copy() will be performed
         // asynchronously using [enqueueMapBuffer + cpu-copy].
         cmd_queue.finish();
-        cl::copy(p, p + numel * dt.itemsize(), *p_buff);
+        cl::copy(cmd_queue, p, p + numel * dt.itemsize(), *p_buff);
     }
 
     py::array to_numpy() {
@@ -370,7 +370,7 @@ struct cl_tensor {
         // make sure data is ready
         cmd_queue.finish();
 
-        cl::copy(*p_buff, p, p + numel * dt.itemsize());
+        cl::copy(cmd_queue, *p_buff, p, p + numel * dt.itemsize());
         return ret;
     }
 };
@@ -382,22 +382,17 @@ struct cl_kernels {
     cl::Program Program;
 
     cl_kernels(std::string source, std::string options, std::string dump_dir) : Program(source.c_str()) {
-        auto throw_build_error = [&](const char* ansi_color) {
-            std::stringstream ss;
-            cl_int buildErr = CL_SUCCESS;
-            auto buildInfo = Program.getBuildInfo<CL_PROGRAM_BUILD_LOG>(&buildErr);
-            for (auto& pair : buildInfo)
-                ss << ansi_color << "[BUILD_LOG]:" << pair.second << ANSI_COLOR_RESET << std::endl;
-            throw std::runtime_error(ss.str());
-        };
         cl_int build_error = CL_SUCCESS;
         try {
             build_error = Program.build((options + " -cl-std=CL3.0").c_str());
-        } catch (...) {
-            throw_build_error(ANSI_COLOR_ERROR);
+        } catch (cl::BuildError err) {
+            std::stringstream ss;
+            for (auto& pair : err.getBuildLog()) {
+                ss << "build failed on device: " << pair.first.getInfo<CL_DEVICE_NAME>() << std::endl;
+                ss << ANSI_COLOR_ERROR << pair.second << ANSI_COLOR_RESET << std::endl;
+            }
+            throw std::runtime_error(ss.str());
         }
-        if (build_error != CL_SUCCESS)
-            throw_build_error(ANSI_COLOR_ERROR);
 
         cl::vector<cl::Kernel> kernels;
         if (Program.createKernels(&kernels) != CL_SUCCESS) {
@@ -669,6 +664,8 @@ void CL_CALLBACK NotifyFunction(const char* pErrInfo, const void* pPrivateInfo, 
     }
 };
 
+static bool enable_profile = false;
+
 PYBIND11_MODULE(cl, m) {
     auto selected_platform = select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
 
@@ -688,6 +685,7 @@ PYBIND11_MODULE(cl, m) {
     cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
 
     m.def("profiling", [](bool enable) {
+        enable_profile = enable;
         cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
     });
 
@@ -717,11 +715,13 @@ PYBIND11_MODULE(cl, m) {
         cmd_queue.finish();
         // return all event time-stamps
         std::vector<uint64_t> ret;
-        for (auto& evt : all_events) {
-            ret.emplace_back();
-            auto start = evt.getProfilingInfo<CL_PROFILING_COMMAND_START>();
-            auto end = evt.getProfilingInfo<CL_PROFILING_COMMAND_END>();
-            ret.back() = end - start;
+        if (enable_profile) {
+            for (auto& evt : all_events) {
+                ret.emplace_back();
+                auto start = evt.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+                auto end = evt.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+                ret.back() = end - start;
+            }
         }
         all_events.clear();
         return ret;
