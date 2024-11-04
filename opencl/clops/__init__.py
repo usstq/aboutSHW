@@ -7,3 +7,4 @@ from .linear_f16 import Linear_f16
 from .linear_f16b1 import Linear_f16b1
 from .linear_f16xmx import Linear_f16xmx
 from .rms_norm import RMSNorm
+from .rope import ROPE

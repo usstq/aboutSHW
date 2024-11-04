@@ -11,7 +11,7 @@ class KernelCache:
         if key in self.cache:
             return self.cache[key]
         
-        self.cache[key] = cl.kernels(cl_kernel_sources, options)
+        self.cache[key] = cl.kernels(cl_kernel_sources, options, dump)
         return self.cache[key]
 
 kernel_cache = KernelCache()
