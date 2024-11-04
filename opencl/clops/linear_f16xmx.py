@@ -174,17 +174,29 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
 #endif
         __local half * scratch = buffA + get_sub_group_id() * 8 * 8 * 2;
         __local half * src = (__local half *)(scratch + channel * 8);
-
+#if COMBINE_GATE_UP == 1
+        N = N / 2;
+        n = n / 2;
+#endif
         for(int i = 0; i < 4; i++) {
             int m = m0 + channel + i*8;
             if (m >= M) m = M - 1; //# no overflow
-            __global half * dst = (__global half *)(C +  m*N + n);
             intel_sub_group_block_write_us8(scratch      , as_ushort8(convert_half8(c[i][0])));
             intel_sub_group_block_write_us8(scratch + 8*8, as_ushort8(convert_half8(c[i][1])));
             half8 v00 = *(__local half8 *)(src);
             half8 v01 = *(__local half8 *)(src + 8*8);
+#if COMBINE_GATE_UP == 1
+            // 8x8 v00 from gate
+            // 8x8 v01 from up
+            // silu(gate_proj) * up_proj
+            __global half * dst = (__global half *)(C +  m*N + n);
+            v00 = v00 / ((half8)(1.0f) + native_exp(-v00)) * v01;
+            *(__global half8 *)dst = v00;
+#else
+            __global half * dst = (__global half *)(C +  m*N + n);
             *(__global half8 *)dst = v00;
             *(__global half8 *)(dst + 8) = v01;
+#endif
         }
     }
 }
@@ -207,7 +219,23 @@ __kernel void Matmul_reference(__global half * A, __global half * B, __global fl
     C[m*N + n] = sum;
 }
 
+__kernel void XMX_interleave(__global half * src0, __global half * src1, __global half * dst, int N, int K) {
+    int k = get_global_id(0);
+    int n = get_global_id(1);
+    
+    int n8g = n / 8;
+    int n8r = n % 8;
+    
+    dst[(n8g*16 + n8r) * K     + k] = src0[n*K + k];
+    dst[(n8g*16 + n8r + 8) * K + k] = src1[n*K + k];
+}
+
 '''
+
+from . import cl
+import numpy as np
+from .utils import *
+
 #================ Hyper parameter ============================
 WG_SGS = 8  # sub-group size (must be 8 for dpasw)
 WG_N = 8    # max 16
@@ -249,24 +277,35 @@ if KDEBUG:
     print(f"num of registers to copy B (per-sub-group per-BK-step) = {num_reg_slm_copyB}")
     print(f"============================{Colors.END}")
 
-from . import cl
-import numpy as np
-from .utils import *
-
-
 class Linear_f16xmx:
-    def __init__(self, weight, bias):
+    # if weight_up is provided, gate/up combination & silu/mul is fused
+    def __init__(self, weight, bias, weight_up = None):
         self.N, self.K = weight.shape # weight: [N, K]
         self.bias = to_cl(bias)
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
         assert self.K % BK == 0, f"'K' dimension {self.K} is not multiple of BK {BK}"
 
+        if weight_up is not None:
+            self.COMBINE_GATE_UP = 1
+        else:
+            self.COMBINE_GATE_UP = 0
         self.cl_kernels = kernel_cache(cl_kernel_sources,
-                                       options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG}")
+                                       options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG} -D COMBINE_GATE_UP={self.COMBINE_GATE_UP}")
 
-        self.weight_raw = to_cl(weight.half())
-        self.weight = to_cl(weight.half())
-        self.cl_kernels.enqueue("XMX_prepackB", [WG_SGS, self.N//SG_N, BM//SG_M], [WG_SGS, WG_N, WG_M], self.weight_raw, self.weight, self.N, self.K)
+        if self.COMBINE_GATE_UP:
+            # interleaving gate & up proj_matrix
+            assert weight.shape == weight_up.shape
+            weight_raw_gate = to_cl(weight.half())
+            weight_raw_up = to_cl(weight_up.half())
+            weight_raw_interleaved = cl.tensor([2*self.N, self.K], np.dtype(np.float16))
+            self.cl_kernels.enqueue("XMX_interleave", [self.K, self.N], [1,1], weight_raw_gate, weight_raw_up, weight_raw_interleaved, self.N, self.K)
+
+            self.weight = cl.tensor([2*self.N, self.K], np.dtype(np.float16))
+            self.cl_kernels.enqueue("XMX_prepackB", [WG_SGS, 2*self.N//SG_N, BM//SG_M], [WG_SGS, WG_N, WG_M], weight_raw_interleaved, self.weight, 2*self.N, self.K)
+        else:
+            weight_raw = to_cl(weight.half())
+            self.weight = to_cl(weight.half())
+            self.cl_kernels.enqueue("XMX_prepackB", [WG_SGS, self.N//SG_N, BM//SG_M], [WG_SGS, WG_N, WG_M], weight_raw, self.weight, self.N, self.K)
 
     def __call__(self, input):
         # shape inference
@@ -278,9 +317,16 @@ class Linear_f16xmx:
         M = input.numel // self.K
         M_padded = (M + (BM - 1))//BM * BM
 
-        self.cl_kernels.enqueue("XMX_tput", [WG_SGS, self.N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], input, self.weight, self.bias, output, M, self.K, self.N)
+        N = self.N
+        K = self.K
+        if self.COMBINE_GATE_UP:
+            N *= 2
+        assert N % BN == 0, f"'N' dimension {N} is not multiple of BM {BN}"
+        assert K % BK == 0, f"'K' dimension {K} is not multiple of BK {BK}"
+
+        self.cl_kernels.enqueue("XMX_tput", [WG_SGS, N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], input, self.weight, self.bias, output, M, K, N)
         #self.cl_kernels.enqueue("Matmul_reference", [self.N, M], [8, 16], input, self.weight_raw, self.bias, output, M, self.K, self.N)
-        
+
         return output
 
 

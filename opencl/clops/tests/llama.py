@@ -76,8 +76,17 @@ class LlamaLikeModel:
 
             d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
-            d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
+            
+            if Linear == clops.Linear_f16xmx:
+                assert l.mlp.gate_proj.bias is None
+                assert l.mlp.up_proj.bias is None
+                d.gate_up_proj = Linear(weight=l.mlp.gate_proj.weight, bias=None,
+                                        weight_up = l.mlp.up_proj.weight)
+            else:
+                d.gate_up_proj = None
+                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
+                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
+            
             d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.id = len(self.layers)
             d.is_last = False
@@ -111,10 +120,13 @@ class LlamaLikeModel:
         post_attention_layernorm = layer.post_attention_layernorm(attn_output)
 
         def mlp(states):
-            gate_proj = layer.gate_proj(states)
-            up_proj = layer.up_proj(states)
-            gate_proj.iSilu()
-            gate_proj *= up_proj
+            if layer.gate_up_proj:
+                gate_proj = layer.gate_up_proj(states)
+            else:
+                gate_proj = layer.gate_proj(states)
+                up_proj = layer.up_proj(states)
+                gate_proj.iSilu()
+                gate_proj *= up_proj
             down_proj = layer.down_proj(gate_proj)
             return down_proj
 
