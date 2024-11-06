@@ -455,17 +455,18 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     // 2, compute Q*K(one token) dot product in each sgw, S/SGS tokens at the same time in wg
-    __local float qk_dot[KV_BLOCK];
+    __local half qk_dot[KV_BLOCK];
     for (int i = id_sg; i < cur_kv_len; i += S / SGS) {
         __global half* pk = cache_k + i * S;
-        float sum = 0;
+        half sum = 0;
+        __attribute__((opencl_unroll_hint))
         for (int j = 0; j < S; j += SGS) {
             // intel_sub_group_block_read_us cannot take __local pointer according to:
             // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
-            //   half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
-            half q_val = query[j + id_sg_local];
+            half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
+            //half q_val = query[j + id_sg_local];
             half k_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pk + j));
-            sum += q_val * k_val;
+            sum = fma(q_val, k_val, sum);
         }
         sum = sub_group_reduce_add(sum);
         if (id_sg_local == 0) {
@@ -477,10 +478,17 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
 
     // 3, compute softmax
     // 3.1 max(qk_dot)
-    __local float max_qk_dot_share[S / SGS];
-    float max_qk_dot = -1e9f;
-    for (int i = id_local; i < cur_kv_len; i += S) {
-        max_qk_dot = fmax(max_qk_dot, qk_dot[i]);
+    __local half max_qk_dot_share[S / SGS];
+    half max_qk_dot = -1e9f;
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            max_qk_dot = fmax(max_qk_dot, qk_dot[i]);
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            max_qk_dot = fmax(max_qk_dot, qk_dot[i]);
+        }
     }
     // reduce in sg
     max_qk_dot = sub_group_reduce_max(max_qk_dot);
@@ -494,11 +502,20 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     }
     max_qk_dot = sub_group_reduce_max(max_qk_dot);
     // 3.2 compute: exp(attn_score[p] - max_attn_score)
-    float exp_sum = 0;
-    for (int i = id_local; i < cur_kv_len; i += S) {
-        float exp_val = native_exp(qk_dot[i] - max_qk_dot);
-        exp_sum += exp_val;
-        qk_dot[i] = exp_val;
+    half exp_sum = 0;
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            half exp_val = native_exp(qk_dot[i] - max_qk_dot);
+            exp_sum += exp_val;
+            qk_dot[i] = exp_val;
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            half exp_val = native_exp(qk_dot[i] - max_qk_dot);
+            exp_sum += exp_val;
+            qk_dot[i] = exp_val;
+        }
     }
     // reduce in sg
     exp_sum = sub_group_reduce_add(exp_sum);
@@ -520,13 +537,20 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     // 3.3 compute: softmax_scale = 1.0f / softmax_scale; half scale = attn_score[p] * softmax_scale;
     float scale = 1.0f / exp_sum;
     __local half weights[KV_BLOCK];
-    for (int i = id_local; i < cur_kv_len; i += S) {
-        weights[i] = convert_half(qk_dot[i] * scale);
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            weights[i] = convert_half(qk_dot[i] * scale);
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            weights[i] = convert_half(qk_dot[i] * scale);
+        }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     // 4 compute W*V(one token) dot product in each wg, SGS tokens at the same time in wg
-    float sum = 0;
+    half sum = 0;
     for (int i = 0; i < cur_kv_len; i += SGS) {
         // intel_sub_group_block_read_us cannot take __local pointer according to:
         // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
@@ -534,6 +558,7 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
         half weight = weights[i + id_sg_local];
         __global half* pv = cache_v + i * S + id_sg * SGS;
         if (i + SGS <= cur_kv_len) {
+            __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SGS; j++) {
                 half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
                 half w = as_half(intel_sub_group_broadcast(as_ushort(weight), j));
@@ -637,7 +662,7 @@ __kernel void MHAReduce(__global half * part_output,       // [B, 1, part_num, H
 '''
 
 class MHA:
-    def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len, use_ref=False, kv_block=256):
+    def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len, use_ref=False, kv_block=64):
         '''
             kv-cache is allocated internally here
         '''
@@ -683,8 +708,8 @@ class MHA:
         # print(self.head_size_scaler, L0, qkv.shape, self.head_cnt_q, self.head_cnt_k, self.S,  self.head_group_size, self.cache_k.shape, self.attn_score.shape)
 
         # attn_score is just a temp/scratch cl-buffer
-        attn_score = cl.tensor([B, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
         if self.use_ref:
+            attn_score = cl.tensor([B, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
             self.cl_kernels_ref.enqueue("MHA",
                                    [self.head_cnt_q, B],
                                    [1, 1],
@@ -779,8 +804,8 @@ if __name__ == "__main__":
         attention_mask = torch.randn([B, KV_LEN], dtype=torch.float32)
         # [B, L1, (Hq + Hk + Hv) * S)]
         qkv = utils.to_cl(torch.randn([B, L1, (H + HK + HK) * S], dtype=torch.float16))
-        result_ref1 = ref(qkv, attention_mask)
         result_opt1 = opt(qkv, attention_mask)
+        result_ref1 = ref(qkv, attention_mask)
         result_ref1_cpu = result_ref1.numpy()
         result_opt1_cpu = result_opt1.numpy()
         if not np.allclose(result_ref1_cpu, result_opt1_cpu, atol=0.02, rtol=0.02):
