@@ -25,6 +25,10 @@ __kernel void XMX_prepackB(__global half * Bsrc, __global half * Bdst, int N, in
     }
 }
 
+//# Register resource needs to be carefully used since C matrix is resident in accumulator register only
+//#   -  avoid using array since compiler would prefer to spill them first
+//#   -  carefully choose which variable lives in global scope to limit register allocation life-cycle
+
 __attribute__((intel_reqd_sub_group_size(WG_SGS)))
 __kernel void XMX_tput(__global half * A, __global half * B, __global float * bias, __global half * C, int M, int K, int N) {
     //# groups/local : [1, N/BN, M/BM] / [WG_SGS, WG_N, WG_M]
@@ -34,25 +38,58 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
     __local half buffA[BM * BK];
     __local half buffB[BN * BK];
 
-    int sg_c = get_local_id(0); //# sub-group local/channel id
-    int sg_n = get_local_id(1); //# sub-group id in 'N' dim
-    int sg_m = get_local_id(2); //# sub-group id in 'M' dim
-    int sg_id = get_sub_group_id();
+    //# accumulators 4 x 2 register tile (each reg is 8x8 float)
+    float8 c00 = 0.0f;
+    float8 c10 = 0.0f;
+    float8 c20 = 0.0f;
+    float8 c30 = 0.0f;
 
+    float8 c01 = 0.0f;
+    float8 c11 = 0.0f;
+    float8 c21 = 0.0f;
+    float8 c31 = 0.0f;
 
-    //# accumulator (32x16)
-    float8 c[4][2] = {0.0f};
+    __local half * pbuffA;
+    __local half * pbuffB;
+    const __local uint * pA;
+    const __local uint * pB;
+
     {
+        int sg_c = get_local_id(0); //# sub-group local/channel id
+        int sg_n = get_local_id(1); //# sub-group id in 'N' dim
+        int sg_m = get_local_id(2); //# sub-group id in 'M' dim
+        int sg_id = get_sub_group_id();
+
         int wg_n = get_group_id(1);
         int wg_m = get_group_id(2);
         //# A: [M, K]
         //# B: [N, K]
-        B += wg_n * BN * K;
+#if 1
+        B += wg_n * BN * K + (sg_n*16*BK) + sg_m*(16*16);
+#else
+        B += wg_n * BN * K + (sg_n * 16 + sg_c)*K + x*16;
+#endif
+        pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
+        
+        int x = (sg_n & 1);
+        int y = (sg_n >> 1);
+        int m = wg_m * BM + sg_m * 32 + y*8 + sg_c;
+        if (m >= M) m = M - 1; //# avoid overflow
+        A += m * K + x*32;
+        pbuffA = buffA + (sg_m*32*BK) + (y + x*8)*(8*16) + sg_c*16;
+
+#if USE_DPASW
+        pA = (__local uint *)(buffA + (sg_m * 32 * BK) + (sg_id & 1) * (4*16));
+#elif USE_DPAS
+        pA = (__local uint *)(buffA + (sg_m * 32 * BK));
+#endif
+        pB = (const __local uint *)(buffB + (sg_n * 16) * BK);
     }
-    
+
 
     //# outer loop in 'K' dim
     for(int k0 = 0; k0 < K; k0 += BK) {
+        
     //# commented to test performance of [SLM + dpasw] only
     #if 1
         //# load & pack A into buffA:
@@ -62,17 +99,11 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
         //#
         {
             //# sg_n (0~7) => [y,x]=[(0~3), (0~1)]
-            int wg_m = get_group_id(2);
-            int x = (sg_n & 1);
-            int y = (sg_n >> 1);
-            int m = wg_m * BM + sg_m * 32 + y*8 + sg_c;
-            if (m >= M) m = M - 1; //# avoid overflow
-            __global half * src = A + m * K + k0 + x*32;
+            __global half * src = A + k0;
             uint8 blk0 = *(__global uint8 *)(src);
             uint8 blk1 = *(__global uint8 *)(src + 16);
-            __local half * dst = buffA + (sg_m*32*BK) + (y + x*8)*(8*16) + sg_c*16;
-            *(__local uint8 *)(dst) = blk0;
-            *(__local uint8 *)(dst + 4*8*16) = blk1;
+            *(__local uint8 *)(pbuffA) = blk0;
+            *(__local uint8 *)(pbuffA + 4*8*16) = blk1;
         }
 
         //# load sub-slice B (256*BK) into buffB : (256*BK)/(16*8) = 128 half (8 x regs)
@@ -80,39 +111,35 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
         {
             #if 1
                 //# given B is prepacked, sub-group block read is faster
-                __global half * src = B + k0*BN + (sg_n*16*BK) + sg_m*(16*16);
+                __global half * src = B + k0*BN;
                 uint8 blk0 = intel_sub_group_block_read8((__global uint *)(src));
                 uint8 blk1 = intel_sub_group_block_read8((__global uint *)(src + 8*16));
-                __local half * dst = buffB + (sg_n*16*BK) + sg_m*(16*16);
-                intel_sub_group_block_write8((__local uint*)(dst), blk0);
-                intel_sub_group_block_write8((__local uint*)(dst + 8*16), blk1);
+                intel_sub_group_block_write8((__local uint*)(pbuffB), blk0);
+                intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), blk1);
             #else
-                int x = sg_m;
-                __global half * src = B + (sg_n * 16 + sg_c)*K + k0 + x*16;
+                __global half * src = B + k0;
                 uint8 blk0 = *(__global uint8 *)(src);
                 uint8 blk1 = *(__global uint8 *)(src + 8*K);
-                __local half * dst = buffB + (sg_n*16*BK) + sg_m*(16*16);
-                intel_sub_group_block_write8((__local uint*)(dst), blk0);
-                intel_sub_group_block_write8((__local uint*)(dst + 8*16), blk1);
+                intel_sub_group_block_write8((__local uint*)(pbuffB), blk0);
+                intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), blk1);
             #endif
         }
     #endif
+    
         barrier(CLK_LOCAL_MEM_FENCE);
+        
     #if 1
         //# offset into buff A & B for each sub-group
         //# sub-group 8-rows, 16-cols: each of size 32x16
         //# both are blocked layout:
         //#        each SG in a row share 32xBK buffA slice
         //#        each SG in a col share 16xBK buffB slice
-        const __local uint * pA = (const __local uint *)(buffA + (sg_m * 32 * BK) + (sg_id & 1) * (4*16));
-
-        //# each sg_n contains two int8x8(half8x16) (B00,B01,B10,B11,....,)
-        const __local uint * pB = (const __local uint *)(buffB + (sg_n * 16) * BK);
 
         //# unroll would cause register exhaast & spill
         __attribute__((opencl_unroll_hint(1)))
         for(int k1 = 0; k1 < BK/16; k1 ++) {
             //# limit scopes of temp regs to reuse-registers
+#if USE_DPASW
             int4 a0 = as_int4(intel_sub_group_block_read4(pA + 0*8*8));
             int4 a1 = as_int4(intel_sub_group_block_read4(pA + 1*8*8));
             int4 a2 = as_int4(intel_sub_group_block_read4(pA + 2*8*8));
@@ -122,19 +149,41 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
             int8 b0 = as_int8(intel_sub_group_block_read8(pB + 0*8*8));
             int8 b1 = as_int8(intel_sub_group_block_read8(pB + 1*8*8));
 
-            c[0][0] = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c[0][0]);
-            c[1][0] = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b0, c[1][0]);
-            c[2][0] = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b0, c[2][0]);
-            c[3][0] = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b0, c[3][0]);
+            c00 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c00);
+            c10 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b0, c10);
+            c20 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b0, c20);
+            c30 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b0, c30);
 
-            c[0][1] = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b1, c[0][1]);
-            c[1][1] = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b1, c[1][1]);
-            c[2][1] = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b1, c[2][1]);
-            c[3][1] = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b1, c[3][1]);
+            c01 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b1, c01);
+            c11 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b1, c11);
+            c21 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b1, c21);
+            c31 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b1, c31);
+#elif USE_DPAS
+            int8 a0 = as_int8(intel_sub_group_block_read8(pA + 0*8*8));
+            int8 a1 = as_int8(intel_sub_group_block_read8(pA + 1*8*8));
+            int8 a2 = as_int8(intel_sub_group_block_read8(pA + 2*8*8));
+            int8 a3 = as_int8(intel_sub_group_block_read8(pA + 3*8*8));
 
+            //# scatter load is no good here, SLM will be in best tput using blocked sub-group read
+            int8 b0 = as_int8(intel_sub_group_block_read8(pB + 0*8*8));
+            int8 b1 = as_int8(intel_sub_group_block_read8(pB + 1*8*8));
+
+            c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
+            c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
+            c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
+            c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
+
+            c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
+            c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
+            c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
+            c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+#endif
             pA += 4*8*8;
             pB += 2*8*8;
         }
+        //# rewind pA & pB after loop to save registers
+        pA -= BK/16*4*8*8;
+        pB -= BK/16*2*8*8;
     #endif
         //# need to sync again at the end, to avoid faster threads
         //# fetching the next block into the cache before slower threads are done
@@ -143,61 +192,62 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
 
     //# store sub-C
     {
+        int sg_c = get_local_id(0); //# sub-group local/channel id
+        int sg_n = get_local_id(1); //# sub-group id in 'N' dim
+        int sg_m = get_local_id(2); //# sub-group id in 'M' dim
+        int sg_id = get_sub_group_id();
+        
         int n = get_group_id(1)*BN + sg_n*16;
-        int m0 = get_group_id(2)*BM + sg_m*32;
+        int m = get_group_id(2)*BM + sg_m*32;
         int channel = get_sub_group_local_id();
 
         if (bias) {
             float8 bias0 = convert_float8((half8)(bias[n + channel]));
             float8 bias1 = convert_float8((half8)(bias[n + 8 + channel]));
-            for(int i = 0; i < 4; i++) {
-                c[i][0] += bias0;
-                c[i][1] += bias1;
-            }
+            c00 += bias0; c01 += bias1;
+            c10 += bias0; c11 += bias1;
+            c20 += bias0; c21 += bias1;
+            c30 += bias0; c31 += bias1;
         }
 
         //# transpose with the help of SLM : using sub-group/scatter load/store
         //# store to SLM in compact format
         //# scatter reads & scatter write to change strides from 8(compat) to N(strided)
-#if KDEBUG == 1
-        if(m == 32 && n == 0 && channel < 8) {
-            half8 v00 = convert_half8(c[0][0]);
-            printf("]]]]] channel %d:  %f\n", channel, v00.s0);
-            //printf("]]]]] %f\n", v00.s1);
-            //printf("]]]]] %f\n", v00.s2);
-            //printf("]]]]] %f\n", v00.s3);
-            //printf("]]]]] %f\n", v00.s4);
-            //printf("]]]]] %f\n", v00.s5);
-            //printf("]]]]] %f\n", v00.s6);
-            //printf("]]]]] %f\n", v00.s7);
-        }
-#endif
         __local half * scratch = buffA + get_sub_group_id() * 8 * 8 * 2;
         __local half * src = (__local half *)(scratch + channel * 8);
 #if COMBINE_GATE_UP == 1
         N = N / 2;
         n = n / 2;
 #endif
-        for(int i = 0; i < 4; i++) {
-            int m = m0 + channel + i*8;
-            if (m >= M) m = M - 1; //# no overflow
-            intel_sub_group_block_write_us8(scratch      , as_ushort8(convert_half8(c[i][0])));
-            intel_sub_group_block_write_us8(scratch + 8*8, as_ushort8(convert_half8(c[i][1])));
-            half8 v00 = *(__local half8 *)(src);
-            half8 v01 = *(__local half8 *)(src + 8*8);
+
 #if COMBINE_GATE_UP == 1
-            // 8x8 v00 from gate
-            // 8x8 v01 from up
-            // silu(gate_proj) * up_proj
-            __global half * dst = (__global half *)(C +  m*N + n);
-            v00 = v00 / ((half8)(1.0f) + native_exp(-v00)) * v01;
-            *(__global half8 *)dst = v00;
-#else
-            __global half * dst = (__global half *)(C +  m*N + n);
-            *(__global half8 *)dst = v00;
-            *(__global half8 *)(dst + 8) = v01;
-#endif
+#define STORE_C_REG(creg0, creg1) { \
+            if (m >= M) m = M - 1; /*# avoid overflow*/ \
+            intel_sub_group_block_write_us8(scratch      , as_ushort8(convert_half8(creg0))); \
+            intel_sub_group_block_write_us8(scratch + 8*8, as_ushort8(convert_half8(creg1))); \
+            half8 v00 = *(__local half8 *)(src);                                            \
+            half8 v01 = *(__local half8 *)(src + 8*8);                                      \
+            __global half * dst = (__global half *)(C +  m*N + n);                          \
+            v00 = v00 / ((half8)(1.0f) + native_exp(-v00)) * v01;  /* silu(gate_proj) * up_proj */  \
+            *(__global half8 *)dst = v00;                                                   \
         }
+#else
+#define STORE_C_REG(creg0, creg1) { \
+            if (m >= M) m = M - 1; /*# avoid overflow*/ \
+            intel_sub_group_block_write_us8(scratch      , as_ushort8(convert_half8(creg0))); \
+            intel_sub_group_block_write_us8(scratch + 8*8, as_ushort8(convert_half8(creg1))); \
+            half8 v00 = *(__local half8 *)(src);                                            \
+            half8 v01 = *(__local half8 *)(src + 8*8);                                      \
+            __global half * dst = (__global half *)(C +  m*N + n);                          \
+            *(__global half8 *)dst = v00;                                                   \
+            *(__global half8 *)(dst + 8) = v01;                                             \
+        }
+#endif
+        m += channel;
+        STORE_C_REG(c00, c01); m += 8;
+        STORE_C_REG(c10, c11); m += 8;
+        STORE_C_REG(c20, c21); m += 8;
+        STORE_C_REG(c30, c31);
     }
 }
 
@@ -257,14 +307,14 @@ assert SLM_use <= SLM_size, f"local memory overflow: ({BM}*{BK} + {BN}*{BK})*2 =
 num_reg_slm_copyA = SG_M * BK/WG_N/16 # BK is number fo half elements, 16 is half elements per register
 num_reg_slm_copyB = SG_N * BK/WG_M/16 # BK is number fo half elements, 16 is half elements per register
 
-assert num_reg_slm_copyA == int(num_reg_slm_copyA), f"num_reg_slm_copyA {num_reg_slm_copyA} is not integer"
-assert num_reg_slm_copyB == int(num_reg_slm_copyB), f"num_reg_slm_copyB {num_reg_slm_copyB} is not integer"
+#assert num_reg_slm_copyA == int(num_reg_slm_copyA), f"num_reg_slm_copyA {num_reg_slm_copyA} is not integer"
+#assert num_reg_slm_copyB == int(num_reg_slm_copyB), f"num_reg_slm_copyB {num_reg_slm_copyB} is not integer"
 
 assert (BK//16 * SG_M)
 
 KDEBUG = 0
 
-if KDEBUG:
+if False:
     print(f"{Colors.YELLOW}===== XMX hyper-param ===================")
     print(f"BM = {BM} WG_M = {WG_M}")
     print(f"BN = {BN} WG_N = {WG_N}")
@@ -273,9 +323,9 @@ if KDEBUG:
     print(f"WG HW threads = {WG_N*WG_M*100/(16*8):.1f} %  {WG_N}x{WG_M} = {WG_N*WG_M} ")
     print(f"SLM usage     = {SLM_use*100/SLM_size:.1f} %  {SLM_use} bytes(SLM:A {BM*BK*2} + SLM:B {BN*BK*2})")
 
-    print(f"num of registers to copy A (per-sub-group per-BK-step) = {num_reg_slm_copyA}")
-    print(f"num of registers to copy B (per-sub-group per-BK-step) = {num_reg_slm_copyB}")
-    print(f"============================{Colors.END}")
+print(f"num of registers to copy A (per-sub-group per-BK-step) = {num_reg_slm_copyA}")
+print(f"num of registers to copy B (per-sub-group per-BK-step) = {num_reg_slm_copyB}")
+print(f"============================{Colors.END}")
 
 class Linear_f16xmx:
     # if weight_up is provided, gate/up combination & silu/mul is fused
@@ -285,12 +335,18 @@ class Linear_f16xmx:
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
         assert self.K % BK == 0, f"'K' dimension {self.K} is not multiple of BK {BK}"
 
+        dinfo = cl.dev_info()
+        USE_DPAS = int('cl_intel_subgroup_matrix_multiply_accumulate' in dinfo['CL_DEVICE_EXTENSIONS'])
+        USE_DPASW = int('cl_intel_subgroup_split_matrix_multiply_accumulate' in dinfo['CL_DEVICE_EXTENSIONS'])
+
+        assert USE_DPAS or USE_DPASW, f"no dpas or dpasw instructions on target device : {dinfo['CL_DEVICE_NAME']}"
+
         if weight_up is not None:
             self.COMBINE_GATE_UP = 1
         else:
             self.COMBINE_GATE_UP = 0
         self.cl_kernels = kernel_cache(cl_kernel_sources,
-                                       options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG} -D COMBINE_GATE_UP={self.COMBINE_GATE_UP}")
+                                       options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG} -D COMBINE_GATE_UP={self.COMBINE_GATE_UP} -D USE_DPASW={USE_DPASW} -D USE_DPAS={USE_DPAS}")
 
         if self.COMBINE_GATE_UP:
             # interleaving gate & up proj_matrix
@@ -340,9 +396,9 @@ def test_mm(M, K, N, compare_ref = False, REPEATE = 2):
     total_sub_groups = total_work_groups * WG_M * WG_N
     print(f"{Colors.YELLOW}============================")
     print(f"M = {M}")
-    print(f"M_padded = {M_padded} = {M_padded//BM} x BM")
-    print(f"N = {N} = {N//BN} x BN")
-    print(f"K = {K} = {K//BK} x BK")
+    print(f"M_padded = {M_padded} = {M_padded/BM:.2f} x BM")
+    print(f"N = {N} = {N/BN:.2f} x BN")
+    print(f"K = {K} = {K/BK:.2f} x BK")
     print(f"total_work_groups = {total_work_groups}")
     print(f"total_sub_groups = {total_sub_groups}")
     total_eus_threads = 512 * 8
@@ -355,8 +411,14 @@ def test_mm(M, K, N, compare_ref = False, REPEATE = 2):
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
     bias = np.random.randint(-vRANGE, vRANGE+1, [N]).astype(np.float16)
+
+    dinfo = cl.dev_info()
+    USE_DPAS = int('cl_intel_subgroup_matrix_multiply_accumulate' in dinfo['CL_DEVICE_EXTENSIONS'])
+    USE_DPASW = int('cl_intel_subgroup_split_matrix_multiply_accumulate' in dinfo['CL_DEVICE_EXTENSIONS'])
+
+    assert USE_DPAS or USE_DPASW, f"no dpas or dpasw instructions on target device : {dinfo['CL_DEVICE_NAME']}"
     k = kernel_cache(cl_kernel_sources,
-                     options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG}")
+                     options=f"-DBM={BM} -DBN={BN} -DBK={BK} -D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} -D KDEBUG={KDEBUG} -D COMBINE_GATE_UP={0} -D USE_DPASW={USE_DPASW} -D USE_DPAS={USE_DPAS}")
 
     if KDEBUG:
         for ni in range(8):
@@ -411,10 +473,10 @@ def test_mm(M, K, N, compare_ref = False, REPEATE = 2):
 if __name__ == "__main__":
     import sys
     cl.profiling(True)
-    batch_seq = 1
-    test_mm(M=128, K=896, N=151936, compare_ref =True, REPEATE = 1)
+    batch_seq = 16*1024
+    #test_mm(M=128, K=896, N=151936, compare_ref =True, REPEATE = 1)
     test_mm(M=batch_seq, K=896, N=1152, compare_ref =True, REPEATE = 10)
-    test_mm(M=batch_seq, K=896, N=896, compare_ref =True, REPEATE = 10)
-    test_mm(M=batch_seq, K=896, N=4864, compare_ref =True, REPEATE = 10)
-    test_mm(M=batch_seq, K=4864, N=896, compare_ref =True, REPEATE = 10)
+    #test_mm(M=batch_seq, K=896, N=896, compare_ref =True, REPEATE = 10)
+    #test_mm(M=batch_seq, K=896, N=4864, compare_ref =True, REPEATE = 10)
+    #test_mm(M=batch_seq, K=4864, N=896, compare_ref =True, REPEATE = 10)
 

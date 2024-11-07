@@ -178,6 +178,7 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
         std::cout << "Error setting default platform.\n";
     }
     std::cout << "platform selected: " << plat.getInfo<CL_PLATFORM_VERSION>() << "; " << plat.getInfo<CL_PLATFORM_NAME>() << std::endl;
+    std::cout << "  device selected: " << cl::Device::getDefault().getInfo<CL_DEVICE_NAME>() << std::endl;
     return newP;
 }
 
@@ -389,7 +390,9 @@ struct cl_kernels {
             std::stringstream ss;
             for (auto& pair : err.getBuildLog()) {
                 ss << "build failed on device: " << pair.first.getInfo<CL_DEVICE_NAME>() << std::endl;
-                ss << ANSI_COLOR_ERROR << pair.second << ANSI_COLOR_RESET << std::endl;
+                ss << "build options: " << options << std::endl;
+                ss << ANSI_COLOR_ERROR << err.message << std::endl;
+                ss << pair.second << ANSI_COLOR_RESET << std::endl;
             }
             throw std::runtime_error(ss.str());
         }
@@ -709,6 +712,17 @@ PYBIND11_MODULE(cl, m) {
 
     m.def("flush", []() {
         cmd_queue.flush();
+    });
+
+    m.def("dev_info", []() {
+        py::dict result;
+        const auto& device = cl::Device::getDefault();
+        result["CL_DEVICE_NAME"] = device.getInfo<CL_DEVICE_NAME>();
+        result["CL_DEVICE_EXTENSIONS"] = device.getInfo<CL_DEVICE_EXTENSIONS>();
+        result["CL_DEVICE_MAX_COMPUTE_UNITS"] = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
+        result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = device.getInfo<CL_DEVICE_MAX_CLOCK_FREQUENCY>();
+        result["CL_DEVICE_LOCAL_MEM_SIZE"] = device.getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+        return result;
     });
 
     m.def("finish", []() {
