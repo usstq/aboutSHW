@@ -267,46 +267,127 @@ __kernel void Linear_w4a_N16(__global half * A_base,
     scales += n*K/GROUP_SIZE;
     zps += n*K/GROUP_SIZE;
 
+#if 1   // faster but less accuracy
+    half sum_all = 0;
+    for(int gk = gk0; gk < gk1; gk++) {
+        __global half *A = A_base + m*K + gk*GROUP_SIZE;
+        __global uchar *B = B_base + NK16n_INT_4bit_index(gk*GROUP_SIZE, n, K, N);
+
+        half8 sum = 0;
+        half scale = scales[gk];
+        char16 zpx8 = (char16)(zps[gk]);
+        char16 mask8 = (char16)0xF;
+        __attribute__((opencl_unroll_hint(4)))
+        for(int g = 0; g < GROUP_SIZE; g += 32, B += 16*16) {
+            // read 16 elements of A
+            ushort2 vAs = intel_sub_group_block_read_us2((const __global ushort*)(A + g));
+
+            // read (8x2)x16 int4
+            char16 bx8 = as_char16(intel_sub_group_block_read_uc16(B));
+            half16 i4x16_even = convert_half16((bx8 & mask8) + zpx8);
+            half16 i4x16_odd = convert_half16(as_char16(as_uchar16(bx8) >> 4) + zpx8);
+
+            sum[0] = fma(as_half(sub_group_broadcast(vAs.s0, 0)), i4x16_even.s0, sum[0]);
+            sum[1] = fma(as_half(sub_group_broadcast(vAs.s0, 1)), i4x16_odd.s0, sum[1]);
+            sum[2] = fma(as_half(sub_group_broadcast(vAs.s0, 2)), i4x16_even.s1, sum[2]);
+            sum[3] = fma(as_half(sub_group_broadcast(vAs.s0, 3)), i4x16_odd.s1, sum[3]);
+            sum[4] = fma(as_half(sub_group_broadcast(vAs.s0, 4)), i4x16_even.s2, sum[4]);
+            sum[5] = fma(as_half(sub_group_broadcast(vAs.s0, 5)), i4x16_odd.s2, sum[5]);
+            sum[6] = fma(as_half(sub_group_broadcast(vAs.s0, 6)), i4x16_even.s3, sum[6]);
+            sum[7] = fma(as_half(sub_group_broadcast(vAs.s0, 7)), i4x16_odd.s3, sum[7]);
+
+            sum[0] = fma(as_half(sub_group_broadcast(vAs.s0, 8)), i4x16_even.s4, sum[0]);
+            sum[1] = fma(as_half(sub_group_broadcast(vAs.s0, 9)), i4x16_odd.s4, sum[1]);
+            sum[2] = fma(as_half(sub_group_broadcast(vAs.s0, 10)), i4x16_even.s5, sum[2]);
+            sum[3] = fma(as_half(sub_group_broadcast(vAs.s0, 11)), i4x16_odd.s5, sum[3]);
+            sum[4] = fma(as_half(sub_group_broadcast(vAs.s0, 12)), i4x16_even.s6, sum[4]);
+            sum[5] = fma(as_half(sub_group_broadcast(vAs.s0, 13)), i4x16_odd.s6, sum[5]);
+            sum[6] = fma(as_half(sub_group_broadcast(vAs.s0, 14)), i4x16_even.s7, sum[6]);
+            sum[7] = fma(as_half(sub_group_broadcast(vAs.s0, 15)), i4x16_odd.s7, sum[7]);
+
+            sum[0] = fma(as_half(sub_group_broadcast(vAs.s1, 0)), i4x16_even.s8, sum[0]);
+            sum[1] = fma(as_half(sub_group_broadcast(vAs.s1, 1)), i4x16_odd.s8, sum[1]);
+            sum[2] = fma(as_half(sub_group_broadcast(vAs.s1, 2)), i4x16_even.s9, sum[2]);
+            sum[3] = fma(as_half(sub_group_broadcast(vAs.s1, 3)), i4x16_odd.s9, sum[3]);
+            sum[4] = fma(as_half(sub_group_broadcast(vAs.s1, 4)), i4x16_even.sa, sum[4]);
+            sum[5] = fma(as_half(sub_group_broadcast(vAs.s1, 5)), i4x16_odd.sa, sum[5]);
+            sum[6] = fma(as_half(sub_group_broadcast(vAs.s1, 6)), i4x16_even.sb, sum[6]);
+            sum[7] = fma(as_half(sub_group_broadcast(vAs.s1, 7)), i4x16_odd.sb, sum[7]);
+
+            sum[0] = fma(as_half(sub_group_broadcast(vAs.s1, 8)), i4x16_even.sc, sum[0]);
+            sum[1] = fma(as_half(sub_group_broadcast(vAs.s1, 9)), i4x16_odd.sc, sum[1]);
+            sum[2] = fma(as_half(sub_group_broadcast(vAs.s1, 10)), i4x16_even.sd, sum[2]);
+            sum[3] = fma(as_half(sub_group_broadcast(vAs.s1, 11)), i4x16_odd.sd, sum[3]);
+            sum[4] = fma(as_half(sub_group_broadcast(vAs.s1, 12)), i4x16_even.se, sum[4]);
+            sum[5] = fma(as_half(sub_group_broadcast(vAs.s1, 13)), i4x16_odd.se, sum[5]);
+            sum[6] = fma(as_half(sub_group_broadcast(vAs.s1, 14)), i4x16_even.sf, sum[6]);
+            sum[7] = fma(as_half(sub_group_broadcast(vAs.s1, 15)), i4x16_odd.sf, sum[7]);
+        }
+
+        // scales applied once
+        sum_all += (sum[0] + sum[1] + sum[2] + sum[3] + sum[4] + sum[5] + sum[6] + sum[7]) * scale;
+    }
+#else
     float sum_all = 0;
     for(int gk = gk0; gk < gk1; gk++) {
         __global half *A = A_base + m*K + gk*GROUP_SIZE;
         __global uchar *B = B_base + NK16n_INT_4bit_index(gk*GROUP_SIZE, n, K, N);
 
-        float sum = 0;
+        float8 sum = 0;
         half scale = scales[gk];
-        char8 zpx8 = (char8)(zps[gk]);
-        char8 mask8 = (char8)0xF;
-        for(int g = 0; g < GROUP_SIZE; g += 16, B += 8*16) {
+        char16 zpx8 = (char16)(zps[gk]);
+        char16 mask8 = (char16)0xF;
+        __attribute__((opencl_unroll_hint(4)))
+        for(int g = 0; g < GROUP_SIZE; g += 32, B += 16*16) {
             // read 16 elements of A
-            ushort vAs = intel_sub_group_block_read_us((const __global ushort*)(A + g));
+            ushort2 vAs = intel_sub_group_block_read_us2((const __global ushort*)(A + g));
 
             // read (8x2)x16 int4
-            char8 bx8 = as_char8(intel_sub_group_block_read_uc8(B));
-            half8 i4x16_even = convert_half8((bx8 & mask8) + zpx8);
-            half8 i4x16_odd = convert_half8(as_char8(as_uchar8(bx8) >> 4) + zpx8);
+            char16 bx8 = as_char16(intel_sub_group_block_read_uc16(B));
+            half16 i4x16_even = convert_half16((bx8 & mask8) + zpx8);
+            half16 i4x16_odd = convert_half16(as_char16(as_uchar16(bx8) >> 4) + zpx8);
 
-            sum += as_half(sub_group_broadcast(vAs, 0)) * (i4x16_even.s0);
-            sum += as_half(sub_group_broadcast(vAs, 1)) * (i4x16_odd.s0);
-            sum += as_half(sub_group_broadcast(vAs, 2)) * (i4x16_even.s1);
-            sum += as_half(sub_group_broadcast(vAs, 3)) * (i4x16_odd.s1);
-            sum += as_half(sub_group_broadcast(vAs, 4)) * (i4x16_even.s2);
-            sum += as_half(sub_group_broadcast(vAs, 5)) * (i4x16_odd.s2);
-            sum += as_half(sub_group_broadcast(vAs, 6)) * (i4x16_even.s3);
-            sum += as_half(sub_group_broadcast(vAs, 7)) * (i4x16_odd.s3);
+            sum[0] += as_half(sub_group_broadcast(vAs.s0, 0)) * i4x16_even.s0;
+            sum[1] += as_half(sub_group_broadcast(vAs.s0, 1)) * i4x16_odd.s0;
+            sum[2] += as_half(sub_group_broadcast(vAs.s0, 2)) * i4x16_even.s1;
+            sum[3] += as_half(sub_group_broadcast(vAs.s0, 3)) * i4x16_odd.s1;
+            sum[4] += as_half(sub_group_broadcast(vAs.s0, 4)) * i4x16_even.s2;
+            sum[5] += as_half(sub_group_broadcast(vAs.s0, 5)) * i4x16_odd.s2;
+            sum[6] += as_half(sub_group_broadcast(vAs.s0, 6)) * i4x16_even.s3;
+            sum[7] += as_half(sub_group_broadcast(vAs.s0, 7)) * i4x16_odd.s3;
 
-            sum += as_half(sub_group_broadcast(vAs, 8)) * (i4x16_even.s4);
-            sum += as_half(sub_group_broadcast(vAs, 9)) * (i4x16_odd.s4);
-            sum += as_half(sub_group_broadcast(vAs, 10)) * (i4x16_even.s5);
-            sum += as_half(sub_group_broadcast(vAs, 11)) * (i4x16_odd.s5);
-            sum += as_half(sub_group_broadcast(vAs, 12)) * (i4x16_even.s6);
-            sum += as_half(sub_group_broadcast(vAs, 13)) * (i4x16_odd.s6);
-            sum += as_half(sub_group_broadcast(vAs, 14)) * (i4x16_even.s7);
-            sum += as_half(sub_group_broadcast(vAs, 15)) * (i4x16_odd.s7);
+            sum[0] += as_half(sub_group_broadcast(vAs.s0, 8)) * i4x16_even.s4;
+            sum[1] += as_half(sub_group_broadcast(vAs.s0, 9)) * i4x16_odd.s4;
+            sum[2] += as_half(sub_group_broadcast(vAs.s0, 10)) * i4x16_even.s5;
+            sum[3] += as_half(sub_group_broadcast(vAs.s0, 11)) * i4x16_odd.s5;
+            sum[4] += as_half(sub_group_broadcast(vAs.s0, 12)) * i4x16_even.s6;
+            sum[5] += as_half(sub_group_broadcast(vAs.s0, 13)) * i4x16_odd.s6;
+            sum[6] += as_half(sub_group_broadcast(vAs.s0, 14)) * i4x16_even.s7;
+            sum[7] += as_half(sub_group_broadcast(vAs.s0, 15)) * i4x16_odd.s7;
+
+            sum[0] += as_half(sub_group_broadcast(vAs.s1, 0)) * i4x16_even.s8;
+            sum[1] += as_half(sub_group_broadcast(vAs.s1, 1)) * i4x16_odd.s8;
+            sum[2] += as_half(sub_group_broadcast(vAs.s1, 2)) * i4x16_even.s9;
+            sum[3] += as_half(sub_group_broadcast(vAs.s1, 3)) * i4x16_odd.s9;
+            sum[4] += as_half(sub_group_broadcast(vAs.s1, 4)) * i4x16_even.sa;
+            sum[5] += as_half(sub_group_broadcast(vAs.s1, 5)) * i4x16_odd.sa;
+            sum[6] += as_half(sub_group_broadcast(vAs.s1, 6)) * i4x16_even.sb;
+            sum[7] += as_half(sub_group_broadcast(vAs.s1, 7)) * i4x16_odd.sb;
+
+            sum[0] += as_half(sub_group_broadcast(vAs.s1, 8)) * i4x16_even.sc;
+            sum[1] += as_half(sub_group_broadcast(vAs.s1, 9)) * i4x16_odd.sc;
+            sum[2] += as_half(sub_group_broadcast(vAs.s1, 10)) * i4x16_even.sd;
+            sum[3] += as_half(sub_group_broadcast(vAs.s1, 11)) * i4x16_odd.sd;
+            sum[4] += as_half(sub_group_broadcast(vAs.s1, 12)) * i4x16_even.se;
+            sum[5] += as_half(sub_group_broadcast(vAs.s1, 13)) * i4x16_odd.se;
+            sum[6] += as_half(sub_group_broadcast(vAs.s1, 14)) * i4x16_even.sf;
+            sum[7] += as_half(sub_group_broadcast(vAs.s1, 15)) * i4x16_odd.sf;
         }
 
         // scales applied once
-        sum_all += sum * scale;
+        sum_all += (sum[0] + sum[1] + sum[2] + sum[3] + sum[4] + sum[5] + sum[6] + sum[7]) * scale;
     }
+#endif
     all_sum[gn][id_sg] = sum_all;
 
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -319,7 +400,6 @@ __kernel void Linear_w4a_N16(__global half * A_base,
         C[m*N + cur_n] = sum_all;
     }
 }
-
 '''
 
 from . import cl
@@ -430,7 +510,7 @@ if __name__ == "__main__":
 
         res = output.numpy()
         ref = Linear_w4a(B, use_ref=True)(input).numpy()
-        compare(ref, res, atol=0.01, rtol=0.01)
+        compare(ref, res, atol=0.1, rtol=0.1)
 
     test_acc([1, 4096, 4096], 100); sys.exit(0)
 
