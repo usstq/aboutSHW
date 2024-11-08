@@ -67,7 +67,7 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
 #if 1
         B += wg_n * BN * K + (sg_n*16*BK) + sg_m*(16*16);
 #else
-        B += wg_n * BN * K + (sg_n * 16 + sg_c)*K + x*16;
+        B += wg_n * BN * K + (sg_n * 16 + sg_c)*K + sg_m*16;
 #endif
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
         
