@@ -382,7 +382,10 @@ struct cl_kernels {
     std::map<std::string, cl::Kernel> kernel_map;
     cl::Program Program;
 
-    cl_kernels(std::string source, std::string options, std::string dump_dir) : Program(source.c_str()) {
+    std::string m_source;
+    std::string m_options;
+
+    cl_kernels(std::string source, std::string options, std::string dump_dir) : m_source(source), m_options(options), Program(source.c_str()) {
         cl_int build_error = CL_SUCCESS;
         try {
             build_error = Program.build((options + " -cl-std=CL3.0").c_str());
@@ -699,12 +702,27 @@ PYBIND11_MODULE(cl, m) {
         .def("numpy", &cl_tensor::to_numpy)
         .def_property_readonly("shape", &cl_tensor::get_shape)
         .def_property_readonly("numel", &cl_tensor::get_numel)
-        .def_property_readonly("dtype", &cl_tensor::get_dtype);
+        .def_property_readonly("dtype", &cl_tensor::get_dtype)
+        .def(py::pickle(
+            // https://docs.python.org/3/library/pickle.html#pickling-class-instances
+            [](cl_tensor& p) {  // __getstate__
+                return py::make_tuple(p.to_numpy());
+            },
+            [](py::tuple t) {  // __setstate__
+                return cl_tensor(t[0].cast<py::array>());
+            }));
 
     py::class_<cl_kernels>(m, "kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
         .def("enqueue", &cl_kernels::enqueue)
-        .def("info", &cl_kernels::info);
+        .def("info", &cl_kernels::info)
+        .def(py::pickle(
+            [](cl_kernels& p) {  // __getstate__
+                return py::make_tuple(p.m_source, p.m_options);
+            },
+            [](py::tuple t) {  // __setstate__
+                return cl_kernels(t[0].cast<std::string>(), t[1].cast<std::string>(), {});
+            }));
 
     py::class_<cpp_kernels>(m, "cpp_kernels")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("name") = "")

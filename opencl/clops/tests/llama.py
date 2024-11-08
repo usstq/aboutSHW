@@ -13,6 +13,7 @@ from contextlib import nullcontext
 
 import clops
 from tqdm import tqdm
+import pickle
 
 # We design empty Layer on purpose, this make the network hierarchy flatten and easier/more clear to see & optimize
 # although it's an object, but we prefer the whole network topology & logic to be in a more functional style
@@ -20,7 +21,10 @@ class Layer:
     pass
 
 class LlamaLikeModel:
-    def __init__(self, hf_model_id, max_kv_len, quant_type, rope_base = 1000000):
+    def __init__(self) -> None:
+        super(LlamaLikeModel, self).__init__()    
+
+    def load_from_hf(self, hf_model_id, max_kv_len, quant_type, rope_base = 1000000):
         print(f"loading {hf_model_id}...")
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
         print(hf_model.config)
@@ -146,7 +150,18 @@ class LlamaLikeModel:
         logits = self.lm_head(final_layernorm)
         return logits.torch().float()
 
-def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type, repeat):
+    def load(self, path) -> None:
+        print(f"loading model from {path}...")
+        with open(path, 'rb') as f:
+            tmp_dict = pickle.load(f)
+        self.__dict__.update(tmp_dict)
+
+    def save(self, path):
+        print(f"saving model to {path}...")
+        with open(path, 'wb') as f:
+            pickle.dump(self.__dict__, f)
+
+def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len, quant_type, repeat, save, load):
     print(f"load Tokenizer from {hf_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -163,8 +178,15 @@ def simple_pipeline(hf_model_path, prompt0, do_trace, max_new_tokens, max_kv_len
         input_ids = inputs["input_ids"]
         max_kv_len = (input_ids.shape[-1] + max_new_tokens + 31 )//32*32
 
-    model = LlamaLikeModel(hf_model_path, max_kv_len, quant_type)
+    model = LlamaLikeModel()
+    if load is None:
+        model.load_from_hf(hf_model_path, max_kv_len, quant_type)
+    else:
+        model.load(load)
     print(f" batch_size, max_kv_len = {batch_size}, {max_kv_len} ")
+
+    if save is not None:
+        model.save(save)
 
     if do_trace:
         from viztracer import VizTracer
@@ -240,6 +262,9 @@ if __name__ == "__main__":
     parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
 
     parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
+    parser.add_argument('--save', type=str, nargs='?', default=None)
+    parser.add_argument('--load', type=str, nargs='?', default=None)
+
     args = parser.parse_args()
 
     if args.prompt_tokens:
@@ -250,4 +275,7 @@ if __name__ == "__main__":
             args.prompt0 = [args.prompt0] * shapes[0]
     else:
         args.prompt0 = [args.prompt0]
-    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type, repeat = args.repeat)
+    simple_pipeline(args.hf_model_path, args.prompt0, args.trace, args.max_new_tokens, args.max_kv_len, args.quant_type,
+                    repeat = args.repeat,
+                    save = args.save,
+                    load = args.load)
