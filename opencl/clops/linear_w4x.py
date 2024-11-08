@@ -441,7 +441,6 @@ print(f"============================{Colors.END}")
 class Linear_w4x:
     # if weight_up is provided, gate/up combination & silu/mul is fused
     def __init__(self, weight, bias, weight_up = None, do_fakequant_weight = False):
-        assert (weight_up is None)
         self.N, self.K = weight.shape # weight: [N, K]
         self.bias = to_cl(bias)
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
@@ -462,7 +461,7 @@ class Linear_w4x:
                                                 f"-D WG_SGS={WG_SGS} -DWG_N={WG_N} -DWG_M={WG_M} "
                                                 f"-D SG_N={SG_N} -D SG_M={SG_M} "
                                                 f"-D KDEBUG={KDEBUG} "
-                                                f"-D COMBINE_GATE_UP={0} "
+                                                f"-D COMBINE_GATE_UP={self.COMBINE_GATE_UP} "
                                                 f"-D USE_DPASW={USE_DPASW} -D USE_DPAS={USE_DPAS} "
                                                 f"-D QUANT_GROUP_SIZE={QUANT_GROUP_SIZE}"))
 
@@ -470,20 +469,21 @@ class Linear_w4x:
 
         if self.COMBINE_GATE_UP:
             # interleaving gate & up proj_matrix
+            N = 2*self.N
             assert weight.shape == weight_up.shape
             weight_raw_gate = to_cl(weight.half())
             weight_raw_up = to_cl(weight_up.half())
-            weight_raw = cl.tensor([2*self.N, self.K], np.dtype(np.float16))
+            weight_raw = cl.tensor([N, self.K], np.dtype(np.float16))
             self.cl_kernels.enqueue("XMX_interleave", [self.K, self.N], [1,1], weight_raw_gate, weight_raw_up, weight_raw, self.N, self.K)
-            N = 2*self.N
         else:
-            weight_raw = to_cl(weight.half())
             N = self.N
+            weight_raw = to_cl(weight.half())
+
         # quantize & repack weight matrix
         self.weight = cl.tensor([N, self.K//2], np.dtype(np.uint8))
         self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
         self.weight_zps = None
-        self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1], weight_raw, self.weight, self.weight_scales, self.weight_zps,  N, self.K)
+        self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1], weight_raw, self.weight, self.weight_scales, self.weight_zps, N, self.K)
         self.debug = False
         
         if do_fakequant_weight:

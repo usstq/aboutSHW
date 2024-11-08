@@ -82,7 +82,7 @@ class LlamaLikeModel:
             d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             
-            if Linear == clops.Linear_f16xmx:
+            if Linear == clops.Linear_f16xmx or Linear == clops.Linear_w4x:
                 assert l.mlp.gate_proj.bias is None
                 assert l.mlp.up_proj.bias is None
                 d.gate_up_proj = Linear(weight=l.mlp.gate_proj.weight, bias=None,
