@@ -6,5 +6,6 @@ from .linear_w4a_cpu import Linear_w4a_cpu
 from .linear_f16 import Linear_f16
 from .linear_f16b1 import Linear_f16b1
 from .linear_f16xmx import Linear_f16xmx
+from .linear_w4x import Linear_w4x
 from .rms_norm import RMSNorm
 from .rope import ROPE
