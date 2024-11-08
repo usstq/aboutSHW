@@ -26,7 +26,7 @@ class LlamaLikeModel:
 
     def load_from_hf(self, hf_model_id, max_kv_len, quant_type, rope_base = 1000000):
         print(f"loading {hf_model_id}...")
-        hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu').eval()
+        hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu', dtype=torch.float16).eval()
         print(hf_model.config)
         
         is_qwen2 = "Qwen2ForCausalLM" in hf_model.config.architectures
@@ -102,6 +102,9 @@ class LlamaLikeModel:
 
             self.layers.append(d)
         self.layers[-1].is_last = True
+        del hf_model
+        import gc
+        gc.collect()
 
     def forward_layer(self, layer, hidden_states, attn_mask):
         # layerNorm operation

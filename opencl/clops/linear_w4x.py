@@ -480,7 +480,7 @@ class Linear_w4x:
             weight_raw = to_cl(weight.half())
             N = self.N
         # quantize & repack weight matrix
-        self.weight = cl.tensor([N, self.K], np.dtype(np.float16))
+        self.weight = cl.tensor([N, self.K//2], np.dtype(np.uint8))
         self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
         self.weight_zps = None
         self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1], weight_raw, self.weight, self.weight_scales, self.weight_zps,  N, self.K)
@@ -596,7 +596,7 @@ if __name__ == "__main__":
     flops += 2*(batch * hidden_size * intermediate_size) * num_hidden_layers # down
 
     print(f"First Token TFLOP {flops/1e12:.3f}")
-    test(batch, hidden_size, hidden_size, REPEATE = 10); sys.exit(0)
+    #test(batch, hidden_size, hidden_size, REPEATE = 10); sys.exit(0)
 
     for batch in [7, 1]:
         test(batch, 2048, 2560, REPEATE = 1)
