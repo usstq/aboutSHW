@@ -49,7 +49,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
         __global half * src = _src + n * K + k;
 
         //# scales & zp are continous in N-dims (for brgemm-style of loading)
-        __global half * scales = _scales + kg*N + n;
+        __global half * scales = _scales + kg*(N*2) + n*2;
         __global char * zps = NULL;
         if (_zps != NULL) zps = _zps + kg*N + n;
 
@@ -75,7 +75,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
                 zp = (7 * vmin + 8 * vmax)/(vmax - vmin);
                 s = (vmax - vmin)/15.0f;
             }
-            scales[0] = s/16;
+            scales[1] = scales[0] = s/16;
             zps[0] = zp;
         } else {
             // no zero-point
@@ -98,7 +98,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
                     s = -vmax / 8.0f;
                 }
             }
-            scales[0] = s/16;
+            scales[1] = scales[0] = s/16;
         }
 
         half rs = 1.0f/s;
@@ -165,7 +165,7 @@ __kernel void XMX_tput(__global half * A,
         B += (wg_n * BN * K/2) + (0 * BK*BN/2) + (sg_n * 16*BK/2) + sg_m*(16*16)/2;
 
         //# offset in n-dimension
-        B_scales += (wg_n * BN + sg_n*16);
+        B_scales += (wg_n * BN * 2 + sg_n*16*2);
 
         //# SLM target place
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
@@ -212,29 +212,33 @@ __kernel void XMX_tput(__global half * A,
         //#  then subtract zero-points (also half) & multiply dequantize-scale, then store to SLM also in 16x8 layout
         //#  later-on, DPAS kernel will read it using intel_sub_group_block_read8() (8x8 uint).
         {
-            int shuffle_id = get_sub_group_local_id() >> 1;
-            half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales + (k0/QUANT_GROUP_SIZE)*N)));
-
             //# quantized weight 16x8 char  => 16x8 half + 16x8 half
             uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k0*BN/2));       // 16x8 char
            
             half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
             half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
 
-            h16x8_b0.even *= (half8)intel_sub_group_shuffle(scales.s0, shuffle_id);
-            h16x8_b0.odd *= (half8)intel_sub_group_shuffle(scales.s0, 4 + shuffle_id);
+            half4 scales = as_half4(intel_sub_group_block_read_us4((const __global ushort*)(B_scales + 2*(k0/QUANT_GROUP_SIZE)*(N))));
 
-            h16x8_b1.even *= (half8)intel_sub_group_shuffle(scales.s1, shuffle_id);
-            h16x8_b1.odd *= (half8)intel_sub_group_shuffle(scales.s1, 4 + shuffle_id);
+            // when zero-point is required in asym case
+            //h16x8_b0.even = mad(h16x8_b0.even, (half8)scales.s0, 0);
+            //h16x8_b0.odd = mad(h16x8_b0.odd, (half8)scales.s1, 0);
+            //h16x8_b1.even = mad(h16x8_b1.even, (half8)scales.s2, 0);
+            //h16x8_b1.odd = mad(h16x8_b1.odd, (half8)scales.s3, 0);
+
+            h16x8_b0.even *= (half8)scales.s0;
+            h16x8_b0.odd *= (half8)scales.s1;
+            h16x8_b1.even *= (half8)scales.s2;
+            h16x8_b1.odd *= (half8)scales.s3;
 
             // 16x8 ushort sub-group write-out
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 0*16), as_ushort8(h16x8_b0.s01234567));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 4*16), as_ushort8(h16x8_b0.s89abcdef));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 8*16), as_ushort8(h16x8_b1.s01234567));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 12*16), as_ushort8(h16x8_b1.s89abcdef));
+            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 0*16), as_ushort8(h16x8_b0.lo));
+            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 4*16), as_ushort8(h16x8_b0.hi));
+            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 8*16), as_ushort8(h16x8_b1.lo));
+            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 12*16), as_ushort8(h16x8_b1.hi));
         }
     #endif
-    
+
         barrier(CLK_LOCAL_MEM_FENCE);
         
     #if 1
@@ -481,9 +485,14 @@ class Linear_w4x:
 
         # quantize & repack weight matrix
         self.weight = cl.tensor([N, self.K//2], np.dtype(np.uint8))
-        self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
+        self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, 2*N], np.dtype(np.float16))
         self.weight_zps = None
-        self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1], weight_raw, self.weight, self.weight_scales, self.weight_zps, N, self.K)
+        self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1],
+                                weight_raw,
+                                self.weight,
+                                self.weight_scales,
+                                self.weight_zps,
+                                N, self.K)
         self.debug = False
         
         if do_fakequant_weight:
@@ -596,7 +605,9 @@ if __name__ == "__main__":
     flops += 2*(batch * hidden_size * intermediate_size) * num_hidden_layers # down
 
     print(f"First Token TFLOP {flops/1e12:.3f}")
-    #test(batch, hidden_size, hidden_size, REPEATE = 10); sys.exit(0)
+    
+    #test(M=BM, K=BK*160, N=BN*64, REPEATE = 20); sys.exit(0)
+    test(batch, hidden_size, hidden_size, REPEATE = 10); sys.exit(0)
 
     for batch in [7, 1]:
         test(batch, 2048, 2560, REPEATE = 1)
@@ -607,84 +618,3 @@ if __name__ == "__main__":
     
     #test(1, hidden_size, hidden_size, REPEATE = 10)
     
-
-'''
-if False:
-    #B *= 0
-    for ni in range(16):
-        for ki in range(16):
-            A[ni, ki] = ni + ki*0.1
-            B[ni, ki] = ni if ni < 8 else (8-ni)
-    #A[:, 32:64] = 0
-    #B[0, 0] = 1
-    #print(f"A[32:40, :16]=\n{A[32:40, :16]}")
-
-# __kernel void quant_I4(__global half * src, __global uchar * dst, __global half * scales, __global char * zps, int N, int K) {
-tB = cl.tensor(B)
-tBq = cl.tensor([N*K//2], np.dtype(np.uint8))
-tscale = cl.tensor([K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
-k.enqueue("quant_I4", [K//QUANT_GROUP_SIZE, N//SG_N], [1, 1], tB, tBq, tscale, None,  N, K)
-fakeB = tB.numpy()
-nBq = tBq.numpy()
-nscale = tscale.numpy()
-
-if False:
-    print(f"B=\n{B[:16, :32].transpose()}")
-    print(f"fakeB=\n{fakeB[:16, :32].transpose()}")
-    def show_t(x):
-        return f"{hex(x)}" #f"{(x & 0xF0)//16}|{(x << 4)//16}"
-    print("nBq=\n", np.array2string(nBq[:(16*16)].reshape(16, 16), formatter={'int': show_t}))
-    print("nscale=\n", nscale[0,:])
-
-
-tA = cl.tensor(A)
-tbias = cl.tensor(bias)
-C = cl.tensor([M, N], np.dtype(np.float16))
-print("prepare reference result using fake-quantized B mat...")
-k.enqueue("Matmul_reference", [N, M], [1, 1], tA, tB, tbias, C, M, K, N)
-cl.finish()
-print("done.")
-
-REPEATE = 10
-
-tBqs = [cl.tensor(nBq) for _ in range(REPEATE)]
-tBscales = [cl.tensor(nscale) for _ in range(REPEATE)]
-tbias = [cl.tensor(bias) for _ in range(REPEATE)]
-tC = cl.tensor([M, N], np.dtype(np.float16))
-
-for i in range(0, REPEATE):
-    k.enqueue("XMX_tput", [WG_SGS, N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], tA, tBqs[i], tBscales[i], tbias[i], tC, M, K, N)
-
-latency_ns = cl.finish()
-for ns in latency_ns:
-    flops = (M * K * N * 2)
-    rd_bytes = (M*K + K*N)*2
-    actual_rd = total_work_groups * (BM*K + BN*K)*2
-    print(f"XMX_tput: {flops*1e-9:.1f} Gflop / {ns*1e-3:.1f} us = {flops/ns*1e-3:.3f} TFlops/s    {rd_bytes/1e6:.1f}=>{actual_rd/1e6:.1f} MB  / {ns*1e-3:.1f} us = {actual_rd/ns:.1f} GB/s")
-
-C = C.numpy()
-tC = tC.numpy()
-#print(C[30:35, [0,1,2,3,8,9,10,11]])
-#print("=========================")
-#print(tC[30:35,[0,1,2,3,8,9,10,11]])
-def compare(ref, opt, atol=0.01, rtol=0.01):
-    if not np.allclose(ref, opt, atol=atol, rtol=rtol):
-        pos = np.where(np.isnan(opt))
-        if len(pos[0]) > 0:
-            print(f'========================================================')
-            print(f'pos nan = {len(pos)}x{len(pos[0])} {pos}')
-            print(f'opt nan = {opt[pos]}')
-            raise("failed.")
-
-        pos = np.where(np.abs(ref - opt) > atol)
-        print(f'========================================================')
-        print(f'compare failed (ref={ref.dtype} {ref.shape}, opt={opt.dtype} {opt.shape}, atol={atol}, rtol={rtol})')
-        print(f'pos = {len(pos)}x{len(pos[0])} {pos}')
-        print(f'ref_val = {ref[pos]}')
-        print(f'opt_val = {opt[pos]}')
-        raise Exception("failed.")
-    else:
-        print(f'compare allclose success!')
-
-compare(C, tC)
-'''
