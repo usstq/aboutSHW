@@ -4,28 +4,14 @@ cl_kernel_sources = r'''
 int BLayout2Offset(int k, int n, int K, int N) {
     int offset = 0;
 
-    //# [K, N] =>  *[K, BN(128)]
-    offset += (n / BN) * BN * K/2;
-    n = n % BN;
-
-    //# [K, BN] =>  *[BK(64), BN(128)]
-    offset += (k / BK) * BK * BN/2;
-    k = k % BK;
-
-    //# [BK, BN] => *[BK(64), SG_N(16)]
-    offset += (n / SG_N) * SG_N * BK/2;
+    offset += (n / SG_N) * (SG_N * K / 2);
     n = n % SG_N;
 
-    //# [BK(64), SG_N(16)] => *[16, 16]
-    offset += (k / 16) * 16 * SG_N/2;
+    offset += (k / 16) * (16 * SG_N/2);
     k = k % 16;
 
-    //# now inside [16, SG_N] sub-block, where this quantized value goes?
-    //# futher divided into two 16x8 (abcd efgh) sub-array
-    //#   a0  a1 | b0 b1  | .... |  h0  h1|
-    //#   a2  a3 | b2 b3  |      |  h2  h3|
-    //# ... ...  | ... ...|      |...  ...|
-    //#  a14 a15 | b14 b15|      | h14 h15|
+    //# now inside [16, SG_N] sub-block, we split it into 2 int4 16x8 sub-blocks
+    //# and merge them into single int8 16x8 sub-blocks.
     int high_4bit = (n >= 8);
     n = n % 8;
     offset += k*8 + n;
@@ -118,6 +104,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
     }
 }
 
+#if 0
 //# M==1, no need to reuse B matrix through SLM
 //# 
 __attribute__((intel_reqd_sub_group_size(WG_SGS)))
@@ -127,35 +114,34 @@ __kernel void XMX_M1(__global half * A,
                      __global float * bias,
                      __global half * C,
                      int M, int K, int N) {
-    //# just loop 128 along K dim, decompress b0 & b1
-    //#     float  intel_sub_group_f16_f16_matrix_mad_k16(int  a, int8 b, float  acc);
+    //# HTs in same work-group will split works along K dimension into 
+    //# 
+    //# GWS [8, N//16]    LWS [8, 16*8]
     //# a: 1x16   b: 16x8   c: 1x8
-    for (int k = 0; k < QUANT_GROUP_SIZE; k+= 16) {
-        //# load a: 1x16 half
-        int a = as_int(intel_sub_group_block_read((const __global uint*)(A + k)));
-        //# load b0, b1
-        uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k*BN/2));       // 16x8 char
-        
-        half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
-        half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
 
-        half4 scales = as_half4(intel_sub_group_block_read_us4((const __global ushort*)(B_scales + 2*(k/QUANT_GROUP_SIZE)*(N))));
+    int n = 
+    float c0 = 0.0f;
+    float c1 = 0.0f;
+    for (int k0 = 0; k0 < K; k0 += QUANT_GROUP_SIZE) {
+        half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales + (k0/QUANT_GROUP_SIZE)*(N))));
+        for (int k = 0; k < QUANT_GROUP_SIZE; k+= 16) {
+            uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + (k0 + k)*BN/2));       // 16x8 char
+            half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
+            half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
+            h16x8_b0 *= (half16)scales.s0;
+            h16x8_b1 *= (half16)scales.s1;
+            int8 b0 = as_int8(h16x8_b0);
+            int8 b1 = as_int8(h16x8_b1);
 
-        // when zero-point is required in asym case
-        //h16x8_b0.even = mad(h16x8_b0.even, (half8)scales.s0, 0);
-        //h16x8_b0.odd = mad(h16x8_b0.odd, (half8)scales.s1, 0);
-        //h16x8_b1.even = mad(h16x8_b1.even, (half8)scales.s2, 0);
-        //h16x8_b1.odd = mad(h16x8_b1.odd, (half8)scales.s3, 0);
+            //# 1x16
+            int a = as_int(intel_sub_group_block_read((const __global uint*)(A + k0 + k)));
 
-        h16x8_b0.even *= (half8)scales.s0;
-        h16x8_b0.odd *= (half8)scales.s1;
-        h16x8_b1.even *= (half8)scales.s2;
-        h16x8_b1.odd *= (half8)scales.s3;
-
-        int8 b0 = as_int8(h16x8_b0);
-        int8 b1 = as_int8(h16x8_b1);
+            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
+        }
     }
 }
+#endif
 
 __attribute__((intel_reqd_sub_group_size(WG_SGS)))
 __kernel void XMX_tput(__global half * A,
@@ -201,10 +187,10 @@ __kernel void XMX_tput(__global half * A,
         //# which b0/b1 should current sg to load into SLM
         //# B is blocked
         //# [WG_N x (BN x K)] [k-loop x (BK x BN)] [SG_N x (16xBK)]  [SG_M * (16x16)]
-        B += (wg_n * BN * K/2) + (0 * BK*BN/2) + (sg_n * 16*BK/2) + sg_m*(16*16)/2;
+        B += (wg_n*BN  + sg_n*16) * (K/2) + sg_m*(16*16)/2;
 
         //# offset in n-dimension
-        B_scales += (wg_n * BN + sg_n*16);
+        B_scales += (wg_n*BN + sg_n*16);
 
         //# SLM target place
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
@@ -245,7 +231,7 @@ __kernel void XMX_tput(__global half * A,
         //# load sub-slice B (128*BK) into buffB
         {
             //# quantized weight 16x8 char  => 16x8 half + 16x8 half
-            uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k0*BN/2));       // 16x8 char
+            uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k0*16/2));       // 16x8 char
            
             half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
             half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
