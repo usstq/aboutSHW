@@ -28,7 +28,7 @@ int BLayout2Offset(int k, int n, int K, int N) {
     //#  a14 a15 | b14 b15|      | h14 h15|
     int high_4bit = (n >= 8);
     n = n % 8;
-    offset += (k / 2)*16 + n*2 + (k & 1);
+    offset += k*8 + n;
 
     return (high_4bit) ? (offset | 0x80000000) : (offset);
 }
@@ -49,7 +49,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
         __global half * src = _src + n * K + k;
 
         //# scales & zp are continous in N-dims (for brgemm-style of loading)
-        __global half * scales = _scales + kg*(N*2) + n*2;
+        __global half * scales = _scales + kg*N + n;
         __global char * zps = NULL;
         if (_zps != NULL) zps = _zps + kg*N + n;
 
@@ -75,7 +75,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
                 zp = (7 * vmin + 8 * vmax)/(vmax - vmin);
                 s = (vmax - vmin)/15.0f;
             }
-            scales[1] = scales[0] = s/16;
+            scales[0] = s/16;
             zps[0] = zp;
         } else {
             // no zero-point
@@ -98,7 +98,7 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
                     s = -vmax / 8.0f;
                 }
             }
-            scales[1] = scales[0] = s/16;
+            scales[0] = s/16;
         }
 
         half rs = 1.0f/s;
@@ -115,6 +115,45 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
             //# update src as fake-quanted value
             src[i] = (as_char(v0) + zp) * s;
         }
+    }
+}
+
+//# M==1, no need to reuse B matrix through SLM
+//# 
+__attribute__((intel_reqd_sub_group_size(WG_SGS)))
+__kernel void XMX_M1(__global half * A,
+                     __global uchar * B,
+                     __global half * B_scales,
+                     __global float * bias,
+                     __global half * C,
+                     int M, int K, int N) {
+    //# just loop 128 along K dim, decompress b0 & b1
+    //#     float  intel_sub_group_f16_f16_matrix_mad_k16(int  a, int8 b, float  acc);
+    //# a: 1x16   b: 16x8   c: 1x8
+    for (int k = 0; k < QUANT_GROUP_SIZE; k+= 16) {
+        //# load a: 1x16 half
+        int a = as_int(intel_sub_group_block_read((const __global uint*)(A + k)));
+        //# load b0, b1
+        uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k*BN/2));       // 16x8 char
+        
+        half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
+        half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
+
+        half4 scales = as_half4(intel_sub_group_block_read_us4((const __global ushort*)(B_scales + 2*(k/QUANT_GROUP_SIZE)*(N))));
+
+        // when zero-point is required in asym case
+        //h16x8_b0.even = mad(h16x8_b0.even, (half8)scales.s0, 0);
+        //h16x8_b0.odd = mad(h16x8_b0.odd, (half8)scales.s1, 0);
+        //h16x8_b1.even = mad(h16x8_b1.even, (half8)scales.s2, 0);
+        //h16x8_b1.odd = mad(h16x8_b1.odd, (half8)scales.s3, 0);
+
+        h16x8_b0.even *= (half8)scales.s0;
+        h16x8_b0.odd *= (half8)scales.s1;
+        h16x8_b1.even *= (half8)scales.s2;
+        h16x8_b1.odd *= (half8)scales.s3;
+
+        int8 b0 = as_int8(h16x8_b0);
+        int8 b1 = as_int8(h16x8_b1);
     }
 }
 
@@ -165,7 +204,7 @@ __kernel void XMX_tput(__global half * A,
         B += (wg_n * BN * K/2) + (0 * BK*BN/2) + (sg_n * 16*BK/2) + sg_m*(16*16)/2;
 
         //# offset in n-dimension
-        B_scales += (wg_n * BN * 2 + sg_n*16*2);
+        B_scales += (wg_n * BN + sg_n*16);
 
         //# SLM target place
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
@@ -203,14 +242,7 @@ __kernel void XMX_tput(__global half * A,
             *(__local uint8 *)(pbuffA + 4*8*16) = blk1;
         }
 
-        //# load sub-slice B (256*BK) into buffB : (256*BK)/(16*8) = 128 half (8 x regs)
-        //#  suppose B has been turned into blocked layout : [K/BK, 256, BK]
-        //#
-        //#         ushort16 intel_sub_group_block_read_us16(const __global ushort* p );
-        //#
-        //#  16x8 compact ushort, each ushort has 16bits, we extract 4 bits from it and convert it into half
-        //#  then subtract zero-points (also half) & multiply dequantize-scale, then store to SLM also in 16x8 layout
-        //#  later-on, DPAS kernel will read it using intel_sub_group_block_read8() (8x8 uint).
+        //# load sub-slice B (128*BK) into buffB
         {
             //# quantized weight 16x8 char  => 16x8 half + 16x8 half
             uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + k0*BN/2));       // 16x8 char
@@ -218,24 +250,14 @@ __kernel void XMX_tput(__global half * A,
             half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
             half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
 
-            half4 scales = as_half4(intel_sub_group_block_read_us4((const __global ushort*)(B_scales + 2*(k0/QUANT_GROUP_SIZE)*(N))));
+            half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales + (k0/QUANT_GROUP_SIZE)*(N))));
 
-            // when zero-point is required in asym case
-            //h16x8_b0.even = mad(h16x8_b0.even, (half8)scales.s0, 0);
-            //h16x8_b0.odd = mad(h16x8_b0.odd, (half8)scales.s1, 0);
-            //h16x8_b1.even = mad(h16x8_b1.even, (half8)scales.s2, 0);
-            //h16x8_b1.odd = mad(h16x8_b1.odd, (half8)scales.s3, 0);
-
-            h16x8_b0.even *= (half8)scales.s0;
-            h16x8_b0.odd *= (half8)scales.s1;
-            h16x8_b1.even *= (half8)scales.s2;
-            h16x8_b1.odd *= (half8)scales.s3;
+            h16x8_b0 *= (half16)scales.s0;
+            h16x8_b1 *= (half16)scales.s1;
 
             // 16x8 ushort sub-group write-out
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 0*16), as_ushort8(h16x8_b0.lo));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 4*16), as_ushort8(h16x8_b0.hi));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 8*16), as_ushort8(h16x8_b1.lo));
-            intel_sub_group_block_write_us8((__local ushort*)(pbuffB + 12*16), as_ushort8(h16x8_b1.hi));
+            intel_sub_group_block_write8((__local uint*)(pbuffB + 0*16), as_uint8(h16x8_b0));
+            intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), as_uint8(h16x8_b1));
         }
     #endif
 
@@ -485,7 +507,7 @@ class Linear_w4x:
 
         # quantize & repack weight matrix
         self.weight = cl.tensor([N, self.K//2], np.dtype(np.uint8))
-        self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, 2*N], np.dtype(np.float16))
+        self.weight_scales = cl.tensor([self.K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
         self.weight_zps = None
         self.cl_kernels.enqueue("quant_I4", [self.K//QUANT_GROUP_SIZE, N//SG_N], [1, 1],
                                 weight_raw,
