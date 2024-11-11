@@ -104,45 +104,6 @@ __kernel void quant_I4(__global half * _src, __global uchar * dst, __global half
     }
 }
 
-#if 0
-//# M==1, no need to reuse B matrix through SLM
-//# 
-__attribute__((intel_reqd_sub_group_size(WG_SGS)))
-__kernel void XMX_M1(__global half * A,
-                     __global uchar * B,
-                     __global half * B_scales,
-                     __global float * bias,
-                     __global half * C,
-                     int M, int K, int N) {
-    //# HTs in same work-group will split works along K dimension into 
-    //# 
-    //# GWS [8, N//16]    LWS [8, 16*8]
-    //# a: 1x16   b: 16x8   c: 1x8
-
-    int n = 
-    float c0 = 0.0f;
-    float c1 = 0.0f;
-    for (int k0 = 0; k0 < K; k0 += QUANT_GROUP_SIZE) {
-        half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales + (k0/QUANT_GROUP_SIZE)*(N))));
-        for (int k = 0; k < QUANT_GROUP_SIZE; k+= 16) {
-            uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B + (k0 + k)*BN/2));       // 16x8 char
-            half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));                    // low-4bit
-            half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));       // high-4bit
-            h16x8_b0 *= (half16)scales.s0;
-            h16x8_b1 *= (half16)scales.s1;
-            int8 b0 = as_int8(h16x8_b0);
-            int8 b1 = as_int8(h16x8_b1);
-
-            //# 1x16
-            int a = as_int(intel_sub_group_block_read((const __global uint*)(A + k0 + k)));
-
-            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
-            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
-        }
-    }
-}
-#endif
-
 __attribute__((intel_reqd_sub_group_size(WG_SGS)))
 __kernel void XMX_tput(__global half * A,
                        __global uchar * B,
@@ -403,6 +364,121 @@ __kernel void XMX_interleave(__global half * src0, __global half * src1, __globa
 
 '''
 
+cl_kernel_sources_M1 = r'''
+void splitter(const int n, const int team, const int tid, int* n_start, int* n_end) {
+    if (team <= 1 || n == 0) {
+        *n_start = 0;
+        *n_end = n;
+    } else {
+        int n1 = (n + team - 1) / team;
+        int n2 = n1 - 1;
+        int T1 = n - n2 * team;
+        *n_end = tid < T1 ? n1 : n2;
+        *n_start = tid <= T1 ? tid * n1 : T1 * n1 + (tid - T1) * n2;
+    }
+    *n_end += *n_start;
+}
+
+//# M==1, no need to reuse B matrix through SLM
+//# 
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void XMX_M1(__global half * A,
+                     __global uchar * B,
+                     __global half * B_scales,
+                     __global float * bias,
+                     __global half * C,
+                     int M, int K, int N) {
+    //# HTs in same work-group will split works along K dimension into 
+    //# 
+    //# GWS [8*(N//16), 16] LWS [8, 16] :     every work-group (with 16 sub-groups) handles 16 outputs
+    //# a: 1x16   b: 16x8   c: 1x8
+    int ng = get_group_id(0);
+
+    //# split quantization-groups into multiply `nthr` threads
+    int ithr = get_local_id(1);
+    int nthr = get_local_size(1); //# fixed 16 HW-threads(each HW-thread is a sub-group of size 8)
+    int K_groups = K/QUANT_GROUP_SIZE;
+    int gk0, gk1;
+    splitter(K_groups, nthr, ithr, &gk0, &gk1);
+
+    //# offset in N direction
+    B += ng * (K*8);
+    B_scales += ng * 16;
+
+    //# offset in K direction
+    B_scales += gk0 * N;
+    A += gk0 * QUANT_GROUP_SIZE;
+    B += gk0 * QUANT_GROUP_SIZE*8;
+
+    //# do the part assigned to current sub-group
+    float c0 = 0.0f;
+    float c1 = 0.0f;
+    for(int gk = gk0; gk < gk1; gk++) {
+        half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales)));
+        B_scales += N;
+        for (int k = 0; k < QUANT_GROUP_SIZE; k += 16) {
+            uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B));    // 16x8 char
+            half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));
+            half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));
+            h16x8_b0 *= (half16)scales.s0;
+            h16x8_b1 *= (half16)scales.s1;
+            int8 b0 = as_int8(h16x8_b0);
+            int8 b1 = as_int8(h16x8_b1);
+
+            int a = as_int(intel_sub_group_block_read((const __global uint*)(A)));
+            A += 16;
+            B += 16*8;
+
+            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
+        }
+    }
+
+    //# reduce
+    __local float all_sum[K_NTHRS][16];     //# [nthr, N16]
+    int id_sg_local = get_sub_group_local_id();
+
+    all_sum[ithr][id_sg_local] = c0;
+    all_sum[ithr][id_sg_local + 8] = c1;
+
+    //intel_sub_group_block_write((__local uint*)(&all_sum[ithr][0]), as_uint(c0));
+    //intel_sub_group_block_write((__local uint*)(&all_sum[ithr][8]), as_uint(c1));
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    //# only the first sg responsible for reducing & post-processing
+    if (ithr != 0) return;
+
+    for(int i = 1; i < K_NTHRS; i++) {
+        float nc0 = as_float(intel_sub_group_block_read((const __local uint*)(&all_sum[i][0])));
+        float nc1 = as_float(intel_sub_group_block_read((const __local uint*)(&all_sum[i][8])));
+        c0 += nc0;
+        c1 += nc1;
+    }
+
+    //# add bias
+    if (bias != NULL) {
+        int n = ng*16 + get_local_id(0);
+        c0 += bias[n]; 
+        c1 += bias[n + 8]; 
+    }
+
+    half v00 = convert_half(c0);
+    half v01 = convert_half(c1);
+
+#if COMBINE_GATE_UP == 1
+    v00 = v00 / ((half)(1.0f) + native_exp(-v00)) * v01;  /* silu(gate_proj) * up_proj */
+    C += ng*8;
+    intel_sub_group_block_write_us((__global ushort*)(C), as_ushort(v00));
+#else
+    C += ng*16;
+    //# store results : 16 x half
+    intel_sub_group_block_write_us((__global ushort*)(C), as_ushort(v00));
+    intel_sub_group_block_write_us((__global ushort*)(C + 8), as_ushort(v01));
+#endif
+}
+'''
+
 from . import cl
 import numpy as np
 from .utils import *
@@ -437,6 +513,7 @@ assert num_reg_slm_copyB == int(num_reg_slm_copyB), f"num_reg_slm_copyB {num_reg
 
 assert (BK//16 * SG_M)
 
+K_NTHRS = 8
 
 print(f"{Colors.YELLOW}===== XMX hyper-param ===================")
 print(f"BM = {BM} WG_M = {WG_M}")
@@ -475,9 +552,13 @@ class Linear_w4x:
                                                 f"-D KDEBUG={KDEBUG} "
                                                 f"-D COMBINE_GATE_UP={self.COMBINE_GATE_UP} "
                                                 f"-D USE_DPASW={USE_DPASW} -D USE_DPAS={USE_DPAS} "
-                                                f"-D QUANT_GROUP_SIZE={QUANT_GROUP_SIZE}"))
+                                                f"-D QUANT_GROUP_SIZE={QUANT_GROUP_SIZE} -D K_NTHRS={K_NTHRS}"))
 
-        # print(self.cl_kernels.info("XMX_tput", [WG_SGS, WG_N, WG_M], WG_SGS))
+        self.cl_kernels_M1 = kernel_cache(cl_kernel_sources_M1,
+                                       options=(f"-D COMBINE_GATE_UP={self.COMBINE_GATE_UP} "
+                                                f"-D QUANT_GROUP_SIZE={QUANT_GROUP_SIZE} -D K_NTHRS={K_NTHRS}"))
+        
+        # print("99999999999999", self.cl_kernels_M1.info("XMX_M1", [16, 16], 16))
 
         if self.COMBINE_GATE_UP:
             # interleaving gate & up proj_matrix
@@ -538,8 +619,10 @@ class Linear_w4x:
             print(f"over-subscribe ratio = {total_sub_groups*100/total_eus_threads:.1f} %")
             print(f"============================{Colors.END}")
 
-        self.cl_kernels.enqueue("XMX_tput", [WG_SGS, N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], input, self.weight, self.weight_scales, self.bias, output, M, K, N)
-
+        if M > 1:
+            self.cl_kernels.enqueue("XMX_tput", [WG_SGS, N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], input, self.weight, self.weight_scales, self.bias, output, M, K, N)
+        else:
+            self.cl_kernels_M1.enqueue("XMX_M1", [8*(N//16), K_NTHRS], [8, K_NTHRS], input, self.weight, self.weight_scales, self.bias, output, M, K, N)
         #self.cl_kernels.enqueue("XMX_tput", [WG_SGS, N//SG_N, M_padded//SG_M], [WG_SGS, WG_N, WG_M], input, self.weight, self.bias, output, M, K, N)
         #self.cl_kernels.enqueue("Matmul_reference", [self.N, M], [8, 16], input, self.weight_raw, self.bias, output, M, self.K, self.N)
 
@@ -551,7 +634,7 @@ def test(M, K, N, REPEATE = 10):
     np.set_printoptions(linewidth = 120)
     
     # M, K, N = 128, 128, 128
-    print("prepare test data...")
+    print(f"prepare test data  M={M}, K={K}, N={N}...")
     vRANGE = 2
     torch.manual_seed(0)
     A = torch.randint(-vRANGE, vRANGE+1, [M, K]).half()
@@ -585,7 +668,8 @@ def test(M, K, N, REPEATE = 10):
     latency_ns = cl.finish()
     for ns in latency_ns:
         flops = (M * K * N * 2)
-        print(f"XMX_tput: {flops*1e-9:.1f} Gflop / {ns*1e-3:.1f} us = {flops/ns*1e-3:.3f} TFlops/s  ")
+        rd_bytes = (M*K)*2 + K*N//2
+        print(f"Linear_w4x: {flops*1e-9:.1f} Gflop / {ns*1e-3:.1f} us = {flops/ns*1e-3:.3f} TFlops/s      {rd_bytes/ns:.3f} GB/s ")
 
     res = output.numpy()
     compare(ref, res)
@@ -615,7 +699,8 @@ if __name__ == "__main__":
     print(f"First Token TFLOP {flops/1e12:.3f}")
     
     #test(M=BM, K=BK*160, N=BN*64, REPEATE = 20); sys.exit(0)
-    test(batch, hidden_size, hidden_size, REPEATE = 10); sys.exit(0)
+    #hidden_size = 4096
+    test(1, hidden_size, hidden_size, REPEATE = 20); sys.exit(0)
 
     for batch in [7, 1]:
         test(batch, 2048, 2560, REPEATE = 1)
