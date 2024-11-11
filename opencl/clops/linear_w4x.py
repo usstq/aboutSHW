@@ -415,13 +415,14 @@ __kernel void XMX_M1(__global half * A,
     float c1 = 0.0f;
     for(int gk = gk0; gk < gk1; gk++) {
         half2 scales = as_half2(intel_sub_group_block_read_us2((const __global ushort*)(B_scales)));
-        B_scales += N;
+        float cg0 = 0.0f;
+        float cg1 = 0.0f;
         for (int k = 0; k < QUANT_GROUP_SIZE; k += 16) {
             uchar16 q16x8 = intel_sub_group_block_read_uc16((const __global uchar*)(B));    // 16x8 char
             half16 h16x8_b0 = convert_half16(as_char16(q16x8 << 4));
             half16 h16x8_b1 = convert_half16(as_char16(q16x8 & (uchar16)(0xF0)));
-            h16x8_b0 *= (half16)scales.s0;
-            h16x8_b1 *= (half16)scales.s1;
+            //# h16x8_b0 *= (half16)scales.s0;
+            //# h16x8_b1 *= (half16)scales.s1;
             int8 b0 = as_int8(h16x8_b0);
             int8 b1 = as_int8(h16x8_b1);
 
@@ -429,9 +430,12 @@ __kernel void XMX_M1(__global half * A,
             A += 16;
             B += 16*8;
 
-            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
-            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
+            cg0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, cg0);
+            cg1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, cg1);
         }
+        B_scales += N;
+        c0 += cg0 * scales.s0;
+        c1 += cg1 * scales.s1;
     }
 
     //# reduce
