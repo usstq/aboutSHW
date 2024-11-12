@@ -17,6 +17,16 @@
 
 #include "opencl.hpp"
 
+
+#include <sycl/CL/opencl.h>
+//#include <sycl/ext/intel/esimd.hpp>
+#include <sycl/sycl.hpp>
+
+//using namespace sycl::ext::intel::esimd;
+//using namespace sycl::ext::intel;
+using namespace sycl;
+
+
 #ifdef __linux__
 #    include <dlfcn.h>
 #endif
@@ -211,6 +221,11 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 #define DEBUG_MEMPOOL_SUMMARY (CLDEBUG & 1)
 #define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
 
+static cl::CommandQueue cmd_queue;
+static cl::Context ocl_context;
+sycl::queue sycl_queue;
+static std::vector<cl::Event> all_events;
+
 // create temp cl_tensor (from pool since we want it to be fast)
 struct cl_buffer_pool {
     std::multimap<size_t, cl::Buffer> pool;
@@ -234,7 +249,7 @@ struct cl_buffer_pool {
         total_alloc_size += sz;
         total_alloc_count++;
 
-        cl::Buffer ret(CL_MEM_READ_WRITE, sz);
+        cl::Buffer ret(ocl_context, CL_MEM_READ_WRITE, sz);
         if (DEBUG_MEMPOOL_VERBOSE)
             std::cout << "[cl_buffer_pool] alloc new " << sz << " bytes, cl_mem: " << ret.get() << std::endl;
         return ret;
@@ -268,10 +283,7 @@ struct cl_buffer_pool {
             show();
     }
 };
-
 static cl_buffer_pool g_buff_pool;
-static cl::CommandQueue cmd_queue;
-static std::vector<cl::Event> all_events;
 
 // composite of cl::Buffer & layout information
 // like numpy array
@@ -385,7 +397,7 @@ struct cl_kernels {
     std::string m_source;
     std::string m_options;
 
-    cl_kernels(std::string source, std::string options, std::string dump_dir) : m_source(source), m_options(options), Program(source.c_str()) {
+    cl_kernels(std::string source, std::string options, std::string dump_dir) : m_source(source), m_options(options), Program(ocl_context, source.c_str()) {
         cl_int build_error = CL_SUCCESS;
         try {
             build_error = Program.build((options + " -cl-std=CL3.0").c_str());
@@ -672,7 +684,31 @@ void CL_CALLBACK NotifyFunction(const char* pErrInfo, const void* pPrivateInfo, 
 
 static bool enable_profile = false;
 
+static void update_queue() {
+    //cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
+
+    auto opencl_gpu_selector = [](const sycl::device& d) {
+        if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
+            return 1;
+        }
+        return -1;
+    };
+
+    if (enable_profile) {
+        sycl::property_list propList{sycl::property::queue::in_order(), sycl::property::queue::enable_profiling()};
+        sycl_queue = sycl::queue(opencl_gpu_selector, propList);
+    } else {
+        sycl::property_list propList{sycl::property::queue::in_order()};
+        sycl_queue = sycl::queue(opencl_gpu_selector, propList);
+    }
+    cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+    ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+}
+
+void test_esimd(sycl::buffer<float> Buf1, sycl::buffer<float> Buf2, int Size);
+
 PYBIND11_MODULE(cl, m) {
+#if 0
     auto selected_platform = select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
 
     auto show_hint = std::getenv("cl_intel_driver_diagnostics") ? atoi(std::getenv("cl_intel_driver_diagnostics")) : 0;
@@ -688,11 +724,20 @@ PYBIND11_MODULE(cl, m) {
 
     // disable out-of-order execution
     // cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
-    cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
+    // cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
+#endif
 
-    m.def("profiling", [](bool enable) {
+    update_queue();
+
+    m.def("profiling", [&](bool enable) {
         enable_profile = enable;
-        cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
+        update_queue();
+    });
+
+    m.def("test_esimd", [&](cl_tensor& a, cl_tensor& b){
+        test_esimd(sycl::make_buffer<sycl::backend::opencl, float>(a.p_buff->get(), sycl_queue.get_context()),
+                   sycl::make_buffer<sycl::backend::opencl, float>(b.p_buff->get(), sycl_queue.get_context()),
+                   a.numel);
     });
 
     py::class_<cl_tensor>(m, "tensor")
@@ -719,7 +764,7 @@ PYBIND11_MODULE(cl, m) {
         .def(py::pickle(
             [](cl_kernels& p) {  // __getstate__
                 return py::make_tuple(p.m_source, p.m_options);
-            },
+            }, 
             [](py::tuple t) {  // __setstate__
                 return cl_kernels(t[0].cast<std::string>(), t[1].cast<std::string>(), {});
             }));
@@ -734,7 +779,8 @@ PYBIND11_MODULE(cl, m) {
 
     m.def("dev_info", []() {
         py::dict result;
-        const auto& device = cl::Device::getDefault();
+        const auto& devices = ocl_context.getInfo<CL_CONTEXT_DEVICES>();
+        const auto& device = devices[0];
         result["CL_DEVICE_NAME"] = device.getInfo<CL_DEVICE_NAME>();
         result["CL_DEVICE_EXTENSIONS"] = device.getInfo<CL_DEVICE_EXTENSIONS>();
         result["CL_DEVICE_MAX_COMPUTE_UNITS"] = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();

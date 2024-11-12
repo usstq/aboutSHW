@@ -15,12 +15,12 @@ if os.name == 'nt':
 
 ext_modules = [
     Pybind11Extension("clops.cl",
-        ["./clops/cl.cpp"],
+        ["./clops/csrc/cl.cpp", "./clops/csrc/ops.cpp"],
         define_macros = [('VERSION_INFO', __version__)],
         include_dirs = include_dirs,
         library_dirs = library_dirs,
-        extra_compile_args=['-fopenmp'],
-        extra_link_args=["-fopenmp"],
+        extra_compile_args=['-fopenmp', '-fsycl'],
+        extra_link_args=["-fopenmp", '-fsycl'],
         libraries=["OpenCL"]
         ),
 ]
