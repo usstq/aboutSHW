@@ -15,7 +15,7 @@
 
 #include "ngen/ngen_opencl.hpp"
 #include "ngen/ngen_register_allocator.hpp"
-#include "../clops/opencl.hpp"
+#include "opencl.hpp"
 #include "../../include/misc.hpp"
 
 #include "init.hpp"
@@ -24,26 +24,31 @@ using namespace ngen;
 
 // g++ -o bench -std=c++17 bench.cpp -lOpenCL && ./bench
 
-int loop_count = 1000000, body_count = 100;
-const int slm_size = 64 * 1024;
-const int local = getenv("WG_SIZE", 8 * 16);
-const int global = local * getenv("WG_NUM", 1);
+int loop_count = 10000, body_count = 100;
+const int slm_size = 1 * 1024;
+const int local = getenv("WG_SIZE", 8 * 16);    // one xecore
+const int global = local * getenv("WG_NUM", 3200);
 
 enum INST_TYPE {
     FLOAT_MOV,
     FLOAT_ADD,
     FLOAT_MUL,
     FLOAT_MAD,
-    HALF_DPAS,
+    HALF_DPAS8x1,
+    HALF_DPAS8x8,
 
-    MEM_TYPE_START,
+    MEM_L1,
+    MEM_SLM,
 };
 static const char* INST_TYPE_NAMES[] = {
     "FLOAT MOV",
     "FLOAT ADD",
     "FLOAT MUL",
     "FLOAT MAD",
+    "HALF DPAS8x1",
     "HALF DPAS8x8",
+    "MEM_L1",
+    "MEM_SLM"
 };
 
 template <HW hw>
@@ -80,10 +85,10 @@ public:
         requireLocalID(1);
         requireLocalSize();
         requireSLM(slm_size);
-        if (i_type == HALF_DPAS)
+        if (i_type == HALF_DPAS8x8 || i_type == HALF_DPAS8x1)
             requireDPAS();
         requireSIMD((GRF::bytes(hw) == 64) ? 16 : 8);
-        externalName("vector_scale");
+        externalName(std::string("bench_") + INST_TYPE_NAMES[int(i_type)]);
 
         finalizeInterface();
 
@@ -96,10 +101,10 @@ public:
         auto groupID = r0.ud(1);                    // Thread group (a.k.a. workgroup) IDs are in r0.ud(1) (X) r0.ud(6) (Y) r0.ud(7) (Z)
 
         // Local variables.
-        auto globalID = r12.ud(0);
-        auto header = r13;
-        auto data = r14;
-        auto temp = r15;
+        auto globalID = r11.ud(0);
+        auto header = r12;
+        auto data = r13;
+        auto temp = r14;
 
         _reg_alloc.claim(r0-r14);
         // Decide on load/store messages.
@@ -125,22 +130,89 @@ public:
         auto beg_high = _reg_alloc.allocSub<uint32_t>();
         get_cycle(beg_low, beg_high);
 
+        switch (i_type) {
+            case MEM_SLM:
+                shl<uint32_t>(1, header, localID[0], 3);
+                break;
+            case MEM_L1:
+                shl<uint32_t>(1, header, localID[0], 3);
+                addc<uint32_t>(1, header, header, bufferPtr.ud(0));
+                mov(1, temp.ud(0), acc0.ud(0));
+                add(1, header.ud(1), bufferPtr.ud(1), temp.ud(0));
+                break;
+            default:
+                break;
+        }
         mark(loop);
-        //mul(1, globalID, groupID, localSize);
-        //add(1, globalID, globalID, localID[0]);
-        if ((int)i_type < (int)INST_TYPE::MEM_TYPE_START) {
-            if (i_type == INST_TYPE::HALF_DPAS) {
+        mul(1, globalID, groupID, localSize);
+        add(1, globalID, globalID, localID[0]);
+        if ((int)i_type >= MEM_L1) {
+            // auto header = state.ra.alloc().ud();
+            // mov<uint32_t>(1, header, slmOffset);
+            // load(1 | ~leaderFlag, value, D32,                           SLM, header)
+            // store(1 | leaderFlag, D32,                           SLM, header, value)
+            auto d_regs = _reg_alloc.allocRange(payload_counts);
+            for (int i = 0; i < payload_counts; i += 2) {
+                switch (i_type) {
+                    case MEM_SLM:
+                        load(1, d_regs[i], D32 | V16T, SLM, header);
+                        break;
+                    case MEM_L1:
+                        load(1, d_regs[i], D32 | V16T, A64, header);
+                        break;
+                    default: break;
+                }
+            }
+        } else if ((int)i_type < (int)INST_TYPE::MEM_SLM) {
+            if (i_type == INST_TYPE::HALF_DPAS8x1 || i_type == INST_TYPE::HALF_DPAS8x8) {
+                // dpasw.8x8 (8|M0)         r46:f         null:f            r46:hf            r46.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r46:f         r46:f             r29:hf            r8.0:hf          {Atomic}
+                // dpasw.8x8 (8|M0)         r54:f         r54:f             r29:hf            r13.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r62:f         r62:f             r29:hf            r18.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r70:f         r70:f             r29:hf            r24.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r78:f         r78:f             r38:hf            r8.0:hf          {Atomic}
+                // dpasw.8x8 (8|M0)         r86:f         r86:f             r38:hf            r13.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r94:f         r94:f             r38:hf            r18.0:hf         {Atomic}
+                // dpasw.8x8 (8|M0)         r102:f        r102:f            r38:hf            r24.0:hf         {$5}
+                // dpas.8x8 (8|M0)          r56:f         null:f            r56:hf            r56.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r56:f         r56:f             r16:hf            r48.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r64:f         r64:f             r16:hf            r40.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r72:f         r72:f             r16:hf            r32.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r80:f         r80:f             r16:hf            r24.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r88:f         r88:f             r8:hf             r48.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r96:f         r96:f             r8:hf             r40.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r104:f        r104:f            r8:hf             r32.0:hf         {Atomic}
+                // dpas.8x8 (8|M0)          r112:f        r112:f            r8:hf             r24.0:hf         {$8}
+                // dpasw(8 | Atomic, 8, 8, r46.f(), null, r46.hf(), r46.hf());
+                // dpasw(8 | Atomic, 8, 8, r46.f(), r46.f(), r29.hf(), r8.hf());
+                // dpasw(8 | Atomic, 8, 8, r54.f(), r54.f(), r29.hf(), r13.hf());
+                // dpasw(8 | Atomic, 8, 8, r62.f(), r62.f(), r29.hf(), r18.hf());
+                // dpasw(8 | Atomic, 8, 8, r70.f(), r70.f(), r29.hf(), r24.hf());
+                // dpasw(8 | Atomic, 8, 8, r78.f(), r78.f(), r38.hf(), r8.hf());
+                // dpasw(8 | Atomic, 8, 8, r86.f(), r86.f(), r38.hf(), r13.hf());
+                // dpasw(8 | Atomic, 8, 8, r94.f(), r94.f(), r38.hf(), r18.hf());
+                // dpasw(8, 8, 8, r102.f(), r102.f(), r38.hf(), r24.hf());
+
                 auto c_regs = _reg_alloc.allocRange(8 * 8);
                 auto a_regs = _reg_alloc.allocRange(8 * 4);
                 auto b_regs = _reg_alloc.allocRange(8 * 2);
-                dpas(8, 8, 8, c_regs[0].f(), c_regs[0].f(), a_regs[0].hf(), b_regs[0].hf());
-                dpas(8, 8, 8, c_regs[8].f(), c_regs[8].f(), a_regs[8].hf(), b_regs[0].hf());
-                dpas(8, 8, 8, c_regs[16].f(), c_regs[16].f(), a_regs[16].hf(), b_regs[0].hf());
-                dpas(8, 8, 8, c_regs[24].f(), c_regs[24].f(), a_regs[24].hf(), b_regs[0].hf());
-                dpas(8, 8, 8, c_regs[32].f(), c_regs[32].f(), a_regs[0].hf(), b_regs[8].hf());
-                dpas(8, 8, 8, c_regs[40].f(), c_regs[40].f(), a_regs[8].hf(), b_regs[8].hf());
-                dpas(8, 8, 8, c_regs[48].f(), c_regs[48].f(), a_regs[16].hf(), b_regs[8].hf());
-                dpas(8, 8, 8, c_regs[56].f(), c_regs[56].f(), a_regs[24].hf(), b_regs[8].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[0].f(), c_regs[0].f(), b_regs[0].hf(), a_regs[0].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[8].f(), c_regs[8].f(), b_regs[0].hf(), a_regs[8].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[16].f(), c_regs[16].f(), b_regs[0].hf(), a_regs[16].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[24].f(), c_regs[24].f(), b_regs[0].hf(), a_regs[24].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[32].f(), c_regs[32].f(), b_regs[8].hf(), a_regs[0].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[40].f(), c_regs[40].f(), b_regs[8].hf(), a_regs[8].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[48].f(), c_regs[48].f(), b_regs[8].hf(), a_regs[16].hf());
+                // dpasw(8 | Atomic, 8, 8, c_regs[56].f(), c_regs[56].f(), b_regs[8].hf(), a_regs[24].hf());
+                auto r = i_type == INST_TYPE::HALF_DPAS8x1 ? 1 : 8;
+                dpas(8, 8, r, c_regs[0].f(), c_regs[0].f(), a_regs[0].hf(), b_regs[0].hf());
+                dpas(8, 8, r, c_regs[8].f(), c_regs[8].f(), a_regs[8].hf(), b_regs[0].hf());
+                dpas(8, 8, r, c_regs[16].f(), c_regs[16].f(), a_regs[16].hf(), b_regs[0].hf());
+                dpas(8, 8, r, c_regs[24].f(), c_regs[24].f(), a_regs[24].hf(), b_regs[0].hf());
+                dpas(8, 8, r, c_regs[32].f(), c_regs[32].f(), a_regs[0].hf(), b_regs[8].hf());
+                dpas(8, 8, r, c_regs[40].f(), c_regs[40].f(), a_regs[8].hf(), b_regs[8].hf());
+                dpas(8, 8, r, c_regs[48].f(), c_regs[48].f(), a_regs[16].hf(), b_regs[8].hf());
+                dpas(8, 8, r, c_regs[56].f(), c_regs[56].f(), a_regs[24].hf(), b_regs[8].hf());
                 _reg_alloc.release(c_regs);
                 _reg_alloc.release(a_regs);
                 _reg_alloc.release(b_regs);
@@ -166,29 +238,23 @@ public:
         get_cycle(end_low, end_high);
         auto result = _reg_alloc.alloc();
         subq(result.ud(0), result.ud(1), end_low, end_high, beg_low, beg_high);
-        if (!useLSC) {
-            Label skip_write;
-            cmp(1 | eq | f0[0], localID, 0);
-            jmpi(1 | ~f0[0], skip_write);
-            shr<uint32_t>(1, header[2], groupID, 3);
-            add<uint32_t>(1, bufferPtr.ud(1), bufferPtr.ud(1), header[2]);
-            store(1, scattered_qword(), A64, bufferPtr.ud(1), result.ud(0));
-            mark(skip_write);
-        } else {
-            store(1, D32 | V8T, A64, header, data);
-        }
 
-        // Do 32 byte (2 OWord) block read at offset (global ID) * sizeof(float).
-        // if (!useLSC) {
-        //     shr<uint32_t>(1, header[2], globalID, 2);
-        //     load(8, data, block_oword(2), bufferSurface, header);
-        // } else {
-        //     shl(1, globalID, globalID, 2);
-        //     addc(1, header.ud(0), bufferPtr.ud(0), globalID);
-        //     mov(1, temp.ud(0), acc0.ud(0));
-        //     add(1, header.ud(1), bufferPtr.ud(1), temp.ud(0));
-        //     load(1, data, D32 | V8T, A64, header);
-        // }
+        Label skip_write;
+        // each workitem 0 of subgroup will write its timestamp(scalar) out.
+        // it seems there should be bugs if only one item of a group wrote the result.(the first eu result is expected but got the second.) 
+        mov<uint32_t>(1, temp.ud(0), localID[0]);
+        // wi 0 of each subgroup
+        and_<uint32_t>(1 | ze | f0[0], null, temp.ud(0), 7);
+        jmpi(1 | ~f0[0], skip_write);
+        // add offset: p = bufferPtr + globalID / 8 * 8
+        //             global / 8 ==> got the sg index; globalID is the wi 0 of each sg
+        //             global / 8 * 8 ==> each sg will write 8 bytes
+        mov<uint32_t>(1, header, globalID);
+        addc<uint32_t>(1, header, header, bufferPtr.ud(0));
+        mov(1, temp.ud(0), acc0.ud(0));
+        add(1, header.ud(1), bufferPtr.ud(1), temp.ud(0));
+        store(1, D64, A64, header, result);
+        mark(skip_write);
 
         // Scale data.
         // mul<float>(8, data, data, alpha);
@@ -204,7 +270,7 @@ public:
     }
 };
 
-void runKernel(cl::Context& context, cl::CommandQueue queue, cl::Kernel kernel, float alpha) {
+void runKernel(cl::Context& context, cl::CommandQueue queue, cl::Kernel kernel, INST_TYPE type) {
     cl_int status;
 
     int N = 128;
@@ -212,17 +278,12 @@ void runKernel(cl::Context& context, cl::CommandQueue queue, cl::Kernel kernel, 
     std::iota(host_buffer.begin(), host_buffer.end(), 1.0f);
 
     std::cout << std::fixed << std::setprecision(1);
-    // std::cout << "\n\nPreparing to scale by " << alpha << ".\n\n";
-    // std::cout << "Data before scaling:";
-    // for (auto &entry : host_buffer)
-    //     std::cout << ' ' << std::setw(4) << entry;
-    // std::cout << std::endl;
 
     auto buffer_bytes = N * sizeof(float);
     cl::Buffer device_buffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, buffer_bytes, host_buffer.data());
 
     kernel.setArg(0, device_buffer);
-    kernel.setArg(1, alpha);
+    kernel.setArg(1, 0);
 
     const cl::NDRange offset_;
     cl::NDRange global_(global);
@@ -239,7 +300,22 @@ void runKernel(cl::Context& context, cl::CommandQueue queue, cl::Kernel kernel, 
             std::cout << "idx:" << i << ", cost: " << (end - start) * 1.0e-6 << "ms, ";
             cl::copy(queue, device_buffer, host_buffer.begin(), host_buffer.end());
             uint64_t* p = (uint64_t*)&host_buffer[0];
-            std::cout << *p << " cycles, CPI: " << ((p[0] * 1.0) / loop_count / body_count) << "\n";
+            if (type == MEM_SLM || type == MEM_L1) {
+                double size = (double)loop_count * body_count * 4 * 8 * global / 8;
+                std::cout << *p << " cycles, bytes/clk: " << ((double)loop_count * body_count * 4 * 8 / p[0]) << ", speed: " << size / (end - start) << " GB/s\n";
+            } else {
+                double computation = (double)loop_count * body_count * global / 8;
+                static int flops_per_instr [] = {
+                    1*8,        // FLOAT_MOV,
+                    1*8,        // FLOAT_ADD,
+                    1*8,        // FLOAT_MUL,
+                    2*8,        // FLOAT_MAD,
+                    1*16*8*2,   // HALF_DPAS8x1,
+                    8*16*8*2,   // HALF_DPAS8x8,
+                };
+                computation *= flops_per_instr[(int)type];
+                std::cout << *p << " cycles, CPI: " << ((p[0] * 1.0) / loop_count / body_count) << ", speed: " << computation / (end - start) << " GFLOPs/s\n";
+            }
         }
     }
 }
@@ -304,9 +380,9 @@ int main() {
     std::cout << "slm_size   = " << slm_size / 1024 << "KB\n";
     std::cout << "local      = " << local << ", threads = " << local / 8 << ", threads/eu = " << std::max(1, local / 8 / 16) << "\n";
     std::cout << "global     = " << global << ", workgroup = " << global / local << "\n\n";
-    for (int i = 0; i <= (int)HALF_DPAS; i++) {
+    for (int i = 0; i <= (int)MEM_SLM; i++) {
         int old_body_cout = -1;
-        if (i == HALF_DPAS) {
+        if (i == HALF_DPAS8x8 || i == HALF_DPAS8x1) {
             // dpas only unroll 8 times
             old_body_cout = body_count;
             body_count = 8;
@@ -350,8 +426,8 @@ int main() {
     #endif
         }
         std::cout << "Testing " << INST_TYPE_NAMES[i] << ":\n";
-        runKernel(context, cmd_queue, kernel, 1.5f);
-        if (i == HALF_DPAS) {
+        runKernel(context, cmd_queue, kernel, (INST_TYPE)i);
+        if (i == HALF_DPAS8x8 || i == HALF_DPAS8x1) {
             body_count = old_body_cout;
         }
     }
