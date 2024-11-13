@@ -42,15 +42,6 @@ using namespace sycl;
 #endif
 
 //=======================================================================================================
-// https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_device_attribute_query.html
-#define CL_DEVICE_IP_VERSION_INTEL               0x4250
-#define CL_DEVICE_ID_INTEL                       0x4251
-#define CL_DEVICE_NUM_SLICES_INTEL               0x4252
-#define CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL 0x4253
-#define CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL    0x4254
-#define CL_DEVICE_NUM_THREADS_PER_EU_INTEL       0x4255
-#define CL_DEVICE_FEATURE_CAPABILITIES_INTEL     0x4256
-
 #define ANSI_COLOR_INFO  "\033[32m"
 #define ANSI_COLOR_ERROR "\033[31m"
 #define ANSI_COLOR_RESET "\033[0m"
@@ -95,103 +86,6 @@ std::ostream& operator<<(std::ostream& os, const std::array<T, N>& nd) {
     return os;
 }
 
-static cl::Platform select_default_platform(std::vector<std::string> exts = {}) {
-    // Filter for a 2.0 or newer platform and set it as the default
-    std::vector<cl::Platform> platforms;
-    cl::Platform::get(&platforms);
-    cl::Platform plat;
-    for (int i = 0; i < platforms.size(); i++) {
-        auto& p = platforms[i];
-        std::string platver = p.getInfo<CL_PLATFORM_VERSION>();
-
-        std::vector<cl::Device> devs;
-        p.getDevices(CL_DEVICE_TYPE_GPU, &devs);
-
-        std::cout << "platform[" << i << "] : " << p.getInfo<CL_PLATFORM_VERSION>() << "; " << p.getInfo<CL_PLATFORM_NAME>() << std::endl;
-        int usable_devs = 0;
-        for (int k = 0; k < devs.size(); k++) {
-            auto& dev = devs[k];
-            std::cout << "  device[" << k << "] : " << dev.getInfo<CL_DEVICE_NAME>() << " " << dev.getInfo<CL_DEVICE_VENDOR>() << std::endl;
-            std::cout << "    CL_DEVICE_MAX_COMPUTE_UNITS: " << dev.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>() << std::endl;
-            std::cout << "    CL_DEVICE_MAX_CLOCK_FREQUENCY: " << dev.getInfo<CL_DEVICE_MAX_CLOCK_FREQUENCY>() << "(MHz)" << std::endl;
-
-            std::cout << "     max total EU-cycles/second: " << 1e-6 * dev.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>() * dev.getInfo<CL_DEVICE_MAX_CLOCK_FREQUENCY>() << "(T-cycles/sec)"
-                      << std::endl;
-            std::cout << "    CL_DEVICE_LOCAL_MEM_SIZE: " << dev.getInfo<CL_DEVICE_LOCAL_MEM_SIZE>() << std::endl;
-
-            cl_uint v;
-#define COUT_CL_INFO(qname) \
-    dev.getInfo(qname, &v); \
-    std::cout << "    " << #qname << ": " << v << std::endl;
-            // COUT_CL_INFO(CL_DEVICE_ID_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_NUM_SLICES_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_NUM_SUB_SLICES_PER_SLICE_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_NUM_EUS_PER_SUB_SLICE_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_NUM_THREADS_PER_EU_INTEL);
-            // COUT_CL_INFO(CL_DEVICE_FEATURE_CAPABILITIES_INTEL);
-
-            std::cout << "    CL_DEVICE_MAX_WORK_GROUP_SIZE: " << dev.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
-            std::cout << "    CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS: " << dev.getInfo<CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS>() << std::endl;
-            std::cout << "    CL_DEVICE_MAX_WORK_ITEM_SIZES: ";
-            auto maxWorkItems = dev.getInfo<CL_DEVICE_MAX_WORK_ITEM_SIZES>();
-            for (auto& sz : maxWorkItems) {
-                std::cout << sz << " ";
-            }
-            std::cout << std::endl;
-            try {
-                std::array<size_t, 8> value = {0};
-                dev.getInfo(CL_DEVICE_SUB_GROUP_SIZES_INTEL, &value);
-                std::cout << "    CL_DEVICE_SUB_GROUP_SIZES_INTEL: " << value << std::endl;
-            } catch (...) {
-                std::cout << "    CL_DEVICE_SUB_GROUP_SIZES_INTEL: " << "???" << std::endl;
-            }
-
-            std::cout << "    CL_DEVICE_SVM_CAPABILITIES: ";
-            auto svm_caps = dev.getInfo<CL_DEVICE_SVM_CAPABILITIES>();
-            if (svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER)
-                std::cout << " COARSE_GRAIN_BUFFER";
-            if (svm_caps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER)
-                std::cout << " FINE_GRAIN_BUFFER";
-            if (svm_caps & CL_DEVICE_SVM_FINE_GRAIN_SYSTEM)
-                std::cout << " FINE_GRAIN_SYSTEM";
-            if (svm_caps & CL_DEVICE_SVM_ATOMICS)
-                std::cout << " ATOMICS";
-            std::cout << std::endl;
-
-            auto dev_exts = dev.getInfo<CL_DEVICE_EXTENSIONS>();
-            std::cout << "    CL_DEVICE_EXTENSIONS: " << dev_exts << std::endl;
-
-            bool has_extension = true;
-            for (auto& ext : exts) {
-                if (dev_exts.find(ext) == std::string::npos) {
-                    has_extension = false;
-                    std::cout << "     lacks extension : " << ext << std::endl;
-                    break;
-                }
-            }
-
-            if (has_extension)
-                usable_devs++;
-        }
-
-        if ((platver.find("OpenCL 2.") != std::string::npos || platver.find("OpenCL 3.") != std::string::npos) && (usable_devs > 0)) {
-            // Note: an OpenCL 3.x platform may not support all required features!
-            plat = p;
-        }
-    }
-
-    if (plat() == 0) {
-        std::cout << "No OpenCL 2.0 or newer platform found.\n";
-    }
-    cl::Platform newP = cl::Platform::setDefault(plat);
-    if (newP != plat) {
-        std::cout << "Error setting default platform.\n";
-    }
-    std::cout << "platform selected: " << plat.getInfo<CL_PLATFORM_VERSION>() << "; " << plat.getInfo<CL_PLATFORM_NAME>() << std::endl;
-    std::cout << "  device selected: " << cl::Device::getDefault().getInfo<CL_DEVICE_NAME>() << std::endl;
-    return newP;
-}
-
 namespace py = pybind11;
 
 // CPU side generates GPU tasks:
@@ -226,15 +120,15 @@ static cl::Context ocl_context;
 sycl::queue sycl_queue;
 static std::vector<cl::Event> all_events;
 
-// create temp cl_tensor (from pool since we want it to be fast)
-struct cl_buffer_pool {
-    std::multimap<size_t, cl::Buffer> pool;
+// create temp tensor (from pool since we want it to be fast)
+struct buffer_pool {
+    std::multimap<size_t, void*> pool;
     size_t total_size = 0;
     size_t total_count = 0;
     size_t total_alloc_size = 0;
     size_t total_alloc_count = 0;
 
-    cl::Buffer alloc(size_t sz) {
+    void* alloc(size_t sz) {
         total_size += sz;
         total_count++;
 
@@ -242,26 +136,27 @@ struct cl_buffer_pool {
         if (it != pool.end()) {
             pool.erase(it);
             if (DEBUG_MEMPOOL_VERBOSE)
-                std::cout << "[cl_buffer_pool] alloc from pool " << sz << " bytes, cl_mem: " << it->second.get() << std::endl;
+                std::cout << "[buffer_pool] alloc from pool " << sz << " bytes @ " << it->second << std::endl;
             return it->second;
         }
         // allocate a new one
         total_alloc_size += sz;
         total_alloc_count++;
 
-        cl::Buffer ret(ocl_context, CL_MEM_READ_WRITE, sz);
+        void * p = sycl::malloc_device(sz, sycl_queue);
         if (DEBUG_MEMPOOL_VERBOSE)
-            std::cout << "[cl_buffer_pool] alloc new " << sz << " bytes, cl_mem: " << ret.get() << std::endl;
-        return ret;
+            std::cout << "[buffer_pool] alloc new " << sz << " bytes @ " << p << std::endl;
+        return p;
     }
-    void free(cl::Buffer buff) {
-        size_t sz = buff.getInfo<CL_MEM_SIZE>();
+
+    void free(void* buff, size_t sz) {
         pool.emplace(sz, buff);
         if (DEBUG_MEMPOOL_VERBOSE)
-            std::cout << "[cl_buffer_pool] free " << sz << " bytes, cl_mem: " << buff.get() << std::endl;
+            std::cout << "[buffer_pool] free " << sz << " bytes @ " << buff << std::endl;
     }
+
     void show() {
-        std::cout << "=== cl_buffer_pool ===" << std::endl;
+        std::cout << "=== buffer_pool ===" << std::endl;
         size_t pool_size = 0;
         std::map<size_t, int> summary;
         for (auto const& p : pool) {
@@ -278,29 +173,25 @@ struct cl_buffer_pool {
                   << " pool/total/actual = " << pool_size / 1e6 << "/" << total_size / 1e6 << "/" << total_alloc_size / 1e6 << " MB  ===" << std::endl;
     }
 
-    ~cl_buffer_pool() {
+    ~buffer_pool() {
         if (DEBUG_MEMPOOL_SUMMARY)
             show();
     }
 };
-static cl_buffer_pool g_buff_pool;
+static buffer_pool g_buff_pool;
 
 // composite of cl::Buffer & layout information
 // like numpy array
-struct cl_tensor {
+struct tensor {
     std::vector<cl_uint> shape;
     std::vector<cl_uint> strides;
     cl_uint numel = 0;
-    std::shared_ptr<cl::Buffer> p_buff;
+    std::shared_ptr<void> p_buff;
     py::dtype dt;
 
-    cl_tensor() {
-        // empty cl::Buffer
-        auto* p = new cl::Buffer();
-        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {});
-    }
+    tensor() {}
 
-    ~cl_tensor() = default;
+    ~tensor() = default;
 
     const std::vector<cl_uint>& get_shape() const {
         return shape;
@@ -310,6 +201,11 @@ struct cl_tensor {
     }
     py::dtype get_dtype() const {
         return dt;
+    }
+
+    template<class T>
+    operator T* () {
+        return reinterpret_cast<T*>(p_buff.get());
     }
 
     template <class SizeContainer>
@@ -334,20 +230,21 @@ struct cl_tensor {
     }
 
     template <class SizeContainer>
-    cl_tensor(const SizeContainer& dims, py::dtype dtype) {
+    tensor(const SizeContainer& dims, py::dtype dtype) {
         resize(dims, dtype);
     }
 
-    cl_tensor(const py::array& arr) {
+    tensor(const py::array& arr) {
         resize(arr);
     }
-    cl_tensor(const std::vector<size_t>& dims, py::dtype dtype) {
+    tensor(const std::vector<size_t>& dims, py::dtype dtype) {
         resize(dims, dtype);
     }
     void update_buff() {
-        auto* p = new cl::Buffer(g_buff_pool.alloc(numel * dt.itemsize()));
-        p_buff = std::shared_ptr<cl::Buffer>(p, [](cl::Buffer* pbuff) {
-            g_buff_pool.free(*pbuff);
+        size_t sz = numel * dt.itemsize();
+        void* p = g_buff_pool.alloc(sz);
+        p_buff = std::shared_ptr<void>(p, [sz](void* pbuff) {
+            g_buff_pool.free(pbuff, sz);
         });
     }
 
@@ -366,11 +263,12 @@ struct cl_tensor {
             expect_stride *= shape[i];
         }
         update_buff();
-        auto* p = reinterpret_cast<uint8_t*>(info.ptr);
-        // manually sync the queue because cl::copy() will be performed
-        // asynchronously using [enqueueMapBuffer + cpu-copy].
-        cmd_queue.finish();
-        cl::copy(cmd_queue, p, p + numel * dt.itemsize(), *p_buff);
+        auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
+
+        sycl_queue.submit([&](handler &h) {
+            h.memcpy(p_buff.get(), p_host, numel * dt.itemsize());
+        });
+        sycl_queue.wait();
     }
 
     py::array to_numpy() {
@@ -378,12 +276,13 @@ struct cl_tensor {
         // so we just allocate
         py::array ret(dt, shape);
         py::buffer_info info = ret.request();
-        auto* p = reinterpret_cast<uint8_t*>(info.ptr);
+        auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
 
         // make sure data is ready
-        cmd_queue.finish();
-
-        cl::copy(cmd_queue, *p_buff, p, p + numel * dt.itemsize());
+        sycl_queue.submit([&](handler &h) {
+            h.memcpy(p_host, p_buff.get(), numel * dt.itemsize());
+        });
+        sycl_queue.wait();
         return ret;
     }
 };
@@ -515,11 +414,11 @@ struct cl_kernels {
             } else if (py::isinstance<py::float_>(arg)) {
                 auto f = arg.cast<float>();
                 kernel.setArg(arg_idx, f);
-            } else if (py::isinstance<cl_tensor>(arg)) {
-                const auto& t = arg.cast<cl_tensor>();
-                kernel.setArg(arg_idx, *(t.p_buff));
+            } else if (py::isinstance<tensor>(arg)) {
+                const auto& t = arg.cast<tensor>();
+                kernel.setArg(arg_idx, t.p_buff.get());
             } else if (arg.is_none()) {
-                kernel.setArg(arg_idx, sizeof(cl::Buffer), nullptr);
+                kernel.setArg(arg_idx, sizeof(void*), nullptr);
             } else {
                 throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
             }
@@ -674,19 +573,10 @@ struct cpp_kernels {
     }
 };
 #endif
-//======================================================================================================================
-// https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_driver_diagnostics.txt
-void CL_CALLBACK NotifyFunction(const char* pErrInfo, const void* pPrivateInfo, size_t size, void* pUserData) {
-    if (pErrInfo != NULL) {
-        std::cerr << ANSI_COLOR_ERROR << "[cl_intel_driver_diagnostics]:" << pErrInfo << ANSI_COLOR_RESET << std::endl;
-    }
-};
-
 static bool enable_profile = false;
 
 static void update_queue() {
     //cmd_queue = cl::CommandQueue(enable ? cl::QueueProperties::Profiling : cl::QueueProperties::None);
-
     auto opencl_gpu_selector = [](const sycl::device& d) {
         if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
             return 1;
@@ -705,28 +595,9 @@ static void update_queue() {
     ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
 }
 
-void test_esimd(sycl::buffer<float> Buf1, sycl::buffer<float> Buf2, int Size);
+void test_esimd(float* Buf1, float* Buf2, int Size);
 
 PYBIND11_MODULE(cl, m) {
-#if 0
-    auto selected_platform = select_default_platform({"cl_intel_subgroups", "cl_intel_required_subgroup_size"});
-
-    auto show_hint = std::getenv("cl_intel_driver_diagnostics") ? atoi(std::getenv("cl_intel_driver_diagnostics")) : 0;
-    if (show_hint) {
-        cl_context_properties properties[] = {
-            CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL,
-            (cl_context_properties)CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL | CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL,
-            CL_CONTEXT_PLATFORM,
-            (cl_context_properties)selected_platform(),
-            0};
-        cl::Context::setDefault(cl::Context(CL_DEVICE_TYPE_GPU, &properties[0], NotifyFunction));
-    }
-
-    // disable out-of-order execution
-    // cl::CommandQueue::setDefault(cl::CommandQueue(cl::QueueProperties::None));
-    // cmd_queue = cl::CommandQueue(cl::QueueProperties::None);
-#endif
-
     update_queue();
 
     m.def("profiling", [&](bool enable) {
@@ -734,27 +605,25 @@ PYBIND11_MODULE(cl, m) {
         update_queue();
     });
 
-    m.def("test_esimd", [&](cl_tensor& a, cl_tensor& b){
-        test_esimd(sycl::make_buffer<sycl::backend::opencl, float>(a.p_buff->get(), sycl_queue.get_context()),
-                   sycl::make_buffer<sycl::backend::opencl, float>(b.p_buff->get(), sycl_queue.get_context()),
-                   a.numel);
+    m.def("test_esimd", [&](tensor& a, tensor& b){
+        test_esimd(a, b, a.numel);
     });
 
-    py::class_<cl_tensor>(m, "tensor")
+    py::class_<tensor>(m, "tensor")
         .def(py::init<>())
         .def(py::init<const py::array&>())
         .def(py::init<const std::vector<size_t>&, py::dtype>())
-        .def("numpy", &cl_tensor::to_numpy)
-        .def_property_readonly("shape", &cl_tensor::get_shape)
-        .def_property_readonly("numel", &cl_tensor::get_numel)
-        .def_property_readonly("dtype", &cl_tensor::get_dtype)
+        .def("numpy", &tensor::to_numpy)
+        .def_property_readonly("shape", &tensor::get_shape)
+        .def_property_readonly("numel", &tensor::get_numel)
+        .def_property_readonly("dtype", &tensor::get_dtype)
         .def(py::pickle(
             // https://docs.python.org/3/library/pickle.html#pickling-class-instances
-            [](cl_tensor& p) {  // __getstate__
+            [](tensor& p) {  // __getstate__
                 return py::make_tuple(p.to_numpy());
             },
             [](py::tuple t) {  // __setstate__
-                return cl_tensor(t[0].cast<py::array>());
+                return tensor(t[0].cast<py::array>());
             }));
 
     py::class_<cl_kernels>(m, "kernels")
