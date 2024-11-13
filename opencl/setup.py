@@ -7,8 +7,14 @@ import os
 include_dirs = ["./clops/csrc/"]
 library_dirs = []
 if os.name == 'nt':
+    # new version
+    include_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/latest/include/sycl/')
+    library_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib')
+
+    # old version
     include_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/latest/windows/include\sycl/')
     library_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/latest/windows/lib/')
+    library_dirs.append(r'C:/Program Files (x86)/Intel/oneAPI/compiler/latest/windows/compiler/lib/intel64')
 
 ext_modules = [
     Pybind11Extension("clops.cl",
@@ -26,11 +32,7 @@ from distutils.spawn import spawn, find_executable
 
 class oneapi_build_ext(build_ext):
     def build_extensions(self):
-        print(f"================= build_extensions =======================")
-        print(oneapi_build_ext.__bases__)
         # https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/get-started-guide/2024-0/get-started-on-windows.html
-        
-        
         if os.name != 'nt':
             compiler = "icpx"
             self.compiler.set_executable('compiler_so', [compiler])
