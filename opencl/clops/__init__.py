@@ -5,9 +5,11 @@ if os.name == 'nt':
     since python is packaged apps, PATH is not searched when loading DLL (the pybind11 part).
     we have to explicitly add following path for using SYCL/DPC++
     '''
-    os.add_dll_directory("C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler") # old versions
-    os.add_dll_directory("C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin") # old versions
-    os.add_dll_directory("C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin") # 
+    for path in ["C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
+                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
+                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin"]:
+        if os.path.exists(path):
+            os.add_dll_directory(path)
 
 from .ops import *
 from .mha import MHA
