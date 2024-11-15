@@ -34,6 +34,7 @@ enum INST_TYPE {
     FLOAT_ADD,
     FLOAT_MUL,
     FLOAT_MAD,
+    HALF_MAD,
     HALF_DPAS8x1,
     HALF_DPAS8x8,
 
@@ -45,6 +46,7 @@ static const char* INST_TYPE_NAMES[] = {
     "FLOAT ADD",
     "FLOAT MUL",
     "FLOAT MAD",
+    "HALF MAD",
     "HALF DPAS8x1",
     "HALF DPAS8x8",
     "MEM_L1",
@@ -227,6 +229,8 @@ public:
                         add<float>(8, tmp_regs[i], tmp_regs[i], float(-1));
                     else if (i_type == INST_TYPE::FLOAT_MAD)
                         mad<float>(8, tmp_regs[i], tmp_regs[i], r13, r14);
+                    else if (i_type == INST_TYPE::HALF_MAD)
+                        mad<half>(16, tmp_regs[i], tmp_regs[i], r13, r14);
                 }
                 _reg_alloc.release(tmp_regs);
             }
@@ -310,6 +314,7 @@ void runKernel(cl::Context& context, cl::CommandQueue queue, cl::Kernel kernel, 
                     1*8,        // FLOAT_ADD,
                     1*8,        // FLOAT_MUL,
                     2*8,        // FLOAT_MAD,
+                    2*16,       // HALF_MAD,
                     1*16*8*2,   // HALF_DPAS8x1,
                     8*16*8*2,   // HALF_DPAS8x8,
                 };
