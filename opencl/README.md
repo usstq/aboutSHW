@@ -1,13 +1,50 @@
-# Build
+# clops
+
+`clops` is a simple wrapper of OpenCL/SYCL which allows major works of enabling NN workloads done on python side (instead of C++).
+
+some highlights in the design:
+ - `cl.tensor` : a pure GPU device memory object
+ - `buffer_pool` : all `cl.tensor`s are allocated/returned from/to this pool, this pool allows reuse of OpenCL buffer object across NN layers.
+ - on purpose flattened NN-class & object hierarchy, just like functional-programming
+ - shottened the distance between network-description & implementation optimization
 
 ```bash
+# install on windows
+install.cmd
+# install on linux
+./install.sh
+
+# test llama2/qwen2 inference
+python -m clops.tests.llama -p "What's Oxygen?" -n128 -hf /mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0/ -q w4x
+python -m clops.tests.llama -x 16x1024 -n 0 -hf /mnt/llm_irs/models_original/Qwen2-0.5B-Instruct -q f16xmx -r 2
+
+# save converted model parameters (weights) into a separate pickle file
+$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --save /c/luocheng/glm4-4b/clops-glm4-4b-model
+# using converted model to infer
+$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --load /c/luocheng/glm4-4b/clops-glm4-4b-model -r 4
+
+# profiling with opencl-intercept-layer: build from source
+$ git clone https://github.com/intel/opencl-intercept-layer
+$ mkdir build && cd build
+$ cmake ..
+$ cmake --build . --config RelWithDebInfo --target install
+
+# profiling with opencl-intercept-layer: profiling
+$ cliloader -dv -cdt  --dump-dir ./dump/ python3 -m clops.tests.llama -p "What's Oxygen?" -n 32
+
+# https://github.com/intel/pti-gpu/tree/master/tools/unitrace
+$ pti-gpu/tools/unitrace/build/unitrace --output-dir-path trace -d -h --opencl --chrome-call-logging  --chrome-kernel-logging --chrome-device-logging   python -m clops.tests.llama -p "What's Oxygen"
+
+# build C++ examples
 $ g++ -O2 ./max_gflops.cpp -lOpenCL
 $ ./a.out
 # disassemble using ocloc tool from intel-opencl-icd
 $ ocloc disasm -file .build/bin_0
+
 ```
 
-# How OpenCL ICD(Installable Client Drivers) loader works?
+
+### How OpenCL ICD(Installable Client Drivers) loader works?
 - user app links to ICD loader `libOpenCL.so` ([github repo](`https://github.com/KhronosGroup/OpenCL-ICD-Loader`)) to use OpenCL API, we can verify that by `readelf -Ws /lib/x86_64-linux-gnu/libOpenCL.so.1`
 
 - ICD (provided by GPGPU vendor) must provide `clGetExtensionFunctionAddress`, ICD loader will use this function to get function pointer to `clIcdGetPlatformIDsKHR`
@@ -33,7 +70,7 @@ ocloc disasm -file .build/bin_0
 ```
 
 
-# ARC A770 
+### ARC A770 
 
 https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2024-1/xe-arch.html
 https://chipsandcheese.com/p/microbenchmarking-intels-arc-a770
@@ -48,7 +85,7 @@ https://chipsandcheese.com/p/microbenchmarking-intels-arc-a770
 | XMX                   | 8x4x16=512    | `64-FP16-MAD per-cycle`/`128-INT8-MAD per-cycle`<br> totally `137.6/275.2 TFLOPS @2.1GHz` |
 
 
-# MTL and SDPA
+### MTL and SDPA
 
 https://chipsandcheese.com/p/intels-ambitious-meteor-lake-igpu?utm_source=publication-search
 
@@ -67,7 +104,7 @@ Say 8K input length for QWen2 sdpa first token, the measured perf so far -
 3. Ideal time of 2 Gemms : 976.7/4.7T = 207ms / layer => 5.8 sec / infer
 
 
-# Develop & Debug & Profile kernels inside torch framework
+### Develop & Debug & Profile kernels inside torch framework
 
 Torch is a good framework to test & optimize kernels because it's easy to add new kernel (or even backend) and integrate with existing models,
 there are few references:
@@ -86,7 +123,21 @@ The [unitrace](https://github.com/intel/pti-gpu/tree/master/tools/unitrace) coul
 unitrace --output-dir-path trace -d --opencl --chrome-kernel-logging python -m clops.tests.llama -p "What's Oxygen"`
 ```
 
-# References
+### References
+
+Hardware:
+ - Intel-Graphics ISA https://www.intel.com/content/dam/develop/external/us/en/documents/micro2015-isa-igc-tutorial.pdf
+ - Intel-Graphics-Compiler: https://github.com/intel/intel-graphics-compiler
+ - Intel-Graphics-Compiler Virtual-ISA: https://github.com/intel/intel-graphics-compiler/tree/master/documentation/visa/instructions
+ - ARC770 spec: https://www.techpowerup.com/gpu-specs/arc-a770.c3914
+ - Detailed ARC GPU doc: https://www.x.org/docs/intel/ACM/intel-gfx-prm-osrc-acm-vol09-renderengine.pdf
+
+Software:
+ - custom torch types & ops : https://pytorch.org/tutorials/advanced/privateuseone.html
+ - custom torch types & ops : https://pytorch.org/tutorials/advanced/torch_script_custom_ops.html#
+ - off-tree torch OpenCL backend: https://github.com/artyom-beilis/pytorch_dlprim
+ - OpenCL python wrapper: https://github.com/inducer/pyopencl
+
 
  - https://github.com/rsnemmen/OpenCL-examples/blob/master/Hello_World/hello.c
  - https://github.com/yohanesgultom/parallel-programming-assignment/blob/master/PR2/opencl/device_query.c
