@@ -284,8 +284,8 @@ __kernel void XMX_tput(__global half * A,
         int channel = get_sub_group_local_id();
 
         if (bias) {
-            float8 bias0 = convert_float8((half8)(bias[n + channel]));
-            float8 bias1 = convert_float8((half8)(bias[n + 8 + channel]));
+            float8 bias0 = (float8)(bias[n + channel]);
+            float8 bias1 = (float8)(bias[n + 8 + channel]);
             c00 += bias0; c01 += bias1;
             c10 += bias0; c11 += bias1;
             c20 += bias0; c21 += bias1;
@@ -535,7 +535,7 @@ class Linear_w4x:
     # if weight_up is provided, gate/up combination & silu/mul is fused
     def __init__(self, weight, bias, weight_up = None, do_fakequant_weight = False):
         self.N, self.K = weight.shape # weight: [N, K]
-        self.bias = to_cl(bias)
+        self.bias = to_cl(bias.float())
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
         assert self.K % BK == 0, f"'K' dimension {self.K} is not multiple of BK {BK}"
 
@@ -643,7 +643,7 @@ def test(M, K, N, REPEATE = 10):
     torch.manual_seed(0)
     A = torch.randint(-vRANGE, vRANGE+1, [M, K]).half()
     B = torch.randint(-vRANGE, vRANGE+1, [N, K]).half()
-    bias = torch.randint(-vRANGE, vRANGE+1, [N]).half()
+    bias = torch.randint(-vRANGE, vRANGE+1, [N]).float()
     
     B = B*0.1
     B[0,0] = 4
