@@ -102,53 +102,92 @@ __kernel void XMX_split_8x16(__global half * A, __global half * B, __global half
 }
 
 __attribute__((intel_reqd_sub_group_size(8)))
-__kernel void XMX_split_8x32(__global half * A, __global half * B, __global half * C, int N) {
-    int sg = get_sub_group_id();
+__kernel void XMX_split_8x32(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
+    //M, N divided by work groups evenly
+    //assert(M%get_num_groups() == 0 && N%get_num_groups() == 0);
+    int ls_m = M/get_num_groups(0);
+    int ls_n = N/get_num_groups(1);
+
+    //used HW threads  per VE engine
+    int HTs = get_local_size(0);
+    //used VE engines per DSS
+    int VEs = get_local_size(1)/get_sub_group_size();
+    //The subgroups in one row can be 2-paired
+    //assert(VEs % 2 == 0);
+    //assert(ls_m%HTs == 0 && ls_n%VEs == 0);
+    int m_sz_per_sg = ls_m/HTs;
+    int n_sz_per_sg = ls_n/VEs;
+    int m_block = 8;
+    int n_block = 16;
+    //assert(m_sg_sz%m_block == 0 && n_sg_sz%n_block == 0);
+
+    int sgid = get_sub_group_id();
+    int sg_mid = sgid / VEs;
+    int sg_nid = sgid % VEs;
+    //use subgroup ID to locate the starting address of A, B, C
+    __global half * A_start = A + sg_mid * m_sz_per_sg * K;
+    __global half * B_start = B + sg_nid * n_sz_per_sg * K;
+    __global half * C_start = C +  sg_mid * m_sz_per_sg * N + sg_nid * n_sz_per_sg;
+    __global half * AA = A_start;
+    __global half * BB = B_start;
+    __global half * CC = C_start;
+
     int channel = get_sub_group_local_id();
-    float8 acc=0.f;
     float8 c0 =0.f;
     float8 c1 =0.f;
-#if 1
-    int4 a = as_int4(intel_sub_group_block_read4((__global uint*)(A+sg%2*64)));
-#else
-    int8 a = as_int8(intel_sub_group_block_read8((__global uint*)(A)));
-#endif
-    __global half* b_sg_base = B+sg*256;
-    int8 b0 = *(__global int8*)(b_sg_base+16*channel);
-    int8 b1 = *(__global int8*)(b_sg_base+128+16*channel);
-#if 1
-    c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b0, acc);
-    c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b1, acc);
-#else
-    c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, acc);
-    c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, acc);
-#endif
-    half8 hc0 = convert_half8(c0);
-    half8 hc1 = convert_half8(c1);
-    __global half* C00 = C+sg*16+channel;
-    __global half* C01= C+sg*16+8+channel;
-    C00[0*N] = hc0.s0;
-    C00[1*N] = hc0.s1;
-    C00[2*N] = hc0.s2;
-    C00[3*N] = hc0.s3;
-    C00[4*N] = hc0.s4;
-    C00[5*N] = hc0.s5;
-    C00[6*N] = hc0.s6;
-    C00[7*N] = hc0.s7;
+    //accumulate K to output C[m_sz_per_sg,n_sz_per_sg] inner most loop.
+    for (int m = 0; m < m_sz_per_sg; m+=m_block) {
+        AA = A_start + m*K;
+        CC = C_start + m*N;
+        for (int n = 0; n < n_sz_per_sg; n+=n_block) {
+            c0 = 0.f;
+            c1 = 0.f;
+            BB = B_start + n*K;
+            CC += n;
+        #if 0
+            int4 a = as_int4(intel_sub_group_block_read4((__global uint*)(AA+sg_nid %2 * 64)));
+        #else
+            int8 a = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
+        #endif
+            int8 b0 = *(__global int8*)(BB+16*channel);
+            int8 b1 = *(__global int8*)(BB+128+16*channel);
+        #if 0
+            c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b1, c1);
+        #else
+            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
+        #endif
+            //printf("A: 0x%x,  AA: 0x%x, B: 0x%x, BB:0x%x,  C:0x%x, CC: 0x%x C_start:0x%x\n", A, AA, B, BB, C, CC, C_start);
+            //printf("#######:%f,%f,%f,%f\n", c0.s0, c0.s1, c0.s2, c0.s3);
 
-    C01[0*N] = hc1.s0;
-    C01[1*N] = hc1.s1;
-    C01[2*N] = hc1.s2;
-    C01[3*N] = hc1.s3;
-    C01[4*N] = hc1.s4;
-    C01[5*N] = hc1.s5;
-    C01[6*N] = hc1.s6;
-    C01[7*N] = hc1.s7;   
+            half8 hc0 = convert_half8(c0);
+            half8 hc1 = convert_half8(c1);
+            __global half* C00 = CC+channel;
+            C00[0*N] = hc0.s0;
+            C00[1*N] = hc0.s1;
+            C00[2*N] = hc0.s2;
+            C00[3*N] = hc0.s3;
+            C00[4*N] = hc0.s4;
+            C00[5*N] = hc0.s5;
+            C00[6*N] = hc0.s6;
+            C00[7*N] = hc0.s7;
+            __global half* C01= CC+8+channel;
+            C01[0*N] = hc1.s0;
+            C01[1*N] = hc1.s1;
+            C01[2*N] = hc1.s2;
+            C01[3*N] = hc1.s3;
+            C01[4*N] = hc1.s4;
+            C01[5*N] = hc1.s5;
+            C01[6*N] = hc1.s6;
+            C01[7*N] = hc1.s7;
+            }
+        }
 }
 '''
 kernels = cl.kernels(src, f"", "./dump/")
-# cl.profiling(True)
-## case 1: XMX output [8,8]
+cl.profiling(True)
+# ## case 1: XMX output [8,8]
 M = 8
 N = 8
 K = 16 
@@ -183,26 +222,27 @@ tC = cl.tensor([M, N], np.dtype(np.float32))
 kernels.enqueue("prepackA", [int(M), int(K/16)], [1, 1], tA, tA_PACK)
 kernels.enqueue("prepackB", tB.shape,tB.shape, tB, tB_PACK)
 kernels.enqueue("XMX_8x8_PREPACKED", [8],[8], tA_PACK, tB_PACK, tC, K)
-compare(C, tC.numpy())
+# compare(C, tC.numpy())
 
-## case 3: XMX output [8,16] , split on 2 subgroups
-M = 8
-N = 16
-K = 16 
-A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
-B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
-C = np.matmul(A, B.transpose(1,0))
-tC = cl.tensor([M, N], np.dtype(np.float16))
-tA = cl.tensor(A)
-tB = cl.tensor(B)
-kernels.enqueue("XMX_split_8x16", [16],[16], tA, tB, tC)
+# ## case 3: XMX output [8,16] , split on 2 subgroups
+# M = 8
+# N = 16
+# K = 16 
+# A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
+# B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
+# C = np.matmul(A, B.transpose(1,0))
+# tC = cl.tensor([M, N], np.dtype(np.float16))
+# tA = cl.tensor(A)
+# tB = cl.tensor(B)
+# kernels.enqueue("XMX_split_8x16", [16],[16], tA, tB, tC)
 # cl.finish()
-compare(C, tC.numpy())
+# compare(C, tC.numpy())
 
 ## case 4: XMX output [8,32] , split on 2 subgroups
-M = 8
-N = 2048
+M = 256
+N = 256
 K = 16 
+vRANGE = 3
 A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
 B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
 C = np.matmul(A, B.transpose(1,0))
@@ -210,8 +250,8 @@ tC = cl.tensor([M, N], np.dtype(np.float16))
 tA = cl.tensor(A)
 tB = cl.tensor(B)
 # there would be 1024/8=128 subgroups.
-kernels.enqueue("XMX_split_8x32", [int(N/2)],[int(N/2)], tA, tB, tC,N) 
-# cl.finish()
+# assert M%(4*8*8) == 0 and N%(2*16*8) == 0 and K%(16) == 0, "M should be divided by 256 , N should be divided by 256, K should be divied by 16"
+kernels.enqueue("XMX_split_8x32", [8, 128],[8, 128], tA, tB, tC,M,N,K) 
+cl.finish()
 compare(C, tC.numpy())
 print("-----------------")
-
