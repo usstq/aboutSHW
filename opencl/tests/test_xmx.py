@@ -102,11 +102,14 @@ __kernel void XMX_split_8x16(__global half * A, __global half * B, __global half
 }
 
 __attribute__((intel_reqd_sub_group_size(8)))
-__kernel void XMX_split_8x32(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
+__kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
     //M, N divided by work groups evenly
     //assert(M%get_num_groups() == 0 && N%get_num_groups() == 0);
     int ls_m = M/get_num_groups(0);
     int ls_n = N/get_num_groups(1);
+    
+    int lgid_m = get_group_id(0);
+    int lgid_n = get_group_id(1);
 
     //used HW threads  per VE engine
     int HTs = get_local_size(0);
@@ -125,9 +128,9 @@ __kernel void XMX_split_8x32(__global half * A, __global half * B, __global half
     int sg_mid = sgid / VEs;
     int sg_nid = sgid % VEs;
     //use subgroup ID to locate the starting address of A, B, C
-    __global half * A_start = A + sg_mid * m_sz_per_sg * K;
-    __global half * B_start = B + sg_nid * n_sz_per_sg * K;
-    __global half * C_start = C +  sg_mid * m_sz_per_sg * N + sg_nid * n_sz_per_sg;
+    __global half * A_start = A + (ls_m * lgid_m + sg_mid * m_sz_per_sg) * K;
+    __global half * B_start = B + (ls_n * lgid_n + sg_nid * n_sz_per_sg) * K;
+    __global half * C_start = C +  (ls_m * lgid_m +sg_mid * m_sz_per_sg) * N + (ls_n * lgid_n + sg_nid * n_sz_per_sg);
     __global half * AA = A_start;
     __global half * BB = B_start;
     __global half * CC = C_start;
@@ -239,8 +242,8 @@ kernels.enqueue("XMX_8x8_PREPACKED", [8],[8], tA_PACK, tB_PACK, tC, K)
 # compare(C, tC.numpy())
 
 ## case 4: XMX output [8,32] , split on 2 subgroups
-M = 256
-N = 256
+M = 1024
+N = 1024
 K = 16 
 vRANGE = 3
 A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
@@ -249,9 +252,17 @@ C = np.matmul(A, B.transpose(1,0))
 tC = cl.tensor([M, N], np.dtype(np.float16))
 tA = cl.tensor(A)
 tB = cl.tensor(B)
+VE_PER_DSS = 16
+HT_PER_VE = 8
+#
+CHANNEL_SIZE = 8
+
+M_PER_SG = 32
+N_PER_SG = 16
 # there would be 1024/8=128 subgroups.
 # assert M%(4*8*8) == 0 and N%(2*16*8) == 0 and K%(16) == 0, "M should be divided by 256 , N should be divided by 256, K should be divied by 16"
-kernels.enqueue("XMX_split_8x32", [8, 128],[8, 128], tA, tB, tC,M,N,K) 
+#kernels.enqueue("XMX_split_8x32", [8, 128],[8, 128], tA, tB, tC,M,N,K) 
+kernels.enqueue("XMX_GEMM", [int(M/M_PER_SG), int(N/N_PER_SG*CHANNEL_SIZE)],[int(HT_PER_VE), int(VE_PER_DSS * CHANNEL_SIZE)], tA, tB, tC,M,N,K) 
 cl.finish()
 compare(C, tC.numpy())
 print("-----------------")
