@@ -56,6 +56,7 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
     std::vector<cl::Platform> platforms;
     cl::Platform::get(&platforms);
     cl::Platform plat;
+    bool ok = false;
     for (int i = 0; i < platforms.size(); i++) {
         auto& p = platforms[i];
         std::string platver = p.getInfo<CL_PLATFORM_VERSION>();
@@ -64,8 +65,6 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
         p.getDevices(CL_DEVICE_TYPE_GPU, &devs);
 
         std::cout << "platform[" << i << "] : " << p.getInfo<CL_PLATFORM_VERSION>() << "; " << p.getInfo<CL_PLATFORM_NAME>() << std::endl;
-        int usable_devs = 0;
-        int selected = -1;
         for (int k = 0; k < devs.size(); k++) {
             auto& dev = devs[k];
             std::cout << "  device[" << k << "] : " << dev.getInfo<CL_DEVICE_NAME>() << " " << dev.getInfo<CL_DEVICE_VENDOR>() << std::endl;
@@ -128,17 +127,18 @@ static cl::Platform select_default_platform(std::vector<std::string> exts = {}) 
             }
 
             if (has_extension) {
-                selected = k;
-                usable_devs++;
+                if ((platver.find("OpenCL 2.") != std::string::npos || platver.find("OpenCL 3.") != std::string::npos)) {
+                    // Note: an OpenCL 3.x platform may not support all required features!
+                    plat = p;
+                    ok = true;
+                    cl::Device::setDefault(devs[k]);
+                    break;
+                }
             }
         }
 
-        if ((platver.find("OpenCL 2.") != std::string::npos || platver.find("OpenCL 3.") != std::string::npos) && (usable_devs > 0)) {
-            // Note: an OpenCL 3.x platform may not support all required features!
-            plat = p;
-            cl::Device::setDefault(devs[selected]);
+        if (ok)
             break;
-        }
     }
 
     if (plat() == 0) {

@@ -518,15 +518,16 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
         }
     }
     // reduce in sg
+    __local half exp_sum_share[S / SGS];
     exp_sum = sub_group_reduce_add(exp_sum);
     if (id_sg_local == 0) {
-        max_qk_dot_share[id_sg] = exp_sum;
+        exp_sum_share[id_sg] = exp_sum;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     // reduce across sg
     exp_sum = 0;
     if (id_sg_local < S / SGS) {
-        exp_sum = max_qk_dot_share[id_sg_local];
+        exp_sum = exp_sum_share[id_sg_local];
     }
     exp_sum = sub_group_reduce_add(exp_sum);
     if (part_num > 1 && id_local == 0) {
@@ -785,11 +786,11 @@ if __name__ == "__main__":
     HK = 32
     S = 128
     MAX_KV_LEN = 256*8
-    B = 16
-    KV_BLOCK = 32
+    B = 2
+    KV_BLOCK = 128
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
-    first_token = 128*2-4  #KV_BLOCK - 2
+    first_token = 512*2-4  #KV_BLOCK - 2
     second_token_num = 80
     KV_LEN = 0
     for idx in range(second_token_num):
