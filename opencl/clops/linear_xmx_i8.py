@@ -406,57 +406,6 @@ __kernel void matmul_bf_xmx_5(__global char* input,
         output_offset += N;
     }
 }
-/****************************************************************************************************************************
-XMX version 6:
-     1. Input data shared in subgroup
-     2. 2x subgroup pair to do one XMX - DPASW
-     3. WI: 1x8 MADs, subgroup: 4x8=32 MADs
-     4. M=1024, N=1024, K=2560, 0.295393 ms
-****************************************************************************************************************************/
-__attribute__((intel_reqd_sub_group_size(8)))
-__kernel void matmul_bf_xmx_6(__global char* input,
-                             __global const char* weights,
-                             __global char* biases,
-                             __global int* output,
-                             int M, int N, int K) {
-    uint gid = (uint)get_global_id(0);
-    uint sglid = (uint)get_sub_group_local_id();
-    uint SIMD = (uint)get_sub_group_size();
-    uint sg_id = gid/SIMD;
-    uint sg_block_f = (sg_id / 2) % (N / SIMD);
-    uint sg_block_b = (sg_id / (N / SIMD) / 2 ) * 2 + sg_id % 2;
-    uint out_f = sg_block_f * BLOCK_F;
-    uint out_b = sg_block_b * BLOCK_B / 2;
-    int8 result = {}, c = {};
-
-    unroll_for(uint ki = 0; ki < K; ki += BLOCK_K) {
-        uint input_offset = out_b * K + ki;
-        int4 a;
-        int8 b;
-        unroll_for(uint bi = 0;bi < BLOCK_B / 2; bi++) {
-            a[bi] = as_int(intel_sub_group_block_read((const __global uint*)(input + input_offset)));
-            input_offset += K;
-        }
-
-        uint weights_offset = out_f * K + sglid * K + ki;
-        unroll_for(uint fi = 0; fi < BLOCK_F; fi++) {
-            b[fi]=*(const __global int*)(weights + weights_offset + fi * 4 );
-        }
-        result += intel_sub_group_i8_i8_split_matrix_mad_k32(a,b,c);
-    }
-
-    uint bias_offset = out_b * N + out_f;
-    unroll_for(uint bi = 0; bi < BLOCK_B; bi++) {
-        result[bi] += biases[bias_offset + sglid];
-        bias_offset += N;
-    }
-
-    uint output_offset = out_b * N + out_f;
-    unroll_for(uint bi = 0; bi < BLOCK_B; bi++) {
-        intel_sub_group_block_write((__global uint *)(output + output_offset), result[bi]);
-        output_offset += N;
-    }
-}
 
 /****************************************************************************************************************************
 XMX version peak:
@@ -573,7 +522,6 @@ class Linear_XMX_I8:
                             ["matmul_bf_xmx_3", [self.M*self.N//TILE_B, 1, 1],[8,1,1]],
                             ["matmul_bf_xmx_4", [self.M*self.N//TILE_B//BLOCK_NUM, 1, 1],[8,1,1]],
                             ["matmul_bf_xmx_5", [self.M*self.N//TILE_B, 1, 1],[8*SUBGROUP_TILE_B,1,1]],
-                            ["matmul_bf_xmx_6", [self.M*self.N*2//TILE_B, 1, 1],[16,1,1]],
                             ["matmul_bf_xmx_peak", [self.M*self.N//TILE_B, 1, 1],[16*8,1,1]],
                             ["matmul_bf_xmx_peak_fake", [self.M*self.N//TILE_B, 1, 1],[16*8,1,1]]]
 
@@ -630,11 +578,11 @@ if __name__ == "__main__":
             print(f"[total]  {mean_ns*1e-6: .3f} ms, BW: { Bsize/mean_ns : .2f} GB/s, Compute: {gops/mean_ns/1000 : .2f} TOPS/s")
 
         res = output.numpy()
-        if kernel_id < 7:
+        if kernel_id < 6:
             compare(ref, res, 0, 0)
 
-    test_matmul([1024, 1024, 2560], 20, 7)
-    sys.exit(0)
+    #test_matmul([1024, 1024, 2560], 20, 6)
+    #sys.exit(0)
 
     for id in range(8):
         test_matmul([1024, 1024, 2560], 20, id)
