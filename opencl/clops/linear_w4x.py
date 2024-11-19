@@ -519,7 +519,7 @@ assert (BK//16 * SG_M)
 
 K_NTHRS = 8
 
-print(f"{Colors.YELLOW}===== XMX hyper-param ===================")
+print(f"{Colors.YELLOW}===== XMX hyper-param(w4x) ===================")
 print(f"BM = {BM} WG_M = {WG_M}")
 print(f"BN = {BN} WG_N = {WG_N}")
 print(f"BK = {BK} Inner-Loop-Cnt = {BK//16}")
@@ -535,7 +535,7 @@ class Linear_w4x:
     # if weight_up is provided, gate/up combination & silu/mul is fused
     def __init__(self, weight, bias, weight_up = None, do_fakequant_weight = False):
         self.N, self.K = weight.shape # weight: [N, K]
-        self.bias = to_cl(bias.float())
+        self.bias = to_cl(bias.float()) if bias is not None else None
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
         assert self.K % BK == 0, f"'K' dimension {self.K} is not multiple of BK {BK}"
 

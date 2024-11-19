@@ -54,6 +54,8 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
     const __local uint * pA;
     const __local uint * pB;
 
+    __global half * A_last = A + (M-1)*K;
+
     {
         int sg_c = get_local_id(0); //# sub-group local/channel id
         int sg_n = get_local_id(1); //# sub-group id in 'N' dim
@@ -70,13 +72,11 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
         B += wg_n * BN * K + (sg_n * 16 + sg_c)*K + sg_m*16;
 #endif
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
-        
-        int x = (sg_n & 1);
-        int y = (sg_n >> 1);
-        int m = wg_m * BM + sg_m * 32 + y*8 + sg_c;
+
+        int m = wg_m * BM + sg_m * 32 + sg_n * 4;
         if (m >= M) m = M - 1; //# avoid overflow
-        A += m * K + x*32;
-        pbuffA = buffA + (sg_m*32*BK) + (y + x*8)*(8*16) + sg_c*16;
+        A += m * K;
+        pbuffA = buffA + (sg_m*32*BK) + (sg_n*4)*16;
 
 #if USE_DPASW
         pA = (__local uint *)(buffA + (sg_m * 32 * BK) + (sg_id & 1) * (4*16));
@@ -89,7 +89,6 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
 
     //# outer loop in 'K' dim
     for(int k0 = 0; k0 < K; k0 += BK) {
-        
     //# commented to test performance of [SLM + dpasw] only
     #if 1
         //# load & pack A into buffA:
@@ -98,12 +97,21 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
         //#   - loading part of 16-row B slice into buffB in packed format
         //#
         {
-            //# sg_n (0~7) => [y,x]=[(0~3), (0~1)]
             __global half * src = A + k0;
-            uint8 blk0 = *(__global uint8 *)(src);
-            uint8 blk1 = *(__global uint8 *)(src + 16);
-            *(__local uint8 *)(pbuffA) = blk0;
-            *(__local uint8 *)(pbuffA + 4*8*16) = blk1;
+            uint4 r0 = intel_sub_group_block_read4((__global uint *)(src)); if (src < A_last) src += K;
+            uint4 r1 = intel_sub_group_block_read4((__global uint *)(src)); if (src < A_last) src += K;
+            uint4 r2 = intel_sub_group_block_read4((__global uint *)(src)); if (src < A_last) src += K;
+            uint4 r3 = intel_sub_group_block_read4((__global uint *)(src));
+            
+            uint4 a0 = (uint4)(r0.s0, r1.s0, r2.s0, r3.s0);
+            uint4 a1 = (uint4)(r0.s1, r1.s1, r2.s1, r3.s1);
+            uint4 a2 = (uint4)(r0.s2, r1.s2, r2.s2, r3.s2);
+            uint4 a3 = (uint4)(r0.s3, r1.s3, r2.s3, r3.s3);
+
+            intel_sub_group_block_write4((__local uint*)(pbuffA), a0);
+            intel_sub_group_block_write4((__local uint*)(pbuffA + 32*16*1), a1);
+            intel_sub_group_block_write4((__local uint*)(pbuffA + 32*16*2), a2);
+            intel_sub_group_block_write4((__local uint*)(pbuffA + 32*16*3), a3);
         }
 
         //# load sub-slice B (256*BK) into buffB : (256*BK)/(16*8) = 128 half (8 x regs)
@@ -475,6 +483,7 @@ if __name__ == "__main__":
     cl.profiling(True)
     batch_seq = 16*1024
     #test_mm(M=128, K=896, N=151936, compare_ref =True, REPEATE = 1)
+    #test_mm(M=126, K=896, N=1152, compare_ref =True, REPEATE = 10)
     test_mm(M=batch_seq, K=896, N=1152, compare_ref =True, REPEATE = 10)
     #test_mm(M=batch_seq, K=896, N=896, compare_ref =True, REPEATE = 10)
     #test_mm(M=batch_seq, K=896, N=4864, compare_ref =True, REPEATE = 10)
