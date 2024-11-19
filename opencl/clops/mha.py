@@ -768,6 +768,7 @@ class MHA:
                                        part_num)
             else:
                 mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
+                print(cl_kernels.info("MHAFirst", [1, 1, self.S], 16))
                 cl_kernels.enqueue("MHAFirst",
                                    [B, self.head_cnt_q, self.S * mb_blocks_num],
                                    [1, 1, self.S],

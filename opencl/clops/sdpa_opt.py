@@ -7,7 +7,7 @@ class SDPA_opt:
     def __init__(self, Hq, Hk, HEAD_SIZE, multi_query : bool = False):
         self.multi_query = multi_query
         
-        self.SG_SCALE_FACTOR=1
+        self.SG_SCALE_FACTOR=2
         self.SUBGROUP_SIZE=16
         # SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
@@ -28,7 +28,7 @@ class SDPA_opt:
             cl_kernel_sources = file.read()
         # print(cl_kernel_sources[:100])
         options = f'-DSUBGROUP_SIZE={self.SUBGROUP_SIZE} -DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} -DTARGET_SEQ_LEN_BLOCK_SIZE={self.TARGET_SEQ_LEN_BLOCK_SIZE} \
-                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR}'
+                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSTATIC_SCALE_VALUE=1'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
     def __call__(self, shape_info_input, query_input, key_input, value_input, attn_mask_input, scale_input):
@@ -54,8 +54,7 @@ class SDPA_opt:
         print(self.cl_kernels.info(self.kernel_name, LWS, self.SUBGROUP_SIZE))
 
         self.cl_kernels.enqueue(self.kernel_name, GWS, LWS,
-                            shape_info_input, query_input, key_input, value_input, attn_mask_input, scale_input, output,
-                            exp_sums, max_logits, tmp_out)
+                            shape_info_input, query_input, key_input, value_input, output)
 
         return output
 
@@ -145,6 +144,7 @@ if __name__ == "__main__":
         except Exception as inst:
             print('failed.')
 
-    # test_acc(B=1, Hq=1, Hk=1, HEAD_SIZE=32, L=16); sys.exit(0)
-    # test_acc(B=1, Hq=28, Hk=7, HEAD_SIZE=128, L=8410); sys.exit(0)
-    test_acc(1, 24, 6, 128, 2134); sys.exit(0)
+    # test_acc(1, 28, 7, 128, 8410)
+    test_acc(1, 24, 6, 128, 2134)
+    # test_acc(1, 1, 1, 128*4, 32)
+    sys.exit(0)

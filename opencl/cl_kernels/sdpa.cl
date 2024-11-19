@@ -3807,8 +3807,8 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define BROADCAST_GROUP_SIZE               4
 #define DO_BROADCAST_KEY_VALUE             f /= 4;
 #define IS_CAUSAL                          0
-#define HAS_ATTN_MASK_INPUT                1
-#define HAS_SCALE_INPUT                    1
+#define HAS_ATTN_MASK_INPUT                0
+#define HAS_SCALE_INPUT                    0
 // #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
 // #define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
 // #define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
@@ -3838,93 +3838,6 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 
 #define DUMP_WORKINFO                      0
 
-inline uint FUNC(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#if INPUT0_SIMPLE
-    return GET_DATA_INDEX_6D(INPUT0, b, f, w, z, y, x);
-#else
-#if INPUT0_DIMS == 4
-    return INPUT0_GET_INDEX(b, f, y, x);
-#elif INPUT0_DIMS == 5
-    return INPUT0_GET_INDEX(b, f, z, y, x);
-#elif INPUT0_DIMS == 6
-    return INPUT0_GET_INDEX(b, f, w, z, y, x);
-#else
-#error sdpa_opt.cl : Unsupported input 0 format
-#endif
-#endif
-}
-inline uint FUNC(get_input0_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#ifdef INPUT0_DIMS_ORDER
-    return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT0_DIMS_ORDER);
-#else
-    return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
-#endif
-}
-inline uint FUNC(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#ifdef DO_BROADCAST_KEY_VALUE
-    DO_BROADCAST_KEY_VALUE;
-#endif
-#if INPUT1_SIMPLE
-    return GET_DATA_INDEX_6D(INPUT1, b, f, w, z, y, x);
-#else
-#if INPUT1_DIMS == 4
-    return INPUT1_GET_INDEX(b, f, y, x);
-#elif INPUT1_DIMS == 5
-    return INPUT1_GET_INDEX(b, f, z, y, x);
-#elif INPUT1_DIMS == 6
-    return INPUT1_GET_INDEX(b, f, w, z, y, x);
-#else
-#error sdpa_opt.cl : Unsupported input 1 format
-#endif
-#endif
-}
-inline uint FUNC(get_input1_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#ifdef INPUT1_DIMS_ORDER
-    return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
-#else
-    return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
-#endif
-}
-inline uint FUNC(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#ifdef DO_BROADCAST_KEY_VALUE
-    DO_BROADCAST_KEY_VALUE;
-#endif
-#if INPUT2_SIMPLE
-    return GET_DATA_INDEX_6D_SAFE(INPUT2, b, f, w, z, y, x);
-#else
-#if INPUT2_DIMS == 4
-    return INPUT2_GET_INDEX(b, f, y, x);
-#elif INPUT2_DIMS == 5
-    return INPUT2_GET_INDEX(b, f, z, y, x);
-#elif INPUT2_DIMS == 6
-    return INPUT2_GET_INDEX(b, f, w, z, y, x);
-#else
-#error sdpa_opt.cl : Unsupported input 1 format
-#endif
-#endif
-}
-inline uint FUNC(get_input2_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#ifdef INPUT2_DIMS_ORDER
-    return FUNC_CALL(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
-#else
-    return FUNC_CALL(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
-#endif
-}
-#ifdef BEAM_TABLE_TYPE
-inline uint FUNC(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-#if BEAM_TABLE_SIMPLE
-    return GET_DATA_INDEX_6D_SAFE(BEAM_TABLE, b, f, w, z, y, x);
-#else
-#error sdpa_opt.cl : Unsupported beam table format
-#endif
-}
-inline uint FUNC(get_bt_index_key)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
-}
-inline uint FUNC(get_bt_index_value)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
-    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
-}
-#endif
 #define OUTPUT_BLOCK_READ(ptr, offset)       BLOCK_READN(OUTPUT_TYPE, 1, ptr, offset)
 #define OUTPUT_BLOCK_WRITE(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 1, ptr, offset, val)
 #define VALUE_BLOCK_READ(ptr, offset)        BLOCK_READN(INPUT2_TYPE, 1, ptr, offset)
@@ -3952,74 +3865,8 @@ inline uint FUNC(get_bt_index_value)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uin
 #define ATTN_MASK_BUFFER
 #define ATTN_MASK_BUFFER_ARG
 #endif
-#if HAS_SCALE_INPUT
-#define ATTN_SCALE_BUFFER     , scale
-#define ATTN_SCALE_BUFFER_ARG , const __global INPUT4_TYPE* scale
-#else
-#define ATTN_SCALE_BUFFER
-#define ATTN_SCALE_BUFFER_ARG
-#endif
+
 #define MASK_VECTOR_TYPE MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
-inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx,
-                                             uint b1_idx,
-                                             uint target_seq_idx,
-                                             uint source_seq_idx ATTN_MASK_BUFFER_ARG ATTN_SCALE_BUFFER_ARG PA_BUFFERS_ARGS) {
-    MASK_VECTOR_TYPE mask_vec = INPUT0_VAL_ZERO;
-#if !IS_CAUSAL && HAS_ATTN_MASK_INPUT
-    const uint attn_mask_offset = INPUT3_GET_INDEX_SAFE(b0_idx, b1_idx, target_seq_idx, source_seq_idx);
-    if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-            mask_vec[i] = NAN;
-        }
-    } else {
-        if (source_seq_idx + SUBGROUP_SIZE <= (uint)SOURCE_SEQ_LEN) {
-            unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-                const INPUT3_TYPE mask_val = attn_mask[attn_mask_offset + i];
-                mask_vec[i] = mask_val;
-            }
-        } else {
-            const uint max_mask_offset = min(source_seq_idx + SUBGROUP_SIZE, (uint)SOURCE_SEQ_LEN);
-            for (uint i = 0; i < SUBGROUP_SIZE; i++) {
-                const INPUT3_TYPE mask_val = source_seq_idx + i < max_mask_offset ? attn_mask[attn_mask_offset + i] : NAN;
-                mask_vec[i] = mask_val;
-            }
-        }
-    }
-#endif
-#if !IS_CAUSAL && !HAS_ATTN_MASK_INPUT
-    if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-            mask_vec[i] = NAN;
-        }
-    } else {
-        const uint max_mask_offset = min(source_seq_idx + SUBGROUP_SIZE, (uint)SOURCE_SEQ_LEN);
-        for (uint i = 0; i < SUBGROUP_SIZE; i++) {
-            mask_vec[i] = source_seq_idx + i < max_mask_offset ? 0 : NAN;
-        }
-    }
-#endif
-#if IS_CAUSAL
-    if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-            mask_vec[i] = NAN;
-        }
-    } else {
-        for (uint i = 0; i < SUBGROUP_SIZE; i++) {
-            if (source_seq_idx + i > target_seq_idx)
-                mask_vec[i] = NAN;
-        }
-    }
-#endif
-#if HAS_SCALE_INPUT
-    const OUTPUT_TYPE scale_val = OUTPUT_VAL_ONE / *scale;
-#else
-    const INPUT0_TYPE scale_val = TO_INPUT0_TYPE(STATIC_SCALE_VALUE_INV);
-#endif
-#if IS_CAUSAL || HAS_ATTN_MASK_INPUT
-    mask_vec *= scale_val;
-#endif
-    return mask_vec;
-}
 
 ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
 uint __attribute__((overloadable)) intel_get_slice_id( void );
@@ -4062,41 +3909,16 @@ uint __attribute__((overloadable)) intel_get_eu_thread_id( void );
 REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
 KERNEL(sdpa_opt)
 (
-#if DUMP_WORKINFO == 1
- __global struct workitem_info * winfo,
-#endif
 OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
  const __global INPUT1_TYPE* key_input,
  const __global INPUT2_TYPE* value_input,
-#if IS_PAGED_ATTENTION
- const __global INPUT3_TYPE* subsequence_begins,
-#if HAS_ALIBI
- const __global INPUT4_TYPE* alibi_slopes,
-#endif
-#endif
-#if HAS_ATTN_MASK_INPUT
- const __global INPUT3_TYPE* attn_mask,
-#endif
-#if HAS_SCALE_INPUT
- const __global INPUT4_TYPE* scale,
-#endif
- __global OUTPUT_TYPE* output,
-#ifdef BEAM_TABLE_TYPE
- const __global BEAM_TABLE_TYPE* beam_table,
-#endif
-#if IS_PAGED_ATTENTION
- const __global int* blocked_indexes_start,
- const __global int* blocked_indexes_end,
- const __global int* gws_seq_indexes_correspondence
-#else
- __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums,
- __global SOFTMAX_ACCUMULATOR_TYPE* max_logits,
- __global OUTPUT_TYPE* tmp_out
-#endif
+ __global OUTPUT_TYPE* output
 ) {
 #if TARGET_SEQ_LEN_BLOCK_SIZE != 16
 #error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
 #endif
+
+#if 1
 #define batch_idx      ((uint)get_global_id(0))
 #define num_heads_dim  ((uint)get_global_id(0))
 #define b0_idx         (batch_idx / NUM_HEADS)
@@ -4106,6 +3928,18 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #define head_size_idx  ((uint)get_local_id(2) % HEAD_SIZE)
 #define sglid          (uint) get_sub_group_local_id()
 #define sgid           (uint) get_sub_group_id()
+#else
+const uint batch_idx   =   ((uint)get_global_id(0));
+const uint num_heads_dim = ((uint)get_global_id(0));
+const uint b0_idx       =  (batch_idx / NUM_HEADS);
+const uint b1_idx       =  (batch_idx % NUM_HEADS);
+const uint target_seq_dim =((uint)get_global_id(1));
+const uint target_seq_idx =((uint)get_global_id(1) * TARGET_SEQ_LEN_BLOCK_SIZE);
+const uint head_size_idx  =((uint)get_local_id(2) % HEAD_SIZE);
+const uint sglid         = (uint) get_sub_group_local_id();
+const uint sgid          = (uint) get_sub_group_id();
+#endif
+
     __local INPUT0_TYPE slm_query[HEAD_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];  // q_share
     __local OUTPUT_TYPE slm_qk_vals[SEQ_LEN_PARTITION_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];  // qk_dot_share
 
@@ -4143,14 +3977,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 	// pw->cycle_start = intel_get_cycle_counter();
     // 1 cache query
     {
-#ifdef INPUT0_DIMS_ORDER
-        uint query_offset = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx, (head_size_idx));
-        uint query_offset_next_seq = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx + 1, (head_size_idx));
-        const uint query_pitch = query_offset_next_seq - query_offset;
-#else
         uint query_offset = INPUT0_GET_INDEX(b0_idx, b1_idx, target_seq_idx, (head_size_idx));
         const uint query_pitch = HEAD_SIZE;
-#endif
+
         const uint cur_target_seq_len_size = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
         uint query_local_offset = head_size_idx * TARGET_SEQ_LEN_BLOCK_SIZE;
         if (cur_target_seq_len_size != TARGET_SEQ_LEN_BLOCK_SIZE) {
@@ -4234,14 +4063,8 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
         SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
         const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
-#ifdef INPUT1_DIMS_ORDER
-        uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len, 0);
-        uint key_offset_next_seq = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + 1, 0);
-        const uint key_pitch = key_offset_next_seq - key_offset;
-#else
         uint key_offset = INPUT1_GET_INDEX(b0_idx, b1_idx, seq_len, 0);
         const uint key_pitch = HEAD_SIZE;
-#endif
 
         int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);
         MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc;
@@ -4297,15 +4120,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #endif
                 unroll_for(uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
 #ifdef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
-#ifdef BEAM_TABLE_TYPE
-                    INPUT1_TYPE key_vals = 0;
-                    if (key_row_idx < seq_len_calc_size)
-                        key_vals = KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index);
-#else
                     INPUT1_TYPE key_vals = 0;
                     if (key_row_idx < seq_len_calc_size)
                         key_vals = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-#endif
                     // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
                     //         io_counts[1]++;
                     // }
@@ -4323,19 +4140,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
         } // end of q*kT
         {
             unroll_for(uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
-#if HAS_SCALE_INPUT
-                const OUTPUT_TYPE scale_val = *scale;
-                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                //         io_counts[4]++;
-                // }
-#else
                 const OUTPUT_TYPE scale_val = TO_OUTPUT_TYPE(STATIC_SCALE_VALUE);
-#endif
+
                 qk_acc[i] *= scale_val;
-#ifdef HAS_ALIBI
-                const int alibi_val = (1 - SOURCE_SEQ_LEN) + seq_len + i;
-                qk_acc[i] += alibi_slopes[num_heads_dim] * alibi_val;
-#endif
                 qk_acc[i] = INPUT0_MIN_FUNC(INPUT0_MAX_FUNC(qk_acc[i], INPUT0_VAL_MIN), INPUT0_VAL_MAX);
                 qk_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max, TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]));
             }
@@ -4416,16 +4223,12 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     seq_len_end = seq_len_start + min(partition_seq_len - seq_len_start, (uint)(SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR));
                 ;
                 for (uint seq_len = seq_len_start / SUBGROUP_SIZE; seq_len < seq_len_end / SUBGROUP_SIZE; seq_len++) {
-#ifdef INPUT2_DIMS_ORDER
-                    uint value_offset =
-                        FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
-#else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
                     // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
                     //     printf("%d: value_offset %d global_linear_id %ld, (%d,%d,%d,%d) \\n", pw->sub_group_local_id, value_offset,
                     //         get_global_linear_id(), b0_idx, b1_idx, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
                     // }
-#endif
+
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
                     unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + seq_len * SUBGROUP_SIZE + sglid];
@@ -4452,15 +4255,11 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                         qk_val[seq_idx] = slm_qk_vals[qk_offset];
                         qk_offset += SEQ_LEN_PARTITION_SIZE;
                     }
-#ifdef INPUT2_DIMS_ORDER
-                    uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start, head_size_idx);
-#else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + seq_len_leftovers_start, head_size_idx);
                     // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
                     //     printf("%d: value_offset %d global_linear_id %ld, (%d,%d,%d,%d) \\n", pw->sub_group_local_id, value_offset,
                     //         get_global_linear_id(), b0_idx, b1_idx, start_partition_idx + seq_len_leftovers_start, head_size_idx);
                     // }
-#endif
 
                     for (uint seq_len_idx = 0; seq_len_idx < partition_seq_len - seq_len_leftovers_start; seq_len_idx++) {
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
@@ -5899,9 +5698,6 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #endif
 #ifdef HAS_ATTN_MASK_INPUT
 #undef HAS_ATTN_MASK_INPUT
-#endif
-#ifdef HAS_SCALE_INPUT
-#undef HAS_SCALE_INPUT
 #endif
 #ifdef INPUT0_DIMS_ORDER
 #undef INPUT0_DIMS_ORDER
