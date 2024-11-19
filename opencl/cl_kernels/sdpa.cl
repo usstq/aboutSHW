@@ -3813,8 +3813,8 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 // #define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
 // #define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
 #define TARGET_SEQ_LEN                     (shape_info[6])
-#define NUM_HEADS                          28
-#define NUM_KV_HEADS                       -1
+// #define NUM_HEADS                          28
+// #define NUM_KV_HEADS                       -1
 #define SOURCE_SEQ_LEN                     (shape_info[14])
 #define SOFTMAX_ACCUMULATOR_TYPE           float
 #define SOFTMAX_ACCUMULATOR_VAL_MAX        FLT_MAX
@@ -3829,12 +3829,12 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SOFTMAX_ACCUMULATOR_ABS_FUNC       fabs
 #define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
 #define SOFTMAX_ACCUMULATOR_IS_FP          1
-#define SUBGROUP_SIZE                      16
-#define HEAD_SIZE                          128
-#define SEQ_LEN_PARTITION_SIZE             256
-#define TARGET_SEQ_LEN_BLOCK_SIZE          16
+// #define SUBGROUP_SIZE                      16
+// #define HEAD_SIZE                          128
+// #define TARGET_SEQ_LEN_BLOCK_SIZE          16
 #define SDPA_STAGE_0                       1
-#define SG_SCALE_FACTOR                    1
+// #define SG_SCALE_FACTOR                    1
+#define SEQ_LEN_PARTITION_SIZE             (HEAD_SIZE*SG_SCALE_FACTOR)
 
 #define DUMP_WORKINFO                      0
 
@@ -4031,33 +4031,33 @@ uint __attribute__((overloadable)) intel_get_eu_thread_id( void );
 #define uint32_t uint
 #define uint64_t ulong
 
-struct workitem_info {
-	uint32_t group_id0;
-	uint32_t group_id1;
-	uint32_t group_id2;
-	uint32_t local_id2;
-	uint32_t sub_group_id;
-	uint32_t sub_group_local_id;
-	uint32_t slice_id;
-	uint32_t sub_slice_id;
-	uint32_t eu_id;
-	uint32_t eu_slot_id;
-	uint64_t cycle_start;
-	uint64_t cycle_dur;
-};
+// struct workitem_info {
+// 	uint32_t group_id0;
+// 	uint32_t group_id1;
+// 	uint32_t group_id2;
+// 	uint32_t local_id2;
+// 	uint32_t sub_group_id;
+// 	uint32_t sub_group_local_id;
+// 	uint32_t slice_id;
+// 	uint32_t sub_slice_id;
+// 	uint32_t eu_id;
+// 	uint32_t eu_slot_id;
+// 	uint64_t cycle_start;
+// 	uint64_t cycle_dur;
+// };
 
-void set_winfo(struct workitem_info * pw) {
-	pw->group_id0 = get_group_id(0);
-	pw->group_id1 = get_group_id(1);
-	pw->group_id2 = get_group_id(2);
-	pw->local_id2 = get_local_id(2);
-	pw->sub_group_id = get_sub_group_id();
-	pw->sub_group_local_id = get_sub_group_local_id();
-	pw->slice_id = intel_get_slice_id();
-	pw->sub_slice_id = intel_get_dual_subslice_id();
-	pw->eu_id = intel_get_eu_id();
-	pw->eu_slot_id = intel_get_eu_thread_id();
-}
+// void set_winfo(struct workitem_info * pw) {
+// 	pw->group_id0 = get_group_id(0);
+// 	pw->group_id1 = get_group_id(1);
+// 	pw->group_id2 = get_group_id(2);
+// 	pw->local_id2 = get_local_id(2);
+// 	pw->sub_group_id = get_sub_group_id();
+// 	pw->sub_group_local_id = get_sub_group_local_id();
+// 	pw->slice_id = intel_get_slice_id();
+// 	pw->sub_slice_id = intel_get_dual_subslice_id();
+// 	pw->eu_id = intel_get_eu_id();
+// 	pw->eu_slot_id = intel_get_eu_thread_id();
+// }
 
 REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
 KERNEL(sdpa_opt)
@@ -4106,43 +4106,43 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #define head_size_idx  ((uint)get_local_id(2) % HEAD_SIZE)
 #define sglid          (uint) get_sub_group_local_id()
 #define sgid           (uint) get_sub_group_id()
-    __local INPUT0_TYPE slm_query[HEAD_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];
-    __local OUTPUT_TYPE slm_qk_vals[SEQ_LEN_PARTITION_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];
-    __local SOFTMAX_ACCUMULATOR_TYPE slm_qk_max_vals[SUBGROUPS_PER_WG * TARGET_SEQ_LEN_BLOCK_SIZE];
+    __local INPUT0_TYPE slm_query[HEAD_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];  // q_share
+    __local OUTPUT_TYPE slm_qk_vals[SEQ_LEN_PARTITION_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];  // qk_dot_share
+
+    __local SOFTMAX_ACCUMULATOR_TYPE slm_qk_max_vals[SUBGROUPS_PER_WG * TARGET_SEQ_LEN_BLOCK_SIZE]; // max_qk_dot_share
+
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_vals[SUBGROUPS_PER_WG * TARGET_SEQ_LEN_BLOCK_SIZE];
+
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_cur[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_cur[TARGET_SEQ_LEN_BLOCK_SIZE];
-    __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
-    __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
+    __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];  // prev_exp_sum_share
+    __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];  // prev_max_attn_score_share
 
 #if DUMP_WORKINFO == 1
-	struct workitem_info *pw = winfo + get_global_linear_id();
+	// struct workitem_info *pw = winfo + get_global_linear_id();
 #else
-    struct workitem_info winfo;
-    struct workitem_info *pw = &winfo;
+    // struct workitem_info winfo;
+    // struct workitem_info *pw = &winfo;
 #endif
-	set_winfo(pw);
+	// set_winfo(pw);
     // if (get_global_linear_id() == 0) {
+    //     printf("shape_info: ");
     //     for (int i = 0; i < 44; i++) {
-    //         printf("shape_info %d : %d, %f\\n", i, shape_info[i], query_input[i]);
+    //         printf("%d, ", shape_info[i]);
     //     }
+    //     printf("\\n");
     // }
 
-    MAKE_VECTOR_TYPE(uint64_t, 8) mad_counts = 0ul;
-	if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-		printf("==============================================entery sub_group_local_id%d Ls=%d, Ld=%d==============================================\\n", 
-                pw->sub_group_local_id, SOURCE_SEQ_LEN, TARGET_SEQ_LEN);
-	}
+    // MAKE_VECTOR_TYPE(uint64_t, 8) mad_counts = 0ul;
+    // MAKE_VECTOR_TYPE(uint32_t, 8) io_counts = 0;
+	// if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+	// 	printf("==============================================entery sub_group_local_id%d Ls=%d, Ld=%d==============================================\\n", 
+    //             pw->sub_group_local_id, SOURCE_SEQ_LEN, TARGET_SEQ_LEN);
+	// }
 
-	pw->cycle_start = intel_get_cycle_counter();
+	// pw->cycle_start = intel_get_cycle_counter();
+    // 1 cache query
     {
-#if IS_PAGED_ATTENTION
-        const uint block_start_pos = blocked_indexes_start[target_seq_dim];
-        const uint block_end_pos = blocked_indexes_end[target_seq_dim];
-        uint query_offset = block_start_pos * HEAD_SIZE * NUM_HEADS + num_heads_dim * HEAD_SIZE + head_size_idx;
-        const uint query_pitch = HEAD_SIZE * NUM_HEADS;
-        const uint cur_target_seq_len_size = block_end_pos - block_start_pos;
-#else
 #ifdef INPUT0_DIMS_ORDER
         uint query_offset = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx, (head_size_idx));
         uint query_offset_next_seq = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx + 1, (head_size_idx));
@@ -4152,7 +4152,6 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
         const uint query_pitch = HEAD_SIZE;
 #endif
         const uint cur_target_seq_len_size = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-#endif
         uint query_local_offset = head_size_idx * TARGET_SEQ_LEN_BLOCK_SIZE;
         if (cur_target_seq_len_size != TARGET_SEQ_LEN_BLOCK_SIZE) {
             if (sgid * SUBGROUP_SIZE < HEAD_SIZE) {
@@ -4161,6 +4160,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     slm_query[query_local_offset] = val;
                     query_offset += query_pitch;
                     query_local_offset++;
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[0]++;
+                    // }
                 }
             }
         } else {
@@ -4171,6 +4173,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     slm_query[query_local_offset] = val;
                     query_offset += query_pitch;
                     query_local_offset++;
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[0]++;
+                    // }
                 }
             } else {
                 query_local_offset += (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
@@ -4180,6 +4185,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     slm_query[query_local_offset] = val;
                     query_offset += query_pitch;
                     query_local_offset++;
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[0]++;
+                    // }
                 }
             }
 #elif SG_SCALE_FACTOR == 4
@@ -4190,6 +4198,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                 slm_query[query_local_offset] = val;
                 query_offset += query_pitch;
                 query_local_offset++;
+                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                //         io_counts[0]++;
+                // }
             }
 #else
             unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
@@ -4197,6 +4208,9 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                 slm_query[query_local_offset] = val;
                 query_offset += query_pitch;
                 query_local_offset++;
+                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                //         io_counts[0]++;
+                // }
             }
 #endif
         }
@@ -4212,25 +4226,14 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
 #endif
     }
+    // loop in kv_len, each sg will compute A([16, K]) * B([16, K]')
     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) output_acc = OUTPUT_VAL_ZERO;
     __attribute__((opencl_unroll_hint(1))) for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
+        // 2 compute q*k, each sg will compute: dot(A([16, K]), B([L1 / kv_block, 16, K])) = C([L1 / kv_block, 16, 16])
+        // each sg will process SGS key lines        
         SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
         const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
-#if IS_PAGED_ATTENTION
-#ifdef BROADCAST_GROUP_SIZE
-        const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
-#else
-        const uint heads_dim = num_heads_dim;
-#endif
-#define KEY_SEQ_OFFSET subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]]
-        uint key_offset = KEY_SEQ_OFFSET * HEAD_SIZE * NUM_KV_HEADS + heads_dim * HEAD_SIZE + seq_len * HEAD_SIZE * NUM_KV_HEADS;
-        const uint key_pitch = HEAD_SIZE * NUM_KV_HEADS;
-#else
-#ifdef BEAM_TABLE_TYPE
-        const uint b_idx = beam_table[FUNC_CALL(get_bt_index_key)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + sglid, 0)];
-        const uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, seq_len + sglid, 0);
-#else
 #ifdef INPUT1_DIMS_ORDER
         uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len, 0);
         uint key_offset_next_seq = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + 1, 0);
@@ -4239,18 +4242,17 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
         uint key_offset = INPUT1_GET_INDEX(b0_idx, b1_idx, seq_len, 0);
         const uint key_pitch = HEAD_SIZE;
 #endif
-#endif
-#endif
+
         int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);
         MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc;
-        qk_acc = FUNC_CALL(load_attn_mask)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx,
-                                           b1_idx,
-#if IS_PAGED_ATTENTION
-                                           blocked_indexes_start[target_seq_dim] - subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]] + sglid,
-#else
-                                           target_seq_idx + sglid,
-#endif
-                                           seq_len ATTN_MASK_BUFFER ATTN_SCALE_BUFFER PA_BUFFERS);
+        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+        //         io_counts[5] += TARGET_SEQ_LEN_BLOCK_SIZE;
+        // }
+//         qk_acc = FUNC_CALL(load_attn_mask)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx,
+//                                            b1_idx,
+//                                            target_seq_idx + sglid,
+//                                            seq_len ATTN_MASK_BUFFER ATTN_SCALE_BUFFER PA_BUFFERS);
+        // loop whole token, 16 items each due to key can be loaded 16 items at a time by using one SIMD read
         if (seq_len_calc_size >= SUBGROUP_SIZE) {
             __attribute__((opencl_unroll_hint(1))) for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
 #define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset);
@@ -4262,20 +4264,19 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     query_local_offset += TARGET_SEQ_LEN_BLOCK_SIZE;
                 }
                 unroll_for(uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
-#ifdef BEAM_TABLE_TYPE
-                    INPUT1_TYPE key_vals = KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index);
-#else
                     INPUT1_TYPE key_vals = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-#endif
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[1]++;
+                    // }
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
                         qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
-                        if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                                mad_counts[0]++;
-                        }
+                        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                        //         mad_counts[0]++;
+                        // }
                     }
                 }
             }
-        } else if (seq_len_calc_size > 0) {
+        } else if (seq_len_calc_size > 0) { // tail
             __attribute__((opencl_unroll_hint(1))) for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
 #define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset);
 #define QUERY_VEC                   MAKE_VECTOR_TYPE(INPUT1_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
@@ -4288,11 +4289,10 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
 #ifndef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
                 QUERY_VEC key_vec = 0;
                 unroll_for(uint key_row_idx = 0; key_row_idx < seq_len_calc_size; key_row_idx++) {
-#ifdef BEAM_TABLE_TYPE
-                    key_vec[key_row_idx] = KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index);
-#else
                     key_vec[key_row_idx] = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-#endif
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[1]++;
+                    // }
                 }
 #endif
                 unroll_for(uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
@@ -4306,22 +4306,28 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     if (key_row_idx < seq_len_calc_size)
                         key_vals = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
 #endif
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                    //         io_counts[1]++;
+                    // }
 #else
 #define key_vals key_vec[key_row_idx]
 #endif
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
                         qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
-                        if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                                mad_counts[1]++;
-                        }
+                        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                        //         mad_counts[1]++;
+                        // }
                     }
                 }
             }
-        }
+        } // end of q*kT
         {
             unroll_for(uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
 #if HAS_SCALE_INPUT
                 const OUTPUT_TYPE scale_val = *scale;
+                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                //         io_counts[4]++;
+                // }
 #else
                 const OUTPUT_TYPE scale_val = TO_OUTPUT_TYPE(STATIC_SCALE_VALUE);
 #endif
@@ -4348,6 +4354,7 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
             if (sgid == 0) {
                 slm_max_val_cur[sglid] = qk_max_new;
             }
+            // 4 softmax
             SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
             for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
                 qk_acc[i] = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]) - qk_max_new);
@@ -4371,116 +4378,70 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
             }
             barrier(CLK_LOCAL_MEM_FENCE);
         }
+        // 5 w*v
         {
             MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) acc_output_res = OUTPUT_VAL_ZERO;
-#if IS_PAGED_ATTENTION
-            const uint value_pitch = HEAD_SIZE * NUM_KV_HEADS;
-#else
-#ifdef INPUT2_DIMS_ORDER
-            uint value_offset_base = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 0, 0);
-            uint value_offset_next_seq = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 1, 0);
-            const uint value_pitch = value_offset_next_seq - value_offset_base;
-#else
             const uint value_pitch = HEAD_SIZE;
-#endif
-#endif
+
             if (partition_seq_len == SEQ_LEN_PARTITION_SIZE) {
                 uint seq_len_start = (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR);
                 for (uint seq_len = seq_len_start; seq_len < seq_len_start + (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR); seq_len += SUBGROUP_SIZE) {
-#if IS_PAGED_ATTENTION
-#ifdef BROADCAST_GROUP_SIZE
-                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
-#else
-                    const uint heads_dim = num_heads_dim;
-#endif
-                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
-                    uint value_offset =
-                        value_seq_offset * HEAD_SIZE * NUM_KV_HEADS + heads_dim * HEAD_SIZE + (start_partition_idx + (seq_len)) * HEAD_SIZE * NUM_KV_HEADS + head_size_idx;
-#else
-#ifdef BEAM_TABLE_TYPE
-                    const uint b_idx =
-                        beam_table[FUNC_CALL(get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len) + sglid, sgid * SUBGROUP_SIZE)];
-                    const uint value_offset =
-                        FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + (seq_len) + sglid, sgid * SUBGROUP_SIZE);
-#else
-#ifdef INPUT2_DIMS_ORDER
-                    uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len), head_size_idx);
-#else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + (seq_len), head_size_idx);
-#endif
-#endif
-#endif
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
+                    //     printf("%d: value_offset %d global_linear_id %ld, (%d,%d,%d,%d) \\n", pw->sub_group_local_id, value_offset,
+                    //         get_global_linear_id(), b0_idx, b1_idx, start_partition_idx + (seq_len), head_size_idx);
+                    // }
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
                     unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + seq_len + sglid];
                     }
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-#ifdef BEAM_TABLE_TYPE
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, i));
-#else
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
-#endif
+                        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                        //         io_counts[2]++;
+                        // }
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
-                            if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                                    mad_counts[2]++;
-                            }
+                            // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                            //         mad_counts[2]++;
+                            // }
                         }
-#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
-#endif
                     }
                 }
-            } else {
+            } else {  // tail
                 const uint seq_len_start = (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR);
                 uint seq_len_end = 0;
                 if (seq_len_start < partition_seq_len)
                     seq_len_end = seq_len_start + min(partition_seq_len - seq_len_start, (uint)(SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR));
                 ;
                 for (uint seq_len = seq_len_start / SUBGROUP_SIZE; seq_len < seq_len_end / SUBGROUP_SIZE; seq_len++) {
-#if IS_PAGED_ATTENTION
-#ifdef BROADCAST_GROUP_SIZE
-                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
-#else
-                    const uint heads_dim = num_heads_dim;
-#endif
-                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
-                    uint value_offset = value_seq_offset * HEAD_SIZE * NUM_KV_HEADS + heads_dim * HEAD_SIZE +
-                                        (start_partition_idx + (seq_len * SUBGROUP_SIZE)) * HEAD_SIZE * NUM_KV_HEADS + head_size_idx;
-#else
-#ifdef BEAM_TABLE_TYPE
-                    const uint b_idx = beam_table[FUNC_CALL(
-                        get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE) + sglid, sgid * SUBGROUP_SIZE)];
-                    uint value_offset =
-                        FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE) + sglid, sgid * SUBGROUP_SIZE);
-#else
 #ifdef INPUT2_DIMS_ORDER
                     uint value_offset =
                         FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
 #else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
-#endif
-#endif
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
+                    //     printf("%d: value_offset %d global_linear_id %ld, (%d,%d,%d,%d) \\n", pw->sub_group_local_id, value_offset,
+                    //         get_global_linear_id(), b0_idx, b1_idx, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
+                    // }
 #endif
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
                     unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + seq_len * SUBGROUP_SIZE + sglid];
                     }
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-#ifdef BEAM_TABLE_TYPE
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, i));
-#else
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
-#endif
+                        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                        //         io_counts[2]++;
+                        // }
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
-                            if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                                    mad_counts[3]++;
-                            }
+                            // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                            //         mad_counts[3]++;
+                            // }
                         }
-#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
-#endif
                     }
                 }
                 const uint seq_len_leftovers_start = ((seq_len_end / SUBGROUP_SIZE) * SUBGROUP_SIZE);
@@ -4491,60 +4452,38 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                         qk_val[seq_idx] = slm_qk_vals[qk_offset];
                         qk_offset += SEQ_LEN_PARTITION_SIZE;
                     }
-#if IS_PAGED_ATTENTION
-#ifdef BROADCAST_GROUP_SIZE
-                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
-#else
-                    const uint heads_dim = num_heads_dim;
-#endif
-                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
-                    uint value_offset = value_seq_offset * HEAD_SIZE * NUM_KV_HEADS + heads_dim * HEAD_SIZE +
-                                        (start_partition_idx + seq_len_leftovers_start) * HEAD_SIZE * NUM_KV_HEADS + head_size_idx;
-#else
-#ifdef BEAM_TABLE_TYPE
-                    const uint b_idx = beam_table[FUNC_CALL(
-                        get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start + sglid, sgid * SUBGROUP_SIZE)];
-                    const uint value_offset =
-                        FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start + sglid, sgid * SUBGROUP_SIZE);
-#else
 #ifdef INPUT2_DIMS_ORDER
                     uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start, head_size_idx);
 #else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + seq_len_leftovers_start, head_size_idx);
+                    // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
+                    //     printf("%d: value_offset %d global_linear_id %ld, (%d,%d,%d,%d) \\n", pw->sub_group_local_id, value_offset,
+                    //         get_global_linear_id(), b0_idx, b1_idx, start_partition_idx + seq_len_leftovers_start, head_size_idx);
+                    // }
 #endif
-#endif
-#endif
+
                     for (uint seq_len_idx = 0; seq_len_idx < partition_seq_len - seq_len_leftovers_start; seq_len_idx++) {
-#ifdef BEAM_TABLE_TYPE
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, seq_len_idx));
-#else
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
-#endif
+                        // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                        //         io_counts[2]++;
+                        // }
                         for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], seq_len_idx), value_val, acc_output_res[seq_idx]);
-                            if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-                                    mad_counts[4]++;
-                            }
+                            // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+                            //         mad_counts[4]++;
+                            // }
                         }
-#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
-#endif
                     }
                 }
-            }
-            {
+            } // end of actual w*v
+            {   //????
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_prev = slm_exp_sum_prev[sglid];
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_cur = slm_exp_sum_cur[sglid];
                 SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[sglid];
                 SOFTMAX_ACCUMULATOR_TYPE max_val_cur = slm_max_val_cur[sglid];
                 barrier(CLK_LOCAL_MEM_FENCE);
-#if IS_PAGED_ATTENTION
-                const uint block_start_pos_new = blocked_indexes_start[target_seq_dim];
-                const uint block_end_pos_new = blocked_indexes_end[target_seq_dim];
-                const uint seq_idx_end = block_end_pos_new - block_start_pos_new;
-#else
                 const uint seq_idx_end = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-#endif
                 for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                     SOFTMAX_ACCUMULATOR_TYPE total_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(sub_group_broadcast(max_val_prev, seq_idx), sub_group_broadcast(max_val_cur, seq_idx));
                     SOFTMAX_ACCUMULATOR_TYPE updated_exp_sum_prev = sub_group_broadcast(exp_sum_prev, seq_idx) * native_exp(sub_group_broadcast(max_val_prev, seq_idx) - total_max);
@@ -4563,53 +4502,52 @@ OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
                     }
                 }
             }
-        }
-    }
+        } // end of w*v
+    }  // end of loop in kv_len
     if (sgid >= (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) {
         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
             slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + (uint)get_local_id(2)] = output_acc[seq_idx];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
+    // 6 output
     if (sgid < (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) {
         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
             unroll_for(uint i = 1; i < SG_SCALE_FACTOR; i++) {
                 output_acc[seq_idx] += slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + (i * HEAD_SIZE) + head_size_idx];
             }
         }
-#if IS_PAGED_ATTENTION
-        const uint block_start_pos_new = blocked_indexes_start[target_seq_dim];
-        const uint block_end_pos_new = blocked_indexes_end[target_seq_dim];
-        uint output_offset = block_start_pos_new * HEAD_SIZE * NUM_HEADS + num_heads_dim * HEAD_SIZE + sgid * SUBGROUP_SIZE;
-        const uint output_pitch = HEAD_SIZE * NUM_HEADS;
-#else
+
         uint output_offset = OUTPUT_GET_INDEX(b0_idx, b1_idx, target_seq_idx, sgid * SUBGROUP_SIZE);
         const uint output_pitch = HEAD_SIZE;
-#endif
-#if IS_PAGED_ATTENTION
-        if (block_start_pos_new + TARGET_SEQ_LEN_BLOCK_SIZE != block_end_pos_new) {
-            const uint seq_idx_end = block_end_pos_new - block_start_pos_new;
-#else
+
         if (get_global_id(1) == get_global_size(1) - 1) {
             const uint seq_idx_end = min((uint)TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-#endif
+
             for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
                 output_offset += output_pitch;
+                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
+                //         io_counts[3]++;
+                // }
             }
         } else {
             unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
                 output_offset += output_pitch;
+                // if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 /*&& pw->sub_group_id==0*/) {
+                //         io_counts[3]++;
+                // }
             }
         }
     }
 
-	pw->cycle_dur = intel_get_cycle_counter() - pw->cycle_start;
-	if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
-		printf("================exit sub_group_local_id%d duration %ld cycles mads %ld, %ld,  %ld, %ld, %ld ===============\\n", 
-                pw->sub_group_local_id, pw->cycle_dur, mad_counts[0], mad_counts[1], mad_counts[2], mad_counts[3], mad_counts[4]);
-	}
+	// pw->cycle_dur = intel_get_cycle_counter() - pw->cycle_start;
+	// if (pw->group_id0==0 && pw->group_id1==0 && pw->group_id2==0 && pw->sub_group_id==0) {
+	// 	printf("================exit sub_group_local_id%d duration %ld cycles mads KQ %d, %d, KQV %d, %d, %d, DDR io Q %d, K %d, V %d, O %d, Scale %d, Mask %d ===============\\n", 
+    //             pw->sub_group_local_id, pw->cycle_dur, mad_counts[0], mad_counts[1], mad_counts[2], mad_counts[3], mad_counts[4],
+    //             io_counts[0], io_counts[1], io_counts[2], io_counts[3], io_counts[4], io_counts[5]);
+	// }
 }
 #endif
 #endif
