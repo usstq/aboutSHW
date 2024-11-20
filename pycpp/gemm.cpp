@@ -205,7 +205,7 @@ void brgemm_4x3(const float* A,
         }
     }
 
-    auto * prefetch_B = B + 8*3;
+    auto * prefetch_B = B + 64/sizeof(float)*10;
 
     // reducing along k dimension
     //   with -O2 optimization flag, following kernel has 6~7 cycles-per-iteration
@@ -216,8 +216,7 @@ void brgemm_4x3(const float* A,
         __m256 b1 = _mm256_loadu_ps(B + 8 * 1);
         __m256 b2 = _mm256_loadu_ps(B + 8 * 2);
         
-        //_mm_prefetch(prefetch_B, _MM_HINT_T1);
-        //_mm_prefetch(B + 24*5, _MM_HINT_T2);
+        //_mm_prefetch(prefetch_B, _MM_HINT_T0);
 
         __m256 a = _mm256_broadcast_ss(A);
         c00 = _mm256_fmadd_ps(a, b0, c00);
@@ -610,41 +609,63 @@ void MM_CacheBlock(const float* A,
                    int K,
                    int N,
                    int BK) {
+    thread_local float scratch[1024*1024];
     for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
         auto* pA = A;
         auto* pC = C;
         int m;
         bool is_accumulate_C = (k > 0);
-        // prefetch next B block
-        auto* prefetch_B = B + (BK * B_stride);
-        int prefetch_n = 0;
 
-        // reuse B sub-matrix [BK x N]   [M/4] times
-        // loading B sub-matrix [BK x N] into cache is mem-bound, bigger M can better reuse B sub-mat
-        //
+        // B sub-matrix [BK x N] will be re-used [M/4] times
+        // we prefer to read it in HW-prefetcher friendly way, so we will 
+        // repack it on-the-fly
+        float* repacked_B_n24 = scratch;
+        float* repacked_B_n8 = scratch + (N/24)*(24*BK);
+        {
+            // scratch buffer is resident in L2, repack process will exploit
+            // HW-prefetcher to access source data from DDR contingously.
+            for(int k = 0; k < BK; k ++) {
+                const auto * src = B + k*B_stride;
+                auto * dst = repacked_B_n24 + 24*k;
+                int n = 0;
+                for (; n + 24 <= N; n += 24, src += 24, dst += BK*24) {
+                    auto b0 = _mm256_loadu_ps(src + 8 * 0);
+                    auto b1 = _mm256_loadu_ps(src + 8 * 1);
+                    auto b2 = _mm256_loadu_ps(src + 8 * 2);
+                    _mm256_storeu_ps(dst + 8 * 0, b0);
+                    _mm256_storeu_ps(dst + 8 * 1, b1);
+                    _mm256_storeu_ps(dst + 8 * 2, b2);
+                }
+                // N tail part is packed in unit of 8-column
+                dst = repacked_B_n8 + 8*k;
+                for (; n < N; n += 8, src += 8, dst += BK*8) {
+                    auto b0 = _mm256_loadu_ps(src + 8 * 0);
+                    _mm256_storeu_ps(dst, b0);
+                }
+            }
+        }
+        // re-use repacked B sub-matrix in L2 cache as long as we can.
         for (m = 0; m + 4 <= M; m += 4, pA += 4 * A_stride, pC += 4 * C_stride) {
-            auto* prefetch_A = pA + 4 * A_stride;
-            auto* prefetch_A_end = prefetch_A + BK;
-
-            const auto * pB = B;
+            const auto * pB = repacked_B_n24;
             int n = 0;
             for (; n + 24 <= N; n += 24, pB += 24*BK) {
-                //brgemm_4x3<4>(pA, A_stride, pB, 24, pC + n, C_stride, BK, is_accumulate_C);
-                brgemm_4x3<4>(pA, A_stride, B + n, B_stride, pC + n, C_stride, BK, is_accumulate_C);
+                brgemm_4x3<4>(pA, A_stride, pB, 24, pC + n, C_stride, BK, is_accumulate_C);
             }
-            // N tails
-            for (; n < N; n += 8) {
-                brgemm_4x1<4>(pA, A_stride, B + n, B_stride, pC + n, C_stride, BK, is_accumulate_C);
+            pB = repacked_B_n8;
+            for (; n < N; n += 8, pB += 8*BK) {
+                brgemm_4x1<4>(pA, A_stride, pB, 8, pC + n, C_stride, BK, is_accumulate_C);
             }
         }
         // M tails
         for (; m < M; m++, pA += A_stride, pC += C_stride) {
+            const auto * pB = repacked_B_n24;
             int n = 0;
-            for (; n + 24 <= N; n += 24) {
-                brgemm_4x3<1>(pA, A_stride, B + n, B_stride, pC + n, C_stride, BK, is_accumulate_C);
+            for (; n + 24 <= N; n += 24, pB += 24*BK) {
+                brgemm_4x3<1>(pA, A_stride, pB, 24, pC + n, C_stride, BK, is_accumulate_C);
             }
-            for (; n < N; n += 8) {
-                brgemm_4x1<4>(pA, A_stride, B + n, B_stride, pC + n, C_stride, BK, is_accumulate_C);
+            pB = repacked_B_n8;
+            for (; n < N; n += 8, pB += 8*BK) {
+                brgemm_4x1<1>(pA, A_stride, pB, 8, pC + n, C_stride, BK, is_accumulate_C);
             }
         }
     }

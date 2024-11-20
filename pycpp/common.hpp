@@ -13,6 +13,8 @@ union KArg {
     uint8_t* pu8;
     int8_t* pi8;
     uint16_t* pu16;
+    const char * str;
+    const wchar_t * wstr;
 };
 
 // https://stackoverflow.com/a/21371401/9292588

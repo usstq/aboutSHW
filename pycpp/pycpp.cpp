@@ -40,7 +40,9 @@ union KArg {
     int64_t i;
     float f;
     void* p;
+    const char* str;
 };
+
 typedef void (*KERNEL_FUNC)(const std::vector<KArg>&);
 
 static int global_so_id = 0;
@@ -101,6 +103,7 @@ struct cpp_kernels {
         }
 
         std::vector<KArg> kargs;
+        std::vector<std::string> str_args;  // temp storage for string args
 
         int arg_id = 0;
         for (auto& arg : args) {
@@ -114,6 +117,9 @@ struct cpp_kernels {
                 const auto& b = arg.cast<py::array>();
                 py::buffer_info info = b.request();
                 karg.p = info.ptr;
+            } else if (py::isinstance<py::str>(arg)) {
+                str_args.emplace_back(arg.cast<std::string>());
+                karg.str = str_args.back().c_str();
             } else {
                 throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(kargs.size()));
             }
@@ -135,11 +141,11 @@ struct cpp_kernels {
 #endif
 
 void init_gemm(py::module_& m);
+void init_proflier(py::module_& m);
 
 PYBIND11_MODULE(pycpp, m) {
-
     init_gemm(m);
-
+    init_proflier(m);
     py::class_<cpp_kernels>(m, "kernels")
          .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("name") = "")
          .def("call", &cpp_kernels::call);

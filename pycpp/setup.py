@@ -5,7 +5,7 @@ __version__ = "0.1"
 
 ext_modules = [
     Pybind11Extension("pycpp",
-        ["./pycpp.cpp", "./gemm.cpp"],
+        ["./pycpp.cpp", "./gemm.cpp", "./profiler.cpp"],
         define_macros = [('VERSION_INFO', __version__)],
         include_dirs = ["./"],
         library_dirs = ["./"],
