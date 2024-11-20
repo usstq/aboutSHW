@@ -9,113 +9,125 @@ from clops import compare
 
 def test_gemm_multi_dss():
     src = r'''
-    __attribute__((intel_reqd_sub_group_size(8)))
-    __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
         //M, N divided by work groups evenly
         //assert(M%get_num_groups() == 0 && N%get_num_groups() == 0);
-        int ls_m = M/get_num_groups(0);
-        int ls_n = N/get_num_groups(1);
+        int m = M/get_num_groups(0);
+        int n = N/get_num_groups(1);
         int lgid_m = get_group_id(0);
         int lgid_n = get_group_id(1);
 
+        int sg_nb = get_num_sub_groups();
         //used HW threads  per VE engine
-        int HTs = get_local_size(0);
+        int sg_per_col = get_local_size(0);
         //used VE engines per DSS
-        int VEs = get_local_size(1)/get_sub_group_size();
+        int sg_per_row = sg_nb/sg_per_col;
+
         //The subgroups in one row can be 2-paired
-        //assert(VEs % 2 == 0);
-        //assert(ls_m%HTs == 0 && ls_n%VEs == 0);
-        int m_sz_per_sg = ls_m/HTs;
-        int n_sz_per_sg = ls_n/VEs;
+        //assert(sg_per_row % 2 == 0);
+        //assert(m%sg_per_col == 0 && n%VEs == 0);
+        int m_per_sg = m / sg_per_col;
+        int n_per_sg = n / sg_per_row;
         int m_block = 8;
-        int n_block = 16;
-        //assert(m_sg_sz%m_block == 0 && n_sg_sz%n_block == 0);
 
         int sgid = get_sub_group_id();
-        int sg_mid = sgid / VEs;
-        int sg_nid = sgid % VEs;
-        //use subgroup ID to locate the starting address of A, B, C
-        __global half * A_start = A + (ls_m * lgid_m + sg_mid * m_sz_per_sg) * K;
-        __global half * B_start = B + (ls_n * lgid_n + sg_nid * n_sz_per_sg) * K;
-        __global half * C_start = C +  (ls_m * lgid_m +sg_mid * m_sz_per_sg) * N + (ls_n * lgid_n + sg_nid * n_sz_per_sg);
-        __global half * AA = A_start;
-        __global half * BB = B_start;
-        __global half * CC = C_start;
+        int sgidx_m = sgid / sg_per_row;
+        int sgidx_n = sgid % sg_per_row;
+        //A,B,C base of WG
+        __global half * local_A = A + m * lgid_m * K;
+        __global half * local_B = B + n * lgid_n  * K;
+        __global half * local_C = C + m * lgid_m * N + n * lgid_n;
+        //A,B,C base of SG
+        __global half *sg_A = local_A + sgidx_m * m_per_sg * K;
+        __global half *sg_B = local_B + sgidx_n * n_per_sg * K;
+        __global half *sg_C = local_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
+        __global half * AA = sg_A;
+        __global half * BB = sg_B;
+        __global half * CC = sg_C;
+        int chan_id = get_sub_group_local_id();
 
-        int channel = get_sub_group_local_id();
         float8 c0 =0.f;
         float8 c1 =0.f;
-        //accumulate K to output C[m_sz_per_sg,n_sz_per_sg] inner most loop.
-        for (int m = 0; m < m_sz_per_sg; m+=m_block) {
-            AA = A_start + m*K;
-            CC = C_start + m*N;
-            for (int n = 0; n < n_sz_per_sg; n+=n_block) {
-                c0 = 0.f;
-                c1 = 0.f;
-                BB = B_start + n*K;
-                CC += n;
-            #if 0
-                int4 a = as_int4(intel_sub_group_block_read4((__global uint*)(AA+sg_nid %2 * 64)));
-            #else
-                int8 a = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
-            #endif
-                int8 b0 = *(__global int8*)(BB+16*channel);
-                int8 b1 = *(__global int8*)(BB+128+16*channel);
-            #if 0
-                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b0, c0);
-                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b1, c1);
-            #else
-                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
-                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
-            #endif
-                //printf("A: 0x%x,  AA: 0x%x, B: 0x%x, BB:0x%x,  C:0x%x, CC: 0x%x C_start:0x%x\n", A, AA, B, BB, C, CC, C_start);
-                //printf("#######:%f,%f,%f,%f\n", c0.s0, c0.s1, c0.s2, c0.s3);
+        //accumulate K to output C[m_sz_per_sg,n_sz_per_sg]
+        int loop_1 = 1;
+        __attribute__((opencl_unroll_hint))
+        // @todo: To use intel_sub_group_f16_f16_split_matrix_mad_k16() in a loop. The loop number should be a const or MACRO. 
+        //        Using "; i < m_per_sg/m_block;" would have accuracy issue with split implementation.
+        // @bug: (int i = 0; i <  m_per_sg/m_block; i++) {
+        for (int i = 0; i < M_BLK; i++) {
+            c0 = 0.f;
+            c1 = 0.f;
+        #if DPASW
+            int4 a = as_int4(intel_sub_group_block_read4((__global uint*)(AA+sgid%2*64)));
+        #else
+            int8 a = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
+        #endif
+            __global half * BB0 =  BB+16*chan_id;
+            global half * BB1 =  BB+128+16*chan_id;
+            int8 b0 = *(__global int8*)(BB0);
+            int8 b1 = *(__global int8*)(BB1);
+        #if DPASW
+            c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a, b1, c1);
+        #else
+            c0 = intel_sub_group_f16_f16_matrix_mad_k16(a, b0, c0);
+            c1 = intel_sub_group_f16_f16_matrix_mad_k16(a, b1, c1);
+        #endif
+            //printf("sgid:%d, chan_id:%d, a[0]:%d, c0:%f, c1:%f, b0:%f, b1:%f\n", sgid, chan_id, a.s0, c0.s0, c1.s0, b0.s0, b1.s1);
 
-                half8 hc0 = convert_half8(c0);
-                half8 hc1 = convert_half8(c1);
-                __global half* C00 = CC+channel;
-                C00[0*N] = hc0.s0;
-                C00[1*N] = hc0.s1;
-                C00[2*N] = hc0.s2;
-                C00[3*N] = hc0.s3;
-                C00[4*N] = hc0.s4;
-                C00[5*N] = hc0.s5;
-                C00[6*N] = hc0.s6;
-                C00[7*N] = hc0.s7;
-                __global half* C01= CC+8+channel;
-                C01[0*N] = hc1.s0;
-                C01[1*N] = hc1.s1;
-                C01[2*N] = hc1.s2;
-                C01[3*N] = hc1.s3;
-                C01[4*N] = hc1.s4;
-                C01[5*N] = hc1.s5;
-                C01[6*N] = hc1.s6;
-                C01[7*N] = hc1.s7;
-            }
+            half8 hc0 = convert_half8(c0);
+            half8 hc1 = convert_half8(c1);
+            __global half* C00 = CC+chan_id;
+            __global half* C01= CC+8+chan_id;
+            C00[0*N] = hc0.s0;
+            C00[1*N] = hc0.s1;
+            C00[2*N] = hc0.s2;
+            C00[3*N] = hc0.s3;
+            C00[4*N] = hc0.s4;
+            C00[5*N] = hc0.s5;
+            C00[6*N] = hc0.s6;
+            C00[7*N] = hc0.s7;
+
+            C01[0*N] = hc1.s0;
+            C01[1*N] = hc1.s1;
+            C01[2*N] = hc1.s2;
+            C01[3*N] = hc1.s3;
+            C01[4*N] = hc1.s4;
+            C01[5*N] = hc1.s5;
+            C01[6*N] = hc1.s6;
+            C01[7*N] = hc1.s7;
+            AA += 8*K;
+            CC += 8*N;
         }
     }
 '''
-    kernels = cl.kernels(src, f"", "./dump/")
-    M = 1024
-    N = 1024
+    # Each subgroup would output MBLOCK * 8 = 32 rows of data.
+    kernels = cl.kernels(src, "-D M_BLK=4 -D DPASW=1", "./dump/")
+    RESERVE_DSS = 8
+    M = 256 * RESERVE_DSS
+    N = 256 * RESERVE_DSS
+    # ONE XMX would accumulate 16
     K = 16
     vRANGE = 3
+    #np.random.seed(0);
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
+    # B layout is [N, K]
     B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
     C = np.matmul(A, B.transpose(1,0))
     tC = cl.tensor([M, N], np.dtype(np.float16))
     tA = cl.tensor(A)
     tB = cl.tensor(B)
 
-    VE_PER_DSS = 16
-    HT_PER_VE = 8
-    CHANNEL_SIZE = 8
-    M_PER_SG = 32
-    N_PER_SG = 16
-    # there would be 1024/8=128 subgroups.
-    # assert M%(4*8*8) == 0 and N%(2*16*8) == 0 and K%(16) == 0, "M should be divided by 256 , N should be divided by 256, K should be divied by 16"
-    #kernels.enqueue("XMX_split_8x32", [8, 128],[8, 128], tA, tB, tC,M,N,K)
-    kernels.enqueue("XMX_GEMM", [int(M/M_PER_SG), int(N/N_PER_SG*CHANNEL_SIZE)],[int(HT_PER_VE), int(VE_PER_DSS * CHANNEL_SIZE)], tA, tB, tC,M,N,K)
+    # One DSS would calculate to output C [256, 256]. One DSS(WG) would has [8, 128] work items. 8 is hw threads, 128 = 16 *8 = EUs * subgroup_size.
+    # subgroup number on on DSS is 8*128/subgroup_size = 128;  Matrix C [256, 256] is divided by subgroups [8, 16].
+    # Each subgroup would output C [256/8, 256/16] = [32, 16]. XMX HW would output [8,8] once. so there would be 8 XMX instructions invocation for one subgroup.
+    # To use the intel_sub_group_f16_f16_split_matrix_mad_k16(), subgroups in one row should be even.
+    # Consider one subgroup is one VE core using 1 hw threads.
+    # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
+    # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
+    kernels.enqueue("XMX_GEMM", [8 * RESERVE_DSS, 128 * RESERVE_DSS],[8, 128], tA, tB, tC, M, N, K)
+
     cl.finish()
     compare(C, tC.numpy())
 
@@ -327,11 +339,9 @@ __kernel void XMX_split_8x32(__global half * A, __global half * B, __global half
     cl.finish()
     compare(C, tC.numpy())
 
+## step by step to understand how to use XMX and how to distribute workloads on GPU A770
 test_xmx_8x8()
 test_xmx_prepack_8x8()
 test_split_xmx()
 test_gemm_multi_dss()
-print("-----------------")
-
-
-
+print("-------------------------")
