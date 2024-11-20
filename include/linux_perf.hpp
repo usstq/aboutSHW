@@ -1012,14 +1012,14 @@ struct PerfEventGroup : public IPerfEventDumper {
                 }
                 if (loop_cnt > 0) {
                     // cycles per kernel (or per-iteration)
-                    log += sprintf(log, " CPK:%.1fx%d", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
+                    log += sprintf(log, " CPK:%.1fx%ld", 1.0 * pmc[hw_cpu_cycles_evid] / loop_cnt, loop_cnt);
                 }
             }
             if (addinfo) {
                 addinfo(duration_ns, &pmc[0], log);
             }
             log += sprintf(log, "\n");
-            printf(log_buff);
+            printf("%s", log_buff);
         }
         return pmc;
     }
