@@ -66,17 +66,14 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
         int wg_m = get_group_id(2);
         //# A: [M, K]
         //# B: [N, K]
-#if 1
         B += wg_n * BN * K + (sg_n*16*BK) + sg_m*(16*16);
-#else
-        B += wg_n * BN * K + (sg_n * 16 + sg_c)*K + sg_m*16;
-#endif
+
         pbuffB = buffB + (sg_n*16*BK) + sg_m*(16*16);
 
-        int m = wg_m * BM + sg_m * 32 + sg_n * 4;
+        int m = wg_m * BM + sg_m * 32 + sg_n * (32/WG_N);
         if (m >= M) m = M - 1; //# avoid overflow
         A += m * K;
-        pbuffA = buffA + (sg_m*32*BK) + (sg_n*4)*16;
+        pbuffA = buffA + (sg_m*32*BK) + (sg_n * (32/WG_N))*16;
 
 #if USE_DPASW
         pA = (__local uint *)(buffA + (sg_m * 32 * BK) + (sg_id & 1) * (4*16));
@@ -92,10 +89,6 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
     //# commented to test performance of [SLM + dpasw] only
     #if 1
         //# load & pack A into buffA:
-        //# each sub-group is responsible for :
-        //#   - loading part of 32-row A slice into buffA in packed format
-        //#   - loading part of 16-row B slice into buffB in packed format
-        //#
         {
             __global half * src = A + k0;
             uint4 r0 = intel_sub_group_block_read4((__global uint *)(src)); if (src < A_last) src += K;
@@ -113,29 +106,20 @@ __kernel void XMX_tput(__global half * A, __global half * B, __global float * bi
             intel_sub_group_block_write4((__local uint*)(pbuffA + 32*16*2), a2);
             intel_sub_group_block_write4((__local uint*)(pbuffA + 32*16*3), a3);
         }
-
+    #endif
+    #if 1
         //# load sub-slice B (256*BK) into buffB : (256*BK)/(16*8) = 128 half (8 x regs)
         //#  suppose B has been turned into blocked layout : [K/BK, 256, BK]
         {
-            #if 1
-                //# given B is prepacked, sub-group block read is faster
-                __global half * src = B + k0*BN;
-                uint8 blk0 = intel_sub_group_block_read8((__global uint *)(src));
-                uint8 blk1 = intel_sub_group_block_read8((__global uint *)(src + 8*16));
-                intel_sub_group_block_write8((__local uint*)(pbuffB), blk0);
-                intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), blk1);
-            #else
-                __global half * src = B + k0;
-                uint8 blk0 = *(__global uint8 *)(src);
-                uint8 blk1 = *(__global uint8 *)(src + 8*K);
-                intel_sub_group_block_write8((__local uint*)(pbuffB), blk0);
-                intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), blk1);
-            #endif
+            __global half * src = B + k0*BN;
+            uint8 blk0 = intel_sub_group_block_read8((__global uint *)(src));
+            uint8 blk1 = intel_sub_group_block_read8((__global uint *)(src + 8*16));
+            intel_sub_group_block_write8((__local uint*)(pbuffB), blk0);
+            intel_sub_group_block_write8((__local uint*)(pbuffB + 8*16), blk1);
         }
     #endif
-    
+
         barrier(CLK_LOCAL_MEM_FENCE);
-        
     #if 1
         //# offset into buff A & B for each sub-group
         //# sub-group 8-rows, 16-cols: each of size 32x16
@@ -322,7 +306,7 @@ assert (BK//16 * SG_M)
 
 KDEBUG = 0
 
-if False:
+if 1:
     print(f"{Colors.YELLOW}===== XMX hyper-param ===================")
     print(f"BM = {BM} WG_M = {WG_M}")
     print(f"BN = {BN} WG_N = {WG_N}")
@@ -407,6 +391,8 @@ def test_mm(M, K, N, compare_ref = False, REPEATE = 2):
     print(f"M_padded = {M_padded} = {M_padded/BM:.2f} x BM")
     print(f"N = {N} = {N/BN:.2f} x BN")
     print(f"K = {K} = {K/BK:.2f} x BK")
+    print(f" A size = {M*K*2*1e-6:.2f} MB")
+    print(f" B size = {N*K*2*1e-6:.2f} MB")
     print(f"total_work_groups = {total_work_groups}")
     print(f"total_sub_groups = {total_sub_groups}")
     total_eus_threads = 512 * 8
@@ -448,6 +434,7 @@ def test_mm(M, K, N, compare_ref = False, REPEATE = 2):
 
     if True:
         all_linear = [Linear_f16xmx(torch.from_numpy(B), torch.from_numpy(bias)) for _ in range(REPEATE)]
+        cl.finish()
         for i in range(0, REPEATE):
             tC = all_linear[i](tA)
     else:
@@ -485,6 +472,7 @@ if __name__ == "__main__":
     #test_mm(M=128, K=896, N=151936, compare_ref =True, REPEATE = 1)
     #test_mm(M=126, K=896, N=1152, compare_ref =True, REPEATE = 10)
     test_mm(M=batch_seq, K=896, N=1152, compare_ref =True, REPEATE = 10)
+    #test_mm(M=batch_seq, K=896, N=1280, compare_ref =True, REPEATE = 10)
     #test_mm(M=batch_seq, K=896, N=896, compare_ref =True, REPEATE = 10)
     #test_mm(M=batch_seq, K=896, N=4864, compare_ref =True, REPEATE = 10)
     #test_mm(M=batch_seq, K=4864, N=896, compare_ref =True, REPEATE = 10)

@@ -1,22 +1,11 @@
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include "common.hpp"
 
-#define CL_HPP_ENABLE_EXCEPTIONS
-#define CL_HPP_TARGET_OPENCL_VERSION 300
-#include <sycl/CL/opencl.h>
-
-#include <algorithm>
 #include <cassert>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <map>
-#include <memory>
+
 #include <sstream>
 #include <sycl/sycl.hpp>
-#include <vector>
 
 using namespace sycl;
 
@@ -38,8 +27,6 @@ using namespace sycl;
 #define ANSI_COLOR_INFO  "\033[32m"
 #define ANSI_COLOR_ERROR "\033[31m"
 #define ANSI_COLOR_RESET "\033[0m"
-
-namespace py = pybind11;
 
 // CPU side generates GPU tasks:
 //  - shape-infer
@@ -70,6 +57,7 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 
 sycl::queue sycl_queue;
 static std::vector<cl_event> all_events;
+
 
 // all tensors are device memory managed by buffer_pool
 struct buffer_pool {
@@ -131,112 +119,72 @@ struct buffer_pool {
 };
 static buffer_pool g_buff_pool;
 
-// composite of cl::Buffer & layout information
-// like numpy array
-struct tensor {
-    std::vector<cl_uint> shape;
-    std::vector<cl_uint> strides;
-    cl_uint numel = 0;
-    std::shared_ptr<void> p_buff;
-    py::dtype dt;
-
-    tensor() {}
-
-    ~tensor() = default;
-
-    const std::vector<cl_uint>& get_shape() const {
-        return shape;
-    }
-    cl_uint get_numel() const {
-        return numel;
-    }
-    py::dtype get_dtype() const {
-        return dt;
+template <class SizeContainer>
+void tensor::resize(const SizeContainer& dims, py::dtype dtype) {
+    dt = dtype;
+    auto it_dims = dims.begin();
+    auto it_dims_end = dims.end();
+    numel = 1;
+    for (; it_dims != it_dims_end; ++it_dims) {
+        auto dim = *it_dims;
+        shape.push_back(dim);
+        numel *= dim;
     }
 
-    template <class T>
-    operator T*() const {
-        return reinterpret_cast<T*>(p_buff.get());
+    cl_uint stride = 1;
+    strides.resize(shape.size());
+    for (int i = shape.size() - 1; i >= 0; --i) {
+        strides[i] = stride;
+        stride *= shape[i];
     }
+    update_buff();
+}
 
-    template <class SizeContainer>
-    void resize(const SizeContainer& dims, py::dtype dtype) {
-        dt = dtype;
-        auto it_dims = dims.begin();
-        auto it_dims_end = dims.end();
-        numel = 1;
-        for (; it_dims != it_dims_end; ++it_dims) {
-            auto dim = *it_dims;
-            shape.push_back(dim);
-            numel *= dim;
-        }
+void tensor::update_buff() {
+    size_t sz = numel * dt.itemsize();
+    void* p = g_buff_pool.alloc(sz);
+    p_buff = std::shared_ptr<void>(p, [sz](void* pbuff) {
+        g_buff_pool.free(pbuff, sz);
+    });
+}
 
-        cl_uint stride = 1;
-        strides.resize(shape.size());
-        for (int i = shape.size() - 1; i >= 0; --i) {
-            strides[i] = stride;
-            stride *= shape[i];
-        }
-        update_buff();
+void tensor::resize(const py::array& b) {
+    py::buffer_info info = b.request();
+    dt = b.dtype();
+    cl_uint expect_stride = 1;
+    numel = 1;
+    shape.resize(info.ndim);
+    strides.resize(info.ndim);
+    for (int i = info.ndim - 1; i >= 0; --i) {
+        numel *= info.shape[i];
+        shape[i] = info.shape[i];
+        strides[i] = info.strides[i] / info.itemsize;
+        ASSERT(strides[i] == expect_stride);
+        expect_stride *= shape[i];
     }
+    update_buff();
+    auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
 
-    template <class SizeContainer>
-    tensor(const SizeContainer& dims, py::dtype dtype) {
-        resize(dims, dtype);
-    }
+    sycl_queue.submit([&](handler& h) {
+        h.memcpy(p_buff.get(), p_host, numel * dt.itemsize());
+    });
+    sycl_queue.wait();
+}
 
-    tensor(const py::array& arr) {
-        resize(arr);
-    }
-    tensor(const std::vector<size_t>& dims, py::dtype dtype) {
-        resize(dims, dtype);
-    }
-    void update_buff() {
-        size_t sz = numel * dt.itemsize();
-        void* p = g_buff_pool.alloc(sz);
-        p_buff = std::shared_ptr<void>(p, [sz](void* pbuff) {
-            g_buff_pool.free(pbuff, sz);
-        });
-    }
+py::array tensor::to_numpy() {
+    // this shouldn't be a very frequent operation which requires optimizations
+    // so we just allocate
+    py::array ret(dt, shape);
+    py::buffer_info info = ret.request();
+    auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
 
-    void resize(const py::array& b) {
-        py::buffer_info info = b.request();
-        dt = b.dtype();
-        cl_uint expect_stride = 1;
-        numel = 1;
-        shape.resize(info.ndim);
-        strides.resize(info.ndim);
-        for (int i = info.ndim - 1; i >= 0; --i) {
-            numel *= info.shape[i];
-            shape[i] = info.shape[i];
-            strides[i] = info.strides[i] / info.itemsize;
-            ASSERT(strides[i] == expect_stride);
-            expect_stride *= shape[i];
-        }
-        update_buff();
-        auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
-
-        sycl_queue.submit([&](handler& h) {
-            h.memcpy(p_buff.get(), p_host, numel * dt.itemsize());
-        });
-        sycl_queue.wait();
-    }
-
-    py::array to_numpy() {
-        // this shouldn't be a very frequent operation which requires optimizations
-        // so we just allocate
-        py::array ret(dt, shape);
-        py::buffer_info info = ret.request();
-        auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
-
-        // make sure data is ready
-        sycl_queue.submit([&](handler& h) {
-            h.memcpy(p_host, p_buff.get(), numel * dt.itemsize());
-        });
-        sycl_queue.wait();
-        return ret;
-    }
-};
+    // make sure data is ready
+    sycl_queue.submit([&](handler& h) {
+        h.memcpy(p_host, p_buff.get(), numel * dt.itemsize());
+    });
+    sycl_queue.wait();
+    return ret;
+}
 
 //======================================================================================================
 // https://www.iwocl.org/wp-content/uploads/39-presentation-iwocl-syclcon-2022-aksel.pdf
@@ -480,18 +428,16 @@ static void update_queue() {
     }
 }
 
-void test_esimd(float* Buf1, float* Buf2, int Size);
+void init_ops(py::module_ &m);
 
 PYBIND11_MODULE(cl, m) {
     update_queue();
 
+    init_ops(m);
+
     m.def("profiling", [&](bool enable) {
         enable_profile = enable;
         update_queue();
-    });
-
-    m.def("test_esimd", [&](tensor& a, tensor& b) {
-        test_esimd(a, b, a.numel);
     });
 
     py::class_<tensor>(m, "tensor")
