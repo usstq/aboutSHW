@@ -316,6 +316,7 @@ __kernel void mlp_dpas_repack(__global const half* input,
     unroll_for(uint ki = 0; ki < K; ki += BK) {
         // Copy input data into local memory
         {
+        #if 0
             uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
                                     + (sg_n/4) * 4 * SG_COPY_INPUT_BLOCK_SIZE 
                                     + (sg_n%4) * XMX_IN_BLOCK_M * dK
@@ -329,6 +330,31 @@ __kernel void mlp_dpas_repack(__global const half* input,
                 //if(sg_n==0 && sg_m==0 && sg_c==0)
                 //    print_as_half16(as_int8(row_data), input_offset + i * dK);
             }
+        
+        #else
+            // Block read can read 4*64 data by each SG, then repack, block write to SLM,
+            // which can improve about 5% performance: 57 TOps/s -> 61 TOps/s
+            uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
+                                    + (sg_n * 4) * dK;
+            
+            uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + sg_n*4;
+            uint input_offset = m * K + ki;
+            
+            uint4 r0 = intel_sub_group_block_read4((__global uint *)(input + input_offset));
+            uint4 r1 = intel_sub_group_block_read4((__global uint *)(input + input_offset + K));
+            uint4 r2 = intel_sub_group_block_read4((__global uint *)(input + input_offset + 2*K));
+            uint4 r3 = intel_sub_group_block_read4((__global uint *)(input + input_offset + 3*K));
+            
+            uint4 a0 = (uint4)(r0.s0, r1.s0, r2.s0, r3.s0);
+            uint4 a1 = (uint4)(r0.s1, r1.s1, r2.s1, r3.s1);
+            uint4 a2 = (uint4)(r0.s2, r1.s2, r2.s2, r3.s2);
+            uint4 a3 = (uint4)(r0.s3, r1.s3, r2.s3, r3.s3);
+            
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset), a0);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*1), a1);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*2), a2);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*3), a3);              
+        #endif
         }
 
         // Copy weight data into local memory
@@ -446,16 +472,58 @@ __kernel void mlp_dpasw_repack(__global const half* input,
     unroll_for(uint ki = 0; ki < K; ki += BK) {
         // Copy input data into local memory
         {
+        #if 0
+            if(0) {
+                // Each SG read 4*64 data, which is lower than read 8*32 data
+                uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
+                                        + (sg_n * 4) * dK;
+                local_input_offset += (sg_c%2) * 2*32*16 + (sg_c/2) * dK;
+                
+                uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + sg_n*4 + sg_c/2;
+                uint input_offset = m * K + ki + (sg_c%2) * 2 * dK;
+        
+                int8 r0 = *(__global int8 *)(input + input_offset);
+                int8 r1 = *(__global int8 *)(input + input_offset + dK);           
+            
+                *(int8 *)(local_input + local_input_offset) = r0;
+                *(int8 *)(local_input + local_input_offset + 32*16) = r1;
+            }
+            // Each SG reads 8*32 data
             uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
                                     + (sg_n/4) * 4 * SG_COPY_INPUT_BLOCK_SIZE 
                                     + (sg_n%4) * XMX_IN_BLOCK_M * dK
                                     + sg_c * dK;
+            
             uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + (sg_n%4) * XMX_IN_BLOCK_M + sg_c;
             uint input_offset = m * K + ki + (sg_n/4) * 2 * dK;
             unroll_for(uint i = 0; i < SG_COPY_INPUT_ROW_PER_CHANNEL; i++) {
                 int8 row_data = *(__global int8 *)(input + input_offset + i * dK);
                 *(int8 *)(local_input + local_input_offset + i * 2 * SG_COPY_INPUT_BLOCK_SIZE) = row_data;
             }
+        #else
+            // Block read can read 4*64 data by each SG, then repack, block write to SLM,
+            // which can improve about 8% performance: 70 TOps/s -> 76TOps/s
+            uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
+                                    + (sg_n * 4) * dK;
+            
+            uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + sg_n*4;
+            uint input_offset = m * K + ki;
+            
+            uint4 r0 = intel_sub_group_block_read4((__global uint *)(input + input_offset));
+            uint4 r1 = intel_sub_group_block_read4((__global uint *)(input + input_offset + K));
+            uint4 r2 = intel_sub_group_block_read4((__global uint *)(input + input_offset + 2*K));
+            uint4 r3 = intel_sub_group_block_read4((__global uint *)(input + input_offset + 3*K));
+            
+            uint4 a0 = (uint4)(r0.s0, r1.s0, r2.s0, r3.s0);
+            uint4 a1 = (uint4)(r0.s1, r1.s1, r2.s1, r3.s1);
+            uint4 a2 = (uint4)(r0.s2, r1.s2, r2.s2, r3.s2);
+            uint4 a3 = (uint4)(r0.s3, r1.s3, r2.s3, r3.s3);
+            
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset), a0);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*1), a1);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*2), a2);
+            intel_sub_group_block_write4((__local uint*)(local_input + local_input_offset + SG_OUTPUT_M*dK*3), a3);            
+        #endif
         }
 
         // Copy weight data into local memory
@@ -463,12 +531,23 @@ __kernel void mlp_dpasw_repack(__global const half* input,
             int wg_size_n = get_global_size(1)/get_local_size(1);
             uint wei_offset = wg_n * WG_COPY_WEI_SIZE * 2 + (sg_m * WG_SG_N  + sg_n)* SG_COPY_WEIGHT_BLOCK_SIZE * 2 + ki/BK * wg_size_n * WG_COPY_WEI_SIZE * 2;
             
+            #if 1
             uint gate_offset = wei_offset + sg_c * dK;
             uint up_offset = gate_offset + SG_COPY_WEIGHT_BLOCK_SIZE;
             uint local_gate_offset = (sg_m * SG_COPY_WEI_COL_PER_CHANNEL * WG_SG_N + sg_n) * SG_COPY_WEIGHT_BLOCK_SIZE; // block_write
             
             int8 gate_cols_data = *(__global int8 *)(weight_gate_up + gate_offset);
             int8 up_cols_data   = *(__global int8 *)(weight_gate_up + up_offset);
+            #else
+            // Need repack weight matrix in row first layout
+            uint gate_offset = wei_offset;
+            uint up_offset = gate_offset + SG_COPY_WEIGHT_BLOCK_SIZE;
+            uint local_gate_offset = (sg_m * SG_COPY_WEI_COL_PER_CHANNEL * WG_SG_N + sg_n) * SG_COPY_WEIGHT_BLOCK_SIZE; // block_write
+            
+            uint8 gate_cols_data = intel_sub_group_block_read8((__global uint *)(weight_gate_up + gate_offset));
+            uint8 up_cols_data = intel_sub_group_block_read8((__global uint *)(weight_gate_up + up_offset));
+            #endif
+    
             intel_sub_group_block_write8((__local uint*)(local_gate + local_gate_offset), as_uint8(gate_cols_data));
             intel_sub_group_block_write8((__local uint*)(local_up + local_gate_offset), as_uint8(up_cols_data));
         }
@@ -573,19 +652,38 @@ __kernel void mlp_dpasw_repack_unroll(__global const half* input,
     float8 up_output2 = 0.0f;
     float8 up_output3 = 0.0f;
     
+    __global half * input_copy_src;
+    __local half * input_copy_dst;
+    {
+        // Block read can read 4*64 data by each SG, then repack, block write to SLM,
+        // which can improve about 8% performance: 67 TOps/s -> 72 TOps/s
+        uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
+                                    + (sg_n * 4) * dK;
+            
+        uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + sg_n*4;
+        uint input_offset = m * K;
+        input_copy_src = input + input_offset;
+        input_copy_dst = local_input + local_input_offset;
+    }
+    
     unroll_for(uint ki = 0; ki < K; ki += BK) {
         // Copy input data into local memory
         {
-            uint local_input_offset = (sg_m * get_local_size(1)) * SG_COPY_INPUT_BLOCK_SIZE
-                                    + (sg_n>>2) * 4 * SG_COPY_INPUT_BLOCK_SIZE 
-                                    + (sg_n&3) * XMX_IN_BLOCK_M * dK
-                                    + sg_c * dK;
-            uint m = wg_m * WG_OUTPUT_M + sg_m * SG_OUTPUT_M + (sg_n%4) * XMX_IN_BLOCK_M + sg_c;
-            uint input_offset = m * K + ki + (sg_n>>2) * 2 * dK;
-            unroll_for(uint i = 0; i < SG_COPY_INPUT_ROW_PER_CHANNEL; i++) {
-                int8 row_data = *(__global int8 *)(input + input_offset + i * dK);
-                *(int8 *)(local_input + local_input_offset + i * 2 * SG_COPY_INPUT_BLOCK_SIZE) = row_data;
-            }
+            uint4 r0 = intel_sub_group_block_read4((__global uint *)(input_copy_src)); 
+            uint4 r1 = intel_sub_group_block_read4((__global uint *)(input_copy_src + K));
+            uint4 r2 = intel_sub_group_block_read4((__global uint *)(input_copy_src + 2*K));
+            uint4 r3 = intel_sub_group_block_read4((__global uint *)(input_copy_src + 3*K));
+            input_copy_src += BK;
+            
+            uint4 a0 = (uint4)(r0.s0, r1.s0, r2.s0, r3.s0);
+            uint4 a1 = (uint4)(r0.s1, r1.s1, r2.s1, r3.s1);
+            uint4 a2 = (uint4)(r0.s2, r1.s2, r2.s2, r3.s2);
+            uint4 a3 = (uint4)(r0.s3, r1.s3, r2.s3, r3.s3);
+            
+            intel_sub_group_block_write4((__local uint*)(input_copy_dst), a0);
+            intel_sub_group_block_write4((__local uint*)(input_copy_dst + SG_OUTPUT_M*dK*1), a1);
+            intel_sub_group_block_write4((__local uint*)(input_copy_dst + SG_OUTPUT_M*dK*2), a2);
+            intel_sub_group_block_write4((__local uint*)(input_copy_dst + SG_OUTPUT_M*dK*3), a3);  
         }
 
         // Copy weight data into local memory
@@ -607,7 +705,7 @@ __kernel void mlp_dpasw_repack_unroll(__global const half* input,
         const __local half* local_input_ptr = (const __local half *)(local_input + sg_m * WG_SG_N * SG_COPY_INPUT_BLOCK_SIZE);
         const __local half* local_gate_ptr  = (const __local half *)(local_gate  + sg_n * SG_WEI_BLOCK_SIZE);
         const __local half* local_up_ptr    = (const __local half *)(local_up    + sg_n * SG_WEI_BLOCK_SIZE);
-        __attribute__((opencl_unroll_hint(4)))
+        __attribute__((opencl_unroll_hint(1)))
         for(int kii = 0; kii < BK/dK; kii ++) {
             int4 in_vec0, in_vec1, in_vec2, in_vec3;
             int8 gate_vec, up_vec;
