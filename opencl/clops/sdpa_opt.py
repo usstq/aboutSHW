@@ -4,8 +4,8 @@ from .utils import *
 import clops
 
 class SDPA_opt:
-    def __init__(self, Hq, Hk, HEAD_SIZE, multi_query : bool = False):
-        self.multi_query = multi_query
+    def __init__(self, Hq, Hk, HEAD_SIZE, is_optimized : bool = False):
+        self.is_optimized = is_optimized
         
         self.SG_SCALE_FACTOR=2
         self.SUBGROUP_SIZE=16
@@ -16,9 +16,9 @@ class SDPA_opt:
         assert(HEAD_SIZE % self.SUBGROUP_SIZE == 0);     # implied
         assert(self.TARGET_SEQ_LEN_BLOCK_SIZE == self.SUBGROUP_SIZE);   # implied
         
-        if self.multi_query:
-            cl_source_file = "cl_kernels/sdpa_multiquery.cl"
-            self.kernel_name = 'sdpa_opt_multi_tokens_multiquery_0_0__sa'
+        if self.is_optimized:
+            cl_source_file = "cl_kernels/sdpa_opt.cl"
+            self.kernel_name = 'sdpa_opt_multi_tokens_6761455398808095608_0_0__sa'
         else:
             cl_source_file = "cl_kernels/sdpa.cl"
             self.kernel_name = 'sdpa_opt_multi_tokens_6761455398808095608_0_0__sa'
@@ -43,7 +43,7 @@ class SDPA_opt:
 
         output = to_cl(torch.zeros(B, Hq, L, HEAD_SIZE))
 
-        if self.multi_query:
+        if self.is_optimized:
             GWS = [HEAD_SIZE*self.SG_SCALE_FACTOR, B*Hq, int(L/self.TARGET_SEQ_LEN_BLOCK_SIZE)]
             LWS = [HEAD_SIZE*self.SG_SCALE_FACTOR, Hq//Hk, 1]
         else:
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         durations = cl.finish()
         return output.numpy(), durations
     
-    def opt_impl(qkv : torch.Tensor, attention_mask : torch.Tensor, scale : torch.Tensor, Hq, Hk, HEAD_SIZE, multi_query : bool = False):
+    def sdpa_impl(qkv : torch.Tensor, attention_mask : torch.Tensor, scale : torch.Tensor, Hq, Hk, HEAD_SIZE, is_optimized : bool = False):
         B, L, _ = qkv.size()
         q_size = Hq * HEAD_SIZE
         kv_size = Hk * HEAD_SIZE
@@ -111,7 +111,7 @@ if __name__ == "__main__":
         ]
         # print(f"len(shape_info)={len(shape_info)}, shape_info={shape_info}")
 
-        sdpa = SDPA_opt(Hq, Hk, HEAD_SIZE, multi_query)
+        sdpa = SDPA_opt(Hq, Hk, HEAD_SIZE, is_optimized)
         for _ in range(1):
             output = sdpa(shape_info, query_input, key_input, value_input, attn_mask_input, scale_input)
 
@@ -124,11 +124,12 @@ if __name__ == "__main__":
         attention_mask = torch.randn([B, L], dtype=torch.float16)
         scale = torch.ones([1], dtype=torch.float16)
         
-        ref, durs = MHA_cl_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE)
+        # ref, durs = MHA_cl_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE)
+        ref, durs = sdpa_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE, False)
         for i, ns in enumerate(durs):
             print(f'{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms')
 
-        opt, durs = opt_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE, False)
+        opt, durs = sdpa_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE, True)
         for i, ns in enumerate(durs):
             print(f'{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms')
 
