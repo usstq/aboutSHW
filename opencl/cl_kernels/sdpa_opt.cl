@@ -3346,13 +3346,13 @@ typedef struct float0 {
 
 //====================================================
 // Kernel template: sdpa_opt_multi_tokens
-// Kernel name: sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define KERNEL(name)                      __kernel void sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define KERNEL_ID                         sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define FUNC(name)                        _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define FUNC_CALL(name)                   _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define CONST_ARRAY_DECL(name)            __constant size_t _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa[]
-#define CONST_ARRAY_REF(name)             _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
+// Kernel name: sdpa_opt_multi_tokens
+#define KERNEL(name)                      __kernel void sdpa_opt_multi_tokens
+#define KERNEL_ID                         sdpa_opt_multi_tokens
+#define FUNC(name)                        _##name##_sdpa_opt_multi_tokens
+#define FUNC_CALL(name)                   _##name##_sdpa_opt_multi_tokens
+#define CONST_ARRAY_DECL(name)            __constant size_t _##name##_sdpa_opt_multi_tokens[]
+#define CONST_ARRAY_REF(name)             _##name##_sdpa_opt_multi_tokens
 #define FP64_SUPPORTED                    1
 #define FP16_SUPPORTED                    1
 #define FP16_UNIT_USED                    1

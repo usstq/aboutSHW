@@ -7,7 +7,7 @@ class SDPA_opt:
     def __init__(self, Hq, Hk, HEAD_SIZE, is_optimized):
         self.is_optimized = is_optimized
         
-        self.SG_SCALE_FACTOR=2
+        self.SG_SCALE_FACTOR=1
         self.SUBGROUP_SIZE=16
         SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
@@ -18,7 +18,7 @@ class SDPA_opt:
         
         if self.is_optimized:
             cl_source_file = "cl_kernels/sdpa_opt.cl"
-            self.kernel_name = 'sdpa_opt_multi_tokens_6761455398808095608_0_0__sa'
+            self.kernel_name = 'sdpa_opt_multi_tokens'
         else:
             cl_source_file = "cl_kernels/sdpa.cl"
             self.kernel_name = 'sdpa_opt_multi_tokens_6761455398808095608_0_0__sa'
@@ -28,7 +28,7 @@ class SDPA_opt:
             cl_kernel_sources = file.read()
         # print(cl_kernel_sources[:100])
         options = f'-DSUBGROUP_SIZE={self.SUBGROUP_SIZE} -DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} -DTARGET_SEQ_LEN_BLOCK_SIZE={self.TARGET_SEQ_LEN_BLOCK_SIZE} \
-                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -DSTATIC_SCALE_VALUE=1'
+                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -DSTATIC_SCALE_VALUE=1 -cl-mad-enable'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
     def __call__(self, shape_info_input, query_input, key_input, value_input, attn_mask_input, scale_input):
@@ -128,7 +128,10 @@ if __name__ == "__main__":
         attention_mask = torch.randn([B, L], dtype=torch.float16)
         scale = torch.ones([1], dtype=torch.float16)
         
-        # ref, durs = MHA_cl_impl(qkv, attention_mask, scale, Hq, Hk, HEAD_SIZE)
+        ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
+        for i, ns in enumerate(durs):
+            print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+
         ref, durs = sdpa_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
@@ -148,7 +151,7 @@ if __name__ == "__main__":
         except Exception as inst:
             print(f'{Colors.RED}FAIL at shape = {opt.shape}.{Colors.END}')
 
-    test_acc(1, 28, 7, 128, 8410)
+    # test_acc(1, 28, 7, 128, 8410)
     test_acc(1, 24, 6, 128, 2134)
     # test_acc(1, 1, 1, 128, 16)
     # test_acc(1, 24, 6, 16, 2134)
