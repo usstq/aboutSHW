@@ -14,7 +14,6 @@
         }
 #endif
 
-
 /*
  g++ -march=core-avx2 -fopenmp -O2 -std=c++11 ./test.cpp
   [   brgemm_4x3<4>] 8.185 us CPU:3.71(GHz) CPI:0.35 CPK:5.9x5120
@@ -50,32 +49,46 @@ inline int64_t getenv(const char* var, int64_t default_value) {
 }
 
 struct MMtestCase {
-    template<typename T>
+    template <typename T>
     struct Tensor {
         std::shared_ptr<T> m_ptr;
         int m_count = 0;
-        Tensor() = default; 
+        Tensor() = default;
         Tensor(int count, T init) : m_count(count) {
-            m_ptr = std::shared_ptr<T>(reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))), [](void * p) { ::free(p); });
+            m_ptr = std::shared_ptr<T>(reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))), [](void* p) {
+                ::free(p);
+            });
         }
 
         void reset(int count) {
             m_count = count;
-            m_ptr = std::shared_ptr<T>(reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))), [](void * p) { ::free(p); });
+            m_ptr = std::shared_ptr<T>(reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))), [](void* p) {
+                ::free(p);
+            });
         }
 
-        T& operator [](int offset) const {return m_ptr.get()[offset];}
-        T* begin() const { return m_ptr.get(); }
-        T* end() const { return m_ptr.get() + m_count; }
-        T* data() const {return m_ptr.get();}
+        T& operator[](int offset) const {
+            return m_ptr.get()[offset];
+        }
+        T* begin() const {
+            return m_ptr.get();
+        }
+        T* end() const {
+            return m_ptr.get() + m_count;
+        }
+        T* data() const {
+            return m_ptr.get();
+        }
         void clr_cache() {
             static int CLFLUSH = getenv("CLFLUSH", 1);
-            if (!CLFLUSH) return;
+            if (!CLFLUSH)
+                return;
             auto* pi8 = reinterpret_cast<int8_t*>(m_ptr.get());
-            #pragma omp parallel
+#pragma omp parallel
             {
                 _mm_mfence();
-                for (size_t i = 0; i < m_count*sizeof(T); i += 64) _mm_clflush(pi8 + i);
+                for (size_t i = 0; i < m_count * sizeof(T); i += 64)
+                    _mm_clflush(pi8 + i);
                 _mm_mfence();
             }
         }
@@ -89,17 +102,20 @@ struct MMtestCase {
     int K;
     int N;
     int stride_B;
-    bool no_ref; 
+    bool no_ref;
     MMtestCase(int M, int K, int N, bool is_accumulate_C = false, int resolution = 10) : M(M), K(K), N(N), A(M * K, 0), C(M * N, 0), C_ref(M * N, 0) {
         stride_B = N + 16;
         B.reset(K * stride_B);
 
-        std::cout << " MMtestCase ================== stride_B = " << stride_B * sizeof(float)/64.0 << " cacheline\n";
+        std::cout << " MMtestCase ================== stride_B = " << stride_B * sizeof(float) / 64.0 << " cacheline\n";
         srand(0);
         float s = 1.0f / resolution;
-        for (auto& v : A)  v = (rand() % resolution) * s - 0.5f;
-        for (auto& v : B)  v = (rand() % resolution) * s - 0.5f;
-        for (auto& v : C)  v = (rand() % resolution) * s - 0.5f;
+        for (auto& v : A)
+            v = (rand() % resolution) * s - 0.5f;
+        for (auto& v : B)
+            v = (rand() % resolution) * s - 0.5f;
+        for (auto& v : C)
+            v = (rand() % resolution) * s - 0.5f;
 
         no_ref = getenv("NOREF", 0);
         if (!no_ref) {
@@ -119,7 +135,8 @@ struct MMtestCase {
     }
 
     bool check(int rows = 9999, float atol = 0.01f, float rtol = 0.01f) {
-        if (no_ref) return false;
+        if (no_ref)
+            return false;
 
         for (int m = 0; m < M && m < rows; m++) {
             for (int n = 0; n < N; n++) {
@@ -205,7 +222,7 @@ void brgemm_4x3(const float* A,
         }
     }
 
-    auto * prefetch_B = B + 64/sizeof(float)*10;
+    auto* prefetch_B = B + 64 / sizeof(float) * 10;
 
     // reducing along k dimension
     //   with -O2 optimization flag, following kernel has 6~7 cycles-per-iteration
@@ -215,7 +232,7 @@ void brgemm_4x3(const float* A,
         __m256 b0 = _mm256_loadu_ps(B + 8 * 0);
         __m256 b1 = _mm256_loadu_ps(B + 8 * 1);
         __m256 b2 = _mm256_loadu_ps(B + 8 * 2);
-        
+
         //_mm_prefetch(prefetch_B, _MM_HINT_T0);
 
         __m256 a = _mm256_broadcast_ss(A);
@@ -336,13 +353,13 @@ void brgemm_4x1(const float* A,
 }
 
 void brgemm_1x12(const float* A,
-                int A_stride,  // stride in number of element
-                const float* B,
-                int B_stride,  // stride in number of element
-                float* C,
-                int C_stride,  // stride in number of element
-                int K,
-                bool is_accumulate_C) {
+                 int A_stride,  // stride in number of element
+                 const float* B,
+                 int B_stride,  // stride in number of element
+                 float* C,
+                 int C_stride,  // stride in number of element
+                 int K,
+                 bool is_accumulate_C) {
     // loop in unit of register blocking: (3x4*8)
     __m256 c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, ca, cb;
 
@@ -381,18 +398,30 @@ void brgemm_1x12(const float* A,
         __m256 b;
         __m256 a = _mm256_broadcast_ss(A);
         // read enough data along current cache fetching line
-        b = _mm256_loadu_ps(B + 8 * 0); c0 = _mm256_fmadd_ps(a, b, c0);
-        b = _mm256_loadu_ps(B + 8 * 1); c1 = _mm256_fmadd_ps(a, b, c1);
-        b = _mm256_loadu_ps(B + 8 * 2); c2 = _mm256_fmadd_ps(a, b, c2);
-        b = _mm256_loadu_ps(B + 8 * 3); c3 = _mm256_fmadd_ps(a, b, c3);
-        b = _mm256_loadu_ps(B + 8 * 4); c4 = _mm256_fmadd_ps(a, b, c4);
-        b = _mm256_loadu_ps(B + 8 * 5); c5 = _mm256_fmadd_ps(a, b, c5);
-        b = _mm256_loadu_ps(B + 8 * 6); c6 = _mm256_fmadd_ps(a, b, c6);
-        b = _mm256_loadu_ps(B + 8 * 7); c7 = _mm256_fmadd_ps(a, b, c7);
-        b = _mm256_loadu_ps(B + 8 * 8); c8 = _mm256_fmadd_ps(a, b, c8);
-        b = _mm256_loadu_ps(B + 8 * 9); c9 = _mm256_fmadd_ps(a, b, c9);
-        b = _mm256_loadu_ps(B + 8 * 10); ca = _mm256_fmadd_ps(a, b, ca);
-        b = _mm256_loadu_ps(B + 8 * 11); cb = _mm256_fmadd_ps(a, b, cb);
+        b = _mm256_loadu_ps(B + 8 * 0);
+        c0 = _mm256_fmadd_ps(a, b, c0);
+        b = _mm256_loadu_ps(B + 8 * 1);
+        c1 = _mm256_fmadd_ps(a, b, c1);
+        b = _mm256_loadu_ps(B + 8 * 2);
+        c2 = _mm256_fmadd_ps(a, b, c2);
+        b = _mm256_loadu_ps(B + 8 * 3);
+        c3 = _mm256_fmadd_ps(a, b, c3);
+        b = _mm256_loadu_ps(B + 8 * 4);
+        c4 = _mm256_fmadd_ps(a, b, c4);
+        b = _mm256_loadu_ps(B + 8 * 5);
+        c5 = _mm256_fmadd_ps(a, b, c5);
+        b = _mm256_loadu_ps(B + 8 * 6);
+        c6 = _mm256_fmadd_ps(a, b, c6);
+        b = _mm256_loadu_ps(B + 8 * 7);
+        c7 = _mm256_fmadd_ps(a, b, c7);
+        b = _mm256_loadu_ps(B + 8 * 8);
+        c8 = _mm256_fmadd_ps(a, b, c8);
+        b = _mm256_loadu_ps(B + 8 * 9);
+        c9 = _mm256_fmadd_ps(a, b, c9);
+        b = _mm256_loadu_ps(B + 8 * 10);
+        ca = _mm256_fmadd_ps(a, b, ca);
+        b = _mm256_loadu_ps(B + 8 * 11);
+        cb = _mm256_fmadd_ps(a, b, cb);
     }
 
     // store C back
@@ -409,7 +438,6 @@ void brgemm_1x12(const float* A,
     _mm256_storeu_ps(C + 8 * 10, ca);
     _mm256_storeu_ps(C + 8 * 11, cb);
 }
-
 
 void brgemm_2x6(const float* A,
                 int A_stride,  // stride in number of element
@@ -460,12 +488,24 @@ void brgemm_2x6(const float* A,
         __m256 a0 = _mm256_broadcast_ss(A);
         __m256 a1 = _mm256_broadcast_ss(A + A_stride);
         // read enough data along current cache fetching line
-        b = _mm256_loadu_ps(B + 8 * 0); c0 = _mm256_fmadd_ps(a0, b, c0); c6 = _mm256_fmadd_ps(a1, b, c6);
-        b = _mm256_loadu_ps(B + 8 * 1); c1 = _mm256_fmadd_ps(a0, b, c1); c7 = _mm256_fmadd_ps(a1, b, c7);
-        b = _mm256_loadu_ps(B + 8 * 2); c2 = _mm256_fmadd_ps(a0, b, c2); c8 = _mm256_fmadd_ps(a1, b, c8);
-        b = _mm256_loadu_ps(B + 8 * 3); c3 = _mm256_fmadd_ps(a0, b, c3); c9 = _mm256_fmadd_ps(a1, b, c9);
-        b = _mm256_loadu_ps(B + 8 * 4); c4 = _mm256_fmadd_ps(a0, b, c4); ca = _mm256_fmadd_ps(a1, b, ca);
-        b = _mm256_loadu_ps(B + 8 * 5); c5 = _mm256_fmadd_ps(a0, b, c5); cb = _mm256_fmadd_ps(a1, b, cb);
+        b = _mm256_loadu_ps(B + 8 * 0);
+        c0 = _mm256_fmadd_ps(a0, b, c0);
+        c6 = _mm256_fmadd_ps(a1, b, c6);
+        b = _mm256_loadu_ps(B + 8 * 1);
+        c1 = _mm256_fmadd_ps(a0, b, c1);
+        c7 = _mm256_fmadd_ps(a1, b, c7);
+        b = _mm256_loadu_ps(B + 8 * 2);
+        c2 = _mm256_fmadd_ps(a0, b, c2);
+        c8 = _mm256_fmadd_ps(a1, b, c8);
+        b = _mm256_loadu_ps(B + 8 * 3);
+        c3 = _mm256_fmadd_ps(a0, b, c3);
+        c9 = _mm256_fmadd_ps(a1, b, c9);
+        b = _mm256_loadu_ps(B + 8 * 4);
+        c4 = _mm256_fmadd_ps(a0, b, c4);
+        ca = _mm256_fmadd_ps(a1, b, ca);
+        b = _mm256_loadu_ps(B + 8 * 5);
+        c5 = _mm256_fmadd_ps(a0, b, c5);
+        cb = _mm256_fmadd_ps(a1, b, cb);
     }
 
     // store C back
@@ -483,15 +523,128 @@ void brgemm_2x6(const float* A,
     _mm256_storeu_ps(C + C_stride + 8 * 5, cb);
 }
 
+void brgemm_6x2(const float* A,
+                int A_stride,  // stride in number of element
+                const float* B,
+                int B_stride,  // stride in number of element
+                float* C,
+                int C_stride,  // stride in number of element
+                int K,
+                bool is_accumulate_C) {
+    __m256 c0, c1, c2, c3, c4, c5;
+    __m256 c6, c7, c8, c9, ca, cb;
+
+    if (is_accumulate_C) {
+        auto* src = C;
+        c0 = _mm256_loadu_ps(src + 8 * 0);
+        c1 = _mm256_loadu_ps(src + 8 * 1);
+        src += C_stride;
+        c2 = _mm256_loadu_ps(src + 8 * 0);
+        c3 = _mm256_loadu_ps(src + 8 * 1);
+        src += C_stride;
+        c4 = _mm256_loadu_ps(src + 8 * 0);
+        c5 = _mm256_loadu_ps(src + 8 * 1);
+        src += C_stride;
+        c6 = _mm256_loadu_ps(src + 8 * 0);
+        c7 = _mm256_loadu_ps(src + 8 * 1);
+        src += C_stride;
+        c8 = _mm256_loadu_ps(src + 8 * 0);
+        c9 = _mm256_loadu_ps(src + 8 * 1);
+        src += C_stride;
+        ca = _mm256_loadu_ps(src + 8 * 0);
+        cb = _mm256_loadu_ps(src + 8 * 1);
+    } else {
+        c0 = _mm256_setzero_ps();
+        c1 = _mm256_setzero_ps();
+        c2 = _mm256_setzero_ps();
+        c3 = _mm256_setzero_ps();
+        c4 = _mm256_setzero_ps();
+        c5 = _mm256_setzero_ps();
+        c6 = _mm256_setzero_ps();
+        c7 = _mm256_setzero_ps();
+        c8 = _mm256_setzero_ps();
+        c9 = _mm256_setzero_ps();
+        ca = _mm256_setzero_ps();
+        cb = _mm256_setzero_ps();
+    }
+
+    const auto* pA3 = A + 3*A_stride;
+    const auto prefetch_stride = B_stride * 4;
+    for (int k = 0; k < K; k++, B += B_stride, A++, pA3++) {
+        __m256 b0 = _mm256_loadu_ps(B + 8 * 0);
+        __m256 b1 = _mm256_loadu_ps(B + 8 * 1);
+
+        //_mm_prefetch(B + 16, _MM_HINT_T1);
+        _mm_prefetch(B + prefetch_stride, _MM_HINT_T1);
+
+        __m256 a0 = _mm256_broadcast_ss(A);
+        c0 = _mm256_fmadd_ps(a0, b0, c0);
+        c1 = _mm256_fmadd_ps(a0, b1, c1);
+        a0 = _mm256_broadcast_ss(A + A_stride);
+        c2 = _mm256_fmadd_ps(a0, b0, c2);
+        c3 = _mm256_fmadd_ps(a0, b1, c3);
+        a0 = _mm256_broadcast_ss(A + 2*A_stride);
+        c4 = _mm256_fmadd_ps(a0, b0, c4);
+        c5 = _mm256_fmadd_ps(a0, b1, c5);
+
+        a0 = _mm256_broadcast_ss(pA3);
+        c6 = _mm256_fmadd_ps(a0, b0, c6);
+        c7 = _mm256_fmadd_ps(a0, b1, c7);
+        a0 = _mm256_broadcast_ss(pA3 + A_stride);
+        c8 = _mm256_fmadd_ps(a0, b0, c8);
+        c9 = _mm256_fmadd_ps(a0, b1, c9);
+        a0 = _mm256_broadcast_ss(pA3 + 2*A_stride);
+        ca = _mm256_fmadd_ps(a0, b0, ca);
+        cb = _mm256_fmadd_ps(a0, b1, cb);
+    }
+
+    // store C back
+    _mm256_storeu_ps(C + 8 * 0, c0);
+    _mm256_storeu_ps(C + 8 * 1, c1);
+    C += C_stride;
+    _mm256_storeu_ps(C + 8 * 0, c2);
+    _mm256_storeu_ps(C + 8 * 1, c3);
+    C += C_stride;
+    _mm256_storeu_ps(C + 8 * 0, c4);
+    _mm256_storeu_ps(C + 8 * 1, c5);
+    C += C_stride;
+    _mm256_storeu_ps(C + 8 * 0, c6);
+    _mm256_storeu_ps(C + 8 * 1, c7);
+    C += C_stride;
+    _mm256_storeu_ps(C + 8 * 0, c8);
+    _mm256_storeu_ps(C + 8 * 1, c9);
+    C += C_stride;
+    _mm256_storeu_ps(C + 8 * 0, ca);
+    _mm256_storeu_ps(C + 8 * 1, cb);
+}
+
+
+
+
 /*
   brgemm_4x3 can get 98% peak GFLOPS if both A & B are in cache
   so the computational kernel is OK.
 
   brgemm_1x12 & brgemm_2x6 are worse (60~70% only)
 */
-int test_basic(LinuxPerf::PerfEventGroup pevg) {
+int test_basic(int K) {
+    LinuxPerf::PerfEventGroup pevg({
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04), "STALLS_TOTAL"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06), "STALLS_L3_MISS"},
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05), "STALLS_L2_MISS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
+
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
+    });
+    pevg.show_header();    
     int M = 4;
-    int K = 256;
     int N = 24;
     MMtestCase mtc(M, K, N);
 
@@ -502,7 +655,10 @@ int test_basic(LinuxPerf::PerfEventGroup pevg) {
         double duration_ns = _duration_ns * 1.0 / REPEATS;
         float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
         float gflops = (M * N * K * 2) / duration_ns;
-        log += sprintf(log, "   %.3f (GFlop/s) / %.2f(GB/s)   compute-bound:%.1f %%", gflops, bw, gflops * 100 / fma_peak_gflops);
+        log += sprintf(log, "   %.3f (GFlop/s) / %.2f(GB/s)   Asize:%.2f(KB) Bsize:%.2f(KB)  compute-bound:%.1f %%", gflops, bw, 
+                       (M * K) * sizeof(float)/1024.0f,
+                       (N * K) * sizeof(float)/1024.0f,
+                       gflops * 100 / fma_peak_gflops);
     };
 
     for (int r = 0; r < 10; r++) {
@@ -561,7 +717,7 @@ int test_basic(LinuxPerf::PerfEventGroup pevg) {
     std::cout << "==========================================================" << mtc.check(4) << std::endl;
     {
         M = 1;
-        N = 12*8;
+        N = 12 * 8;
         MMtestCase mtc(M, K, N);
         for (int r = 0; r < 10; r++) {
             auto pmc = pevg.rdpmc(
@@ -579,7 +735,7 @@ int test_basic(LinuxPerf::PerfEventGroup pevg) {
     }
     {
         M = 2;
-        N = 6*8;
+        N = 6 * 8;
         MMtestCase mtc(M, K, N);
         for (int r = 0; r < 10; r++) {
             auto pmc = pevg.rdpmc(
@@ -594,78 +750,258 @@ int test_basic(LinuxPerf::PerfEventGroup pevg) {
                 custom_log);
         }
         std::cout << "==========================================================" << mtc.check() << std::endl;
+    }
+    {
+        M = 6;
+        N = 892;
+        MMtestCase mtc(M, K, N);
+        for (int r = 0; r < 10; r++) {
+            auto pmc = pevg.rdpmc(
+                [&]() {
+                    // repeat
+                    for (int repeat = 0; repeat < REPEATS; repeat++) {
+                        brgemm_6x2(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
+                    }
+                },
+                "brgemm_6x2",
+                REPEATS * K,
+                custom_log);
+        }
+        std::cout << "==========================================================" << mtc.check() << std::endl;
     }    
     return 0;
 }
 
 //===============================================================
-void MM_CacheBlock(const float* A,
-                   int A_stride,  // stride in number of element
-                   const float* B,
-                   int B_stride,  // stride in number of element
-                   float* C,
-                   int C_stride,  // stride in number of element
-                   int M,
-                   int K,
-                   int N,
-                   int BK) {
-    thread_local float scratch[1024*1024];
-    for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
-        auto* pA = A;
-        auto* pC = C;
-        int m;
-        bool is_accumulate_C = (k > 0);
+// when M is big, problem is compute-bounded because we can keep A & B sub-matrix in cache
+// to overcome memory bandwidth issue and reach the compute-bound.
+//
+// if we choose to put B sub-matrix [BK x BN] in cache
+//
+// then it can update [M x BN] results with [number of DDR accesses of A & C sub-matrix] = (M x (BK + BN))
+// and after [K/BK] times, it can complete [M x BN] results,
+//
+//  we want (M x (BK + BN))*[K/BK] / [M x BN]  to be as small as possible, given [BK * BN] limited by L2 cache size
+//
+//   solve above eq we have BN == BK
+//
+// choose B sub-matrix [BK x BN] to put into L2 cache in packed (HW-prefetcher friendly)
+// format, and accumulate all affected columns of C. B sub-matrix will be re-used [M/4] times.
+// the bigger the M is, the better cache hit-rate of B will be.
+//
+void MM_ComputeBounded(const float* _A,
+                       int A_stride,  // stride in number of element
+                       const float* _B,
+                       int B_stride,  // stride in number of element
+                       float* _C,
+                       int C_stride,  // stride in number of element
+                       int M,
+                       int K,
+                       int N) {
+    thread_local float scratch[1024 * 1024];
+    constexpr int BK = 512;
+    constexpr int BN = 480;
+    for (int n0 = 0; n0 < N; n0 += BN) {
+        int bN = std::min(N - n0, BN);
+        const auto* A = _A;
+        const auto* B = _B + n0;
+        auto* C = _C + n0;
+        for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
+            int bK = std::min(K - k, BK);
+            auto* pA = A;
+            auto* pC = C;
+            int m;
+            bool is_accumulate_C = (k > 0);
 
-        // B sub-matrix [BK x N] will be re-used [M/4] times
-        // we prefer to read it in HW-prefetcher friendly way, so we will 
-        // repack it on-the-fly
-        float* repacked_B_n24 = scratch;
-        float* repacked_B_n8 = scratch + (N/24)*(24*BK);
-        {
-            // scratch buffer is resident in L2, repack process will exploit
-            // HW-prefetcher to access source data from DDR contingously.
-            for(int k = 0; k < BK; k ++) {
-                const auto * src = B + k*B_stride;
-                auto * dst = repacked_B_n24 + 24*k;
+            float* repacked_B_n24 = scratch;
+            float* repacked_B_n8 = scratch + (bN / 24) * (24 * bK);
+            {
+                // scratch buffer is resident in L2, repack process will exploit
+                // HW-prefetcher to access source data from DDR contingously.
+                for (int k = 0; k < bK; k++) {
+                    const auto* src = B + k * B_stride;
+                    auto* dst = repacked_B_n24 + 24 * k;
+                    int n = 0;
+                    for (; n + 24 <= bN; n += 24, src += 24, dst += bK * 24) {
+                        auto b0 = _mm256_loadu_ps(src + 8 * 0);
+                        auto b1 = _mm256_loadu_ps(src + 8 * 1);
+                        auto b2 = _mm256_loadu_ps(src + 8 * 2);
+                        _mm256_storeu_ps(dst + 8 * 0, b0);
+                        _mm256_storeu_ps(dst + 8 * 1, b1);
+                        _mm256_storeu_ps(dst + 8 * 2, b2);
+                    }
+                    // N tail part is packed in unit of 8-column
+                    dst = repacked_B_n8 + 8 * k;
+                    for (; n < bN; n += 8, src += 8, dst += bK * 8) {
+                        auto b0 = _mm256_loadu_ps(src + 8 * 0);
+                        _mm256_storeu_ps(dst, b0);
+                    }
+                }
+            }
+            // re-use repacked B sub-matrix in L2 cache as long as we can.
+            for (m = 0; m + 4 <= M; m += 4, pA += 4 * A_stride, pC += 4 * C_stride) {
+                const auto* pB = repacked_B_n24;
                 int n = 0;
-                for (; n + 24 <= N; n += 24, src += 24, dst += BK*24) {
-                    auto b0 = _mm256_loadu_ps(src + 8 * 0);
-                    auto b1 = _mm256_loadu_ps(src + 8 * 1);
-                    auto b2 = _mm256_loadu_ps(src + 8 * 2);
-                    _mm256_storeu_ps(dst + 8 * 0, b0);
-                    _mm256_storeu_ps(dst + 8 * 1, b1);
-                    _mm256_storeu_ps(dst + 8 * 2, b2);
+                for (; n + 24 <= bN; n += 24, pB += 24 * bK) {
+                    brgemm_4x3<4>(pA, A_stride, pB, 24, pC + n, C_stride, bK, is_accumulate_C);
                 }
-                // N tail part is packed in unit of 8-column
-                dst = repacked_B_n8 + 8*k;
-                for (; n < N; n += 8, src += 8, dst += BK*8) {
-                    auto b0 = _mm256_loadu_ps(src + 8 * 0);
-                    _mm256_storeu_ps(dst, b0);
+                pB = repacked_B_n8;
+                for (; n < bN; n += 8, pB += 8 * bK) {
+                    brgemm_4x1<4>(pA, A_stride, pB, 8, pC + n, C_stride, bK, is_accumulate_C);
+                }
+            }
+            // M tails
+            for (; m < M; m++, pA += A_stride, pC += C_stride) {
+                const auto* pB = repacked_B_n24;
+                int n = 0;
+                for (; n + 24 <= bN; n += 24, pB += 24 * bK) {
+                    brgemm_4x3<1>(pA, A_stride, pB, 24, pC + n, C_stride, bK, is_accumulate_C);
+                }
+                pB = repacked_B_n8;
+                for (; n < bN; n += 8, pB += 8 * bK) {
+                    brgemm_4x1<1>(pA, A_stride, pB, 8, pC + n, C_stride, bK, is_accumulate_C);
                 }
             }
         }
-        // re-use repacked B sub-matrix in L2 cache as long as we can.
-        for (m = 0; m + 4 <= M; m += 4, pA += 4 * A_stride, pC += 4 * C_stride) {
-            const auto * pB = repacked_B_n24;
-            int n = 0;
-            for (; n + 24 <= N; n += 24, pB += 24*BK) {
-                brgemm_4x3<4>(pA, A_stride, pB, 24, pC + n, C_stride, BK, is_accumulate_C);
-            }
-            pB = repacked_B_n8;
-            for (; n < N; n += 8, pB += 8*BK) {
-                brgemm_4x1<4>(pA, A_stride, pB, 8, pC + n, C_stride, BK, is_accumulate_C);
+    }
+}
+/*
+    between compute-bound & mem-bound cases, M is not big enough to reuse B many times,
+    the cost of B sub-matrix repack is not justified enough, we will access B w/o repacking
+    this requires re-use B matrix from L1-cache, (because HW-refetcher)
+
+*/
+void MM_ComputeBounded_nocopy(const float* _A,
+                              int A_stride,  // stride in number of element
+                              const float* _B,
+                              int B_stride,  // stride in number of element
+                              float* _C,
+                              int C_stride,  // stride in number of element
+                              int M,
+                              int K,
+                              int N) {
+
+#if 1
+    int BK = 256;
+    const auto* A = _A;
+    const auto* B = _B;
+    for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
+        int bK = std::min(K - k, BK);
+        for (int n = 0; n + 16 <= N; n += 16) {
+            auto* pA = A;
+            auto* pC = _C;
+            for (int m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
+                brgemm_6x2(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+
+                auto* src = pC + 16;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
+                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
             }
         }
-        // M tails
-        for (; m < M; m++, pA += A_stride, pC += C_stride) {
-            const auto * pB = repacked_B_n24;
-            int n = 0;
-            for (; n + 24 <= N; n += 24, pB += 24*BK) {
-                brgemm_4x3<1>(pA, A_stride, pB, 24, pC + n, C_stride, BK, is_accumulate_C);
+    }
+#else
+    int BK = 256;
+    int BN = 64;
+    for (int k = 0; k < K; k += BK, _A += BK, _B += BK * B_stride) {
+        for (int n0 = 0; n0 < N; n0 += BN) {
+            int bN = std::min(N - n0, BN);
+            const auto* A = _A;
+            const auto* B = _B + n0;
+            auto* C = _C + n0;
+
+            int bK = std::min(K - k, BK);
+            int m;
+            bool is_accumulate_C = (k > 0);
+            {
+                auto* pA = A;
+                auto* pC = C;
+                for (m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
+                    for (int n = 0; n + 16 <= bN; n += 16)
+                        brgemm_6x2(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, is_accumulate_C);
+                }
             }
-            pB = repacked_B_n8;
-            for (; n < N; n += 8, pB += 8*BK) {
-                brgemm_4x1<1>(pA, A_stride, pB, 8, pC + n, C_stride, BK, is_accumulate_C);
+        }
+    }
+#endif
+}
+
+//===============================================================
+// when M is too small, problem becomes memory bounded because A & C are small
+// and there is no opportunity to reuse the biggest matrix here : B
+//
+//  REF: https://abertschi.ch/blog/2022/prefetching/
+//
+// thus to reach the mem-bound, we need to make best use of HW-prefetcher by access data continously
+// since L2 Hardware Prefetcher (Streamer) support multiple streams (32 at most), we can access many rows of B
+// continously.
+//
+void MM_MemoryBounded(const float* A,
+                      int A_stride,  // stride in number of element
+                      const float* B,
+                      int B_stride,  // stride in number of element
+                      float* C,
+                      int C_stride,  // stride in number of element
+                      int M,
+                      int K,
+                      int N) {
+    //
+    {
+        auto c0 = _mm256_setzero_ps();
+        auto* pC = C;
+        for (int m = 0; m < M; m++, pC += C_stride) {
+            for (int n = 0; n < N; n += 8 * 4) {
+                _mm256_storeu_ps(pC + n + 8 * 0, c0);
+                _mm256_storeu_ps(pC + n + 8 * 1, c0);
+                _mm256_storeu_ps(pC + n + 8 * 2, c0);
+                _mm256_storeu_ps(pC + n + 8 * 3, c0);
+            }
+        }
+    }
+    for (int k = 0; k < K; k += 4) {
+        const auto* pA = A;
+        auto* pC = C;
+        for (int m = 0; m < M; m++, pA += A_stride, pC += C_stride) {
+            __m256 a0 = _mm256_broadcast_ss(pA + k + 0);
+            __m256 a1 = _mm256_broadcast_ss(pA + k + 1);
+            __m256 a2 = _mm256_broadcast_ss(pA + k + 2);
+            __m256 a3 = _mm256_broadcast_ss(pA + k + 3);
+            const auto* pB = B + k * B_stride;
+            const auto* pB2 = pB + 2 * B_stride;
+
+            for (int n = 0; n < N; n += 8 * 4, pB += 8 * 4, pB2 += 8 * 4) {
+                __m256 c0 = _mm256_loadu_ps(pC + n + 8 * 0);
+                __m256 c1 = _mm256_loadu_ps(pC + n + 8 * 1);
+                __m256 c2 = _mm256_loadu_ps(pC + n + 8 * 2);
+                __m256 c3 = _mm256_loadu_ps(pC + n + 8 * 3);
+
+                c0 = _mm256_fmadd_ps(a0, _mm256_loadu_ps(pB + 8 * 0), c0);
+                c1 = _mm256_fmadd_ps(a0, _mm256_loadu_ps(pB + 8 * 1), c1);
+                c2 = _mm256_fmadd_ps(a0, _mm256_loadu_ps(pB + 8 * 2), c2);
+                c3 = _mm256_fmadd_ps(a0, _mm256_loadu_ps(pB + 8 * 3), c3);
+
+                c0 = _mm256_fmadd_ps(a1, _mm256_loadu_ps(pB + B_stride + 8 * 0), c0);
+                c1 = _mm256_fmadd_ps(a1, _mm256_loadu_ps(pB + B_stride + 8 * 1), c1);
+                c2 = _mm256_fmadd_ps(a1, _mm256_loadu_ps(pB + B_stride + 8 * 2), c2);
+                c3 = _mm256_fmadd_ps(a1, _mm256_loadu_ps(pB + B_stride + 8 * 3), c3);
+
+                c0 = _mm256_fmadd_ps(a2, _mm256_loadu_ps(pB2 + 8 * 0), c0);
+                c1 = _mm256_fmadd_ps(a2, _mm256_loadu_ps(pB2 + 8 * 1), c1);
+                c2 = _mm256_fmadd_ps(a2, _mm256_loadu_ps(pB2 + 8 * 2), c2);
+                c3 = _mm256_fmadd_ps(a2, _mm256_loadu_ps(pB2 + 8 * 3), c3);
+
+                c0 = _mm256_fmadd_ps(a3, _mm256_loadu_ps(pB2 + B_stride + 8 * 0), c0);
+                c1 = _mm256_fmadd_ps(a3, _mm256_loadu_ps(pB2 + B_stride + 8 * 1), c1);
+                c2 = _mm256_fmadd_ps(a3, _mm256_loadu_ps(pB2 + B_stride + 8 * 2), c2);
+                c3 = _mm256_fmadd_ps(a3, _mm256_loadu_ps(pB2 + B_stride + 8 * 3), c3);
+
+                _mm256_storeu_ps(pC + n + 8 * 0, c0);
+                _mm256_storeu_ps(pC + n + 8 * 1, c1);
+                _mm256_storeu_ps(pC + n + 8 * 2, c2);
+                _mm256_storeu_ps(pC + n + 8 * 3, c3);
             }
         }
     }
@@ -716,11 +1052,13 @@ void MM_brgemm(const float* A,
         splitter(num_works, nthr, ithr, n0, n1);
         n0 *= 8;
         n1 *= 8;
-        int BN = 240;
-        for (int n = n0; n < n1; n += BN) {
-            int bN = std::min(n1 - n, BN);
-            MM_CacheBlock(A, A_stride, B + n, B_stride, C + n, C_stride, M, K, bN, 256);
-            // MM_CacheBlock<256>(A, A_stride, B + n*K, bN, C + n, C_stride, M, K, bN);
+
+        if (M < 6) {
+            MM_MemoryBounded(A, A_stride, B + n0, B_stride, C + n0, C_stride, M, K, n1 - n0);
+        } else if (M <= 60) {
+            MM_ComputeBounded_nocopy(A, A_stride, B + n0, B_stride, C + n0, C_stride, M, K, n1 - n0);
+        } else {
+            MM_ComputeBounded(A, A_stride, B + n0, B_stride, C + n0, C_stride, M, K, n1 - n0);
         }
     }
 }
@@ -757,14 +1095,12 @@ int test(LinuxPerf::PerfEventGroup* pevg, int64_t M, int64_t K, int64_t N) {
     return 0;
 }
 
- 
-
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 namespace py = pybind11;
 
-void init_gemm(py::module_& m) {
+PYBIND11_MODULE(gemm, m) {
     m.def("gemm", [](py::array_t<float> A, py::array_t<float> B, py::array_t<float> C) {
         py::buffer_info bufA = A.request();
         py::buffer_info bufB = B.request();
@@ -779,12 +1115,10 @@ void init_gemm(py::module_& m) {
         ASSERT(M == bufC.shape[0]);
         ASSERT(N == bufC.shape[1]);
 
-        MM_brgemm(static_cast<float*>(bufA.ptr), K,
-                  static_cast<float*>(bufB.ptr), N,
-                  static_cast<float*>(bufC.ptr), N,
-                  M, K, N, false);
-
+        MM_brgemm(static_cast<float*>(bufA.ptr), K, static_cast<float*>(bufB.ptr), N, static_cast<float*>(bufC.ptr), N, M, K, N, false);
     });
+
+    m.def("test_basic", &test_basic);
 }
 
 #if 0

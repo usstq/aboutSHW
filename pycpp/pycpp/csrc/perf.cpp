@@ -26,7 +26,7 @@ struct PerfData {
 #include <pybind11/stl.h>
 namespace py = pybind11;
 
-void init_proflier(py::module_& m) {
+PYBIND11_MODULE(perf, m) {
     pybind11::class_<PerfData>(m, "perf")
         .def(pybind11::init<const std::string&>())
         .def("finish", &PerfData::finish)
