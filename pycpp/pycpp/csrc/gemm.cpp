@@ -102,12 +102,20 @@ struct MMtestCase {
     int K;
     int N;
     int stride_B;
+    int stride_C;
     bool no_ref;
-    MMtestCase(int M, int K, int N, bool is_accumulate_C = false, int resolution = 10) : M(M), K(K), N(N), A(M * K, 0), C(M * N, 0), C_ref(M * N, 0) {
-        stride_B = N + 16;
+    MMtestCase(int M, int K, int N, int stride_B = 0, bool is_accumulate_C = false, int resolution = 10) : M(M), K(K), N(N), stride_B(stride_B), A(M * K, 0), C(M * N, 0), C_ref(M * N, 0) {
+        if (stride_B == 0)
+            stride_B = N;
+        stride_C = N;
         B.reset(K * stride_B);
 
-        std::cout << " MMtestCase ================== stride_B = " << stride_B * sizeof(float) / 64.0 << " cacheline\n";
+        /*
+        std::cout << " MMtestCase ================== M = " << M << ", K = " << K << ", N = " << N << ",  stride_B = " << stride_B * sizeof(float) / 64.0 << " cacheline\n";
+        std::cout << " MMtestCase ================== A size = " << M*K*sizeof(float)/1024.0 << " KB\n";
+        std::cout << " MMtestCase ================== B size = " << N*K*sizeof(float)/1024.0 << " KB\n";
+        std::cout << " MMtestCase ================== C size = " << M*N*sizeof(float)/1024.0 << " KB\n";
+        */
         srand(0);
         float s = 1.0f / resolution;
         for (auto& v : A)
@@ -117,7 +125,7 @@ struct MMtestCase {
         for (auto& v : C)
             v = (rand() % resolution) * s - 0.5f;
 
-        no_ref = getenv("NOREF", 0);
+        no_ref = true; //getenv("NOREF", 0);
         if (!no_ref) {
             for (int m = 0; m < M; m++) {
                 for (int n = 0; n < N; n++) {
@@ -130,7 +138,7 @@ struct MMtestCase {
                     C_ref[m * N + n] = sum;
                 }
             }
-            std::cout << "ref is calculated\n";
+            //std::cout << "ref is calculated\n";
         }
     }
 
@@ -523,6 +531,9 @@ void brgemm_2x6(const float* A,
     _mm256_storeu_ps(C + C_stride + 8 * 5, cb);
 }
 
+static int SN = getenv("SN", 16);
+
+template <int rows, int prefetch_v = 16>
 void brgemm_6x2(const float* A,
                 int A_stride,  // stride in number of element
                 const float* B,
@@ -538,21 +549,32 @@ void brgemm_6x2(const float* A,
         auto* src = C;
         c0 = _mm256_loadu_ps(src + 8 * 0);
         c1 = _mm256_loadu_ps(src + 8 * 1);
-        src += C_stride;
-        c2 = _mm256_loadu_ps(src + 8 * 0);
-        c3 = _mm256_loadu_ps(src + 8 * 1);
-        src += C_stride;
-        c4 = _mm256_loadu_ps(src + 8 * 0);
-        c5 = _mm256_loadu_ps(src + 8 * 1);
-        src += C_stride;
-        c6 = _mm256_loadu_ps(src + 8 * 0);
-        c7 = _mm256_loadu_ps(src + 8 * 1);
-        src += C_stride;
-        c8 = _mm256_loadu_ps(src + 8 * 0);
-        c9 = _mm256_loadu_ps(src + 8 * 1);
-        src += C_stride;
-        ca = _mm256_loadu_ps(src + 8 * 0);
-        cb = _mm256_loadu_ps(src + 8 * 1);
+        if (rows > 1) {
+            src += C_stride;
+            c2 = _mm256_loadu_ps(src + 8 * 0);
+            c3 = _mm256_loadu_ps(src + 8 * 1);
+            
+        }
+        if (rows > 2) {
+            src += C_stride;
+            c4 = _mm256_loadu_ps(src + 8 * 0);
+            c5 = _mm256_loadu_ps(src + 8 * 1);
+        }
+        if (rows > 3) {
+            src += C_stride;
+            c6 = _mm256_loadu_ps(src + 8 * 0);
+            c7 = _mm256_loadu_ps(src + 8 * 1);
+        }
+        if (rows > 4) {
+            src += C_stride;
+            c8 = _mm256_loadu_ps(src + 8 * 0);
+            c9 = _mm256_loadu_ps(src + 8 * 1);
+        }
+        if (rows > 5) {
+            src += C_stride;
+            ca = _mm256_loadu_ps(src + 8 * 0);
+            cb = _mm256_loadu_ps(src + 8 * 1);
+        }
     } else {
         c0 = _mm256_setzero_ps();
         c1 = _mm256_setzero_ps();
@@ -569,53 +591,75 @@ void brgemm_6x2(const float* A,
     }
 
     const auto* pA3 = A + 3*A_stride;
-    const auto prefetch_stride = B_stride * 4;
-    for (int k = 0; k < K; k++, B += B_stride, A++, pA3++) {
+    const auto prefetch_stride = B_stride * prefetch_v;
+    int k;
+    for (k = 0; k < K; k++, B += B_stride, A++, pA3++) {
         __m256 b0 = _mm256_loadu_ps(B + 8 * 0);
         __m256 b1 = _mm256_loadu_ps(B + 8 * 1);
 
-        //_mm_prefetch(B + 16, _MM_HINT_T1);
-        _mm_prefetch(B + prefetch_stride, _MM_HINT_T1);
+        _mm_prefetch(B + 16, _MM_HINT_T0);
+        if (prefetch_v)
+            _mm_prefetch(B + prefetch_stride, _MM_HINT_T0);
 
         __m256 a0 = _mm256_broadcast_ss(A);
         c0 = _mm256_fmadd_ps(a0, b0, c0);
         c1 = _mm256_fmadd_ps(a0, b1, c1);
-        a0 = _mm256_broadcast_ss(A + A_stride);
-        c2 = _mm256_fmadd_ps(a0, b0, c2);
-        c3 = _mm256_fmadd_ps(a0, b1, c3);
-        a0 = _mm256_broadcast_ss(A + 2*A_stride);
-        c4 = _mm256_fmadd_ps(a0, b0, c4);
-        c5 = _mm256_fmadd_ps(a0, b1, c5);
+        if (rows > 1) {
+            a0 = _mm256_broadcast_ss(A + A_stride);
+            c2 = _mm256_fmadd_ps(a0, b0, c2);
+            c3 = _mm256_fmadd_ps(a0, b1, c3);
+        }
+        if (rows > 2) {
+            a0 = _mm256_broadcast_ss(A + 2*A_stride);
+            c4 = _mm256_fmadd_ps(a0, b0, c4);
+            c5 = _mm256_fmadd_ps(a0, b1, c5);
+        }
 
-        a0 = _mm256_broadcast_ss(pA3);
-        c6 = _mm256_fmadd_ps(a0, b0, c6);
-        c7 = _mm256_fmadd_ps(a0, b1, c7);
-        a0 = _mm256_broadcast_ss(pA3 + A_stride);
-        c8 = _mm256_fmadd_ps(a0, b0, c8);
-        c9 = _mm256_fmadd_ps(a0, b1, c9);
-        a0 = _mm256_broadcast_ss(pA3 + 2*A_stride);
-        ca = _mm256_fmadd_ps(a0, b0, ca);
-        cb = _mm256_fmadd_ps(a0, b1, cb);
+        if (rows > 3) {
+            a0 = _mm256_broadcast_ss(pA3);
+            c6 = _mm256_fmadd_ps(a0, b0, c6);
+            c7 = _mm256_fmadd_ps(a0, b1, c7);
+        }
+        if (rows > 4) {
+            a0 = _mm256_broadcast_ss(pA3 + A_stride);
+            c8 = _mm256_fmadd_ps(a0, b0, c8);
+            c9 = _mm256_fmadd_ps(a0, b1, c9);
+        }
+        if (rows > 5) {
+            a0 = _mm256_broadcast_ss(pA3 + 2*A_stride);
+            ca = _mm256_fmadd_ps(a0, b0, ca);
+            cb = _mm256_fmadd_ps(a0, b1, cb);
+        }
     }
 
     // store C back
     _mm256_storeu_ps(C + 8 * 0, c0);
     _mm256_storeu_ps(C + 8 * 1, c1);
-    C += C_stride;
-    _mm256_storeu_ps(C + 8 * 0, c2);
-    _mm256_storeu_ps(C + 8 * 1, c3);
-    C += C_stride;
-    _mm256_storeu_ps(C + 8 * 0, c4);
-    _mm256_storeu_ps(C + 8 * 1, c5);
-    C += C_stride;
-    _mm256_storeu_ps(C + 8 * 0, c6);
-    _mm256_storeu_ps(C + 8 * 1, c7);
-    C += C_stride;
-    _mm256_storeu_ps(C + 8 * 0, c8);
-    _mm256_storeu_ps(C + 8 * 1, c9);
-    C += C_stride;
-    _mm256_storeu_ps(C + 8 * 0, ca);
-    _mm256_storeu_ps(C + 8 * 1, cb);
+    if (rows > 1) {
+        C += C_stride;
+        _mm256_storeu_ps(C + 8 * 0, c2);
+        _mm256_storeu_ps(C + 8 * 1, c3);
+    }
+    if (rows > 2) {
+        C += C_stride;
+        _mm256_storeu_ps(C + 8 * 0, c4);
+        _mm256_storeu_ps(C + 8 * 1, c5);
+    }
+    if (rows > 3) {
+        C += C_stride;
+        _mm256_storeu_ps(C + 8 * 0, c6);
+        _mm256_storeu_ps(C + 8 * 1, c7);
+    }
+    if (rows > 4) {
+        C += C_stride;
+        _mm256_storeu_ps(C + 8 * 0, c8);
+        _mm256_storeu_ps(C + 8 * 1, c9);
+    }
+    if (rows > 5) {
+        C += C_stride;
+        _mm256_storeu_ps(C + 8 * 0, ca);
+        _mm256_storeu_ps(C + 8 * 1, cb);
+    }
 }
 
 
@@ -648,13 +692,14 @@ int test_basic(int K) {
     int N = 24;
     MMtestCase mtc(M, K, N);
 
+    int actualN = N;
 #define REPEATS 20
     auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
         double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
         double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
         double duration_ns = _duration_ns * 1.0 / REPEATS;
         float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
-        float gflops = (M * N * K * 2) / duration_ns;
+        float gflops = (M * actualN * K * 2) / duration_ns;
         log += sprintf(log, "   %.3f (GFlop/s) / %.2f(GB/s)   Asize:%.2f(KB) Bsize:%.2f(KB)  compute-bound:%.1f %%", gflops, bw, 
                        (M * K) * sizeof(float)/1024.0f,
                        (N * K) * sizeof(float)/1024.0f,
@@ -752,24 +797,82 @@ int test_basic(int K) {
         std::cout << "==========================================================" << mtc.check() << std::endl;
     }
     {
-        M = 6;
-        N = 892;
-        MMtestCase mtc(M, K, N);
-        for (int r = 0; r < 10; r++) {
-            auto pmc = pevg.rdpmc(
-                [&]() {
-                    // repeat
-                    for (int repeat = 0; repeat < REPEATS; repeat++) {
-                        brgemm_6x2(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                    }
-                },
-                "brgemm_6x2",
-                REPEATS * K,
-                custom_log);
-        }
-        std::cout << "==========================================================" << mtc.check() << std::endl;
+
     }    
     return 0;
+}
+
+
+
+/*
+4/8/.../20/24/28/32/36/40/44/.../76/80/84/88/92/96
+
+if stride is multiple of 4-cachelines, performance is
+bad comparing to adjacent strides (97% vs 99%).
+
+and as stride incease, this is getting worse.(83% vs %97)
+
+
+*/
+void test_brgemm_6x2(int K, int Bstride, int rounds) {
+#if 0
+    MMtestCase mtc(6, K, 16, Bstride);
+    for (int repeat = 0; repeat < rounds; repeat++) {
+        brgemm_6x2(mtc.A.data(), mtc.K,
+                    mtc.B.data(), mtc.stride_B,
+                    mtc.C.data(), mtc.stride_C,
+                    mtc.K, false);
+    }
+#else
+    LinuxPerf::PerfEventGroup pevg({
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
+        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+
+        {PERF_TYPE_RAW, X86_RAW_EVENT(0x43, 0xfd, 0x0), "L1_MISS_ANY"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04), "STALLS_TOTAL"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06), "STALLS_L3_MISS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05), "STALLS_L2_MISS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
+
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
+        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
+    });
+    int M = 6;
+    int N = 16;
+    int r;
+    int ROUNDS=2;
+    auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
+        double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
+        double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
+        double duration_ns = _duration_ns * 1.0 / rounds;
+        float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
+        float gflops = (M * N * K * 2) / duration_ns;
+        if (r == ROUNDS-1)
+        log += sprintf(log, " (%d,%d,%d - %d-cachelines)   %.3f (GFlop/s) / %.2f(GB/s)   compute-bound:%.1f %%",
+                       M, K, N, Bstride/16, gflops, bw, 
+                       gflops * 100 / fma_peak_gflops);
+    };
+    MMtestCase mtc(M, K, N, Bstride);
+    for (r = 0; r < ROUNDS; r++) {
+        auto pmc = pevg.rdpmc(
+            [&]() {
+                // repeat
+                for (int repeat = 0; repeat < rounds; repeat++) {
+                    brgemm_6x2<6>(mtc.A.data(), mtc.K,
+                               mtc.B.data(), mtc.stride_B,
+                               mtc.C.data(), mtc.stride_C,
+                               mtc.K, false);
+                }
+            },
+            "brgemm_6x2<6>",
+            rounds * K,
+            custom_log);
+    }
+    //std::cout << "==========================================================" << mtc.check() << std::endl;
+#endif
 }
 
 //===============================================================
@@ -826,6 +929,9 @@ void MM_ComputeBounded(const float* _A,
                         auto b0 = _mm256_loadu_ps(src + 8 * 0);
                         auto b1 = _mm256_loadu_ps(src + 8 * 1);
                         auto b2 = _mm256_loadu_ps(src + 8 * 2);
+
+                        _mm_prefetch(src + 16*10, _MM_HINT_T0);
+
                         _mm256_storeu_ps(dst + 8 * 0, b0);
                         _mm256_storeu_ps(dst + 8 * 1, b1);
                         _mm256_storeu_ps(dst + 8 * 2, b2);
@@ -866,11 +972,15 @@ void MM_ComputeBounded(const float* _A,
     }
 }
 /*
-    between compute-bound & mem-bound cases, M is not big enough to reuse B many times,
-    the cost of B sub-matrix repack is not justified enough, we will access B w/o repacking
-    this requires re-use B matrix from L1-cache, (because HW-refetcher)
+between compute-bound & mem-bound cases, M is not big enough to reuse B many times,
+the cost of B sub-matrix repack is not justified enough, we will access B w/o repacking
+this requires re-use one column of B matrix from L1-cache.
+
+W/o changing strides of B, one column of B matrix may overflow L2-cache due to partial usage of
+cache-set.
 
 */
+static int BBK = getenv("BBK", 54);
 void MM_ComputeBounded_nocopy(const float* _A,
                               int A_stride,  // stride in number of element
                               const float* _B,
@@ -880,9 +990,8 @@ void MM_ComputeBounded_nocopy(const float* _A,
                               int M,
                               int K,
                               int N) {
-
-#if 1
-    int BK = 256;
+#define PREFETCH_V 16
+    int BK = BBK;
     const auto* A = _A;
     const auto* B = _B;
     for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
@@ -890,43 +999,59 @@ void MM_ComputeBounded_nocopy(const float* _A,
         for (int n = 0; n + 16 <= N; n += 16) {
             auto* pA = A;
             auto* pC = _C;
-            for (int m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
-                brgemm_6x2(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-
-                auto* src = pC + 16;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-                _mm_prefetch(src, _MM_HINT_T2); src += C_stride;
-            }
-        }
-    }
-#else
-    int BK = 256;
-    int BN = 64;
-    for (int k = 0; k < K; k += BK, _A += BK, _B += BK * B_stride) {
-        for (int n0 = 0; n0 < N; n0 += BN) {
-            int bN = std::min(N - n0, BN);
-            const auto* A = _A;
-            const auto* B = _B + n0;
-            auto* C = _C + n0;
-
-            int bK = std::min(K - k, BK);
             int m;
-            bool is_accumulate_C = (k > 0);
-            {
-                auto* pA = A;
-                auto* pC = C;
+            if (n == 0) {
+                // first column will prefetch the next column together with next few rows in same column
                 for (m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
-                    for (int n = 0; n + 16 <= bN; n += 16)
-                        brgemm_6x2(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, is_accumulate_C);
+                    brgemm_6x2<6, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                }
+                if (m < M) {
+                    switch(M - m) {
+                        case 5:
+                            brgemm_6x2<5, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 4:
+                            brgemm_6x2<4, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 3:
+                            brgemm_6x2<3, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 2:
+                            brgemm_6x2<2, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 1:
+                            brgemm_6x2<1, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                    }
+                }
+            } else {
+                // the rest columns only prefetch the next columns
+                for (m = 0; m + 6 <= M; m += 6, pA += 6 * A_stride, pC += 6 * C_stride) {
+                    brgemm_6x2<6, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                }
+                if (m < M) {
+                    switch(M - m) {
+                        case 5:
+                            brgemm_6x2<5, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 4:
+                            brgemm_6x2<4, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 3:
+                            brgemm_6x2<3, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 2:
+                            brgemm_6x2<2, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                        case 1:
+                            brgemm_6x2<1, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                            break;
+                    }
                 }
             }
         }
     }
-#endif
+#undef PREFETCH_V
 }
 
 //===============================================================
@@ -1119,6 +1244,7 @@ PYBIND11_MODULE(gemm, m) {
     });
 
     m.def("test_basic", &test_basic);
+    m.def("test_brgemm_6x2", &test_brgemm_6x2);
 }
 
 #if 0

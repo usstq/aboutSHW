@@ -53,7 +53,6 @@ import gc
 import sys
 import numpy as np
 
-# pycpp.test_basic(2560);sys.exit(0)
 
 class Colors:
     """ ANSI color codes """
@@ -82,17 +81,18 @@ class Colors:
     CROSSED = "\033[9m"
     END = "\033[0m"
 
-@pycpp.clib
-def mylib():
-    return r'''
-#include "common.hpp"
-extern "C" void test(const char * str) {
-    std::cout << str << std::endl;
-    int64_t a = std::strtoull(str, NULL, 0);
-    std::cout << a << std::endl;
-}
-'''
-mylib.test("0xfffffffffffffe00")
+if False:
+    @pycpp.clib
+    def mylib():
+        return r'''
+    #include "common.hpp"
+    extern "C" void test(const char * str) {
+        std::cout << str << std::endl;
+        int64_t a = std::strtoull(str, NULL, 0);
+        std::cout << a << std::endl;
+    }
+    '''
+    mylib.test("0xfffffffffffffe00")
 
 
 print(dir(pycpp))
@@ -189,6 +189,7 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
         mtracer.update("torch.matmul duplicates weight")
 
         avg_gflops = 0
+        avg_dt = 0
         for r in range(REPEAT):
             t0 = time.time()
             for wei in net2:
@@ -197,15 +198,19 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
             t1 = time.time()
             dt = (t1-t0)/len(net2)
             gflops = M*K*N*2/dt*1e-9
-            if (r > 0): avg_gflops += gflops
+            if (r > 0):
+                avg_gflops += gflops
+                avg_dt += dt
             print(f"{dt*1e3:.3f} ms/linear {gflops:.3f} GFLOPS")
         avg_gflops_matmul = avg_gflops / (REPEAT-1)
+        avg_dt_matmul = avg_dt / (REPEAT-1)
 
         mtracer.update("torch.matmul execution")
         print("============== my gemm ============ ")
         src = A.numpy()
         dst = C.numpy()
         avg_gflops = 0
+        avg_dt = 0
         for r in range(REPEAT):
             t0 = time.time()
             for wei in net2:
@@ -214,9 +219,12 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
             t1 = time.time()
             dt = (t1-t0)/len(net2)
             gflops = M*K*N*2/dt*1e-9
-            if (r > 0): avg_gflops += gflops
+            if (r > 0):
+                avg_gflops += gflops
+                avg_dt += dt
             print(f"{dt*1e3:.3f} ms/linear {M*K*N*2/dt*1e-9:.3f} GFLOPS")
         avg_gflops_mygemm = avg_gflops / (REPEAT-1)
+        avg_dt_mygemm = avg_dt / (REPEAT-1)
 
         mtracer.update("my gemm execution")
 
@@ -227,24 +235,98 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
         else:
             color = Colors.LIGHT_RED
         
-        log_str = f"{color}avg_gflops_matmul / avg_gflops_mygemm :  test({M},{K},{N})  {avg_gflops_matmul:.3f} / {avg_gflops_mygemm:.3f}  GFLOPS {Colors.END}\n"
+        log_str = f"{color}avg_gflops_matmul / avg_gflops_mygemm :  test({M},{K},{N})  {avg_gflops_matmul:.3f} / {avg_gflops_mygemm:.3f}  GFLOPS   {avg_dt_matmul*1e6:.0f}/{avg_dt_mygemm*1e6:.0f} us {Colors.END}\n"
         print(log_str)
         output_log_str += log_str
 
+if 0:
+    import timeit
+    for n in range(1, 100, 8):
+        pycpp.test_brgemm_6x2(2560, 16*n, 20000)
+        #print(n, timeit.timeit(lambda: pycpp.test_brgemm_6x2(2560, 16*n, 20000), number=1))
+    sys.exit(0)
 
-test(6*8,89200,1024, LAYERS=-1)
-sys.exit(0)
+class CacheSimulator:
+    def __init__(self, size=2048*1024, way=16):
+        self.size = size
+        self.way = way
+        self.num_sets = (size // (way*64))
+        self.sets = [0] * self.num_sets
+        print(f"Cache {self.way} way {self.size/1024/1024:.1f} MB {len(self.sets)} sets")
 
-test(1,892,896)
-test(4,892,896)
-test(6,892,896)
-test(6*2,892,896)
-test(6*4,892,896)
-test(6*8,892,896)
-sys.exit(0)
+    def test(self, K, stride_bytes):
+        for i in range(self.num_sets):
+            self.sets[i] = 0
+
+        for k in range(K):
+            offset_cache_line = (k * stride_bytes) // 64
+            cache_set_index = offset_cache_line % self.num_sets
+            self.sets[cache_set_index] += 1
+
+        cached = 0
+        for i in range(self.num_sets):
+            num_cache_lines = self.sets[i]
+            if num_cache_lines > 0:
+                cached += self.way if num_cache_lines > self.way else num_cache_lines
+                print(f"set[{i}] : {self.sets[i]}")
+        print(f"total {K*64/1024:.1f} KB, cached {cached*64/1024:.1f} KB, hit-rate: {cached*100/K:.1f} % ") 
+        
+cs = CacheSimulator()
+#cs.test(892, 64*16*4)
+#cs.test(892, 7168*4)
+#cs.test(892, (7168+16)*4)
+#sys.exit(0)
+#def test_stride_access(stride, cache_size=2048*1024, way=16):
+
+#test(6*8,892,16*100, LAYERS=1);sys.exit(0)
+#test(6*2,8920,896)
+#test(6*8,8920,896)
+#test(6*4,8920,896)
+#sys.exit(0)
+#for n in [59,60,61]:test(6,400,16*n)
+#sys.exit(0)
+if 0:
+    for k in [127, 160, 195, 255]:
+        test(12,k,240*1)
+        test(12,k,240*3)
+        test(12,k,240*5)
+        test(12,k,240*7)
+        test(12,k,240*9)
+        output_log_str += "\n"
+    sys.exit(0)
+
+    for m in [6, 12, 48, 60]:
+        test(m,8920,896)
+    sys.exit(0)
+
+    for m in [6, 12, 24, 48, 49, 50, 51, 52, 53, 54, 60]:
+        test(m,8920,896)
+    sys.exit(0)
+
+    for m in [1, 6, 12, 24, 48, 60, 80, 100, 200, 300, 400, 500, 1000]:
+        test(m,8920,896)
+    sys.exit(0)
+
+
+    for m in range(1, 60):
+        test(m,8920,896)
+
+    sys.exit(0)
+
+    test(1,8920,896)
+    test(4,8920,896)
+    test(6,8920,896)
+    test(6*2,8920,896)
+    test(6*4,8920,896)
+    test(6*8,8920,896)
+    test(6*10,8920,896)
+    sys.exit(0)
 
 
 #test(4000, 4096, 4096);sys.exit(0)
+#test(40,892,7168)
+#test(40,892,7168+16)
+#sys.exit(0)
 
 test(4, 892, 896)
 test(40, 892, 896)
