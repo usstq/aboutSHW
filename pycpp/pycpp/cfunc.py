@@ -5,8 +5,9 @@ import ctypes
 import numpy as np
 
 class CFunc:
-    def __init__(self, ctype_callable):
+    def __init__(self, ctype_callable, name):
         self.func = ctype_callable
+        self.name = name
 
     def __call__(self, *args):
         # translate args into ctypes
@@ -25,11 +26,11 @@ class CFunc:
         self.func(*cargs)
 
 class CLib:
-    def __init__(self, src, options, lineno_base):
+    def __init__(self, src, options, lineno_base, co_filename, disasm):
         with tempfile.TemporaryDirectory() as tmp_dir:
             temp_name = next(tempfile._get_candidate_names())
             so_path = os.path.join(tmp_dir,temp_name+'.so')
-            args = f"gcc -fopenmp -shared -o {so_path}  -Wall -fpic -x c++ - -lstdc++"
+            args = f"gcc -fopenmp -shared -o {so_path} {options} -Wall -fpic -x c++ - -lstdc++"
 
             cc = subprocess.Popen(args.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             cc.stdin.write(src)
@@ -46,32 +47,38 @@ class CLib:
                 for s in output.splitlines():
                     if s.startswith("<stdin>:"):
                         parts = s.split(":")
-                        parts[0] = __file__
+                        parts[0] = co_filename
                         if (parts[1].isnumeric()):
                             parts[1] = str(int(parts[1]) + lineno_base)
                         s = ":".join(parts)
                     print(f"\033[31m{s}\033[0m", file=sys.stderr)
 
-                raise Exception(f"CLib compilation failed")
+                raise Exception(f"CLib compilation failed with command line:\n{args}")
 
             # print(f"{so_path} genearted.")
 
             self.dll = ctypes.cdll.LoadLibrary(so_path)
+            
+            if disasm:
+                subprocess.run(f"objdump -d {so_path} -M intel".split())
 
             # self.dll.test(ctypes.pointer(ctypes.c_float(5)), ctypes.c_int(1))
 
     def __getattr__(self, name):
-        return CFunc(getattr(self.dll, name))
+        return CFunc(getattr(self.dll, name), name)
 
 import inspect
 
-def clib(f):
-    src_lines, line_no = inspect.getsourcelines(f)
-    src = f()
-    return CLib(src, "", line_no + 1)
+def clib(options="", disasm=None):
+    def _clib(f):
+        frame = inspect.currentframe().f_back
+        src_lines, line_no = inspect.getsourcelines(f)
+        src = f()
+        return CLib(src, options, line_no + 1, co_filename=frame.f_code.co_filename, disasm=disasm)
+    return _clib
 
 if __name__ == "__main__":
-    @clib
+    @clib("")
     def mylib():
         return '''
         #include "common.hpp"

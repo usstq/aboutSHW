@@ -5,17 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
-union KArg {
-    int64_t i;
-    float f;
-    void* p;
-    float* pf32;
-    uint8_t* pu8;
-    int8_t* pi8;
-    uint16_t* pu16;
-    const char * str;
-    const wchar_t * wstr;
-};
+#include <x86intrin.h>
 
 // https://stackoverflow.com/a/21371401/9292588
 #if USE_DEBUG

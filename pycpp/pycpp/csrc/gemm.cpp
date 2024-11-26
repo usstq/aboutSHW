@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <memory>
 
+
+#define JIT_DEBUG 1
+#include "../include/jit.h"
 #include "../include/linux_perf.hpp"
 #include "omp.h"
 
@@ -20,6 +23,7 @@
 */
 
 //=================================================================================================================================================
+#if 0
 inline int64_t getenv(const char* var, int64_t default_value) {
     const char* p = std::getenv(var);
     if (p) {
@@ -47,6 +51,7 @@ inline int64_t getenv(const char* var, int64_t default_value) {
 
     return default_value;
 }
+#endif
 
 struct MMtestCase {
     template <typename T>
@@ -94,7 +99,7 @@ struct MMtestCase {
         }
     };
 
-    Tensor<float> A;      // [M, N]
+    Tensor<float> A;      // [M, K]
     Tensor<float> B;      // [K, N]
     Tensor<float> C;      // [M, N]
     Tensor<float> C_ref;  // [M, N]
@@ -104,7 +109,15 @@ struct MMtestCase {
     int stride_B;
     int stride_C;
     bool no_ref;
-    MMtestCase(int M, int K, int N, int stride_B = 0, bool is_accumulate_C = false, int resolution = 10) : M(M), K(K), N(N), stride_B(stride_B), A(M * K, 0), C(M * N, 0), C_ref(M * N, 0) {
+    MMtestCase(int M, int K, int N, int _stride_B = 0, bool is_accumulate_C = false, int resolution = 10)
+        : M(M),
+          K(K),
+          N(N),
+          stride_B(_stride_B),
+          A(M * K, 0),
+          C(M * N, 0),
+          C_ref(M * N, 0) {
+
         if (stride_B == 0)
             stride_B = N;
         stride_C = N;
@@ -125,7 +138,7 @@ struct MMtestCase {
         for (auto& v : C)
             v = (rand() % resolution) * s - 0.5f;
 
-        no_ref = true; //getenv("NOREF", 0);
+        no_ref = getenv("NOREF", 1);
         if (!no_ref) {
             for (int m = 0; m < M; m++) {
                 for (int n = 0; n < N; n++) {
@@ -138,7 +151,7 @@ struct MMtestCase {
                     C_ref[m * N + n] = sum;
                 }
             }
-            //std::cout << "ref is calculated\n";
+            std::cout << "ref is calculated\n";
         }
     }
 
@@ -149,7 +162,7 @@ struct MMtestCase {
         for (int m = 0; m < M && m < rows; m++) {
             for (int n = 0; n < N; n++) {
                 auto base = C_ref[m * N + n];
-                auto val = C[m * N + n];
+                auto& val = C[m * N + n];
                 auto delta = std::abs(val - base);
                 if (delta > atol) {
                     std::cout << "@ (" << m << "," << n << ")  " << val << " vs " << base << "(base)  delta(" << delta << ") > atol(" << atol << ")" << std::endl;
@@ -159,6 +172,7 @@ struct MMtestCase {
                     std::cout << "@ (" << m << "," << n << ")  " << val << " vs " << base << "(base)  delta(" << delta << ") > base*rtol (" << base * rtol << ")" << std::endl;
                     return false;
                 }
+                val = 0;
             }
         }
         return true;
@@ -172,7 +186,154 @@ struct MMtestCase {
 };
 
 //=================================================================================================================================================
+class GemmRegBlocking : public jit_generator {
+public:
+    int m_rows;
+    int m_cols;
+    GemmRegBlocking(int rows, int cols) : m_rows(rows), m_cols(cols) {
+        ASSERT(rows * cols + cols + 1 <= 16);
+        create_kernel("GemmRegBlocking");
+    }
 
+    struct CallArgs {
+        const float* A;
+        int64_t A_stride;  // stride in number of bytes
+        const float* B;
+        int64_t B_stride;  // stride in number of bytes
+        float* C;
+        int64_t C_stride;  // stride in number of bytes
+        int64_t K;
+        int64_t accumulate;
+    };
+
+    Xbyak::Ymm ymmC(int row, int col) {
+        return Xbyak::Ymm(row * m_cols + col);
+    }
+    Xbyak::Ymm ymmB(int col) {
+        return Xbyak::Ymm(m_rows * m_cols + col);
+    }
+    Xbyak::Ymm ymmA() {
+        return Xbyak::Ymm(m_rows * m_cols + m_cols);
+    }
+
+    void generate() override {
+        auto A_ptr = abi_param2;
+        auto A_stride = abi_param3;
+        auto B_ptr = abi_param4;
+        auto B_stride = abi_param5;
+
+        mov(A_ptr, ptr[abi_param1 + offsetof(CallArgs, A)]);
+        mov(A_stride, ptr[abi_param1 + offsetof(CallArgs, A_stride)]);
+        mov(B_ptr, ptr[abi_param1 + offsetof(CallArgs, B)]);
+        mov(B_stride, ptr[abi_param1 + offsetof(CallArgs, B_stride)]);
+
+        // initilaize C
+        {
+            Xbyak::Label skip_load;
+            auto reg_tmp = rax;
+            for (int r = 0; r < m_rows; r++)
+                for (int c = 0; c < m_cols; c++) {
+                    auto ymm = ymmC(r, c);
+                    vxorps(ymm, ymm, ymm);
+                }
+
+            mov(reg_tmp, ptr[abi_param1 + offsetof(CallArgs, accumulate)]);
+            and_(reg_tmp, 1);
+            jz(skip_load);
+            {
+                auto dst_ptr = r10;
+                auto dst_stride = r11;
+                mov(dst_ptr, ptr[abi_param1 + offsetof(CallArgs, C)]);
+                mov(dst_stride, ptr[abi_param1 + offsetof(CallArgs, C_stride)]);
+
+                // load subC[m_rows, m_cols]
+                for (int r = 0; r < m_rows; r++) {
+                    for (int c = 0; c < m_cols; c++) {
+                        vmovups(ymmC(r, c), ptr[dst_ptr + c * 32]);
+                    }
+                    add(dst_ptr, dst_stride);
+                }
+            }
+            L(skip_load);
+        }
+
+        // loop over K
+        //            B:    1 x cols regs
+        // A : 1 regs C: rows x cols regs
+        {
+            Xbyak::Label loop_over_k;
+            auto reg_k = r10;
+            auto A_ptr3 = r11;
+
+            auto loadA = [&](int r) {
+                switch (r) {
+                case 0:
+                    vbroadcastss(ymmA(), ptr[A_ptr]);
+                    break;
+                case 1:
+                    vbroadcastss(ymmA(), ptr[A_ptr + A_stride]);
+                    break;
+                case 2:
+                    vbroadcastss(ymmA(), ptr[A_ptr + 2 * A_stride]);
+                    break;
+                case 3:
+                    vbroadcastss(ymmA(), ptr[A_ptr3]);
+                    break;
+                case 4:
+                    vbroadcastss(ymmA(), ptr[A_ptr3 + A_stride]);
+                    break;
+                case 5:
+                    vbroadcastss(ymmA(), ptr[A_ptr3 + 2 * A_stride]);
+                    break;
+                default:
+                    throw std::runtime_error("number of reg-blocking rows is not supported");
+                }
+            };
+            
+
+            lea(A_ptr3, ptr[A_ptr + 2 * A_stride]);
+            lea(A_ptr3, ptr[A_ptr3 + A_stride]);
+            mov(reg_k, ptr[abi_param1 + offsetof(CallArgs, K)]);
+
+            align(64, false);
+            L(loop_over_k);
+            {
+                // load B regs
+                for (int c = 0; c < m_cols; c++)
+                    vmovups(ymmB(c), ptr[B_ptr + c * 32]);
+
+                lea(B_ptr, ptr[B_ptr + B_stride]);
+                for (int r = 0; r < m_rows; r++) {
+                    loadA(r);
+                    for (int c = 0; c < m_cols; c++)
+                        vfmadd231ps(ymmC(r, c), ymmA(), ymmB(c));
+                }
+
+                lea(A_ptr, ptr[A_ptr + 4]);
+                lea(A_ptr3, ptr[A_ptr3 + 4]);
+            }
+            dec(reg_k);
+            jnz(loop_over_k, T_NEAR);
+        }
+
+        // save C
+        {
+            auto dst_ptr = r10;
+            auto dst_stride = r11;
+            mov(dst_ptr, ptr[abi_param1 + offsetof(CallArgs, C)]);
+            mov(dst_stride, ptr[abi_param1 + offsetof(CallArgs, C_stride)]);
+            for (int r = 0; r < m_rows; r++) {
+                for (int c = 0; c < m_cols; c++) {
+                    vmovups(ptr[dst_ptr + c * 32], ymmC(r, c));
+                }
+                add(dst_ptr, dst_stride);
+            }
+        }
+        ret();
+    }
+};
+
+//=================================================================================================================================================
 template <int row>
 void brgemm_4x3(const float* A,
                 int A_stride,  // stride in number of element
@@ -553,7 +714,6 @@ void brgemm_6x2(const float* A,
             src += C_stride;
             c2 = _mm256_loadu_ps(src + 8 * 0);
             c3 = _mm256_loadu_ps(src + 8 * 1);
-            
         }
         if (rows > 2) {
             src += C_stride;
@@ -590,7 +750,7 @@ void brgemm_6x2(const float* A,
         cb = _mm256_setzero_ps();
     }
 
-    const auto* pA3 = A + 3*A_stride;
+    const auto* pA3 = A + 3 * A_stride;
     const auto prefetch_stride = B_stride * prefetch_v;
     int k;
     for (k = 0; k < K; k++, B += B_stride, A++, pA3++) {
@@ -610,7 +770,7 @@ void brgemm_6x2(const float* A,
             c3 = _mm256_fmadd_ps(a0, b1, c3);
         }
         if (rows > 2) {
-            a0 = _mm256_broadcast_ss(A + 2*A_stride);
+            a0 = _mm256_broadcast_ss(A + 2 * A_stride);
             c4 = _mm256_fmadd_ps(a0, b0, c4);
             c5 = _mm256_fmadd_ps(a0, b1, c5);
         }
@@ -626,7 +786,7 @@ void brgemm_6x2(const float* A,
             c9 = _mm256_fmadd_ps(a0, b1, c9);
         }
         if (rows > 5) {
-            a0 = _mm256_broadcast_ss(pA3 + 2*A_stride);
+            a0 = _mm256_broadcast_ss(pA3 + 2 * A_stride);
             ca = _mm256_fmadd_ps(a0, b0, ca);
             cb = _mm256_fmadd_ps(a0, b1, cb);
         }
@@ -662,16 +822,13 @@ void brgemm_6x2(const float* A,
     }
 }
 
-
-
-
 /*
   brgemm_4x3 can get 98% peak GFLOPS if both A & B are in cache
   so the computational kernel is OK.
 
   brgemm_1x12 & brgemm_2x6 are worse (60~70% only)
 */
-int test_basic(int K) {
+int test_reg_blocking(int K) {
     LinuxPerf::PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
@@ -687,22 +844,25 @@ int test_basic(int K) {
         {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
     });
-    pevg.show_header();    
+    pevg.show_header();
     int M = 4;
     int N = 24;
     MMtestCase mtc(M, K, N);
 
-    int actualN = N;
 #define REPEATS 20
     auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
         double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
         double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
         double duration_ns = _duration_ns * 1.0 / REPEATS;
         float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
-        float gflops = (M * actualN * K * 2) / duration_ns;
-        log += sprintf(log, "   %.3f (GFlop/s) / %.2f(GB/s)   Asize:%.2f(KB) Bsize:%.2f(KB)  compute-bound:%.1f %%", gflops, bw, 
-                       (M * K) * sizeof(float)/1024.0f,
-                       (N * K) * sizeof(float)/1024.0f,
+        float gflops = (M * N * K * 2) / duration_ns;
+        log += sprintf(log,
+                       "   %.3f (GFlop/s) / %.2f(GB/s)   %d,%d,%d %.2f & %.2f(KB)  compute-bound:%.1f %%",
+                       gflops,
+                       bw,
+                       M, K, N,
+                       (M * K) * sizeof(float) / 1024.0f,
+                       (N * K) * sizeof(float) / 1024.0f,
                        gflops * 100 / fma_peak_gflops);
     };
 
@@ -797,12 +957,37 @@ int test_basic(int K) {
         std::cout << "==========================================================" << mtc.check() << std::endl;
     }
     {
+        M = 4;
+        N = 24;
+        MMtestCase mtc(M, K, N);
 
-    }    
+        GemmRegBlocking gemm_rb(4, 3);
+        GemmRegBlocking::CallArgs args;
+        args.A = mtc.A.data();
+        args.A_stride = mtc.K * sizeof(float);
+        args.B = mtc.B.data();
+        args.B_stride = mtc.stride_B * sizeof(float);
+        args.C = mtc.C.data();
+        args.C_stride = mtc.N * sizeof(float);
+        args.K = K;
+        args.accumulate = false;
+
+        for (int r = 0; r < 10; r++) {
+            auto pmc = pevg.rdpmc(
+                [&]() {
+                    // repeat
+                    for (int repeat = 0; repeat < REPEATS; repeat++) {
+                        gemm_rb(&args);
+                    }
+                },
+                "gemm_rb(4,3)",
+                REPEATS * K,
+                custom_log);
+        }
+        std::cout << "==========================================================" << mtc.check() << std::endl;
+    }
     return 0;
 }
-
-
 
 /*
 4/8/.../20/24/28/32/36/40/44/.../76/80/84/88/92/96
@@ -814,16 +999,7 @@ and as stride incease, this is getting worse.(83% vs %97)
 
 
 */
-void test_brgemm_6x2(int K, int Bstride, int rounds) {
-#if 0
-    MMtestCase mtc(6, K, 16, Bstride);
-    for (int repeat = 0; repeat < rounds; repeat++) {
-        brgemm_6x2(mtc.A.data(), mtc.K,
-                    mtc.B.data(), mtc.stride_B,
-                    mtc.C.data(), mtc.stride_C,
-                    mtc.K, false);
-    }
-#else
+void test_reg_blocking_6x2(int K, int Bstride, int rounds) {
     LinuxPerf::PerfEventGroup pevg({
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
         {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
@@ -843,17 +1019,23 @@ void test_brgemm_6x2(int K, int Bstride, int rounds) {
     int M = 6;
     int N = 16;
     int r;
-    int ROUNDS=2;
+    int ROUNDS = 2;
     auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
         double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
         double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
         double duration_ns = _duration_ns * 1.0 / rounds;
         float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
         float gflops = (M * N * K * 2) / duration_ns;
-        if (r == ROUNDS-1)
-        log += sprintf(log, " (%d,%d,%d - %d-cachelines)   %.3f (GFlop/s) / %.2f(GB/s)   compute-bound:%.1f %%",
-                       M, K, N, Bstride/16, gflops, bw, 
-                       gflops * 100 / fma_peak_gflops);
+        if (r == ROUNDS - 1)
+            log += sprintf(log,
+                           " (%d,%d,%d - %d-cachelines)   %.3f (GFlop/s) / %.2f(GB/s)   compute-bound:%.1f %%",
+                           M,
+                           K,
+                           N,
+                           Bstride / 16,
+                           gflops,
+                           bw,
+                           gflops * 100 / fma_peak_gflops);
     };
     MMtestCase mtc(M, K, N, Bstride);
     for (r = 0; r < ROUNDS; r++) {
@@ -861,18 +1043,14 @@ void test_brgemm_6x2(int K, int Bstride, int rounds) {
             [&]() {
                 // repeat
                 for (int repeat = 0; repeat < rounds; repeat++) {
-                    brgemm_6x2<6>(mtc.A.data(), mtc.K,
-                               mtc.B.data(), mtc.stride_B,
-                               mtc.C.data(), mtc.stride_C,
-                               mtc.K, false);
+                    brgemm_6x2<6>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.stride_C, mtc.K, false);
                 }
             },
             "brgemm_6x2<6>",
             rounds * K,
             custom_log);
     }
-    //std::cout << "==========================================================" << mtc.check() << std::endl;
-#endif
+    // std::cout << "==========================================================" << mtc.check() << std::endl;
 }
 
 //===============================================================
@@ -930,7 +1108,7 @@ void MM_ComputeBounded(const float* _A,
                         auto b1 = _mm256_loadu_ps(src + 8 * 1);
                         auto b2 = _mm256_loadu_ps(src + 8 * 2);
 
-                        _mm_prefetch(src + 16*10, _MM_HINT_T0);
+                        _mm_prefetch(src + 16 * 10, _MM_HINT_T0);
 
                         _mm256_storeu_ps(dst + 8 * 0, b0);
                         _mm256_storeu_ps(dst + 8 * 1, b1);
@@ -973,32 +1151,29 @@ void MM_ComputeBounded(const float* _A,
 }
 /*
 between compute-bound & mem-bound cases, M is not big enough to reuse B many times,
-the cost of B sub-matrix repack is not justified enough, we will access B w/o repacking
+the cost of B sub-matrix repack is not worthy, we will access B w/o repacking
 this requires re-use one column of B matrix from L1-cache.
 
-W/o changing strides of B, one column of B matrix may overflow L2-cache due to partial usage of
-cache-set.
-
+W/o changing strides of B, one column of B matrix may overflow L2-cache due to the nature of set-associative cache.
+so BK should be small enough to not overflow L2-cache-sets.
 */
-static int BBK = getenv("BBK", 54);
-void MM_ComputeBounded_nocopy(const float* _A,
+
+void MM_ComputeBounded_nocopy(const float* A,
                               int A_stride,  // stride in number of element
-                              const float* _B,
+                              const float* B,
                               int B_stride,  // stride in number of element
-                              float* _C,
+                              float* C,
                               int C_stride,  // stride in number of element
                               int M,
                               int K,
                               int N) {
 #define PREFETCH_V 16
-    int BK = BBK;
-    const auto* A = _A;
-    const auto* B = _B;
+    static int BK = getenv("BK", 54);
     for (int k = 0; k < K; k += BK, A += BK, B += BK * B_stride) {
         int bK = std::min(K - k, BK);
         for (int n = 0; n + 16 <= N; n += 16) {
             auto* pA = A;
-            auto* pC = _C;
+            auto* pC = C;
             int m;
             if (n == 0) {
                 // first column will prefetch the next column together with next few rows in same column
@@ -1006,22 +1181,22 @@ void MM_ComputeBounded_nocopy(const float* _A,
                     brgemm_6x2<6, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
                 }
                 if (m < M) {
-                    switch(M - m) {
-                        case 5:
-                            brgemm_6x2<5, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 4:
-                            brgemm_6x2<4, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 3:
-                            brgemm_6x2<3, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 2:
-                            brgemm_6x2<2, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 1:
-                            brgemm_6x2<1, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
+                    switch (M - m) {
+                    case 5:
+                        brgemm_6x2<5, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 4:
+                        brgemm_6x2<4, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 3:
+                        brgemm_6x2<3, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 2:
+                        brgemm_6x2<2, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 1:
+                        brgemm_6x2<1, PREFETCH_V>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
                     }
                 }
             } else {
@@ -1030,22 +1205,22 @@ void MM_ComputeBounded_nocopy(const float* _A,
                     brgemm_6x2<6, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
                 }
                 if (m < M) {
-                    switch(M - m) {
-                        case 5:
-                            brgemm_6x2<5, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 4:
-                            brgemm_6x2<4, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 3:
-                            brgemm_6x2<3, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 2:
-                            brgemm_6x2<2, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
-                        case 1:
-                            brgemm_6x2<1, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
-                            break;
+                    switch (M - m) {
+                    case 5:
+                        brgemm_6x2<5, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 4:
+                        brgemm_6x2<4, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 3:
+                        brgemm_6x2<3, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 2:
+                        brgemm_6x2<2, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
+                    case 1:
+                        brgemm_6x2<1, 0>(pA, A_stride, B + n, B_stride, pC + n, C_stride, bK, k > 0);
+                        break;
                     }
                 }
             }
@@ -1078,14 +1253,13 @@ void MM_MemoryBounded(const float* A,
         auto c0 = _mm256_setzero_ps();
         auto* pC = C;
         for (int m = 0; m < M; m++, pC += C_stride) {
-            for (int n = 0; n < N; n += 8 * 4) {
-                _mm256_storeu_ps(pC + n + 8 * 0, c0);
-                _mm256_storeu_ps(pC + n + 8 * 1, c0);
-                _mm256_storeu_ps(pC + n + 8 * 2, c0);
-                _mm256_storeu_ps(pC + n + 8 * 3, c0);
+            for (int n = 0; n < N; n += 8) {
+                _mm256_storeu_ps(pC + n, c0);
             }
         }
     }
+    ASSERT(((K % 4) == 0) && ((N % 8) == 0));
+
     for (int k = 0; k < K; k += 4) {
         const auto* pA = A;
         auto* pC = C;
@@ -1096,8 +1270,8 @@ void MM_MemoryBounded(const float* A,
             __m256 a3 = _mm256_broadcast_ss(pA + k + 3);
             const auto* pB = B + k * B_stride;
             const auto* pB2 = pB + 2 * B_stride;
-
-            for (int n = 0; n < N; n += 8 * 4, pB += 8 * 4, pB2 += 8 * 4) {
+            int n = 0;
+            for (; (n + 8*4) <= N; n += 8 * 4, pB += 8 * 4, pB2 += 8 * 4) {
                 __m256 c0 = _mm256_loadu_ps(pC + n + 8 * 0);
                 __m256 c1 = _mm256_loadu_ps(pC + n + 8 * 1);
                 __m256 c2 = _mm256_loadu_ps(pC + n + 8 * 2);
@@ -1127,6 +1301,15 @@ void MM_MemoryBounded(const float* A,
                 _mm256_storeu_ps(pC + n + 8 * 1, c1);
                 _mm256_storeu_ps(pC + n + 8 * 2, c2);
                 _mm256_storeu_ps(pC + n + 8 * 3, c3);
+            }
+            // n tails
+            for (; n < N; n += 8, pB += 8, pB2 += 8) {
+                __m256 c0 = _mm256_loadu_ps(pC + n);
+                c0 = _mm256_fmadd_ps(a0, _mm256_loadu_ps(pB), c0);
+                c0 = _mm256_fmadd_ps(a1, _mm256_loadu_ps(pB + B_stride), c0);
+                c0 = _mm256_fmadd_ps(a2, _mm256_loadu_ps(pB2), c0);
+                c0 = _mm256_fmadd_ps(a3, _mm256_loadu_ps(pB2 + B_stride), c0);
+                _mm256_storeu_ps(pC + n, c0);
             }
         }
     }
@@ -1226,6 +1409,39 @@ int test(LinuxPerf::PerfEventGroup* pevg, int64_t M, int64_t K, int64_t N) {
 namespace py = pybind11;
 
 PYBIND11_MODULE(gemm, m) {
+
+    py::class_<GemmRegBlocking>(m, "GemmRegBlocking")
+        .def(py::init<int, int>())  // GemmRegBlocking(int rows, int cols_in_avx2_regs)
+        .def("__call__", [](GemmRegBlocking& self, py::array_t<float> A, py::array_t<float> B, py::array_t<float> C){
+            py::buffer_info bufA = A.request();
+            py::buffer_info bufB = B.request();
+            py::buffer_info bufC = C.request();
+
+            auto M = bufA.shape[0];
+            auto K = bufA.shape[1];
+
+            ASSERT(K == bufB.shape[0]);
+            auto N = bufB.shape[1];
+
+            ASSERT(M == bufC.shape[0]);
+            ASSERT(N == bufC.shape[1]);
+
+            ASSERT(M == self.m_rows);
+            ASSERT(N == self.m_cols * 8);
+
+            GemmRegBlocking::CallArgs args;
+            args.A = static_cast<float*>(bufA.ptr);
+            args.A_stride = bufA.strides[0];
+            args.B = static_cast<float*>(bufB.ptr);
+            args.B_stride = bufB.strides[0];
+            args.C = static_cast<float*>(bufC.ptr);
+            args.C_stride = bufC.strides[0];
+            args.K = K;
+            args.accumulate = false;
+
+            self(&args);
+        });
+
     m.def("gemm", [](py::array_t<float> A, py::array_t<float> B, py::array_t<float> C) {
         py::buffer_info bufA = A.request();
         py::buffer_info bufB = B.request();
@@ -1243,8 +1459,8 @@ PYBIND11_MODULE(gemm, m) {
         MM_brgemm(static_cast<float*>(bufA.ptr), K, static_cast<float*>(bufB.ptr), N, static_cast<float*>(bufC.ptr), N, M, K, N, false);
     });
 
-    m.def("test_basic", &test_basic);
-    m.def("test_brgemm_6x2", &test_brgemm_6x2);
+    m.def("test_reg_blocking", &test_reg_blocking);
+    m.def("test_reg_blocking_6x2", &test_reg_blocking_6x2);
 }
 
 #if 0
@@ -1265,7 +1481,7 @@ int main() {
         //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
     });
     pevg.show_header();
-    //test_basic(pevg); return 0;
+    //test_reg_blocking(pevg); return 0;
 
     int M = getenv("M", 4);
     int K = getenv("K", 256);

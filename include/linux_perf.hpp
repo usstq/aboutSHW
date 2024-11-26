@@ -1069,6 +1069,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         PerfEventGroup* pevg = nullptr;
         ProfileData* pd = nullptr;
         bool do_unlock = false;
+        size_t num_events = 0;
         ProfileScope() = default;
         ProfileScope(PerfEventGroup* pevg, ProfileData* pd, bool do_unlock = false) : pevg(pevg), pd(pd), do_unlock(do_unlock) {}
 
@@ -1094,27 +1095,40 @@ struct PerfEventGroup : public IPerfEventDumper {
             return *this;
         }
 
-        uint64_t* finish() {
+        uint64_t* finish(uint64_t* ext_data = nullptr) {
             if (do_unlock) {
                 PerfEventGroup::get_sampling_lock() --;
             }
+            num_events = 0;
             if (!pevg || !pd)
                 return nullptr;
+
+            num_events = pevg->events.size();
+            if (num_events > pd->data_size)
+                num_events = pd->data_size;
 
             pd->stop();
             bool use_pmc = (pevg->num_events_no_pmc == 0);
             if (use_pmc) {
-                for (size_t i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                for (size_t i =0; i < num_events; i++)
                     if (pevg->events[i].pmc_index)
                         pd->data[i] = (_rdpmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
                     else
                         pd->data[i] = 0;
             } else {
                 pevg->read();
-                for (size_t i =0; i < pevg->events.size() && i < pd->data_size; i++)
+                for (size_t i =0; i < num_events; i++)
                     pd->data[i] = pevg->values[i] - pd->data[i];
             }
             pevg = nullptr;
+
+            if (ext_data) {
+                // duration in ns
+                ext_data[0] = pd->tsc_end - pd->tsc_start;
+                // other event counters
+                for (size_t i =0; i < num_events; i++)
+                    ext_data[i+1] = pd->data[i];
+            }
             return pd->data;
         }
 

@@ -1,4 +1,16 @@
-# Basic fact: Cache-Penalties of accessing B matrix column-wise
+# Register-blocking kernels that can reach peak-GFLOPS: 4x3 or 6x2
+
+in [test_reg_blocking.py](test_reg_blocking.py), we implemented a few register blocking kernel and test it on a very small input matrix (which fits L2) many times, and measure duration & cpu cycles of the kernel, measured CPI(cycles per iterations) shows the 4x3 & 6x2 kernels can reach FMA instruction's throughput.
+
+```bash
+$ python -m pycpp.doc.test_reg_blocking
+
+gemm_regblk_4x3 0.003 ms   5.7 GHz   CPI:6.0  181 GFLOPS
+gemm_regblk_6x2 0.003 ms   5.7 GHz   CPI:6.0  181 GFLOPS
+gemm_regblk_2x6 0.006 ms   5.8 GHz   CPI:12.8  87 GFLOPS
+```
+
+# Cache-penalties of accessing B matrix column-wise
 B matrix is stored in row-major order, register-blocking matmul kernel accesses B matrix in column wise or strided pattern (a fixed distance exists between two cache-line hits), we change the stride of B from 1-cacheline to 100-cacheline, and measure the latency of a 6x2 avx2-register blocking kernel as following:
 
 ![L2miss_vs_stride.png](./L2miss_vs_stride.png)
@@ -27,11 +39,25 @@ and our test has memory-footprint of 220(KB) in total, which means at least 220 
     - in round4, 0'th cache-line in each 24-cachelines group will hit
     - ... only (0,16,8) cache-lines in 24-cachelines group will hit, which provides (2048*3/24)=256(KB) effective capacity which is just enough to hold 220(KB)
 
-## 2. gradual increasement of cache-miss
- we also observe slow increase of latency along with regular strides, for regular strides, whole memory footprint can be contained in L2, why it still increases?
- 
- this is due to L1-cache miss, L1 prefetcher works best in streaming case, in strided case it's worser at large strides, SW prefetch can help this a lot.
+```bash
+# cache simulator shows the huge loss of effective cache capacity at some special strides
+$ python -m pycpp.doc.cache_simulator
 
+Cache 16 way 2.0 MB 2048 sets
+ stride 16 cache-lines: total 220.0 KB, cached  128.0 KB, hit-rate: 58.2 %
+ stride 32 cache-lines: total 220.0 KB, cached   64.0 KB, hit-rate: 29.1 %
+ stride 48 cache-lines: total 220.0 KB, cached  128.0 KB, hit-rate: 58.2 %
+ stride 64 cache-lines: total 220.0 KB, cached   32.0 KB, hit-rate: 14.5 %
+ stride 80 cache-lines: total 220.0 KB, cached  128.0 KB, hit-rate: 58.2 %
+ stride 96 cache-lines: total 220.0 KB, cached   64.0 KB, hit-rate: 29.1 %
+```
+
+## 2. gradual increase of cache-miss
+For regular strides, whole memory footprint can be fully cached in L2, why can we still observe gradual increase of latency along with strides?
+ 
+Perf event shows that this is due to L1-cache miss, L1 prefetcher stops at 4KB page boundary, the larger the strides, the more frequent such stops would happen.
+
+SW prefetch can help in this case.
 
  - https://en.wikipedia.org/wiki/Row-_and_column-major_order
  - https://stackoverflow.com/questions/57344826/how-does-cache-associativity-impact-performance
@@ -48,7 +74,7 @@ and our test has memory-footprint of 220(KB) in total, which means at least 220 
     - cache-set associative mapping logic so full cache-capacity can be effectively used;
     - use SW-prefetcher instructions
 
-# Basic fact: Cache-Penalties of register blocking kernel
+# Cache-Blocking: with sub-B repacked
 
 With limited general register file size, register blocking kernel can determine a fixed BM & BN dimension of sub-A & sub-B matrix,
 but the reduction dimension K is not limited by GRF size, if K is so big that sub-A & sub-B oveflow L1 or L2 cache, this

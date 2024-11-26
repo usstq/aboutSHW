@@ -95,6 +95,7 @@ if False:
     mylib.test("0xfffffffffffffe00")
 
 
+pycpp.test_reg_blocking(2560)
 print(dir(pycpp))
 
 print(torch.backends.mkldnn.is_available())
@@ -141,7 +142,7 @@ def show_final_logs():
         print(output_log_str)
 atexit.register(show_final_logs)
 
-def test(M, K, N, REPEAT=3, LAYERS=-1):
+def test(M, K, N, REPEAT=3, LAYERS=-1, name=""):
     global output_log_str
     with torch.no_grad():
         device = torch.device("cpu")
@@ -154,6 +155,8 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
             total_gflops = 300e9
             LAYERS = min(int(total_gflops//(M*K*N*2)),
                         int(2e9//(K*N*4)))
+        if LAYERS <= 0:
+            LAYERS = 4
 
         print(f" ******* test M={M}, K={K}, N={N}, LAYERS={LAYERS} weights:{K*N*4*LAYERS/1024:.1f}(KB) ******* ")
         
@@ -230,12 +233,16 @@ def test(M, K, N, REPEAT=3, LAYERS=-1):
 
         compare(Cref.numpy(), C.numpy())
         
-        if avg_gflops_mygemm > avg_gflops_matmul * 0.95:
+        dt_ratio = avg_dt_mygemm / avg_dt_matmul
+
+        if dt_ratio < 1.05:
             color = Colors.LIGHT_CYAN
+            info = f"[ PASS : {dt_ratio:.2f}]"
         else:
             color = Colors.LIGHT_RED
-        
-        log_str = f"{color}avg_gflops_matmul / avg_gflops_mygemm :  test({M},{K},{N})  {avg_gflops_matmul:.3f} / {avg_gflops_mygemm:.3f}  GFLOPS   {avg_dt_matmul*1e6:.0f}/{avg_dt_mygemm*1e6:.0f} us {Colors.END}\n"
+            info = f"[FAILED: {dt_ratio:.2f}]"
+
+        log_str = f"{info} {name} {color}avg_gflops_matmul / avg_gflops_mygemm :  test({M},{K},{N})  {avg_gflops_matmul:.3f} / {avg_gflops_mygemm:.3f}  GFLOPS   {avg_dt_matmul*1e6:.0f}/{avg_dt_mygemm*1e6:.0f} us {Colors.END}\n"
         print(log_str)
         output_log_str += log_str
 
@@ -246,36 +253,11 @@ if 0:
         #print(n, timeit.timeit(lambda: pycpp.test_brgemm_6x2(2560, 16*n, 20000), number=1))
     sys.exit(0)
 
-class CacheSimulator:
-    def __init__(self, size=2048*1024, way=16):
-        self.size = size
-        self.way = way
-        self.num_sets = (size // (way*64))
-        self.sets = [0] * self.num_sets
-        print(f"Cache {self.way} way {self.size/1024/1024:.1f} MB {len(self.sets)} sets")
 
-    def test(self, K, stride_bytes):
-        for i in range(self.num_sets):
-            self.sets[i] = 0
-
-        for k in range(K):
-            offset_cache_line = (k * stride_bytes) // 64
-            cache_set_index = offset_cache_line % self.num_sets
-            self.sets[cache_set_index] += 1
-
-        cached = 0
-        for i in range(self.num_sets):
-            num_cache_lines = self.sets[i]
-            if num_cache_lines > 0:
-                cached += self.way if num_cache_lines > self.way else num_cache_lines
-                print(f"set[{i}] : {self.sets[i]}")
-        print(f"total {K*64/1024:.1f} KB, cached {cached*64/1024:.1f} KB, hit-rate: {cached*100/K:.1f} % ") 
-        
-cs = CacheSimulator()
 #cs.test(892, 64*16*4)
 #cs.test(892, 7168*4)
 #cs.test(892, (7168+16)*4)
-#sys.exit(0)
+sys.exit(0)
 #def test_stride_access(stride, cache_size=2048*1024, way=16):
 
 #test(6*8,892,16*100, LAYERS=1);sys.exit(0)
@@ -322,6 +304,35 @@ if 0:
     test(6*10,8920,896)
     sys.exit(0)
 
+
+def test_llm_gemm(name, Ms, hidden_size, intermediate_size, num_attention_heads, num_key_value_heads):
+    head_size = hidden_size//num_attention_heads
+    q_proj_size = head_size * num_attention_heads
+    k_proj_size = head_size * num_key_value_heads
+    v_proj_size = head_size * num_key_value_heads
+    qkv_proj_size = q_proj_size + k_proj_size + v_proj_size
+    print(f"======= {name} ========")
+    for m in Ms:
+        test(m, hidden_size, hidden_size, name=name) # o_proj
+        test(m, hidden_size, q_proj_size, name=name)
+        test(m, hidden_size, k_proj_size, name=name)
+        test(m, hidden_size, qkv_proj_size, name=name)
+        test(m, hidden_size, intermediate_size, name=name)
+        test(m, hidden_size, intermediate_size * 2, name=name) # gate-up fused
+        test(m, intermediate_size, hidden_size, name=name)
+
+Ms = [1, 4, 40, 400, 1024, 2048]
+test_llm_gemm("llama-3-8b", Ms, hidden_size = 4096, intermediate_size = 14336, num_attention_heads = 32, num_key_value_heads = 8)
+test_llm_gemm("mistral-7b-v0.1", Ms, hidden_size = 4096, intermediate_size = 14336, num_attention_heads = 32, num_key_value_heads = 8)
+test_llm_gemm("Qwen2-0.5B-Instruct", Ms, hidden_size = 896, intermediate_size = 4864, num_attention_heads = 14, num_key_value_heads = 2)
+test_llm_gemm("Qwen2-7B-Instruct", Ms, hidden_size = 3584, intermediate_size = 18944, num_attention_heads = 28, num_key_value_heads = 4)
+test_llm_gemm("llama-2-7b-chat", Ms, hidden_size = 4096, intermediate_size = 11008, num_attention_heads = 32, num_key_value_heads = 32)
+test_llm_gemm("llama-2-13b-chat", Ms, hidden_size = 5120, intermediate_size = 13824, num_attention_heads = 40, num_key_value_heads = 40)
+test_llm_gemm("glm4-4b", Ms, hidden_size = 3072, intermediate_size = 8192, num_attention_heads = 24, num_key_value_heads = 6)
+test_llm_gemm("chatglm-6b", Ms, hidden_size = 4096, intermediate_size = 16384, num_attention_heads = 32, num_key_value_heads = 32)
+test_llm_gemm("chatglm2-6b", Ms, hidden_size = 4096, intermediate_size = 13696, num_attention_heads = 32, num_key_value_heads = 32)
+
+sys.exit(0)
 
 #test(4000, 4096, 4096);sys.exit(0)
 #test(40,892,7168)
