@@ -27,7 +27,7 @@ class SDPA_opt:
             # Read the entire file content into a string
             cl_kernel_sources = file.read()
         # print(cl_kernel_sources[:100])
-        options = f'-DSUBGROUP_SIZE={self.SUBGROUP_SIZE} -DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} -DTARGET_SEQ_LEN_BLOCK_SIZE={self.TARGET_SEQ_LEN_BLOCK_SIZE} \
+        options = f'-DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} \
                     -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -DSTATIC_SCALE_VALUE=1 -cl-mad-enable'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
@@ -41,7 +41,8 @@ class SDPA_opt:
         max_logits = to_cl(np.zeros([4], dtype=np.float32))
         tmp_out = to_cl(np.zeros([2], dtype=np.float16))
 
-        output = to_cl(torch.zeros(B, Hq, L, HEAD_SIZE))
+        output = to_cl(torch.zeros(B, Hq, L, HEAD_SIZE, dtype=torch.float16))
+        # output = cl.tensor([B, Hq, L, HEAD_SIZE], query_input.dtype)
 
         # if self.is_optimized:
         #     GWS = [HEAD_SIZE*self.SG_SCALE_FACTOR, B*Hq, int(L/self.TARGET_SEQ_LEN_BLOCK_SIZE)]
@@ -117,13 +118,13 @@ if __name__ == "__main__":
         # print(f"len(shape_info)={len(shape_info)}, shape_info={shape_info}")
 
         sdpa = SDPA_opt(Hq, Hk, HEAD_SIZE, is_optimized)
-        for _ in range(1):
-            output = sdpa(shape_info, query_input, key_input, value_input, attn_mask_input, scale_input)
+        output = sdpa(shape_info, query_input, key_input, value_input, attn_mask_input, scale_input)
 
+        output = to_torch(output)
         durations = cl.finish()
         return output.numpy(), durations
 
-    def test_acc(B, Hq, Hk, HEAD_SIZE, L, use_randn = True):              
+    def test_acc(B, Hq, Hk, HEAD_SIZE, L, use_randn = False):              
         # reference torch impl
         # qkv = torch.randn([B, L, (Hq + Hk + Hk) * HEAD_SIZE], dtype=torch.float16)
         attention_mask = torch.zeros([B, L], dtype=torch.float16)
@@ -139,6 +140,8 @@ if __name__ == "__main__":
             q = torch.from_numpy(q)
             k = torch.from_numpy(k)
             v = torch.from_numpy(v)
+            # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
             # q = torch.randn([B, L, Hq, HEAD_SIZE], dtype=torch.float16)
             # k = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
             # v = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
@@ -146,21 +149,36 @@ if __name__ == "__main__":
             # np.save("k.npy", k)
             # np.save("v.npy", v)
         else:
-            q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)
-            k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
-            v = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)            
+            with open('q_samenumber.npy', 'rb') as f:
+                q = np.load(f)
+            with open('k_samenumber.npy', 'rb') as f:
+                k = np.load(f)
+            with open('v_samenumber.npy', 'rb') as f:
+                v = np.load(f)
+            q = torch.from_numpy(q)
+            k = torch.from_numpy(k)
+            v = torch.from_numpy(v)
+            # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            # v = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            # np.save("q_samenumber.npy", q)
+            # np.save("k_samenumber.npy", k)
+            # np.save("v_samenumber.npy", v)
         qkv = torch.cat((q, k, v), 2)
         qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))
         
         ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
+        print(f'{ref0=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
+        print(f'{ref=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         opt, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, True)
+        print(f'{opt=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
             
@@ -168,9 +186,8 @@ if __name__ == "__main__":
 
         try:
             if not np.allclose(ref, opt, atol=0.01, rtol=0.01, equal_nan=True):
-                # print(f'{ref=}\n{opt=}')
                 pos = np.where(np.abs(ref - opt) > 0.01)
-                print(f"{pos=}")
+                print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
                 print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
                 raise Exception("failed.")
             print(f'{Colors.GREEN} PASS at shape = {opt.shape}.{Colors.END}')

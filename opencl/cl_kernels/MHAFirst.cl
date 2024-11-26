@@ -207,6 +207,7 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
             } else {
                 max_qk_dot = -1e9f;
             }
+            // if (id_sg == 0) printf("debug: max_qk_dot=%f @(%d,%d,%d,%d)\n", max_qk_dot, query_start, key_n_start_sg, id_sg, id_sg_local);
             max_qk_dot = sub_group_reduce_max(max_qk_dot);
             float prev_max_attn_score = prev_max_attn_score_share[m];
             max_qk_dot = fmax(max_qk_dot, prev_max_attn_score);
@@ -232,6 +233,9 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
             }
             for (uint k = id_sg_local; k < S; k += SGS) {
                 prev_output_share[m][k] = convert_half(prev_output_share[m][k] * scale_fixed);
+                if (prev_output_share[m][k]!=0) printf("prev_output_share 2 %f, (%d,%d,%d,%d), min %f, %f,%f,%f,%f,%f,%f,%f. ", prev_output_share[m][k], 
+                query_start, key_n_start_sg, id_sg, id_sg_local, -1e9f,
+                scale_fixed, pre_exp_sum_fixed, exp_sum, pre_exp_sum, native_exp(prev_max_attn_score - max_qk_dot), prev_max_attn_score, max_qk_dot);
             }
 
             prev_max_attn_score_share[m] = max_qk_dot;

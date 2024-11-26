@@ -414,6 +414,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             for (uint m = 0; m < query_len; m++) {
                 __global half* dst = output + m * HQ * S + id_sg * SGS;
                 intel_sub_group_block_write_us((__global ushort*)dst, as_short(sum[m]));
+                if (cur_mb_blocks_num == 0 && id_sg == 0 && id_sg_local == 0) printf("cur_mb_blocks_num: %d, %f, %d.  ", cur_mb_blocks_num, sum[m], dst);
             }
         }
     }

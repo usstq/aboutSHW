@@ -3829,10 +3829,10 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SOFTMAX_ACCUMULATOR_ABS_FUNC       fabs
 #define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
 #define SOFTMAX_ACCUMULATOR_IS_FP          1
-// #define SUBGROUP_SIZE                      16
+#define SUBGROUP_SIZE                      16
 // #define HEAD_SIZE                          128
 // #define SEQ_LEN_PARTITION_SIZE             (SG_SCALE_FACTOR * HEAD_SIZE)
-// #define TARGET_SEQ_LEN_BLOCK_SIZE          16
+#define TARGET_SEQ_LEN_BLOCK_SIZE          16
 #define SDPA_STAGE_0                       1
 // #define SG_SCALE_FACTOR                    2
 
@@ -4520,6 +4520,7 @@ KERNEL(sdpa_opt)
         } else {
             unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
+                if (get_global_id(1) == 0 && sgid == 0 && sglid == 0) printf("ref:target_seq_idx: %d, %f, %d.  ", target_seq_idx, output_acc[seq_idx], output_offset);
                 output_offset += output_pitch;
             }
         }
