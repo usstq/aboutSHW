@@ -9,7 +9,7 @@ ext_modules = [
         define_macros = [('VERSION_INFO', __version__)],
         include_dirs = ["./"],
         library_dirs = ["./"],
-        extra_compile_args = ['-fopenmp','-march=core-avx2', '-fPIC', '-std=c++11', '-O2'],
+        extra_compile_args = ['-fopenmp','-march=core-avx2', '-fPIC', '-std=c++11', '-O2', '-g'],
         extra_link_args = ['-fopenmp'],
         ),
 
