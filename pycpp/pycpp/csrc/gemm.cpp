@@ -1,7 +1,7 @@
 
 #include <cstdlib>
 #include <memory>
-
+#include <stdexcept>
 
 #define JIT_DEBUG 1
 #include "../include/jit.h"
@@ -16,6 +16,22 @@
             throw std::runtime_error(ss.str());                              \
         }
 #endif
+
+#define DEBUG0(...)        std::cout << "===" << __LINE__ << ":" << std::endl;
+#define DEBUG1(x)          std::cout << "===" << __LINE__ << ":" << #x << "=" << x << std::endl;
+#define DEBUG2(x1, x2)     std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << std::endl;
+#define DEBUG3(x1, x2, x3) std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << "," << #x3 << "=" << x3 << std::endl;
+#define DEBUG4(x1, x2, x3, x4) \
+    std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << "," << #x3 << "=" << x3 << "," << #x4 << "=" << x4 << std::endl;
+#define DEBUG5(x1, x2, x3, x4, x5)                                                                                                                                        \
+    std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << "," << #x3 << "=" << x3 << "," << #x4 << "=" << x4 << "," << #x5 << "=" << x5 \
+              << std::endl;
+#define DEBUG6(x1, x2, x3, x4, x5, x6)                                                                                                                                           \
+    std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << "," << #x3 << "=" << x3 << "," << #x4 << "=" << x4 << "," << #x5 << "=" << x5 << "," \
+              << #x6 << "=" << x6 << std::endl;
+
+#define GET_MACRO(_0, _1, _2, _3, _4, _5, _6, NAME, ...) NAME
+#define DEBUG_LOG(...)                                   GET_MACRO(_0 __VA_OPT__(, ) __VA_ARGS__, DEBUG6, DEBUG5, DEBUG4, DEBUG3, DEBUG2, DEBUG1, DEBUG0)(__VA_ARGS__)
 
 /*
  g++ -march=core-avx2 -fopenmp -O2 -std=c++11 ./test.cpp
@@ -117,7 +133,6 @@ struct MMtestCase {
           A(M * K, 0),
           C(M * N, 0),
           C_ref(M * N, 0) {
-
         if (stride_B == 0)
             stride_B = N;
         stride_C = N;
@@ -188,10 +203,15 @@ struct MMtestCase {
 //=================================================================================================================================================
 class GemmRegBlocking : public jit_generator {
 public:
-    int m_rows;
-    int m_cols;
-    GemmRegBlocking(int rows, int cols) : m_rows(rows), m_cols(cols) {
-        ASSERT(rows * cols + cols + 1 <= 16);
+    const int m_rows;
+    const int m_cols;
+    const bool m_preload_b;
+    GemmRegBlocking(int rows, int cols) : m_rows(rows), m_cols(cols), m_preload_b(rows >= cols) {
+        if (m_preload_b) {
+            ASSERT(rows * cols + cols + 1 <= 16);
+        } else {
+            ASSERT(rows * cols + rows + 1 <= 16);
+        }
         create_kernel("GemmRegBlocking");
     }
 
@@ -210,10 +230,16 @@ public:
         return Xbyak::Ymm(row * m_cols + col);
     }
     Xbyak::Ymm ymmB(int col) {
-        return Xbyak::Ymm(m_rows * m_cols + col);
+        if (m_preload_b)
+            return Xbyak::Ymm(m_rows * m_cols + col);
+        else
+            return Xbyak::Ymm(m_rows * m_cols);
     }
-    Xbyak::Ymm ymmA() {
-        return Xbyak::Ymm(m_rows * m_cols + m_cols);
+    Xbyak::Ymm ymmA(int row) {
+        if (m_preload_b)
+            return Xbyak::Ymm(m_rows * m_cols + m_cols);
+        else
+            return Xbyak::Ymm(m_rows * m_cols + 1 + row);
     }
 
     void generate() override {
@@ -268,37 +294,38 @@ public:
             auto loadA = [&](int r) {
                 switch (r) {
                 case 0:
-                    vbroadcastss(ymmA(), ptr[A_ptr]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr]);
                     break;
                 case 1:
-                    vbroadcastss(ymmA(), ptr[A_ptr + A_stride]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr + A_stride]);
                     break;
                 case 2:
-                    vbroadcastss(ymmA(), ptr[A_ptr + 2 * A_stride]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr + 2 * A_stride]);
                     break;
                 case 3:
-                    vbroadcastss(ymmA(), ptr[A_ptr3]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr3]);
                     break;
                 case 4:
-                    vbroadcastss(ymmA(), ptr[A_ptr3 + A_stride]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr3 + A_stride]);
                     break;
                 case 5:
-                    vbroadcastss(ymmA(), ptr[A_ptr3 + 2 * A_stride]);
+                    vbroadcastss(ymmA(r), ptr[A_ptr3 + 2 * A_stride]);
                     break;
                 default:
                     throw std::runtime_error("number of reg-blocking rows is not supported");
                 }
             };
-            
 
-            lea(A_ptr3, ptr[A_ptr + 2 * A_stride]);
-            lea(A_ptr3, ptr[A_ptr3 + A_stride]);
+            if (m_rows > 3) {
+                lea(A_ptr3, ptr[A_ptr + 2 * A_stride]);
+                lea(A_ptr3, ptr[A_ptr3 + A_stride]);
+            }
             mov(reg_k, ptr[abi_param1 + offsetof(CallArgs, K)]);
 
             align(64, false);
             L(loop_over_k);
-            {
-                // load B regs
+            if (m_preload_b) {
+                // preload B regs
                 for (int c = 0; c < m_cols; c++)
                     vmovups(ymmB(c), ptr[B_ptr + c * 32]);
 
@@ -306,11 +333,25 @@ public:
                 for (int r = 0; r < m_rows; r++) {
                     loadA(r);
                     for (int c = 0; c < m_cols; c++)
-                        vfmadd231ps(ymmC(r, c), ymmA(), ymmB(c));
+                        vfmadd231ps(ymmC(r, c), ymmA(r), ymmB(c));
                 }
 
                 lea(A_ptr, ptr[A_ptr + 4]);
-                lea(A_ptr3, ptr[A_ptr3 + 4]);
+                if (m_rows > 3) lea(A_ptr3, ptr[A_ptr3 + 4]);
+            } else {
+                // preload A regs
+                for (int r = 0; r < m_rows; r++)
+                    loadA(r);
+
+                for (int c = 0; c < m_cols; c++) {
+                    vmovups(ymmB(c), ptr[B_ptr + c * 32]);
+                    for (int r = 0; r < m_rows; r++)
+                        vfmadd231ps(ymmC(r, c), ymmA(r), ymmB(c));
+                }
+
+                lea(B_ptr, ptr[B_ptr + B_stride]);
+                lea(A_ptr, ptr[A_ptr + 4]);
+                if (m_rows > 3) lea(A_ptr3, ptr[A_ptr3 + 4]);
             }
             dec(reg_k);
             jnz(loop_over_k, T_NEAR);
@@ -519,93 +560,6 @@ void brgemm_4x1(const float* A,
     if (row > 3) {
         _mm256_storeu_ps(C + 3 * C_stride + 8 * 0, c30);
     }
-}
-
-void brgemm_1x12(const float* A,
-                 int A_stride,  // stride in number of element
-                 const float* B,
-                 int B_stride,  // stride in number of element
-                 float* C,
-                 int C_stride,  // stride in number of element
-                 int K,
-                 bool is_accumulate_C) {
-    // loop in unit of register blocking: (3x4*8)
-    __m256 c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, ca, cb;
-
-    if (is_accumulate_C) {
-        c0 = _mm256_loadu_ps(C + 8 * 0);
-        c1 = _mm256_loadu_ps(C + 8 * 1);
-        c2 = _mm256_loadu_ps(C + 8 * 2);
-        c3 = _mm256_loadu_ps(C + 8 * 3);
-        c4 = _mm256_loadu_ps(C + 8 * 4);
-        c5 = _mm256_loadu_ps(C + 8 * 5);
-        c6 = _mm256_loadu_ps(C + 8 * 6);
-        c7 = _mm256_loadu_ps(C + 8 * 7);
-        c8 = _mm256_loadu_ps(C + 8 * 8);
-        c9 = _mm256_loadu_ps(C + 8 * 9);
-        ca = _mm256_loadu_ps(C + 8 * 10);
-        cb = _mm256_loadu_ps(C + 8 * 11);
-    } else {
-        c0 = _mm256_setzero_ps();
-        c1 = _mm256_setzero_ps();
-        c2 = _mm256_setzero_ps();
-        c3 = _mm256_setzero_ps();
-        c4 = _mm256_setzero_ps();
-        c5 = _mm256_setzero_ps();
-        c6 = _mm256_setzero_ps();
-        c7 = _mm256_setzero_ps();
-        c8 = _mm256_setzero_ps();
-        c9 = _mm256_setzero_ps();
-        ca = _mm256_setzero_ps();
-        cb = _mm256_setzero_ps();
-    }
-    // reducing along k dimension
-    //   with -O2 optimization flag, following kernel has 6~7 cycles-per-iteration
-    //   which is consistent with FMA's throughput(0.5)
-    for (int k = 0; k < K; k++, B += B_stride, A++) {
-        // 16-ymm-registers are just enough for 4x3 register blocking
-        __m256 b;
-        __m256 a = _mm256_broadcast_ss(A);
-        // read enough data along current cache fetching line
-        b = _mm256_loadu_ps(B + 8 * 0);
-        c0 = _mm256_fmadd_ps(a, b, c0);
-        b = _mm256_loadu_ps(B + 8 * 1);
-        c1 = _mm256_fmadd_ps(a, b, c1);
-        b = _mm256_loadu_ps(B + 8 * 2);
-        c2 = _mm256_fmadd_ps(a, b, c2);
-        b = _mm256_loadu_ps(B + 8 * 3);
-        c3 = _mm256_fmadd_ps(a, b, c3);
-        b = _mm256_loadu_ps(B + 8 * 4);
-        c4 = _mm256_fmadd_ps(a, b, c4);
-        b = _mm256_loadu_ps(B + 8 * 5);
-        c5 = _mm256_fmadd_ps(a, b, c5);
-        b = _mm256_loadu_ps(B + 8 * 6);
-        c6 = _mm256_fmadd_ps(a, b, c6);
-        b = _mm256_loadu_ps(B + 8 * 7);
-        c7 = _mm256_fmadd_ps(a, b, c7);
-        b = _mm256_loadu_ps(B + 8 * 8);
-        c8 = _mm256_fmadd_ps(a, b, c8);
-        b = _mm256_loadu_ps(B + 8 * 9);
-        c9 = _mm256_fmadd_ps(a, b, c9);
-        b = _mm256_loadu_ps(B + 8 * 10);
-        ca = _mm256_fmadd_ps(a, b, ca);
-        b = _mm256_loadu_ps(B + 8 * 11);
-        cb = _mm256_fmadd_ps(a, b, cb);
-    }
-
-    // store C back
-    _mm256_storeu_ps(C + 8 * 0, c0);
-    _mm256_storeu_ps(C + 8 * 1, c1);
-    _mm256_storeu_ps(C + 8 * 2, c2);
-    _mm256_storeu_ps(C + 8 * 3, c3);
-    _mm256_storeu_ps(C + 8 * 4, c4);
-    _mm256_storeu_ps(C + 8 * 5, c5);
-    _mm256_storeu_ps(C + 8 * 6, c6);
-    _mm256_storeu_ps(C + 8 * 7, c7);
-    _mm256_storeu_ps(C + 8 * 8, c8);
-    _mm256_storeu_ps(C + 8 * 9, c9);
-    _mm256_storeu_ps(C + 8 * 10, ca);
-    _mm256_storeu_ps(C + 8 * 11, cb);
 }
 
 void brgemm_2x6(const float* A,
@@ -820,237 +774,6 @@ void brgemm_6x2(const float* A,
         _mm256_storeu_ps(C + 8 * 0, ca);
         _mm256_storeu_ps(C + 8 * 1, cb);
     }
-}
-
-/*
-  brgemm_4x3 can get 98% peak GFLOPS if both A & B are in cache
-  so the computational kernel is OK.
-
-  brgemm_1x12 & brgemm_2x6 are worse (60~70% only)
-*/
-int test_reg_blocking(int K) {
-    LinuxPerf::PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04), "STALLS_TOTAL"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06), "STALLS_L3_MISS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05), "STALLS_L2_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
-
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
-    });
-    pevg.show_header();
-    int M = 4;
-    int N = 24;
-    MMtestCase mtc(M, K, N);
-
-#define REPEATS 20
-    auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
-        double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
-        double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
-        double duration_ns = _duration_ns * 1.0 / REPEATS;
-        float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
-        float gflops = (M * N * K * 2) / duration_ns;
-        log += sprintf(log,
-                       "   %.3f (GFlop/s) / %.2f(GB/s)   %d,%d,%d %.2f & %.2f(KB)  compute-bound:%.1f %%",
-                       gflops,
-                       bw,
-                       M, K, N,
-                       (M * K) * sizeof(float) / 1024.0f,
-                       (N * K) * sizeof(float) / 1024.0f,
-                       gflops * 100 / fma_peak_gflops);
-    };
-
-    for (int r = 0; r < 10; r++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                // repeat
-                for (int repeat = 0; repeat < REPEATS; repeat++) {
-                    brgemm_4x3<1>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                }
-            },
-            "brgemm_4x3<1>",
-            REPEATS * K,
-            custom_log);
-    }
-    std::cout << "==========================================================" << mtc.check(1) << std::endl;
-
-    for (int r = 0; r < 10; r++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                // repeat
-                for (int repeat = 0; repeat < REPEATS; repeat++) {
-                    brgemm_4x3<2>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                }
-            },
-            "brgemm_4x3<2>",
-            REPEATS * K,
-            custom_log);
-    }
-    std::cout << "==========================================================" << mtc.check(2) << std::endl;
-    for (int r = 0; r < 10; r++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                // repeat
-                for (int repeat = 0; repeat < REPEATS; repeat++) {
-                    brgemm_4x3<3>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                }
-            },
-            "brgemm_4x3<3>",
-            REPEATS * K,
-            custom_log);
-    }
-    std::cout << "==========================================================" << mtc.check(3) << std::endl;
-
-    for (int r = 0; r < 10; r++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                // repeat
-                for (int repeat = 0; repeat < REPEATS; repeat++) {
-                    brgemm_4x3<4>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                }
-            },
-            "brgemm_4x3<4>",
-            REPEATS * K,
-            custom_log);
-    }
-    std::cout << "==========================================================" << mtc.check(4) << std::endl;
-    {
-        M = 1;
-        N = 12 * 8;
-        MMtestCase mtc(M, K, N);
-        for (int r = 0; r < 10; r++) {
-            auto pmc = pevg.rdpmc(
-                [&]() {
-                    // repeat
-                    for (int repeat = 0; repeat < REPEATS; repeat++) {
-                        brgemm_1x12(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                    }
-                },
-                "brgemm_1x12",
-                REPEATS * K,
-                custom_log);
-        }
-        std::cout << "==========================================================" << mtc.check() << std::endl;
-    }
-    {
-        M = 2;
-        N = 6 * 8;
-        MMtestCase mtc(M, K, N);
-        for (int r = 0; r < 10; r++) {
-            auto pmc = pevg.rdpmc(
-                [&]() {
-                    // repeat
-                    for (int repeat = 0; repeat < REPEATS; repeat++) {
-                        brgemm_2x6(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.N, mtc.K, false);
-                    }
-                },
-                "brgemm_2x6",
-                REPEATS * K,
-                custom_log);
-        }
-        std::cout << "==========================================================" << mtc.check() << std::endl;
-    }
-    {
-        M = 4;
-        N = 24;
-        MMtestCase mtc(M, K, N);
-
-        GemmRegBlocking gemm_rb(4, 3);
-        GemmRegBlocking::CallArgs args;
-        args.A = mtc.A.data();
-        args.A_stride = mtc.K * sizeof(float);
-        args.B = mtc.B.data();
-        args.B_stride = mtc.stride_B * sizeof(float);
-        args.C = mtc.C.data();
-        args.C_stride = mtc.N * sizeof(float);
-        args.K = K;
-        args.accumulate = false;
-
-        for (int r = 0; r < 10; r++) {
-            auto pmc = pevg.rdpmc(
-                [&]() {
-                    // repeat
-                    for (int repeat = 0; repeat < REPEATS; repeat++) {
-                        gemm_rb(&args);
-                    }
-                },
-                "gemm_rb(4,3)",
-                REPEATS * K,
-                custom_log);
-        }
-        std::cout << "==========================================================" << mtc.check() << std::endl;
-    }
-    return 0;
-}
-
-/*
-4/8/.../20/24/28/32/36/40/44/.../76/80/84/88/92/96
-
-if stride is multiple of 4-cachelines, performance is
-bad comparing to adjacent strides (97% vs 99%).
-
-and as stride incease, this is getting worse.(83% vs %97)
-
-
-*/
-void test_reg_blocking_6x2(int K, int Bstride, int rounds) {
-    LinuxPerf::PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
-
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0x43, 0xfd, 0x0), "L1_MISS_ANY"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04), "STALLS_TOTAL"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06), "STALLS_L3_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05), "STALLS_L2_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
-
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
-    });
-    int M = 6;
-    int N = 16;
-    int r;
-    int ROUNDS = 2;
-    auto custom_log = [&](uint64_t _duration_ns, uint64_t* pmc, char*& log) {
-        double cpu_freq_GHz = 1.0 * pmc[0] / _duration_ns;
-        double fma_peak_gflops = cpu_freq_GHz * 2 * 8 * 2;  // SIMD-8 x 0.5 tput x 2FLOPS/fma
-        double duration_ns = _duration_ns * 1.0 / rounds;
-        float bw = ((M * K) * sizeof(float) + (K * N) * sizeof(float) + (M * N) * sizeof(float)) / duration_ns;
-        float gflops = (M * N * K * 2) / duration_ns;
-        if (r == ROUNDS - 1)
-            log += sprintf(log,
-                           " (%d,%d,%d - %d-cachelines)   %.3f (GFlop/s) / %.2f(GB/s)   compute-bound:%.1f %%",
-                           M,
-                           K,
-                           N,
-                           Bstride / 16,
-                           gflops,
-                           bw,
-                           gflops * 100 / fma_peak_gflops);
-    };
-    MMtestCase mtc(M, K, N, Bstride);
-    for (r = 0; r < ROUNDS; r++) {
-        auto pmc = pevg.rdpmc(
-            [&]() {
-                // repeat
-                for (int repeat = 0; repeat < rounds; repeat++) {
-                    brgemm_6x2<6>(mtc.A.data(), mtc.K, mtc.B.data(), mtc.stride_B, mtc.C.data(), mtc.stride_C, mtc.K, false);
-                }
-            },
-            "brgemm_6x2<6>",
-            rounds * K,
-            custom_log);
-    }
-    // std::cout << "==========================================================" << mtc.check() << std::endl;
 }
 
 //===============================================================
@@ -1271,7 +994,7 @@ void MM_MemoryBounded(const float* A,
             const auto* pB = B + k * B_stride;
             const auto* pB2 = pB + 2 * B_stride;
             int n = 0;
-            for (; (n + 8*4) <= N; n += 8 * 4, pB += 8 * 4, pB2 += 8 * 4) {
+            for (; (n + 8 * 4) <= N; n += 8 * 4, pB += 8 * 4, pB2 += 8 * 4) {
                 __m256 c0 = _mm256_loadu_ps(pC + n + 8 * 0);
                 __m256 c1 = _mm256_loadu_ps(pC + n + 8 * 1);
                 __m256 c2 = _mm256_loadu_ps(pC + n + 8 * 2);
@@ -1409,10 +1132,9 @@ int test(LinuxPerf::PerfEventGroup* pevg, int64_t M, int64_t K, int64_t N) {
 namespace py = pybind11;
 
 PYBIND11_MODULE(gemm, m) {
-
     py::class_<GemmRegBlocking>(m, "GemmRegBlocking")
         .def(py::init<int, int>())  // GemmRegBlocking(int rows, int cols_in_avx2_regs)
-        .def("__call__", [](GemmRegBlocking& self, py::array_t<float> A, py::array_t<float> B, py::array_t<float> C){
+        .def("__call__", [](GemmRegBlocking& self, py::array_t<float> A, py::array_t<float> B, py::array_t<float> C, int ROUNDS) {
             py::buffer_info bufA = A.request();
             py::buffer_info bufB = B.request();
             py::buffer_info bufC = C.request();
@@ -1439,8 +1161,9 @@ PYBIND11_MODULE(gemm, m) {
             args.K = K;
             args.accumulate = false;
 
-            self(&args);
-        });
+            for(int r = 0; r < ROUNDS; r++)
+                self(&args);
+        }, py::arg(), py::arg(), py::arg(), py::arg("ROUNDS") = 1);
 
     m.def("gemm", [](py::array_t<float> A, py::array_t<float> B, py::array_t<float> C) {
         py::buffer_info bufA = A.request();
@@ -1459,52 +1182,53 @@ PYBIND11_MODULE(gemm, m) {
         MM_brgemm(static_cast<float*>(bufA.ptr), K, static_cast<float*>(bufB.ptr), N, static_cast<float*>(bufC.ptr), N, M, K, N, false);
     });
 
-    m.def("test_reg_blocking", &test_reg_blocking);
-    m.def("test_reg_blocking_6x2", &test_reg_blocking_6x2);
-}
+    m.def("test_regblk", [](py::array_t<float> A, py::array_t<float> B, py::array_t<float> C, int ROUNDS) {
+        py::buffer_info bufA = A.request();
+        py::buffer_info bufB = B.request();
+        py::buffer_info bufC = C.request();
+        auto M = bufA.shape[0];
+        auto K = bufA.shape[1];
+        ASSERT(K == bufB.shape[0]);
+        auto N = bufB.shape[1];
 
-#if 0
-int main() {
-    LinuxPerf::PerfEventGroup pevg({
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, "HW_CPU_CYCLES"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, "HW_INSTRUCTIONS"},
-        {PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, "HW_CACHE_MISSES"},
+        ASSERT(M == bufC.shape[0]);
+        ASSERT(N == bufC.shape[1]);
 
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x04, 0x04), "STALLS_TOTAL"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x06, 0x06), "STALLS_L3_MISS"},
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xa3, 0x05, 0x05), "STALLS_L2_MISS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x40, 0x02),"BOUND_ON_STORES"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xa6, 0x21, 0x05), "BOUND_ON_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x81, 0x00), "ALL_LOADS"},
+        //DEBUG_LOG(M, K, N);
+        //DEBUG_LOG(bufA.strides[0], bufB.strides[0], bufC.strides[0]);
 
-        {PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x41, 0x00), "SPLIT_LOADS"},
-        //{PERF_TYPE_RAW, X86_RAW_EVENT(0xd0, 0x42, 0x00), "SPLIT_STORES"},
+        if (M == 4 && N == 3 * 8) {
+            for (int r = 0; r < ROUNDS; r++)
+                brgemm_4x3<4>(static_cast<float*>(bufA.ptr),
+                              bufA.strides[0] / bufA.itemsize,
+                              static_cast<float*>(bufB.ptr),
+                              bufB.strides[0] / bufB.itemsize,
+                              static_cast<float*>(bufC.ptr),
+                              bufC.strides[0] / bufC.itemsize,
+                              K,
+                              false);
+        } else if (M == 6 && N == 2 * 8) {
+            for (int r = 0; r < ROUNDS; r++)
+                brgemm_6x2<6, 0>(static_cast<float*>(bufA.ptr),
+                                 bufA.strides[0] / bufA.itemsize,
+                                 static_cast<float*>(bufB.ptr),
+                                 bufB.strides[0] / bufB.itemsize,
+                                 static_cast<float*>(bufC.ptr),
+                                 bufC.strides[0] / bufC.itemsize,
+                                 K,
+                                 false);
+        } else if (M == 2 && N == 6 * 8) {
+            for (int r = 0; r < ROUNDS; r++)
+                brgemm_2x6(static_cast<float*>(bufA.ptr),
+                           bufA.strides[0] / bufA.itemsize,
+                           static_cast<float*>(bufB.ptr),
+                           bufB.strides[0] / bufB.itemsize,
+                           static_cast<float*>(bufC.ptr),
+                           bufC.strides[0] / bufC.itemsize,
+                           K,
+                           false);
+        } else {
+            throw std::runtime_error("Unsupported M & N in test_regblk()");
+        }
     });
-    pevg.show_header();
-    //test_reg_blocking(pevg); return 0;
-
-    int M = getenv("M", 4);
-    int K = getenv("K", 256);
-    int N = getenv("N", 24);
-    test(pevg, M, K, N); return 0;
-
-    test(pevg, 4*1000, 1024, 120);
-    //test(pevg, 128, 1024, 120 * 5);
-    //test(pevg, 128, 1024, 120 * 10);
-    //test(pevg, 32, 1024, 4080);
-    //test(pevg, 32, 4096, 4080);
-    std::cout << ".............................................................." << std::endl;
-    // test(pevg, 32, 4096, 4096);
-    // test(pevg, 32, 4096, 11008);
-    // test(pevg, 32, 11008, 4096);
-
-    // test(pevg, 128, 1024, 256);
-    // test(pevg, 128, 1024, 512);
-    // test(pevg, 128, 1024, 1024);
-    std::cout << ".............................................................." << std::endl;
-    // test(pevg, M, K, N);
-    return 0;
-
-    return 0;
 }
-#endif

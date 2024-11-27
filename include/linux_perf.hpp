@@ -33,6 +33,25 @@ inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int
 #include <iomanip>
 #include <functional>
 #include <limits>
+#include <map>
+
+
+/*
+RAW HARDWARE EVENT DESCRIPTOR
+       Even when an event is not available in a symbolic form within perf right now, it can be encoded in a per processor specific way.
+
+       For instance For x86 CPUs NNN represents the raw register encoding with the layout of IA32_PERFEVTSELx MSRs (see [Intel® 64 and IA-32 Architectures Software Developer’s Manual Volume 3B: System Programming Guide] Figure 30-1
+       Layout of IA32_PERFEVTSELx MSRs) or AMD’s PerfEvtSeln (see [AMD64 Architecture Programmer’s Manual Volume 2: System Programming], Page 344, Figure 13-7 Performance Event-Select Register (PerfEvtSeln)).
+
+       Note: Only the following bit fields can be set in x86 counter registers: event, umask, edge, inv, cmask. Esp. guest/host only and OS/user mode flags must be setup using EVENT MODIFIERS.
+
+ event 7:0
+ umask 15:8
+ edge  18
+ inv   23
+ cmask 31:24
+*/
+#define X86_RAW_EVENT(EventSel, UMask, CMask) ((CMask << 24) | (UMask << 8) | (EventSel))
 
 namespace LinuxPerf {
 
@@ -201,7 +220,21 @@ struct PerfRawConfig {
                             CPU_SET(std::atoi(cpu.c_str()), &cpu_mask);
                         }
                     } else {
-                        auto config = strtoul(&items[1][0], nullptr, 0);
+                        // raw config format: 0x10d1 or EventSel-UMask-0
+                        auto raw_evt = items[1];
+                        uint64_t config;
+                        if (raw_evt.find('-') != std::string::npos) {
+                            auto evsel_umask_cmask = str_split(raw_evt, "-");
+                            auto evsel = strtoul(evsel_umask_cmask[0].c_str(), nullptr, 0);
+                            auto umask = strtoul(evsel_umask_cmask[1].c_str(), nullptr, 0);
+                            uint64_t cmask = 0;
+                            if (evsel_umask_cmask.size() > 2) {
+                                cmask = strtoul(evsel_umask_cmask[2].c_str(), nullptr, 0);
+                            }
+                            config = X86_RAW_EVENT(evsel, umask, cmask);
+                        } else {
+                            config = strtoul(raw_evt.c_str(), nullptr, 0);
+                        }
                         if (config > 0)
                             raw_configs.emplace_back(items[0], config);
                     }
@@ -236,7 +269,7 @@ struct PerfRawConfig {
                 printf("\n");
             }
         } else {
-            printf(LINUX_PERF_" LINUX_PERF is unset, example: LINUX_PERF=dump,switch-cpu,L2_MISS=0x10d1\n");
+            printf(LINUX_PERF_" LINUX_PERF is unset, example: LINUX_PERF=dump:switch-cpu:L2_MISS=0x10d1\n");
         }
     }
 
@@ -524,23 +557,6 @@ struct PerfEventCtxSwitch : public IPerfEventDumper {
         return inst;
     }
 };
-
-/*
-RAW HARDWARE EVENT DESCRIPTOR
-       Even when an event is not available in a symbolic form within perf right now, it can be encoded in a per processor specific way.
-
-       For instance For x86 CPUs NNN represents the raw register encoding with the layout of IA32_PERFEVTSELx MSRs (see [Intel® 64 and IA-32 Architectures Software Developer’s Manual Volume 3B: System Programming Guide] Figure 30-1
-       Layout of IA32_PERFEVTSELx MSRs) or AMD’s PerfEvtSeln (see [AMD64 Architecture Programmer’s Manual Volume 2: System Programming], Page 344, Figure 13-7 Performance Event-Select Register (PerfEvtSeln)).
-
-       Note: Only the following bit fields can be set in x86 counter registers: event, umask, edge, inv, cmask. Esp. guest/host only and OS/user mode flags must be setup using EVENT MODIFIERS.
-
- event 7:0
- umask 15:8
- edge  18
- inv   23
- cmask 31:24
-*/
-#define X86_RAW_EVENT(EventSel, UMask, CMask) ((CMask << 24) | (UMask << 8) | (EventSel))
 
 struct PerfEventGroup : public IPerfEventDumper {
     int group_fd = -1;
@@ -1095,7 +1111,7 @@ struct PerfEventGroup : public IPerfEventDumper {
             return *this;
         }
 
-        uint64_t* finish(uint64_t* ext_data = nullptr) {
+        uint64_t* finish(std::map<std::string, uint64_t>* ext_data = nullptr) {
             if (do_unlock) {
                 PerfEventGroup::get_sampling_lock() --;
             }
@@ -1120,15 +1136,16 @@ struct PerfEventGroup : public IPerfEventDumper {
                 for (size_t i =0; i < num_events; i++)
                     pd->data[i] = pevg->values[i] - pd->data[i];
             }
-            pevg = nullptr;
 
             if (ext_data) {
-                // duration in ns
-                ext_data[0] = pd->tsc_end - pd->tsc_start;
+                (*ext_data)["ns"] = pd->tsc_end - pd->tsc_start;
                 // other event counters
-                for (size_t i =0; i < num_events; i++)
-                    ext_data[i+1] = pd->data[i];
+                for (size_t i =0; i < num_events; i++) {
+                    (*ext_data)[pevg->events[i].name] = pd->data[i];
+                }
             }
+
+            pevg = nullptr;
             return pd->data;
         }
 

@@ -43,13 +43,14 @@ struct PerfData {
             pscope[0].finish();
             is_finished = true;
         }
+        return false; // false: we don't handle exceptions
     }
-    std::vector<uint64_t> finish() {
+    std::map<std::string, uint64_t> finish() {
         if (!is_finished) {
-            std::vector<uint64_t> ret(32, 0);
-            pscope[0].finish(&ret[0]);
+            std::map<std::string, uint64_t> evts;
+            pscope[0].finish(&evts);
             is_finished = true;
-            return ret;
+            return evts;
         }
         return {};
     }

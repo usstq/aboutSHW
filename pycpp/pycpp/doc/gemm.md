@@ -4,14 +4,19 @@ in [test_reg_blocking.py](test_reg_blocking.py), we implemented a few register b
 
 ```bash
 $ python -m pycpp.doc.test_reg_blocking
-
-gemm_regblk_4x3 0.003 ms   5.7 GHz   CPI:6.0  181 GFLOPS
-gemm_regblk_6x2 0.003 ms   5.7 GHz   CPI:6.0  181 GFLOPS
-gemm_regblk_2x6 0.006 ms   5.8 GHz   CPI:12.8  87 GFLOPS
+jit-4x3 0.003 ms   5.7 GHz  CPI:6.1  180 GFLOPS 
+jit-6x2 0.003 ms   5.8 GHz  CPI:6.0  184 GFLOPS 
+jit-3x4 0.003 ms   5.8 GHz  CPI:6.3  174 GFLOPS # SPLIT_LOADS observed
+jit-2x6 0.003 ms   5.7 GHz  CPI:6.5  170 GFLOPS 
+jit-1x12 0.006 ms   5.8 GHz  CPI:14.5  77 GFLOPS # L1-load bounded?
 ```
 
 # Cache-penalties of accessing B matrix column-wise
 B matrix is stored in row-major order, register-blocking matmul kernel accesses B matrix in column wise or strided pattern (a fixed distance exists between two cache-line hits), we change the stride of B from 1-cacheline to 100-cacheline, and measure the latency of a 6x2 avx2-register blocking kernel as following:
+
+```bash
+$ python -m pycpp.doc.test_strided_access
+```
 
 ![L2miss_vs_stride.png](./L2miss_vs_stride.png)
 
