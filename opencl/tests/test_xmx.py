@@ -6,6 +6,8 @@ from clops import cl
 import numpy as np
 import sys
 from clops import compare
+from clops.utils import *
+
 
 def test_gemm_multi_dss():
     src = r'''
@@ -103,7 +105,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     }
 '''
     # Each subgroup would output MBLOCK * 8 = 32 rows of data.
-    kernels = cl.kernels(src, "-D M_BLK=4 -D DPASW=1", "./dump/")
+    kernels = cl.kernels(src, "-D M_BLK=4 -D DPASW=1")
     RESERVE_DSS = 8
     M = 256 * RESERVE_DSS
     N = 256 * RESERVE_DSS
@@ -145,7 +147,7 @@ def test_xmx_8x8():
         intel_sub_group_block_write8((__global uint*)C, res);
     }
 '''
-    kernels = cl.kernels(src, f"", "./dump/")
+    kernels = cl.kernels(src, f"")
     cl.profiling(True)
     # ## case 1: XMX output [8,8]
     M = 8
@@ -211,7 +213,7 @@ def test_xmx_prepack_8x8():
         intel_sub_group_block_write8((__global uint*)C, res);
     }
     '''
-    kernels = cl.kernels(src, f"", "./dump/")
+    kernels = cl.kernels(src, f"")
     vRANGE = 3
     K=128
     M=8
@@ -313,7 +315,7 @@ __kernel void XMX_split_8x32(__global half * A, __global half * B, __global half
 }
 '''
     vRANGE = 3
-    kernels = cl.kernels(src, f"", "./dump/")
+    kernels = cl.kernels(src, f"")
     M = 8
     N = 16
     K = 16
@@ -339,9 +341,262 @@ __kernel void XMX_split_8x32(__global half * A, __global half * B, __global half
     cl.finish()
     compare(C, tC.numpy())
 
+#  Current unroll=40 achieve about 124 TFLOPs, enlarging unroll to 100 would achieve about 128 TFLOPS
+#  DPASW=0 BLOCKA=0 UNROLL=2: 689804791ns   124.53 TFLOPS
+#  DPASW=0 BLOCKA=1 UNROLL=2: 690417291ns   124.42 TFLOPS
+#  DPASW=1 BLOCKA=0 UNROLL=2: 689496666ns   124.58 TFLOPS
+#  DPASW=1 BLOCKA=1 UNROLL=2: 689496875ns   124.58 TFLOPS
+def test_xmx_gflops():
+
+    src = '''
+
+        __attribute__((intel_reqd_sub_group_size(8)))
+        __kernel void xmx_tput(__global half * A, __global half * B, __global float * C, int K) {
+            int id = get_global_linear_id();
+            int sgid = id /get_sub_group_size();
+            global half *sgA = A + sgid *128;
+            global half *sgB = B + sgid *128;
+            // every workitem update 10 C elements.
+            global float *CC = C + id *10;
+            global float *sgC = C + sgid *64;
+//DPASW = 1
+#if DPASW
+
+            int4 a0=0;
+    #if BLOCKA
+
+            a0 = as_int4(intel_sub_group_block_read4((__global uint*)(sgA)));
+    //BLOCKA = 0
+    #else
+            a0.s0 = *(__global uint*)(sgA);
+            a0.s1 = *(__global uint*)(sgA+2);
+            a0.s2 = *(__global uint*)(sgA+4);
+            a0.s3 = *(__global uint*)(sgA+6);
+    //End BLOCKA
+    #endif
+
+
+//DPASW = 0
+#else
+            int8 a0;
+    #if BLOCKA
+            a0 = as_int8(intel_sub_group_block_read8((__global uint*)(sgA)));
+    //BLOCKA = 0
+    #else
+            a0.s0 = *(__global uint*)(sgA);
+            a0.s1 = *(__global uint*)(sgA+2);
+            a0.s2 = *(__global uint*)(sgA+4);
+            a0.s3 = *(__global uint*)(sgA+6);
+            a0.s4 = *(__global uint*)(sgA+8);
+            a0.s5 = *(__global uint*)(sgA+10);
+            a0.s6 = *(__global uint*)(sgA+12);
+            a0.s7 = *(__global uint*)(sgA+14);
+            /*  Initilized  with IMM would cause perf drop to from 116 TFLOPS to 90 TFLOPS.
+                a0(int8) is shared by all the DPAS ISAs. Extra copy a0 in GRF regristers level cause the perf drop to 90 TFLOPS.
+                The disassembly shows there DPAS is split by extra loading A0 and sync ISAs.
+                a0.s1 = 1;
+                a0.s2 = 2;
+                a0.s3 = 3;
+                a0.s4 = 4;
+                a0.s5 = 5;
+                a0.s6 = 6;
+                a0.s7 = 7;
+                expected dpas8x8:
+                        dpas.8x8 (8|M0)          r115:f        null:f            r115:hf           r115.0:hf        {Atomic}
+                        dpas.8x8 (8|M0)          r115:f        r115:f            r35:hf            r51.0:hf         {Atomic}
+                        dpas.8x8 (8|M0)          r107:f        r107:f            r35:hf            r51.0:hf         {Atomic}
+                        ........
+                        dpas.8x8 (8|M0)          r59:f         r59:f             r35:hf            r51.0:hf         {$7}
+                But real case:
+                        mov (8|M0)               r24.0<1>:d    0:w
+                        mov (8|M0)               r25.0<1>:d    1:w
+                        mov (8|M0)               r26.0<1>:d    2:w
+                        mov (8|M0)               r27.0<1>:d    3:w
+                        mov (8|M0)               r28.0<1>:d    4:w
+                        mov (8|M0)               r29.0<1>:d    5:w
+                        mov (8|M0)               r30.0<1>:d    6:w
+                        mov (8|M0)               r31.0<1>:d    7:w
+                        mov (8|M0)               r38.0<1>:ud   r38.0<8;8,1>:ud                  {$5.dst}
+                        sync.nop                             null                             {Compacted,A@1}
+                        sync.nop                             null                             {Compacted,$6.dst}
+                        dpas.8x8 (8|M0)          r110:f        null:f            r110:hf           r110.0:hf        {Atomic}
+                        dpas.8x8 (8|M0)          r110:f        r110:f            r38:hf            r8.0:hf          {Atomic}
+                        dpas.8x8 (8|M0)          r102:f        r102:f            r38:hf            r16.0:hf         {$6}
+                (W)     cmp (8|M0)    (lt)f1.1   null<1>:d     r33.7<0;1,0>:d    r33.6<0;1,0>:d
+                        mov (8|M0)               r8.0<1>:d     0:w                               {$6.src}
+                        mov (8|M0)               r9.0<1>:d     1:w
+                        mov (8|M0)               r10.0<1>:d    2:w
+                        mov (8|M0)               r11.0<1>:d    3:w
+                        mov (8|M0)               r12.0<1>:d    4:w
+                        mov (8|M0)               r13.0<1>:d    5:w
+                        mov (8|M0)               r14.0<1>:d    6:w
+                        mov (8|M0)               r15.0<1>:d    7:w
+                        mov (8|M0)               r16.0<1>:d    0:w
+                        mov (8|M0)               r17.0<1>:d    1:w
+                        mov (8|M0)               r18.0<1>:d    2:w
+                        mov (8|M0)               r19.0<1>:d    3:w
+                        mov (8|M0)               r20.0<1>:d    4:w
+                        mov (8|M0)               r21.0<1>:d    5:w
+                        mov (8|M0)               r22.0<1>:d    6:w
+                        mov (8|M0)               r23.0<1>:d    7:w
+                        sync.nop                             null                             {Compacted,A@1}
+                        sync.nop                             null                             {Compacted,$7.dst}
+                        dpas.8x8 (8|M0)          r94:f         null:f            r94:hf            r94.0:hf         {Atomic}
+                        dpas.8x8 (8|M0)          r94:f         r94:f             r38:hf            r24.0:hf         {Atomic}
+                        dpas.8x8 (8|M0)          r86:f         r86:f             r38:hf            r8.0:hf          {Atomic}
+                        dpas.8x8 (8|M0)          r78:f         r78:f             r38:hf            r16.0:hf         {$7}
+                        ..........
+
+            */
+    // End BLOCKA
+    #endif
+
+
+//End of DPASW
+#endif
+            int8 b0 = as_int8(intel_sub_group_block_read8((__global uint*)(sgB)));
+            float8 c0= 0.f;
+            float8 c1= 0.f;
+            float8 c2= 0.f;
+            float8 c3= 0.f;
+            float8 c4= 0.f;
+            float8 c5= 0.f;
+            float8 c6= 0.f;
+            float8 c7= 0.f;
+            float8 c8= 0.f;
+            float8 c9= 0.f;
+
+            __attribute__((opencl_unroll_hint(1)))
+            for(int k = 0; k < K/40; k ++) {
+#if DPASW
+                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
+#else
+                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
+
+                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
+                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
+                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
+                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
+                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
+                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
+                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
+                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
+                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
+                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
+#endif
+
+            }
+            //enusre the accumulate OPs not optimized by compiler.
+            CC[0] = c0.s0;
+            CC[1] = c1.s0;
+            CC[2] = c2.s0;
+            CC[3] = c3.s0;
+            CC[4] = c4.s0;
+            CC[5] = c5.s0;
+            CC[6] = c6.s0;
+            CC[7] = c7.s0;
+            CC[8] = c8.s0;
+            CC[9] = c9.s0;
+        }
+    '''
+    RESERVE_DSS = 32
+    SUB_GROUPS = RESERVE_DSS * 16 * 8;
+    A = np.random.randint(-3, 3, [SUB_GROUPS*128]).astype(np.float16)
+    B = np.random.randint(-3, 3, [SUB_GROUPS*128]).astype(np.float16)
+    tA = cl.tensor(A)
+    tB = cl.tensor(B)
+    tC = cl.tensor([SUB_GROUPS*80], np.dtype(np.float32))
+    K = 10240000
+    DPASW_LIST = [0, 1]
+    BLOCKED_LIST = [0, 1]
+    # DPASW_LIST = [0]
+    # BLOCKED_LIST = [0]
+    for DPASW in DPASW_LIST:
+        for BLOCKA in BLOCKED_LIST:
+            k = kernel_cache(src, options=f"-DDPASW={DPASW} -DBLOCKA={BLOCKA}")
+            k.enqueue("xmx_tput", [1024* RESERVE_DSS], [1024], tA, tB, tC, K)
+            profiling = cl.finish()
+            dur_ns = profiling[0]
+            print(f" DPASW={DPASW} BLOCKA={BLOCKA} : {dur_ns}ns  {128* RESERVE_DSS* K*(64*16*2)*1e-3/dur_ns: .2f} TFLOPS")
+
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
+cl.profiling(True)
 test_xmx_8x8()
 test_xmx_prepack_8x8()
 test_split_xmx()
 test_gemm_multi_dss()
+test_xmx_gflops()
 print("-------------------------")
