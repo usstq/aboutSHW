@@ -175,7 +175,7 @@ def test_xmx_prepack_8x8():
         int m_size = get_global_size(0);
         int K_size = get_global_size(1);
         int s_offset = m_id * K_size + K_id;
-        int d_offset = m_id/8 * K_size * 8 + K_id * 8 + m_id%8;
+        int d_offset = m_id/8 *K_size*8  + K_id * 8 + m_id%8;
         uint8 data = *((__global uint8*)src + s_offset);
         *((__global uint8*)dest + d_offset) = data;
     }
@@ -623,25 +623,35 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
         __global half *CC00, *CC01, *CC10, *CC11, *CC20, *CC21, *CC30, *CC31;
         __global half *BB0, *BB1;
-        
+        c00 = 0.f;
+        c01 = 0.f;
+        c10 = 0.f;
+        c11 = 0.f;
+        c20 = 0.f;
+        c21 = 0.f;
+        c30 = 0.f;
+        c31 = 0.f;
         //accumulate K to output C[m_sz_per_sg,n_sz_per_sg]
-        BB0 =  BB+16*chan_id;
-        BB1 =  BB+128+16*chan_id;
-        b0 = *(__global int8*)(BB0);
-        b1 = *(__global int8*)(BB1);
-        a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
-        a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+8*K)));
-        a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+16*K)));
-        a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+24*K)));
+        int i;
+        for (i  = 0; i < 4; i++) {
+            b0 = as_int8(intel_sub_group_block_read8((__global uint*)(BB)));
+            b1 = as_int8(intel_sub_group_block_read8((__global uint*)(BB+512)));
+            a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
+            a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+512)));
+            a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+1024)));
+            a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+1536)));
 
-        c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
-        c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
-        c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
-        c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
-        c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
-        c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
-        c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
-        c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+            c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
+            c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
+            c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
+            c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
+            c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
+            c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
+            c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
+            c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+            AA +=128;
+            BB +=128;
+        }
 
         half8 hc00 = convert_half8(c00);
         half8 hc01 = convert_half8(c01);
@@ -737,7 +747,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
     prepack =  r'''
 
-    // Prepack A from mk to MK(8m16k) for fp16
+    // Prepack A from mk to 8m4m4k(8m16k) for fp16
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackA(__global half * src, __global half * dest) {
         int m_id = get_global_id(0);
@@ -745,7 +755,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int m_size = get_global_size(0);
         int K_size = get_global_size(1);
         int s_offset = m_id * K_size + K_id;
-        int d_offset = m_id/8 * K_size * 8 + K_id * 8 + m_id%8;
+        int d_offset = m_id/8 * 32 + K_id * 8 + m_id%8;
         uint8 data = *((__global uint8*)src + s_offset);
         *((__global uint8*)dest + d_offset) = data;
     }
@@ -769,18 +779,21 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     M = 256
     N = 256
     # ONE XMX would accumulate 16
-    K = 16
+    K = 64
     vRANGE = 3
     #np.random.seed(0);
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     # B layout is [N, K]
     B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
     B_PACK = B
+    A_PACK = A
     C = np.matmul(A, B.transpose(1,0))
     tC = cl.tensor([M, N], np.dtype(np.float16))
     tA = cl.tensor(A)
     tB = cl.tensor(B)
     tB_pack = cl.tensor(B_PACK)
+    tA_pack = cl.tensor(A_PACK)
+    prepack_ker.enqueue("prepackA", [N, int(K/16)],[8, 4], tA, tA_pack)
     prepack_ker.enqueue("prepackB", [N, K],[8, K], tB, tB_pack)
     cl.finish()
     # One DSS would calculate to output C [256, 256]. One DSS(WG) would has [8, 128] work items. 8 is hw threads, 128 = 16 *8 = EUs * subgroup_size.
@@ -790,7 +803,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     # Consider one subgroup is one VE core using 1 hw threads.
     # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
     # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
-    kernels.enqueue("XMX_GEMM", [8, 128],[8, 128], tA, tB, tC, M, N, K)
+    kernels.enqueue("XMX_GEMM", [8, 128],[8, 128], tA_pack, tB_pack, tC, M, N, K)
 
     cl.finish()
     compare(C, tC.numpy())
