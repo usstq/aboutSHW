@@ -342,7 +342,7 @@ __kernel void XMX_split_8x32(__global half * A, __global half * B, __global half
     compare(C, tC.numpy())
 
 def test_xmx_gflops():
-
+    
     src = '''
 
         __attribute__((intel_reqd_sub_group_size(8)))
@@ -494,7 +494,7 @@ def test_xmx_gflops():
             float8 c9= 0.f;
 
             __attribute__((opencl_unroll_hint(1)))
-            for(int k = 0; k < K/40; k ++) {
+            for(int k = 0; k < K/20; k ++) {
 #if DPASW
                 c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
                 c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
@@ -517,53 +517,8 @@ def test_xmx_gflops():
                 c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
                 c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
                 c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
-
-                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
-                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
-                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
-                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
-                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
-                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
-                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
-                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
-                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
-                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
-
-                c0 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c0);
-                c1 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c1);
-                c2 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c2);
-                c3 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c3);
-                c4 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c4);
-                c5 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c5);
-                c6 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c6);
-                c7 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c7);
-                c8 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c8);
-                c9 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c9);
-                
                 
 #else
-                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
-                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
-                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
-                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
-                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
-                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
-                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
-                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
-                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
-                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
-
-                c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
-                c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
-                c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
-                c3 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c3);
-                c4 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c4);
-                c5 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c5);
-                c6 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c6);
-                c7 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c7);
-                c8 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c8);
-                c9 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c9);
-                
                 c0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c0);
                 c1 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c1);
                 c2 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c2);
@@ -611,17 +566,234 @@ def test_xmx_gflops():
     K = 10240000
     DPASW_LIST = [0, 1]
     BLOCKED_LIST = [0, 1]
-    # DPASW_LIST = [0]
-    # BLOCKED_LIST = [0]
-    UNROLL_LIST = [2]
     for DPASW in DPASW_LIST:
         for BLOCKA in BLOCKED_LIST:
-            for UNROLL in UNROLL_LIST:
-                k = kernel_cache(src, options=f"-DDPASW={DPASW} -DBLOCKA={BLOCKA} -DUNROLL_HINT={UNROLL}")
-                k.enqueue("xmx_tput", [1024* RESERVE_DSS], [1024], tA, tB, tC, K)
-                profiling = cl.finish()
-                dur_ns = profiling[0]
-                print(f" DPASW={DPASW} BLOCKA={BLOCKA} UNROLL={UNROLL}: {dur_ns}ns  {128* RESERVE_DSS* K*(64*16*2)*1e-3/dur_ns: .2f} TFLOPS")
+            k = kernel_cache(src, options=f"-DDPASW={DPASW} -DBLOCKA={BLOCKA}")
+            k.enqueue("xmx_tput", [1024* RESERVE_DSS], [1024], tA, tB, tC, K)
+            profiling = cl.finish()
+            dur_ns = profiling[0]
+            print(f" DPASW={DPASW} BLOCKA={BLOCKA}: {dur_ns}ns  {128* RESERVE_DSS* K*(64*16*2)*1e-3/dur_ns: .2f} TFLOPS")
+
+
+
+def test_gemm_one_dss():
+    
+    
+    src = r'''
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
+        //M, N divided by work groups evenly
+        //assert(M%get_num_groups() == 0 && N%get_num_groups() == 0);
+        int m = M/get_num_groups(0);
+        int n = N/get_num_groups(1);
+        int lgid_m = get_group_id(0);
+        int lgid_n = get_group_id(1);
+
+        int sg_nb = get_num_sub_groups();
+        //used HW threads  per VE engine
+        int sg_per_col = get_local_size(0);
+        //used VE engines per DSS
+        int sg_per_row = sg_nb/sg_per_col;
+
+        //The subgroups in one row can be 2-paired
+        //assert(sg_per_row % 2 == 0);
+        //assert(m%sg_per_col == 0 && n%VEs == 0);
+        int m_per_sg = m / sg_per_col;
+        int n_per_sg = n / sg_per_row;
+
+        int sgid = get_sub_group_id();
+        int sgidx_m = sgid / sg_per_row;
+        int sgidx_n = sgid % sg_per_row;
+        //A,B,C base of WG
+        __global half * local_A = A + m * lgid_m * K;
+        __global half * local_B = B + n * lgid_n  * K;
+        __global half * local_C = C + m * lgid_m * N + n * lgid_n;
+        //A,B,C base of SG
+        __global half *sg_A = local_A + sgidx_m * m_per_sg * K;
+        __global half *sg_B = local_B + sgidx_n * n_per_sg * K;
+        __global half *sg_C = local_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
+        __global half * AA = sg_A;
+        __global half * BB = sg_B;
+        __global half * CC = sg_C;
+        int chan_id = get_sub_group_local_id();
+
+        float8 c00, c01, c10, c11, c20, c21,c30, c31;
+        int8 b0, b1;
+        int8 a0, a1, a2, a3;
+
+        __global half *CC00, *CC01, *CC10, *CC11, *CC20, *CC21, *CC30, *CC31;
+        __global half *BB0, *BB1;
+        
+        //accumulate K to output C[m_sz_per_sg,n_sz_per_sg]
+        BB0 =  BB+16*chan_id;
+        BB1 =  BB+128+16*chan_id;
+        b0 = *(__global int8*)(BB0);
+        b1 = *(__global int8*)(BB1);
+        a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
+        a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+8*K)));
+        a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+16*K)));
+        a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+24*K)));
+
+        c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
+        c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
+        c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
+        c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
+        c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
+        c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
+        c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
+        c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+
+        half8 hc00 = convert_half8(c00);
+        half8 hc01 = convert_half8(c01);
+        half8 hc10 = convert_half8(c10);
+        half8 hc11 = convert_half8(c11);
+        half8 hc20 = convert_half8(c20);
+        half8 hc21 = convert_half8(c21);
+        half8 hc30 = convert_half8(c30);
+        half8 hc31 = convert_half8(c31);
+
+        CC00 = CC+chan_id;
+        CC01= CC+8+chan_id;
+        CC10 = CC+8*N+chan_id;
+        CC11= CC+8*N+8+chan_id;
+        CC20 = CC+16*N+chan_id;
+        CC21= CC+16*N+8+chan_id;
+        CC30 = CC+24*N+chan_id;
+        CC31= CC+24*N+8+chan_id;
+
+        CC00[0*N] = hc00.s0;
+        CC00[1*N] = hc00.s1;
+        CC00[2*N] = hc00.s2;
+        CC00[3*N] = hc00.s3;
+        CC00[4*N] = hc00.s4;
+        CC00[5*N] = hc00.s5;
+        CC00[6*N] = hc00.s6;
+        CC00[7*N] = hc00.s7;
+
+        CC01[0*N] = hc01.s0;
+        CC01[1*N] = hc01.s1;
+        CC01[2*N] = hc01.s2;
+        CC01[3*N] = hc01.s3;
+        CC01[4*N] = hc01.s4;
+        CC01[5*N] = hc01.s5;
+        CC01[6*N] = hc01.s6;
+        CC01[7*N] = hc01.s7;
+        
+        CC10[0*N] = hc10.s0;
+        CC10[1*N] = hc10.s1;
+        CC10[2*N] = hc10.s2;
+        CC10[3*N] = hc10.s3;
+        CC10[4*N] = hc10.s4;
+        CC10[5*N] = hc10.s5;
+        CC10[6*N] = hc10.s6;
+        CC10[7*N] = hc10.s7;
+
+        CC11[0*N] = hc11.s0;
+        CC11[1*N] = hc11.s1;
+        CC11[2*N] = hc11.s2;
+        CC11[3*N] = hc11.s3;
+        CC11[4*N] = hc11.s4;
+        CC11[5*N] = hc11.s5;
+        CC11[6*N] = hc11.s6;
+        CC11[7*N] = hc11.s7;
+
+        CC20[0*N] = hc20.s0;
+        CC20[1*N] = hc20.s1;
+        CC20[2*N] = hc20.s2;
+        CC20[3*N] = hc20.s3;
+        CC20[4*N] = hc20.s4;
+        CC20[5*N] = hc20.s5;
+        CC20[6*N] = hc20.s6;
+        CC20[7*N] = hc20.s7;
+
+        CC21[0*N] = hc21.s0;
+        CC21[1*N] = hc21.s1;
+        CC21[2*N] = hc21.s2;
+        CC21[3*N] = hc21.s3;
+        CC21[4*N] = hc21.s4;
+        CC21[5*N] = hc21.s5;
+        CC21[6*N] = hc21.s6;
+        CC21[7*N] = hc21.s7;
+        
+        CC30[0*N] = hc30.s0;
+        CC30[1*N] = hc30.s1;
+        CC30[2*N] = hc30.s2;
+        CC30[3*N] = hc30.s3;
+        CC30[4*N] = hc30.s4;
+        CC30[5*N] = hc30.s5;
+        CC30[6*N] = hc30.s6;
+        CC30[7*N] = hc30.s7;
+
+        CC31[0*N] = hc31.s0;
+        CC31[1*N] = hc31.s1;
+        CC31[2*N] = hc31.s2;
+        CC31[3*N] = hc31.s3;
+        CC31[4*N] = hc31.s4;
+        CC31[5*N] = hc31.s5;
+        CC31[6*N] = hc31.s6;
+        CC31[7*N] = hc31.s7;
+    }
+'''
+
+    prepack =  r'''
+
+    // Prepack A from mk to MK(8m16k) for fp16
+    __attribute__((intel_reqd_sub_group_size(8)))
+    __kernel void prepackA(__global half * src, __global half * dest) {
+        int m_id = get_global_id(0);
+        int K_id = get_global_id(1);
+        int m_size = get_global_size(0);
+        int K_size = get_global_size(1);
+        int s_offset = m_id * K_size + K_id;
+        int d_offset = m_id/8 * K_size * 8 + K_id * 8 + m_id%8;
+        uint8 data = *((__global uint8*)src + s_offset);
+        *((__global uint8*)dest + d_offset) = data;
+    }
+
+    // Prepack B from kn to 16n2n4k(8k8n2k) for fp16, Similiar with AMX prepack
+    __attribute__((intel_reqd_sub_group_size(8)))
+    __kernel void prepackB(__global half * src, __global half * dest) {
+        int n_id = get_global_id(0);
+        int k_id = get_global_id(1);
+        int n_size = get_global_size(0);
+        int k_size = get_global_size(1);
+        int s_offset = n_id * k_size + k_id;
+        int d_offset = ((n_id/8)%32)*512 + ((k_id)/2)%32 * 16 + (n_id%8)*2 + (k_id)%2;
+        half data = *(src + s_offset);
+        *(dest + d_offset) = data;
+    }
+    '''
+    # Each subgroup would output MBLOCK * 8 = 32 rows of data.
+    prepack_ker = cl.kernels(prepack, "")
+    kernels = cl.kernels(src, "")
+    M = 256
+    N = 256
+    # ONE XMX would accumulate 16
+    K = 16
+    vRANGE = 3
+    #np.random.seed(0);
+    A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
+    # B layout is [N, K]
+    B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
+    B_PACK = B
+    C = np.matmul(A, B.transpose(1,0))
+    tC = cl.tensor([M, N], np.dtype(np.float16))
+    tA = cl.tensor(A)
+    tB = cl.tensor(B)
+    tB_pack = cl.tensor(B_PACK)
+    prepack_ker.enqueue("prepackB", [N, K],[8, K], tB, tB_pack)
+    cl.finish()
+    # One DSS would calculate to output C [256, 256]. One DSS(WG) would has [8, 128] work items. 8 is hw threads, 128 = 16 *8 = EUs * subgroup_size.
+    # subgroup number on on DSS is 8*128/subgroup_size = 128;  Matrix C [256, 256] is divided by subgroups [8, 16].
+    # Each subgroup would output C [256/8, 256/16] = [32, 16]. XMX HW would output [8,8] once. so there would be 8 XMX instructions invocation for one subgroup.
+    # To use the intel_sub_group_f16_f16_split_matrix_mad_k16(), subgroups in one row should be even.
+    # Consider one subgroup is one VE core using 1 hw threads.
+    # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
+    # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
+    kernels.enqueue("XMX_GEMM", [8, 128],[8, 128], tA, tB, tC, M, N, K)
+
+    cl.finish()
+    compare(C, tC.numpy())
 
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
 cl.profiling(True)
@@ -630,5 +802,7 @@ cl.profiling(True)
 # test_split_xmx()
 # test_gemm_multi_dss()
 # test_xmx_gflops()
-test_xmx_gflops()
+# test_xmx_gflops()
+test_gemm_one_dss()
+
 print("-------------------------")
