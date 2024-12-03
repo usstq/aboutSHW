@@ -125,7 +125,7 @@ if __name__ == "__main__":
         durations = cl.finish()
         return output.numpy(), durations
 
-    def test_acc(B, Hq, Hk, HEAD_SIZE, L, use_randn = False):              
+    def test_acc(B, Hq, Hk, HEAD_SIZE, L, use_randn = True):
         # reference torch impl
         # qkv = torch.randn([B, L, (Hq + Hk + Hk) * HEAD_SIZE], dtype=torch.float16)
         attention_mask = torch.zeros([B, L], dtype=torch.float16)
@@ -134,39 +134,40 @@ if __name__ == "__main__":
         print(f'====================={scale=}, {scale.dtype=}')
         
         if use_randn:
-            with open('q.npy', 'rb') as f:
-                q = np.load(f)
-            with open('k.npy', 'rb') as f:
-                k = np.load(f)
-            with open('v.npy', 'rb') as f:
-                v = np.load(f)
-            q = torch.from_numpy(q)
-            k = torch.from_numpy(k)
-            v = torch.from_numpy(v)
+            # with open('q.npy', 'rb') as f:
+            #     q = np.load(f)
+            # with open('k.npy', 'rb') as f:
+            #     k = np.load(f)
+            # with open('v.npy', 'rb') as f:
+            #     v = np.load(f)
+            # q = torch.from_numpy(q)
+            # k = torch.from_numpy(k)
+            # v = torch.from_numpy(v)
             # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
             # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            # q = torch.randn([B, L, Hq, HEAD_SIZE], dtype=torch.float16)
-            # k = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
-            # v = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
+            q = torch.randn([B, L, Hq, HEAD_SIZE], dtype=torch.float16)
+            k = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
+            v = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
             # np.save("q.npy", q)
             # np.save("k.npy", k)
             # np.save("v.npy", v)
         else:
-            with open('q_samenumber.npy', 'rb') as f:
-                q = np.load(f)
-            with open('k_samenumber.npy', 'rb') as f:
-                k = np.load(f)
-            with open('v_samenumber.npy', 'rb') as f:
-                v = np.load(f)
-            q = torch.from_numpy(q)
-            k = torch.from_numpy(k)
-            v = torch.from_numpy(v)
-            # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            # v = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            # with open('q_samenumber.npy', 'rb') as f:
+            #     q = np.load(f)
+            # with open('k_samenumber.npy', 'rb') as f:
+            #     k = np.load(f)
+            # with open('v_samenumber.npy', 'rb') as f:
+            #     v = np.load(f)
+            # q = torch.from_numpy(q)
+            # k = torch.from_numpy(k)
+            # v = torch.from_numpy(v)
+            q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            v = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
             # np.save("q_samenumber.npy", q)
             # np.save("k_samenumber.npy", k)
             # np.save("v_samenumber.npy", v)
+            print(f'{Colors.CYAN} q k v shape = {q.shape=} {k.shape=} {v.shape=}.{Colors.END}')
         qkv = torch.cat((q, k, v), 2)
         qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))
         
@@ -198,10 +199,13 @@ if __name__ == "__main__":
             print(f'{Colors.RED} FAIL at shape = {opt.shape}.{Colors.END}')
 
     # "B, Hq, Hk, HEAD_SIZE, L"
-    # test_acc(1, 28, 7, 128, 8410)
-    # test_acc(1, 24, 6, 128, 2134)
-    # test_acc(1, 1, 1, 128, 16*512)
-    test_acc(1, 1, 1, 128, 256)
-    # for k in range(1, 100):
-    #     test_acc(1, 1, 1, 128, 16*k)
+    test_acc(1, 28, 7, 128, 8410)   # tail
+    test_acc(1, 24, 6, 128, 2134)   # tail
+    test_acc(1, 28, 7, 128, 64*128)
+    test_acc(1, 24, 6, 128, 16*128)
+    test_acc(1, 1, 1, 128, 16*512)
+    test_acc(1, 1, 1, 128, 16*2)
+    test_acc(1, 1, 1, 128, 16+1)
+    for k in range(1, 10):
+        test_acc(1, 1, 1, 128, 16*k+1)
     sys.exit(0)

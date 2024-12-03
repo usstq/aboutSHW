@@ -4208,6 +4208,8 @@ KERNEL(sdpa_opt)
         // each sg will compute a whole row of query
         {
             const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
+            // const int key_len_in_kv_block = min((int)SEQ_LEN_PARTITION_SIZE, max((int)0, (int)((target_seq_idx+query_len) - start_partition_idx)));
+            const int key_len_in_kv_block = SEQ_LEN_PARTITION_SIZE;
             for (uint m = sgid; m < query_len; m += SUBGROUPS_PER_WG) {
                 // rowmax
                 SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
@@ -4217,7 +4219,6 @@ KERNEL(sdpa_opt)
                 } else {
                     qk_max_new = SOFTMAX_ACCUMULATOR_VAL_MIN;
                 }
-                // if (sgid == 0) printf("debug: qk_max_new=%f @(%d,%d, %d, %d,%d)\n", qk_max_new, target_seq_idx, start_partition_idx, m, sgid, sglid);
                 qk_max_new = sub_group_reduce_max(qk_max_new);
                 SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[m];
                 qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max_new, max_val_prev);
@@ -4231,7 +4232,7 @@ KERNEL(sdpa_opt)
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < SEQ_LEN_PARTITION_SIZE; k += SUBGROUP_SIZE) {
+                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(slm_qk_vals[m][k] - qk_max_new);
                     slm_qk_vals[m][k] = a;
                     exp_sum_new += a;
@@ -4251,13 +4252,11 @@ KERNEL(sdpa_opt)
                 exp_sum_new += pre_exp_sum_fixed;
                 float scale_fixed = pre_exp_sum_fixed / exp_sum_new;
                 float scale = 1.0f / exp_sum_new;
-                for (uint k = sglid; k < SEQ_LEN_PARTITION_SIZE; k += SUBGROUP_SIZE) {
+                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
                     slm_qk_vals[m][k] = convert_half(slm_qk_vals[m][k] * scale);
                 }
                 for (uint k = sglid; k < HEAD_SIZE; k += SUBGROUP_SIZE) {
-                    // if (slm_output_prev[m][k]!=OUTPUT_VAL_ZERO) printf("slm_output_prev 1 %f, ", slm_output_prev[m][k]);
                     slm_output_prev[m][k] = convert_half(slm_output_prev[m][k] * scale_fixed);
-                    // if (slm_output_prev[m][k]!=OUTPUT_VAL_ZERO) printf("slm_output_prev 2 %f, (%d,%d,%d,%d), min %f, %f,%f,%f,%f,%f,%f,%f. ", slm_output_prev[m][k], 
                     // target_seq_idx, start_partition_idx, sgid, sglid, SOFTMAX_ACCUMULATOR_VAL_MIN,
                     // scale_fixed, pre_exp_sum_fixed, exp_sum_new, pre_exp_sum, native_exp(max_val_prev - qk_max_new), max_val_prev, qk_max_new);
                 }
@@ -4286,7 +4285,6 @@ KERNEL(sdpa_opt)
             const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
             for (uint m = 0; m < query_len; m++) {
                 acc_output_res[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE));
-                // if (acc_output_res[m]!=OUTPUT_VAL_ZERO) printf("%f, ", acc_output_res[m]);
             }
 #            ifdef INPUT2_DIMS_ORDER
             uint value_offset_base = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 0, 0);
@@ -4313,7 +4311,6 @@ KERNEL(sdpa_opt)
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
-                            // if (acc_output_res[seq_idx]!=OUTPUT_VAL_ZERO) printf("1: %f, ", acc_output_res[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
@@ -4341,7 +4338,6 @@ KERNEL(sdpa_opt)
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
-                            // if (acc_output_res[seq_idx]!=OUTPUT_VAL_ZERO) printf("2: %f, ", acc_output_res[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
@@ -4349,12 +4345,11 @@ KERNEL(sdpa_opt)
                 // tail, less within a subgroup
                 const uint seq_len_leftovers_start = ((seq_len_end / SUBGROUP_SIZE) * SUBGROUP_SIZE);
                 if (seq_len_leftovers_start != seq_len_end) {
-                    printf("TAILing MAYBE ERROR! %d, %d", seq_len_leftovers_start, seq_len_end);
-                    uint qk_offset = min(seq_len_leftovers_start + sglid, seq_len_end - 1);
+                    // uint qk_offset = min(seq_len_leftovers_start + sglid, seq_len_end - 1);
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
                     unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                        qk_val[seq_idx] = slm_qk_vals[seq_idx][qk_offset];  // FIXME??
-                        qk_offset += SEQ_LEN_PARTITION_SIZE;
+                        qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len_leftovers_start+sglid];
+                        // qk_offset += SEQ_LEN_PARTITION_SIZE;
                     }
 #                ifdef INPUT2_DIMS_ORDER
                     uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start, head_size_idx);
@@ -4365,7 +4360,6 @@ KERNEL(sdpa_opt)
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], seq_len_idx), value_val, acc_output_res[seq_idx]);
-                            // if (acc_output_res[seq_idx]!=OUTPUT_VAL_ZERO) printf("3: %f, ", acc_output_res[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
@@ -4413,7 +4407,6 @@ KERNEL(sdpa_opt)
         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
             unroll_for(uint i = 1; i < SG_SCALE_FACTOR; i++) {
                 printf("SG_SCALE_FACTOR WARNING!");
-                // output_acc[seq_idx] += slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + (i * HEAD_SIZE) + head_size_idx];
             }
         }
         uint output_offset = OUTPUT_GET_INDEX(b0_idx, b1_idx, target_seq_idx, sgid * SUBGROUP_SIZE);
@@ -4422,22 +4415,14 @@ KERNEL(sdpa_opt)
             const uint seq_idx_end = min((uint)TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
             for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
-                // printf("target_seq_idx: %d, %f, %d.  ", target_seq_idx, output_acc[seq_idx], output_offset);
                 output_offset += output_pitch;
             }
         } else {
             unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
-                if (get_global_id(1) == 0 && sgid == 0 && sglid == 0) printf("target_seq_idx: %d, %f, %d.  ", target_seq_idx, output_acc[seq_idx], output_offset);
                 output_offset += output_pitch;
             }
         }
-    }
-    // debug
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (get_global_id(1) == 0 && sgid == 0 && sglid == 0) {
-        half a = as_half(intel_sub_group_block_read_us((const __global ushort*)output));
-        printf("readback: %f.  ", a);
     }
 }
 #    endif

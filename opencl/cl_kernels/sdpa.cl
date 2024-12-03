@@ -4484,7 +4484,7 @@ KERNEL(sdpa_opt)
                 }
             }
         }
-    }
+    } // end of loop in kv_len
     if (sgid >= (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) {
         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
             slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + (uint)get_local_id(2)] = output_acc[seq_idx];
@@ -4520,7 +4520,6 @@ KERNEL(sdpa_opt)
         } else {
             unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
-                if (get_global_id(1) == 0 && sgid == 0 && sglid == 0) printf("ref:target_seq_idx: %d, %f, %d.  ", target_seq_idx, output_acc[seq_idx], output_offset);
                 output_offset += output_pitch;
             }
         }
