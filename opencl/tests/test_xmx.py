@@ -604,18 +604,28 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int sgid = get_sub_group_id();
         int sgidx_m = sgid / sg_per_row;
         int sgidx_n = sgid % sg_per_row;
+        int chan_id = get_sub_group_local_id();
+
         //A,B,C base of WG
         __global half * local_A = A + m * lgid_m * K;
+        //prepacked B laytout is N{16nK[4k2n(8k8n2k)]}, perf group base is same with planar NK layout.
         __global half * local_B = B + n * lgid_n  * K;
         __global half * local_C = C + m * lgid_m * N + n * lgid_n;
+
+        __local half buffB[256 * 64];
+        __local half* local_B_ptr = buffB;
         //A,B,C base of SG
         __global half *sg_A = local_A + sgidx_m * m_per_sg * K;
-        __global half *sg_B = local_B + sgidx_n * n_per_sg * K;
         __global half *sg_C = local_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
         __global half * AA = sg_A;
-        __global half * BB = sg_B;
         __global half * CC = sg_C;
-        int chan_id = get_sub_group_local_id();
+
+        // B is prepacked to N{16nK[4k2n(8k8n2k)]} , () means in DPAS,   [] means in local memory, {} means one xe core.
+        // when doing copying B, `16n` dimension is divided by 16 VEs(divided result:sgidx_n), `4k2n` combined dimension is divided by 6 HW threads(divided result: sgidx_m ). Each HW would copy  (8k8n2k) elements.
+        // The stide on `16n` diemsnion is `K/64*1024` , the stride on `4k2n` is 128.
+        __global half *BB_src = local_B + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
+        int B_offset_dest = sgidx_n * 1024 + sgidx_m * 128;
+        int B_sg_offset = sgidx_n * 1024;
 
         float8 c00, c01, c10, c11, c20, c21,c30, c31;
         int8 b0, b1;
@@ -632,25 +642,34 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         c30 = 0.f;
         c31 = 0.f;
         //accumulate K to output C[m_sz_per_sg,n_sz_per_sg]
-        int i;
-        for (i  = 0; i < 128; i++) {
-            b0 = as_int8(intel_sub_group_block_read8((__global uint*)(BB)));
-            b1 = as_int8(intel_sub_group_block_read8((__global uint*)(BB+128)));
-            a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
-            a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+128)));
-            a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+256)));
-            a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+384)));
+        int i,j;
+        size_t B_offset = 0;
+        uint8 copy_BB;
+        for (i  = 0; i < 32; i++) {
+            copy_BB = intel_sub_group_block_read8((__global uint*)(BB_src));
+            intel_sub_group_block_write8((__local uint*)(buffB+B_offset_dest), copy_BB);
+            barrier(CLK_LOCAL_MEM_FENCE);
+            local_B_ptr = buffB + B_sg_offset;
+            for (j  = 0; j < 4; j++) {
+                b0 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr)));
+                b1 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr+128)));
+                a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
+                a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+128)));
+                a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+256)));
+                a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+384)));
 
-            c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
-            c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
-            c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
-            c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
-            c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
-            c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
-            c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
-            c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
-            AA +=512;
-            BB +=256;
+                c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
+                c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
+                c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
+                c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
+                c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
+                c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
+                c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
+                c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+                AA +=512;
+                local_B_ptr +=256;
+            }
+            BB_src += 1024;
         }
 
         half8 hc00 = convert_half8(c00);
@@ -747,7 +766,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
     prepack =  r'''
 
-    // Prepack A from mk to MK[4m(8m16k)] for fp16
+    // Prepack A from mk to M{8mK[4m(8m16k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackA(__global half * src, __global half * dest) {
         int m_id = get_global_id(0);
@@ -760,7 +779,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         *((__global uint8*)dest + d_offset) = data;
     }
 
-    // Prepack B from kn to NK[4k2n(8k8n2k)] for fp16, Similiar with AMX prepack
+    // Prepack B from kn to N{16nK[4k2n(8k8n2k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackB(__global half * src, __global half * dest) {
         int n_id = get_global_id(0);
