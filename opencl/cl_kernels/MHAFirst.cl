@@ -1,7 +1,37 @@
+__kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv) * S)]
+                    int L1,                             // input seq-length
+                    __global half * param_cache_k,     // [B, Hk, max_kv_len, S]
+                    __global half * param_cache_v,     // [B, Hk, max_kv_len, S]
+                    int L0
+                    ) {
+    // global: [hkv, B, L1 * CONCAT_BLOCK],
+    // local: [1, 1, CONCAT_BLOCK],
+    int hkv = get_global_id(0);
+    int b = get_global_id(1);
+    int l = get_group_id(2);
+    int id_local = get_local_id(2);
+
+    int HQKV = HQ + HK + HK;
+
+    // concat k & v into cache
+    __global half * dst_k = param_cache_k +
+        ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
+    __global half * dst_v = param_cache_v +
+        ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
+
+    __global half * cur_k = param_qkv + ((b * L1 + l) * HQKV + HQ + hkv) * S;
+    __global half * cur_v = cur_k + HK * S;
+    __attribute__((opencl_unroll_hint(16)))
+    for(int i = id_local; i < S; i += CONCAT_BLOCK) {
+        dst_k[i] = cur_k[i];
+        dst_v[i] = cur_v[i];
+    }
+}
+
 __attribute__((intel_reqd_sub_group_size(16)))
-__kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ + HK + HK) * S)]
-                       const __global half * param_output,      // [B, L1, HQ * S]
-                       const uint L1                            // input seq-length
+__kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + HK) * S)]
+                       __global half * param_output,      // [B, L1, HQ * S]
+                       uint L1                            // input seq-length
                        ) {
     // global: [B, HQ, S * mb_blocks_num]
     // local: [1, 1, S]
@@ -12,7 +42,7 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
     const int id_sg = get_sub_group_id();
     const int id_sg_local = get_sub_group_local_id();
     const int id_local = get_local_id(2);
-
+    
     const int HQKV = HQ + HK + HK;
     const int head_group_size = HQ / HK;
     const int hkv = h / head_group_size;
@@ -30,15 +60,15 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
 
     // store prev iteration state
     __local half prev_output_share[SGS][S];
-    __local half prev_max_attn_score_share[SGS];  // slm_max_val_prev
-    __local half prev_exp_sum_share[SGS];   // slm_exp_sum_prev
+    __local half prev_max_attn_score_share[SGS];
+    __local half prev_exp_sum_share[SGS];
 
-    __local half max_qk_dot_share[SGS][S / SGS];  // slm_qk_max_vals
-    __local half qk_dot_share[SGS][kv_block];   // slm_qk_vals
+    __local half max_qk_dot_share[SGS][S / SGS];
+    __local half qk_dot_share[SGS][kv_block];
 
     // m, n, k corresponding to loop index for M, N, K, A(query) shape: [M, K], B(key, value) shape: [N, K]
     // 1 cache query
-    __local half q_share[S][SGS];                       // transpose query, prepare for dot(k, q)  // slm_query
+    __local half q_share[S][SGS];                       // transpose query, prepare for dot(k, q)
     if (query_len == SGS) {
         __attribute__((opencl_unroll_hint))
         for (int m = 0; m < SGS; m++) {
@@ -66,8 +96,13 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
     for (int i = 0, key_n_start = 0; i < kv_block_num; i++, key_n_start += kv_block) {
         // 2 compute q*k, each sg will compute: dot(A([16, K]), B([L1 / kv_block, 16, K])) = C([L1 / kv_block, 16, 16])
         // each sg will process SGS key lines
-        const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
+        // const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
+        const int key_len_in_kv_block = min(kv_block, max(0, (int)L1 - key_n_start));
         const int key_n_start_sg = key_n_start + id_sg * SGS;
+        if (id_sg_local == 0) {
+            printf("cur_mb_blocks_num %d %d %d: kv_block=%d, %d, %d, %d\n", cur_mb_blocks_num, id_sg, id_sg_local,
+            kv_block, query_end, key_n_start, key_len_in_kv_block);
+        }
         half16 dot_prod = 0;
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
@@ -116,7 +151,7 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
                 for (uint n = 0; n < SGS; n++) {
                     qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
                 }
-            } else { // tail
+            } else {
                 for (uint k = 0; k < S; k += SGS) {
                     half query_val[SGS];
                     __attribute__((opencl_unroll_hint))
@@ -207,7 +242,6 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
             } else {
                 max_qk_dot = -1e9f;
             }
-            // if (id_sg == 0) printf("debug: max_qk_dot=%f @(%d,%d,%d,%d)\n", max_qk_dot, query_start, key_n_start_sg, id_sg, id_sg_local);
             max_qk_dot = sub_group_reduce_max(max_qk_dot);
             float prev_max_attn_score = prev_max_attn_score_share[m];
             max_qk_dot = fmax(max_qk_dot, prev_max_attn_score);
@@ -233,9 +267,6 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
             }
             for (uint k = id_sg_local; k < S; k += SGS) {
                 prev_output_share[m][k] = convert_half(prev_output_share[m][k] * scale_fixed);
-                if (prev_output_share[m][k]!=0) printf("prev_output_share 2 %f, (%d,%d,%d,%d), min %f, %f,%f,%f,%f,%f,%f,%f. ", prev_output_share[m][k], 
-                query_start, key_n_start_sg, id_sg, id_sg_local, -1e9f,
-                scale_fixed, pre_exp_sum_fixed, exp_sum, pre_exp_sum, native_exp(prev_max_attn_score - max_qk_dot), prev_max_attn_score, max_qk_dot);
             }
 
             prev_max_attn_score_share[m] = max_qk_dot;
@@ -267,7 +298,7 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
                 }
             }
         }
-        if (k < value_len_in_kv_block) {  // tail
+        if (k < value_len_in_kv_block) {
             const uint v_row = key_n_start + k;
             half16 cur_weights;
             __attribute__((opencl_unroll_hint))
@@ -283,7 +314,7 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
                 }
             }
         }
-        for (uint m = 0; m < query_len; m++) { // ????
+        for (uint m = 0; m < query_len; m++) {
             intel_sub_group_block_write_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS, as_short(sum[m]));
         }
         // 6 output
@@ -293,5 +324,246 @@ __kernel void MHAFirst(const __global half * param_qkv,         // [B, L1, (HQ +
                 intel_sub_group_block_write_us((__global ushort*)dst, as_short(sum[m]));
             }
         }
-    }  // end of loop in kv_len
+    }
+}
+
+__attribute__((intel_reqd_sub_group_size(SGS)))
+__kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + HK) * S]
+                        __global half * param_output,      // [B, 1, HQ * S]/[B, 1, part_num, HQ * S]
+                        __global half * param_cache_k,     // [B, HK, max_kv_len, S]
+                        __global half * param_cache_v,     // [B, HK, max_kv_len, S]
+                        __global float* param_max,         // [B, HQ, part_num]
+                        __global float* param_sum,         // [B, HQ, part_num]
+                        int kv_len
+                        ) {
+    // global: [B, HQ, S * part_num]
+    // local:  [1, 1, S]
+    const uint b = get_global_id(0);
+    const uint h = get_global_id(1);
+    const uint id_local = get_local_id(2);
+    const uint id_sg = get_sub_group_id();
+    const uint id_sg_local = get_sub_group_local_id();
+    const uint part_num = get_num_groups(2);
+    const uint cur_part_num = get_group_id(2);
+    const uint cur_kv_len = cur_part_num + 1 < part_num ? KV_BLOCK : kv_len - cur_part_num * KV_BLOCK;
+
+    int HQKV = HQ + HK + HK;
+    int head_group_size = HQ / HK;
+    int hkv = h / head_group_size;
+    const float head_size_scaler = 1.0f / sqrt(convert_float(S));
+
+    __global half* cache_k = param_cache_k + ((b * HK + hkv) * MAX_KV_LEN + cur_part_num * KV_BLOCK) * S;
+    __global half* cache_v = param_cache_v + ((b * HK + hkv) * MAX_KV_LEN + cur_part_num * KV_BLOCK) * S;
+
+    __global half* q = param_qkv + b * HQKV * S + h * S;
+
+    __local half query[S];
+    // 1, load query
+    query[id_local] = as_half(intel_sub_group_block_read_us((const __global ushort*)q + id_sg * SGS));
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 2, compute Q*K(one token) dot product in each sgw, S/SGS tokens at the same time in wg
+    __local half qk_dot[KV_BLOCK];
+    for (int i = id_sg; i < cur_kv_len; i += S / SGS) {
+        __global half* pk = cache_k + i * S;
+        half sum = 0;
+        __attribute__((opencl_unroll_hint))
+        for (int j = 0; j < S; j += SGS) {
+            // intel_sub_group_block_read_us cannot take __local pointer according to:
+            // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
+            half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
+            //half q_val = query[j + id_sg_local];
+            half k_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pk + j));
+            sum = fma(q_val, k_val, sum);
+        }
+        sum = sub_group_reduce_add(sum);
+        if (id_sg_local == 0) {
+            sum *= head_size_scaler;
+            qk_dot[i] = sum;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 3, compute softmax
+    // 3.1 max(qk_dot)
+    __local half max_qk_dot_share[S / SGS];
+    half max_qk_dot = -1e9f;
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            max_qk_dot = fmax(max_qk_dot, qk_dot[i]);
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            max_qk_dot = fmax(max_qk_dot, qk_dot[i]);
+        }
+    }
+    // reduce in sg
+    max_qk_dot = sub_group_reduce_max(max_qk_dot);
+    if (id_sg_local == 0) {
+        max_qk_dot_share[id_sg] = max_qk_dot;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    // reduce across sg
+    if (id_sg_local < S / SGS) {
+        max_qk_dot = max_qk_dot_share[id_sg_local];
+    }
+    max_qk_dot = sub_group_reduce_max(max_qk_dot);
+    // 3.2 compute: exp(attn_score[p] - max_attn_score)
+    half exp_sum = 0;
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            half exp_val = native_exp(qk_dot[i] - max_qk_dot);
+            exp_sum += exp_val;
+            qk_dot[i] = exp_val;
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            half exp_val = native_exp(qk_dot[i] - max_qk_dot);
+            exp_sum += exp_val;
+            qk_dot[i] = exp_val;
+        }
+    }
+    // reduce in sg
+    exp_sum = sub_group_reduce_add(exp_sum);
+    if (id_sg_local == 0) {
+        max_qk_dot_share[id_sg] = exp_sum;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    // reduce across sg
+    exp_sum = 0;
+    if (id_sg_local < S / SGS) {
+        exp_sum = max_qk_dot_share[id_sg_local];
+    }
+    exp_sum = sub_group_reduce_add(exp_sum);
+    if (part_num > 1 && id_local == 0) {
+        uint offset = cur_part_num + (b * HQ + h) * part_num;
+        param_max[offset] = max_qk_dot;
+        param_sum[offset] = exp_sum;
+    }
+    // 3.3 compute: softmax_scale = 1.0f / softmax_scale; half scale = attn_score[p] * softmax_scale;
+    float scale = 1.0f / exp_sum;
+    __local half weights[KV_BLOCK];
+    if (cur_kv_len == KV_BLOCK) {
+        __attribute__((opencl_unroll_hint))
+        for (int i = id_local; i < KV_BLOCK; i += S) {
+            weights[i] = convert_half(qk_dot[i] * scale);
+        }
+    } else {
+        for (int i = id_local; i < cur_kv_len; i += S) {
+            weights[i] = convert_half(qk_dot[i] * scale);
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 4 compute W*V(one token) dot product in each wg, SGS tokens at the same time in wg
+    half sum = 0;
+    for (int i = 0; i < cur_kv_len; i += SGS) {
+        // intel_sub_group_block_read_us cannot take __local pointer according to:
+        // https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
+        //ushort weight = intel_sub_group_block_read_us((const __local ushort*)weights + i);
+        half weight = weights[i + id_sg_local];
+        __global half* pv = cache_v + i * S + id_sg * SGS;
+        if (i + SGS <= cur_kv_len) {
+            __attribute__((opencl_unroll_hint))
+            for (int j = 0; j < SGS; j++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
+                half w = as_half(intel_sub_group_broadcast(as_ushort(weight), j));
+                sum += w * v_val;
+            }
+        } else {
+            for (int j = 0; j < cur_kv_len - i; j++) {
+                half v_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pv + j * S));
+                half w = as_half(intel_sub_group_broadcast(as_ushort(weight), j));
+                sum += w * v_val;
+            }
+        }
+    }
+    half acc = sum;
+
+    // 5 output
+    if (part_num == 1) {
+        // [B, 1, HQ * S]
+        __global half* output = param_output + b * HQ * S + h * S + id_sg * SGS;
+        intel_sub_group_block_write_us((const __global ushort*)output, as_short(acc));
+    } else {
+        // [B, 1, part_num, HQ * S]
+        __global half* output = param_output + b * part_num * HQ * S + cur_part_num * HQ * S + h * S + id_sg * SGS;
+        intel_sub_group_block_write_us((const __global ushort*)output, as_short(acc));
+    }
+}
+
+__attribute__((intel_reqd_sub_group_size(SGS)))
+__kernel void MHAReduce(__global half * part_output,       // [B, 1, part_num, HQ * S]
+                        __global half * param_output,      // [B, 1, HQ * S]
+                        __global float* param_max,         // [B, HQ, part_num]
+                        __global float* param_sum,         // [B, HQ, part_num]
+                        uint part_num
+                        ) {
+    // global: [B, HQ, S]
+    // local: [1, 1, S]
+    const uint b = get_global_id(0);
+    const uint h = get_global_id(1);
+    const uint id_local = get_local_id(2);
+    // sg id in workgroup
+    const uint id_sg = get_sub_group_id();
+    // id in subgroup
+    const uint id_sg_local = get_sub_group_local_id();
+
+    __global float* cur_param_max = param_max + b * HQ * part_num + h * part_num;
+    __global float* cur_param_sum = param_sum + b * HQ * part_num + h * part_num;
+    const uint MAX_PART_NUM = (MAX_KV_LEN + KV_BLOCK - 1) / KV_BLOCK;
+    __local float cur_param_max_share[MAX_PART_NUM];
+    // get real max val
+    float max_qk_dot = -1e9f;
+    for (int i = id_local; i < part_num; i += S) {
+        max_qk_dot = fmax(max_qk_dot, cur_param_max[i]);
+        cur_param_max_share[i] = cur_param_max[i];
+    }
+    // reduce in sg
+    max_qk_dot = sub_group_reduce_max(max_qk_dot);
+    // reduce across sg
+    __local float max_qk_dot_share[S / SGS];
+    if (id_sg_local == 0) {
+        max_qk_dot_share[id_sg] = max_qk_dot;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    max_qk_dot = -1e9f;
+    if (id_sg_local < S / SGS) {
+        max_qk_dot = max_qk_dot_share[id_sg_local];
+    }
+    max_qk_dot = sub_group_reduce_max(max_qk_dot);
+
+    // get real sum
+    float exp_sum = 0;
+    for (int i = id_local; i < part_num; i += S) {
+        float exp_new = cur_param_sum[i] * native_exp(cur_param_max_share[i] - max_qk_dot);
+        exp_sum += exp_new;
+        cur_param_max_share[i] = exp_new;
+    }
+    exp_sum = sub_group_reduce_add(exp_sum);
+    if (id_sg_local == 0) {
+        max_qk_dot_share[id_sg] = exp_sum;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    exp_sum = 0;
+    if (id_sg_local < S / SGS) {
+        exp_sum = max_qk_dot_share[id_sg_local];
+    }
+    exp_sum = sub_group_reduce_max(exp_sum);
+
+    // reduce
+    float rescale = 1.0f / exp_sum;
+    float acc = 0;
+    // [B, 1, HQ * S]
+    __global half* output = param_output + b * HQ * S + h * S + id_sg * SGS;
+    for (int i = 0; i < part_num; i++) {
+        // [B, 1, part_num, HQ * S]
+        __global half* cur_part_output = part_output + (b * part_num + i) * HQ * S + h * S;
+        float compensation = cur_param_max_share[i];
+        half cur_output = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_part_output + id_sg * SGS));
+        acc += convert_float(cur_output) * compensation;
+    }
+    intel_sub_group_block_write_us((const __global ushort*)output, as_short(convert_half(acc * rescale)));
 }
