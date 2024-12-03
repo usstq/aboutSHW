@@ -582,8 +582,6 @@ def test_gemm_one_dss():
     src = r'''
 __attribute__((intel_reqd_sub_group_size(8)))
 __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
-        //M, N divided by work groups evenly
-        //assert(M%get_num_groups() == 0 && N%get_num_groups() == 0);
         int m = M/get_num_groups(0);
         int n = N/get_num_groups(1);
         int lgid_m = get_group_id(0);
@@ -607,32 +605,43 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int chan_id = get_sub_group_local_id();
 
         //A,B,C base of WG
-        __global half * local_A = A + m * lgid_m * K;
+        __global half *wg_A = A + m * lgid_m * K;
         //prepacked B laytout is N{16nK[4k2n(8k8n2k)]}, perf group base is same with planar NK layout.
-        __global half * local_B = B + n * lgid_n  * K;
-        __global half * local_C = C + m * lgid_m * N + n * lgid_n;
-
+        __global half *wg_B = B + n * lgid_n  * K;
+        __global half *wg_C = C + m * lgid_m * N + n * lgid_n;
+        
         __local half buffB[256 * 64];
+        __local half buffA[64 * 256];
         __local half* local_B_ptr = buffB;
-        //A,B,C base of SG
-        __global half *sg_A = local_A + sgidx_m * m_per_sg * K;
-        __global half *sg_C = local_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
-        __global half * AA = sg_A;
-        __global half * CC = sg_C;
+        __local half* local_A_ptr = buffA;
+
+        //C base of SG
+        __global half *sg_C = wg_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
 
         // B is prepacked to N{16nK[4k2n(8k8n2k)]} , () means in DPAS,   [] means in local memory, {} means one xe core.
         // when doing copying B, `16n` dimension is divided by 16 VEs(divided result:sgidx_n), `4k2n` combined dimension is divided by 6 HW threads(divided result: sgidx_m ). Each HW would copy  (8k8n2k) elements.
         // The stide on `16n` diemsnion is `K/64*1024` , the stride on `4k2n` is 128.
-        __global half *BB_src = local_B + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
-        int B_offset_dest = sgidx_n * 1024 + sgidx_m * 128;
-        int B_sg_offset = sgidx_n * 1024;
+        __global half *copy_B_src = wg_B + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
+        int copy_B_dest_offset = sgidx_n * 1024 + sgidx_m * 128;
+        int sg_B_offset_local = sgidx_n * 1024;
+
+        //Prepack A from mk to M{8mK[4k4m(8m16k)]}, a is `8m` dim, b is `4k` dim, c is `4m` dim.
+        int a =  sgidx_m;
+        int b =  sgidx_n / 4;
+        int c =  sgidx_n % 4;
+        int copy_A_src_m = (a *4 + c) * 8 + chan_id;
+        int copy_A_src_k = 0;
+        int copy_A_dest_offset = a * 2048 + (b*4+c)*128 + chan_id*16;
+        int sg_A_offset_local = sgidx_m * 2048;
 
         float8 c00, c01, c10, c11, c20, c21,c30, c31;
         int8 b0, b1;
         int8 a0, a1, a2, a3;
-
         __global half *CC00, *CC01, *CC10, *CC11, *CC20, *CC21, *CC30, *CC31;
         __global half *BB0, *BB1;
+        int K_BLK, loop_k_slm;
+        uint8 data_B;
+        uint data_A;
         c00 = 0.f;
         c01 = 0.f;
         c10 = 0.f;
@@ -641,23 +650,28 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         c21 = 0.f;
         c30 = 0.f;
         c31 = 0.f;
-        //accumulate K to output C[m_sz_per_sg,n_sz_per_sg]
-        int i,j;
-        size_t B_offset = 0;
-        uint8 copy_BB;
-        for (i  = 0; i < 32; i++) {
-            copy_BB = intel_sub_group_block_read8((__global uint*)(BB_src));
-            intel_sub_group_block_write8((__local uint*)(buffB+B_offset_dest), copy_BB);
+
+        int i;
+        half16 dataA;
+        for (K_BLK = 0; K_BLK < 32; K_BLK++) {
+            copy_A_src_k = (K_BLK*4 + b) * 16;
+            
+            dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
+            *(__local half16*)(buffA+copy_A_dest_offset) = dataA;
+
+            data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
+            intel_sub_group_block_write8((__local uint*)(buffB+copy_B_dest_offset), data_B);
             barrier(CLK_LOCAL_MEM_FENCE);
-            local_B_ptr = buffB + B_sg_offset;
-            for (j  = 0; j < 4; j++) {
+
+            local_B_ptr = buffB + sg_B_offset_local;
+            local_A_ptr = buffA + sg_A_offset_local;
+            for (loop_k_slm = 0; loop_k_slm < 4; loop_k_slm++) {
                 b0 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr)));
                 b1 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr+128)));
-                a0 = as_int8(intel_sub_group_block_read8((__global uint*)(AA)));
-                a1 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+128)));
-                a2 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+256)));
-                a3 = as_int8(intel_sub_group_block_read8((__global uint*)(AA+384)));
-
+                a0 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr)));
+                a1 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+128)));
+                a2 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+256)));
+                a3 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+384)));
                 c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
                 c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
                 c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
@@ -666,10 +680,14 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
                 c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
                 c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
                 c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
-                AA +=512;
+                //accumulate next 16 k, A_step = 128*4, B_step = 128*2
+                local_A_ptr +=512;
                 local_B_ptr +=256;
             }
-            BB_src += 1024;
+            barrier(CLK_LOCAL_MEM_FENCE);
+
+            //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
+            copy_B_src += 1024;
         }
 
         half8 hc00 = convert_half8(c00);
@@ -681,14 +699,14 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         half8 hc30 = convert_half8(c30);
         half8 hc31 = convert_half8(c31);
 
-        CC00 = CC+chan_id;
-        CC01= CC+8+chan_id;
-        CC10 = CC+8*N+chan_id;
-        CC11= CC+8*N+8+chan_id;
-        CC20 = CC+16*N+chan_id;
-        CC21= CC+16*N+8+chan_id;
-        CC30 = CC+24*N+chan_id;
-        CC31= CC+24*N+8+chan_id;
+        CC00 = sg_C+chan_id;
+        CC01= sg_C+8+chan_id;
+        CC10 = sg_C+8*N+chan_id;
+        CC11= sg_C+8*N+8+chan_id;
+        CC20 = sg_C+16*N+chan_id;
+        CC21= sg_C+16*N+8+chan_id;
+        CC30 = sg_C+24*N+chan_id;
+        CC31= sg_C+24*N+8+chan_id;
 
         CC00[0*N] = hc00.s0;
         CC00[1*N] = hc00.s1;
@@ -766,7 +784,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
     prepack =  r'''
 
-    // Prepack A from mk to M{8mK[4m(8m16k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
+    // Prepack A from mk to M{8mK[4k4m(8m16k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackA(__global half * src, __global half * dest) {
         int m_id = get_global_id(0);
@@ -799,13 +817,14 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     N = 512
     # ONE XMX would accumulate 16
     K = 2048
-    vRANGE = 3
+    vRANGE = 10
     #np.random.seed(0);
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     # B layout is [N, K]
     B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
     B_PACK = B
     A_PACK = A
+
     C = np.matmul(A, B.transpose(1,0))
     tC = cl.tensor([M, N], np.dtype(np.float16))
     tA = cl.tensor(A)
@@ -822,9 +841,9 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     # Consider one subgroup is one VE core using 1 hw threads.
     # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
     # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
-    kernels.enqueue("XMX_GEMM", [16, 256],[8, 128], tA_pack, tB_pack, tC, M, N, K)
-
+    kernels.enqueue("XMX_GEMM", [16, 256],[8, 128], tA, tB_pack, tC, M, N, K)
     cl.finish()
+
     compare(C, tC.numpy())
 
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
