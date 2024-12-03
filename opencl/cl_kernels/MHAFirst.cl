@@ -59,7 +59,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     __global half* output = param_output + ((b * L1 + query_start) * HQ + h) * S;
 
     // store prev iteration state
-    __local half prev_output_share[SGS][S];
+    __local half prev_output_share[SGS][S];  // FIXME: not initialized
     __local half prev_max_attn_score_share[SGS];
     __local half prev_exp_sum_share[SGS];
 
@@ -80,7 +80,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             if (m < query_len) {
                 half q_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_q + m * qkv_stride + id_sg * SGS));
                 q_share[id_local][m] = q_val;
-            } else {
+            } else { // FIXME: why else?
                 // avoid q*k to check if M is varying
                 q_share[id_local][m] = 0;
             }
@@ -97,12 +97,12 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         // 2 compute q*k, each sg will compute: dot(A([16, K]), B([L1 / kv_block, 16, K])) = C([L1 / kv_block, 16, 16])
         // each sg will process SGS key lines
         // const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
-        const int key_len_in_kv_block = min(kv_block, max(0, (int)L1 - key_n_start));
+        const int key_len_in_kv_block = min(kv_block, max(0, (int)L1 - key_n_start)); // FIXME: bug?
         const int key_n_start_sg = key_n_start + id_sg * SGS;
-        if (id_sg_local == 0) {
-            printf("cur_mb_blocks_num %d %d %d: kv_block=%d, %d, %d, %d\n", cur_mb_blocks_num, id_sg, id_sg_local,
-            kv_block, query_end, key_n_start, key_len_in_kv_block);
-        }
+        // if (id_sg_local == 0) {
+        //     printf("cur_mb_blocks_num %d %d %d: kv_block=%d, %d, %d, %d\n", cur_mb_blocks_num, id_sg, id_sg_local,
+        //     kv_block, query_end, key_n_start, key_len_in_kv_block);
+        // }
         half16 dot_prod = 0;
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;

@@ -4043,6 +4043,8 @@ KERNEL(sdpa_opt)
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
 
+    const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
+
     {
 #            ifdef INPUT0_DIMS_ORDER
         uint query_offset = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx, (head_size_idx));
@@ -4052,12 +4054,11 @@ KERNEL(sdpa_opt)
         uint query_offset = INPUT0_GET_INDEX(b0_idx, b1_idx, target_seq_idx, (head_size_idx));
         const uint query_pitch = HEAD_SIZE;
 #            endif
-        const uint cur_target_seq_len_size = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
 
         uint query_local_offset = head_size_idx * TARGET_SEQ_LEN_BLOCK_SIZE;
-        if (cur_target_seq_len_size != TARGET_SEQ_LEN_BLOCK_SIZE) {
+        if (query_len != TARGET_SEQ_LEN_BLOCK_SIZE) { // tailing
             if (sgid * SUBGROUP_SIZE < HEAD_SIZE) {
-                for (uint seq_idx = 0; seq_idx < cur_target_seq_len_size; seq_idx++) {
+                for (uint seq_idx = 0; seq_idx < query_len; seq_idx++) {
                     INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
                     slm_query[query_local_offset] = val;
                     query_offset += query_pitch;
@@ -4207,9 +4208,10 @@ KERNEL(sdpa_opt)
         barrier(CLK_LOCAL_MEM_FENCE);
         // each sg will compute a whole row of query
         {
-            const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
             // const int key_len_in_kv_block = min((int)SEQ_LEN_PARTITION_SIZE, max((int)0, (int)((target_seq_idx+query_len) - start_partition_idx)));
+            // const int key_len_in_kv_block = partition_seq_len;
             const int key_len_in_kv_block = SEQ_LEN_PARTITION_SIZE;
+            // printf("key_len_in_kv_block @ (%d,%d,%d) = %d   ", target_seq_idx, sgid, sglid, key_len_in_kv_block);
             for (uint m = sgid; m < query_len; m += SUBGROUPS_PER_WG) {
                 // rowmax
                 SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
@@ -4281,10 +4283,8 @@ KERNEL(sdpa_opt)
         barrier(CLK_LOCAL_MEM_FENCE);
         // w * v
         {
-            MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) acc_output_res = OUTPUT_VAL_ZERO;
-            const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
             for (uint m = 0; m < query_len; m++) {
-                acc_output_res[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE));
+                output_acc[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE));
             }
 #            ifdef INPUT2_DIMS_ORDER
             uint value_offset_base = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 0, 0);
@@ -4310,7 +4310,7 @@ KERNEL(sdpa_opt)
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                            acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
+                            output_acc[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, output_acc[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
@@ -4337,7 +4337,7 @@ KERNEL(sdpa_opt)
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                            acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
+                            output_acc[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, output_acc[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
@@ -4359,39 +4359,14 @@ KERNEL(sdpa_opt)
                     for (uint seq_len_idx = 0; seq_len_idx < partition_seq_len - seq_len_leftovers_start; seq_len_idx++) {
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
                         for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                            acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], seq_len_idx), value_val, acc_output_res[seq_idx]);
+                            output_acc[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], seq_len_idx), value_val, output_acc[seq_idx]);
                         }
                         value_offset += value_pitch;
                     }
                 }
             }
-            {
-            //     SOFTMAX_ACCUMULATOR_TYPE exp_sum_prev = slm_exp_sum_prev[sglid];
-            //     SOFTMAX_ACCUMULATOR_TYPE exp_sum_cur = slm_exp_sum_cur[sglid];
-            //     SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[sglid];
-            //     SOFTMAX_ACCUMULATOR_TYPE max_val_cur = slm_max_val_cur[sglid];
-            //     barrier(CLK_LOCAL_MEM_FENCE);
-                const uint seq_idx_end = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-                for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
-                    // SOFTMAX_ACCUMULATOR_TYPE total_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(sub_group_broadcast(max_val_prev, seq_idx), sub_group_broadcast(max_val_cur, seq_idx));
-                    // SOFTMAX_ACCUMULATOR_TYPE updated_exp_sum_prev = sub_group_broadcast(exp_sum_prev, seq_idx) * native_exp(sub_group_broadcast(max_val_prev, seq_idx) - total_max);
-                    // SOFTMAX_ACCUMULATOR_TYPE updated_exp_sum_cur = sub_group_broadcast(exp_sum_cur, seq_idx) * native_exp(sub_group_broadcast(max_val_cur, seq_idx) - total_max);
-                    // SOFTMAX_ACCUMULATOR_TYPE updated_total_exp_sum = updated_exp_sum_prev + updated_exp_sum_cur;
-                    // if (start_partition_idx > 0) {
-                    //     OUTPUT_TYPE updated_prev_res = TO_SOFTMAX_ACCUMULATOR_TYPE(output_acc[seq_idx]) * updated_exp_sum_prev / updated_total_exp_sum;
-                    //     ;
-                    //     acc_output_res[seq_idx] *= updated_exp_sum_cur / updated_total_exp_sum;
-                    //     acc_output_res[seq_idx] += updated_prev_res;
-                    // }
-                    output_acc[seq_idx] = acc_output_res[seq_idx];
-                    // if (sgid == 0 && sglid == 0) {
-                    //     slm_exp_sum_prev[seq_idx] = updated_total_exp_sum;
-                    //     slm_max_val_prev[seq_idx] = total_max;
-                    // }
-                }
-            }
             for (uint m = 0; m < query_len; m++) {
-                intel_sub_group_block_write_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE, as_short(acc_output_res[m]));
+                intel_sub_group_block_write_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE, as_short(output_acc[m]));
             }
         } // w*v
     } // end of loop in kv_len
@@ -4411,9 +4386,8 @@ KERNEL(sdpa_opt)
         }
         uint output_offset = OUTPUT_GET_INDEX(b0_idx, b1_idx, target_seq_idx, sgid * SUBGROUP_SIZE);
         const uint output_pitch = HEAD_SIZE;
-        if (get_global_id(1) == get_global_size(1) - 1) {
-            const uint seq_idx_end = min((uint)TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-            for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
+        if (TARGET_SEQ_LEN_BLOCK_SIZE > query_len) {
+            for (uint seq_idx = 0; seq_idx < query_len; seq_idx++) {
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
                 output_offset += output_pitch;
             }
