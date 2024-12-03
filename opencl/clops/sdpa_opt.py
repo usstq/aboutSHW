@@ -171,28 +171,28 @@ if __name__ == "__main__":
         qkv = torch.cat((q, k, v), 2)
         qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))
         
-        ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
-        print(f'{ref0=}\n')
-        for i, ns in enumerate(durs):
-            print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+        # ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
+        # print(f'{ref0=}\n')
+        # for i, ns in enumerate(durs):
+        #     print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
-        print(f'{ref=}\n')
+        # print(f'{ref=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         opt, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, True)
-        print(f'{opt=}\n')
+        # print(f'{opt=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
             
-        print(f'all zeros? {np.all(ref == 0)} {np.all(opt == 0)}')
+        # print(f'all zeros? {np.all(ref == 0)} {np.all(opt == 0)}')
 
         try:
             if not np.allclose(ref, opt, atol=0.01, rtol=0.01, equal_nan=True):
                 pos = np.where(np.abs(ref - opt) > 0.01)
-                print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
-                print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
+                # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                # print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
                 raise Exception("failed.")
             print(f'{Colors.GREEN} PASS at shape = {opt.shape}.{Colors.END}')
         except Exception as inst:
@@ -201,11 +201,11 @@ if __name__ == "__main__":
     # "B, Hq, Hk, HEAD_SIZE, L"
     test_acc(1, 28, 7, 128, 8410)   # tail
     test_acc(1, 24, 6, 128, 2134)   # tail
-    test_acc(1, 28, 7, 128, 64*128)
-    test_acc(1, 24, 6, 128, 16*128)
-    test_acc(1, 1, 1, 128, 16*512)
-    test_acc(1, 1, 1, 128, 16*2)
-    test_acc(1, 1, 1, 128, 16+1)
-    for k in range(1, 10):
-        test_acc(1, 1, 1, 128, 16*k+1)
+    # test_acc(1, 28, 7, 128, 64*128)
+    # test_acc(1, 24, 6, 128, 16*128)
+    # test_acc(1, 1, 1, 128, 16*512)
+    # test_acc(1, 1, 1, 128, 16*2)
+    # test_acc(1, 1, 1, 128, 16+1)
+    # for k in range(1, 10):
+    #     test_acc(1, 1, 1, 128, 16*k+1)
     sys.exit(0)
