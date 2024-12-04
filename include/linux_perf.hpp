@@ -579,7 +579,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t tsc_start;
         uint64_t tsc_end;
         std::string title;
-        const char * cat;
+        std::string cat;
         int32_t id;
         static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
         uint64_t data[data_size] = {0};
@@ -623,6 +623,9 @@ struct PerfEventGroup : public IPerfEventDumper {
         ProfileData(const std::string& title) : title(title) {
             start();
         }
+        ProfileData(const std::string& title, const std::string& cat) : title(title), cat(cat) {
+            start();
+        }
         void start() {
             tsc_start = get_time_ns();
         }
@@ -650,7 +653,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         for (auto& d : all_dump_data) {
             auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
             auto title = std::string(d.title) + "_" + std::to_string(d.id);
-            auto cat = d.cat;
+            auto& cat = d.cat;
             //auto pid = serial;
             auto start = tsc.tsc_to_usec(d.tsc_start);
             //auto end = tsc.tsc_to_usec(d.tsc_end);
@@ -1077,6 +1080,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         ProfileScope& operator=(const ProfileScope&) = delete;
 
         ProfileScope(ProfileScope&& other) {
+            if (pevg) finish();
             pevg = other.pevg;
             pd = other.pd;
             other.pevg = nullptr;
@@ -1085,6 +1089,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
         ProfileScope& operator=(ProfileScope&& other) {
             if (&other != this) {
+                if (pevg) finish();
                 pevg = other.pevg;
                 pd = other.pd;
                 other.pevg = nullptr;
@@ -1123,7 +1128,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
     };
 
-    ProfileData* _profile(const std::string& title, int id = 0) {
+    ProfileData* _profile(const std::string& title, int id = 0, const std::string& cat = "") {
         if (get_sampling_lock().load() != 0)
             return nullptr;
         if (dump_limit == 0)
@@ -1134,7 +1139,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
         all_dump_data.emplace_back(title);
         auto* pd = &all_dump_data.back();
-        pd->cat = "enable";
+        pd->cat = cat;
         pd->id = id;
 
         // use rdpmc if possible
@@ -1179,6 +1184,16 @@ template <typename ... Args>
 ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+    return {&pevg, pd};
+}
+
+template <typename ... Args>
+ProfileScope Profile(const std::string& title, const std::string& category, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id, category);
     if (pd) {
         pd->set_extra_data(std::forward<Args>(args)...);
     }
