@@ -748,7 +748,55 @@ struct PerfEventGroup : public IPerfEventDumper {
     struct Config {
         uint32_t type;
         uint64_t config;
-        const char * name;
+        std::string name;
+
+        bool is_cpu_cycles() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_CPU_CYCLES;
+        }
+        bool is_instructions() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_INSTRUCTIONS;
+        }
+        Config(std::string str) {
+            if (str == "HW_CPU_CYCLES" || str == "cycles") {
+                type = PERF_TYPE_HARDWARE;
+                config = PERF_COUNT_HW_CPU_CYCLES;
+                name = str;
+            }
+            else if (str == "HW_INSTRUCTIONS" || str == "instructions") {
+                type = PERF_TYPE_HARDWARE;
+                config = PERF_COUNT_HW_INSTRUCTIONS;
+                name = str;
+            }
+            else if (str == "SW_PAGE_FAULTS" || str == "pagefaults") {
+                type = PERF_TYPE_SOFTWARE;
+                config =  PERF_COUNT_SW_PAGE_FAULTS;
+                name = str;
+            } else {
+                type = PERF_TYPE_RAW;
+                auto items = str_split(str, "=");
+                if (items.size() != 2)
+                    throw std::runtime_error(std::string("Unknown Perf config: ") + str);
+                name = items[0];
+                auto values = str_split(items[1], ",");
+                // 1.raw_config
+                // 2.EventSel, UMask
+                // 3.EventSel, UMask, CMask
+                if (values.size() == 1) {
+                    config = std::strtoull(values[0].c_str(), nullptr, 0);
+                } else if (values.size() == 2) {
+                    config = X86_RAW_EVENT(
+                                std::strtoull(values[0].c_str(), nullptr, 0), 
+                                std::strtoull(values[1].c_str(), nullptr, 0), 0);
+                } else if (values.size() == 3) {
+                    config = X86_RAW_EVENT(
+                                std::strtoull(values[0].c_str(), nullptr, 0), 
+                                std::strtoull(values[1].c_str(), nullptr, 0),
+                                std::strtoull(values[2].c_str(), nullptr, 0));
+                } else {
+                    throw std::runtime_error(std::string("Unknown Perf config (too many values): ") + str);
+                }
+            }
+        }
         Config(uint32_t type, uint64_t config, const char * name = "?") : type(type), config(config), name(name) {}
     };
 
@@ -767,7 +815,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 add_raw(tc.config);
             }
             events.back().name = tc.name;
-            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", strlen(tc.name));
+            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", tc.name.size());
         }
 
         // env var defined raw events

@@ -81,8 +81,8 @@ class Colors:
     CROSSED = "\033[9m"
     END = "\033[0m"
 
-if False:
-    @pycpp.clib
+if 0:
+    @pycpp.clib()
     def mylib():
         return r'''
     #include "common.hpp"
@@ -91,11 +91,39 @@ if False:
         int64_t a = std::strtoull(str, NULL, 0);
         std::cout << a << std::endl;
     }
+    extern "C" void test2(int ele_bits, int32_t * dst,  int oc, int32_t value) {
+        auto pack_ele = [&](int32_t* dst, int oc, int32_t value) {
+            if (ele_bits == 8) {
+                dst += oc/(4*8)*8;
+                auto off = (oc % (4*8));
+                dst += (off % 8);
+                auto b_off = (off / 8) * 8;
+                int32_t mask = ~(0xFF << b_off);
+                (*dst) = ((*dst) & mask) | ((value & 0xFF) << b_off);
+            } else {
+                dst += oc/(8*8)*8;
+                auto off = (oc % (8*8));
+                dst += (off % 8);
+                auto b_off = (off / 8) * 4;
+                int32_t mask = ~(0xF << b_off);
+                (*dst) = ((*dst) & mask) | ((value & 0xF) << b_off);
+            }
+        };
+        pack_ele(dst, oc, value);
+    }
     '''
-    mylib.test("0xfffffffffffffe00")
+    np.set_printoptions(formatter={'int':lambda x:f'{x:08x}'})
+    A = np.zeros([16], dtype=np.uint32)
+    for i in range(16*4):
+        mylib.test2(8, A, i, i)
+    print(A)
+    for i in range(16*8):
+        mylib.test2(4, A, i, i % 16)
+    print(A)
+    #mylib.test("0xfffffffffffffe00")
+    sys.exit(0)
 
 
-pycpp.test_reg_blocking(2560)
 print(dir(pycpp))
 
 print(torch.backends.mkldnn.is_available())
@@ -246,18 +274,6 @@ def test(M, K, N, REPEAT=3, LAYERS=-1, name=""):
         print(log_str)
         output_log_str += log_str
 
-if 0:
-    import timeit
-    for n in range(1, 100, 8):
-        pycpp.test_brgemm_6x2(2560, 16*n, 20000)
-        #print(n, timeit.timeit(lambda: pycpp.test_brgemm_6x2(2560, 16*n, 20000), number=1))
-    sys.exit(0)
-
-
-#cs.test(892, 64*16*4)
-#cs.test(892, 7168*4)
-#cs.test(892, (7168+16)*4)
-sys.exit(0)
 #def test_stride_access(stride, cache_size=2048*1024, way=16):
 
 #test(6*8,892,16*100, LAYERS=1);sys.exit(0)
@@ -295,15 +311,55 @@ if 0:
 
     sys.exit(0)
 
-    test(1,8920,896)
-    test(4,8920,896)
-    test(6,8920,896)
-    test(6*2,8920,896)
-    test(6*4,8920,896)
-    test(6*8,8920,896)
-    test(6*10,8920,896)
-    sys.exit(0)
+test(1,8920,896)
+test(4,8920,896)
+test(6,8920,896)
+test(6*2,8920,896)
+test(6*4,8920,896)
+test(6*8,8920,896)
+test(6*10,8920,896)
+sys.exit(0)
 
+#test(400, 4096, 4096)
+#test(400, 4096, 4320)
+test(400, 4096, 4096)
+test(4000, 4096, 4096)
+sys.exit(0)
+
+test(400, 892, 896)
+test(400, 892, 896*4)
+test(400, 892, 896*8)
+test(400, 4096, 4096)
+test(4000, 4096, 4096)
+sys.exit(0)
+
+test(40, 892, 896)
+test(40, 892, 896+16)
+test(40, 892, 896*4)
+test(40, 892, 896*8)
+test(40, 892, 896*8+16)
+test(40, 4096, 4096)
+sys.exit(0)
+
+
+test(4, 892, 896)
+test(40, 892, 896)
+test(400, 892, 896)
+
+test(4, 892, 896*4)
+test(40, 892, 896*4)
+test(400, 892, 896*4)
+
+test(4, 892, 896*8)
+test(40, 892, 896*8)
+test(400, 892, 896*8)
+
+test(1, 4096, 4096)
+test(4, 4096, 4096)
+test(40, 4096, 4096)
+test(400, 4096, 4096)
+test(4000, 4096, 4096)
+sys.exit(0)
 
 def test_llm_gemm(name, Ms, hidden_size, intermediate_size, num_attention_heads, num_key_value_heads):
     head_size = hidden_size//num_attention_heads
@@ -338,21 +394,3 @@ sys.exit(0)
 #test(40,892,7168)
 #test(40,892,7168+16)
 #sys.exit(0)
-
-test(4, 892, 896)
-test(40, 892, 896)
-test(400, 892, 896)
-
-test(4, 892, 896*4)
-test(40, 892, 896*4)
-test(400, 892, 896*4)
-
-test(4, 892, 896*8)
-test(40, 892, 896*8)
-test(400, 892, 896*8)
-
-test(1, 4096, 4096)
-test(4, 4096, 4096)
-test(40, 4096, 4096)
-test(400, 4096, 4096)
-test(4000, 4096, 4096)

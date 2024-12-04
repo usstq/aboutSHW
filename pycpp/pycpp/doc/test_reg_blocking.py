@@ -25,20 +25,7 @@ def compare(ref, opt, atol=0.01, rtol=0.01):
     else:
         print(f"allclose for {ref.dtype}{ref.shape} vs {opt.dtype}{opt.shape}")
 
-import os
-
-LINUX_PERF = ['dump']
-# LINUX_PERF.append("STALLS_TOTAL=0xa3-0x04-0x04")
-# LINUX_PERF.append("STALLS_L3_MISS=0xa3-0x06-0x06")
-# LINUX_PERF.append("STALLS_L2_MISS=0xa3-0x05-0x05")
-# LINUX_PERF.append("BOUND_ON_LOADS=0xa6-0x21-0x05")
-# LINUX_PERF.append("BOUND_ON_STORES=0xa6-0x40-0x02")
-LINUX_PERF.append("SPLIT_LOADS=0xd0-0x41")
-LINUX_PERF.append("SPLIT_STORES=0xd0-0x42")
-
-os.environ['LINUX_PERF']=':'.join(LINUX_PERF)
-
-print(os.environ['LINUX_PERF'])
+perf = pycpp.perf(["HW_CPU_CYCLES", "SPLIT_LOADS=0xd0,0x41"])
 
 def test_gemm_reg_blk(M, N, K):
     vRANGE = 3
@@ -55,16 +42,8 @@ def test_gemm_reg_blk(M, N, K):
     ROUNDS = 20000
     try:
         for r in range(10):
-            with pycpp.perf("") as p:
+            with perf.verbose(f"regblk{M}x{N//8}", ROUNDS, K, M*K*N*2):
                 pycpp.test_regblk(A, B, C1, ROUNDS)
-                events = p.finish()
-                for key in events:
-                    events[key] = events[key]/ROUNDS
-
-                dt_ns = events["ns"]
-                cycles = events["HW_CPU_CYCLES"]
-                info = ",".join([f'{k}={events[k]:.0f}' for k in events])
-                print(f"regblk-{M}x{N//8} {dt_ns*1e-6:.3f} ms   {cycles/dt_ns:.1f} GHz  {info}  CPI:{cycles/K:.1f}  {M*K*N*2/dt_ns:.0f} GFLOPS ")
         compare(C0, C1)
     except Exception as e:
         print(e)
@@ -72,17 +51,8 @@ def test_gemm_reg_blk(M, N, K):
     try:
         jit = pycpp.GemmRegBlocking(M, N//8)
         for r in range(10):
-            with pycpp.perf("") as p:
+            with perf.verbose(f"jit{M}x{N//8}", ROUNDS, K, M*K*N*2):
                 jit(A, B, C1, ROUNDS)
-                events = p.finish()
-                for key in events:
-                    events[key] = events[key]/ROUNDS
-
-                dt_ns = events["ns"]
-                cycles = events["HW_CPU_CYCLES"]
-                info = ",".join([f'{k}={events[k]:.0f}' for k in events])
-                print(f"jit-{M}x{N//8} {dt_ns*1e-6:.3f} ms   {cycles/dt_ns:.1f} GHz  {info} CPI:{cycles/K:.1f}  {M*K*N*2/dt_ns:.0f} GFLOPS ")
-
         compare(C0, C1)
     except Exception as e:
         print(e)
