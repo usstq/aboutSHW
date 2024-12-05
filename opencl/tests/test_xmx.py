@@ -576,72 +576,53 @@ def test_xmx_gflops():
 
 
 
-def test_gemm_one_dss():
-    
+def test_mm_tput():
     
     src = r'''
-__attribute__((intel_reqd_sub_group_size(8)))
+__attribute__((intel_reqd_sub_group_size(SG_SIZE)))
 __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, int M, int N, int K) {
-        int m = M/get_num_groups(0);
-        int n = N/get_num_groups(1);
+    
         int lgid_m = get_group_id(0);
         int lgid_n = get_group_id(1);
-
         int sg_nb = get_num_sub_groups();
-        //used HW threads  per VE engine
-        int sg_per_col = get_local_size(0);
-        //used VE engines per DSS
-        int sg_per_row = sg_nb/sg_per_col;
-
-        //The subgroups in one row can be 2-paired
-        //assert(sg_per_row % 2 == 0);
-        //assert(m%sg_per_col == 0 && n%VEs == 0);
-        int m_per_sg = m / sg_per_col;
-        int n_per_sg = n / sg_per_row;
-
-        int sgid = get_sub_group_id();
-        int sgidx_m = sgid / sg_per_row;
-        int sgidx_n = sgid % sg_per_row;
         int chan_id = get_sub_group_local_id();
+        int sgid = get_sub_group_id();
+
+        int sgidx_m = sgid / N_WG_SGS;
+        int sgidx_n = sgid % N_WG_SGS;
 
         //A,B,C base of WG
-        __global half *wg_A = A + m * lgid_m * K;
-        //prepacked B laytout is N{16nK[4k2n(8k8n2k)]}, perf group base is same with planar NK layout.
-        __global half *wg_B = B + n * lgid_n  * K;
-        __global half *wg_C = C + m * lgid_m * N + n * lgid_n;
+        __global half *wg_A = A + M_BLOCK * lgid_m * K;
         
-        __local half buffB[256 * 64];
-        __local half buffA[64 * 256];
-        __local half* local_B_ptr = buffB;
-        __local half* local_A_ptr = buffA;
+        __local half buffA[K_BLOCK * M_BLOCK];
+        __local half buffB[N_BLOCK * K_BLOCK];
 
         //C base of SG
-        __global half *sg_C = wg_C + (sgidx_m * m_per_sg) * N +  sgidx_n * n_per_sg;
-
+        __global half *sg_C = (C + M_BLOCK * lgid_m * N + N_BLOCK * lgid_n) + (sgidx_m * SG_M) * N +  sgidx_n * SG_N;
+#if DEBUG == 0
         // B is prepacked to N{16nK[4k2n(8k8n2k)]} , () means in DPAS,   [] means in local memory, {} means one xe core.
         // when doing copying B, `16n` dimension is divided by 16 VEs(divided result:sgidx_n), `4k2n` combined dimension is divided by 6 HW threads(divided result: sgidx_m ). Each HW would copy  (8k8n2k) elements.
         // The stide on `16n` diemsnion is `K/64*1024` , the stride on `4k2n` is 128.
-        __global half *copy_B_src = wg_B + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
+
+        __global half *copy_B_src = ( B + N_BLOCK * lgid_n  * K) + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
         int copy_B_dest_offset = sgidx_n * 1024 + sgidx_m * 128;
-        int sg_B_offset_local = sgidx_n * 1024;
 
         //Prepack A from mk to M{8mK[4k4m(8m16k)]}, a is `8m` dim, b is `4k` dim, c is `4m` dim.
-        int a =  sgidx_m;
-        int b =  sgidx_n / 4;
-        int c =  sgidx_n % 4;
-        int copy_A_src_m = (a *4 + c) * 8 + chan_id;
-        int copy_A_src_k = 0;
-        int copy_A_dest_offset = a * 2048 + (b*4+c)*128 + chan_id*16;
+        //int a =  sgidx_m;
+        //int b =  sgidx_n / 4;
+        //int c =  sgidx_n % 4;
+        int copy_A_src_m = (sgidx_m *4 + sgidx_n % 4) * 8 + chan_id;
+        int copy_A_dest_offset = sgidx_m * 2048 + (sgidx_n / 4 *4+ sgidx_n % 4)*128 + chan_id*16;
+#endif
+        int sg_B_offset_local = sgidx_n * 1024;
+#if USE_DPAS
         int sg_A_offset_local = sgidx_m * 2048;
-
+#elif USE_DPASW
+        int sg_A_offset_local = sgidx_m * 2048 + (sgid % 2) * 64;
+#endif
         float8 c00, c01, c10, c11, c20, c21,c30, c31;
-        int8 b0, b1;
-        int8 a0, a1, a2, a3;
-        __global half *CC00, *CC01, *CC10, *CC11, *CC20, *CC21, *CC30, *CC31;
-        __global half *BB0, *BB1;
-        int K_BLK, loop_k_slm;
-        uint8 data_B;
-        uint data_A;
+
+        int kblk2, kblk;
         c00 = 0.f;
         c01 = 0.f;
         c10 = 0.f;
@@ -650,28 +631,29 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         c21 = 0.f;
         c30 = 0.f;
         c31 = 0.f;
+        __local uint*  local_B_ptr = (__local uint*)(buffB + sg_B_offset_local);
+        __local uint*  local_A_ptr = (__local uint)(buffA + sg_A_offset_local);
 
-        int i;
-        half16 dataA;
-        for (K_BLK = 0; K_BLK < 32; K_BLK++) {
-            copy_A_src_k = (K_BLK*4 + b) * 16;
-            
-            dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
+        __attribute__((opencl_unroll_hint(1)))
+        for (kblk2 = 0; kblk2 < K/K_BLOCK; kblk2++) {
+#if DEBUG == 0
+            int copy_A_src_k = (kblk2*4 + sgidx_n / 4) * 16;
+            half16 dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
             *(__local half16*)(buffA+copy_A_dest_offset) = dataA;
 
-            data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
+            uint8 data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
             intel_sub_group_block_write8((__local uint*)(buffB+copy_B_dest_offset), data_B);
             barrier(CLK_LOCAL_MEM_FENCE);
-
-            local_B_ptr = buffB + sg_B_offset_local;
-            local_A_ptr = buffA + sg_A_offset_local;
-            for (loop_k_slm = 0; loop_k_slm < 4; loop_k_slm++) {
-                b0 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr)));
-                b1 = as_int8(intel_sub_group_block_read8((__local uint*)(local_B_ptr+128)));
-                a0 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr)));
-                a1 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+128)));
-                a2 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+256)));
-                a3 = as_int8(intel_sub_group_block_read8((__local uint*)(local_A_ptr+384)));
+#endif
+            __attribute__((opencl_unroll_hint(1)))
+            for (kblk = 0; kblk < K_BLOCK/16; kblk++) {
+#if USE_DPAS
+                int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
+                int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
+                int8 a0 = as_int8(intel_sub_group_block_read8(local_A_ptr));
+                int8 a1 = as_int8(intel_sub_group_block_read8(local_A_ptr+64));
+                int8 a2 = as_int8(intel_sub_group_block_read8(local_A_ptr+128));
+                int8 a3 = as_int8(intel_sub_group_block_read8(local_A_ptr+192));
                 c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
                 c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
                 c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
@@ -680,105 +662,58 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
                 c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
                 c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
                 c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
-                //accumulate next 16 k, A_step = 128*4, B_step = 128*2
-                local_A_ptr +=512;
-                local_B_ptr +=256;
+#elif USE_DPASW
+                int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
+                int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
+                int4 a0 = as_int4(intel_sub_group_block_read4(local_A_ptr));
+                int4 a1 = as_int4(intel_sub_group_block_read4(local_A_ptr+64));
+                int4 a2 = as_int4(intel_sub_group_block_read4(local_A_ptr+128));
+                int4 a3 = as_int4(intel_sub_group_block_read4(local_A_ptr+192));
+                c00 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c00);
+                c01 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b1, c01);
+                c10 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b0, c10);
+                c11 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b1, c11);
+                c20 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b0, c20);
+                c21 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b1, c21);
+                c30 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b0, c30);
+                c31 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b1, c31);
+#endif
+                //accumulate next 16 k, A_step = 64*4, B_step = 64*2
+                local_A_ptr +=256;
+                local_B_ptr +=128;
             }
+#if DEBUG == 0
             barrier(CLK_LOCAL_MEM_FENCE);
-
             //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
             copy_B_src += 1024;
+            local_A_ptr -= 1024;
+            local_B_ptr -= 512;
+
+#endif
+        }
+#if DEBUG == 0
+
+#define store_C(C_REG, C_addr) {                                \
+        half8 hc = convert_half8(C_REG);                        \
+        C_addr[0*N] = hc.s0;                                    \
+        C_addr[1*N] = hc.s1;                                    \
+        C_addr[2*N] = hc.s2;                                    \
+        C_addr[3*N] = hc.s3;                                    \
+        C_addr[4*N] = hc.s4;                                    \
+        C_addr[5*N] = hc.s5;                                    \
+        C_addr[6*N] = hc.s6;                                    \
+        C_addr[7*N] = hc.s7;                                    \  
         }
 
-        half8 hc00 = convert_half8(c00);
-        half8 hc01 = convert_half8(c01);
-        half8 hc10 = convert_half8(c10);
-        half8 hc11 = convert_half8(c11);
-        half8 hc20 = convert_half8(c20);
-        half8 hc21 = convert_half8(c21);
-        half8 hc30 = convert_half8(c30);
-        half8 hc31 = convert_half8(c31);
-
-        CC00 = sg_C+chan_id;
-        CC01= sg_C+8+chan_id;
-        CC10 = sg_C+8*N+chan_id;
-        CC11= sg_C+8*N+8+chan_id;
-        CC20 = sg_C+16*N+chan_id;
-        CC21= sg_C+16*N+8+chan_id;
-        CC30 = sg_C+24*N+chan_id;
-        CC31= sg_C+24*N+8+chan_id;
-
-        CC00[0*N] = hc00.s0;
-        CC00[1*N] = hc00.s1;
-        CC00[2*N] = hc00.s2;
-        CC00[3*N] = hc00.s3;
-        CC00[4*N] = hc00.s4;
-        CC00[5*N] = hc00.s5;
-        CC00[6*N] = hc00.s6;
-        CC00[7*N] = hc00.s7;
-
-        CC01[0*N] = hc01.s0;
-        CC01[1*N] = hc01.s1;
-        CC01[2*N] = hc01.s2;
-        CC01[3*N] = hc01.s3;
-        CC01[4*N] = hc01.s4;
-        CC01[5*N] = hc01.s5;
-        CC01[6*N] = hc01.s6;
-        CC01[7*N] = hc01.s7;
-        
-        CC10[0*N] = hc10.s0;
-        CC10[1*N] = hc10.s1;
-        CC10[2*N] = hc10.s2;
-        CC10[3*N] = hc10.s3;
-        CC10[4*N] = hc10.s4;
-        CC10[5*N] = hc10.s5;
-        CC10[6*N] = hc10.s6;
-        CC10[7*N] = hc10.s7;
-
-        CC11[0*N] = hc11.s0;
-        CC11[1*N] = hc11.s1;
-        CC11[2*N] = hc11.s2;
-        CC11[3*N] = hc11.s3;
-        CC11[4*N] = hc11.s4;
-        CC11[5*N] = hc11.s5;
-        CC11[6*N] = hc11.s6;
-        CC11[7*N] = hc11.s7;
-
-        CC20[0*N] = hc20.s0;
-        CC20[1*N] = hc20.s1;
-        CC20[2*N] = hc20.s2;
-        CC20[3*N] = hc20.s3;
-        CC20[4*N] = hc20.s4;
-        CC20[5*N] = hc20.s5;
-        CC20[6*N] = hc20.s6;
-        CC20[7*N] = hc20.s7;
-
-        CC21[0*N] = hc21.s0;
-        CC21[1*N] = hc21.s1;
-        CC21[2*N] = hc21.s2;
-        CC21[3*N] = hc21.s3;
-        CC21[4*N] = hc21.s4;
-        CC21[5*N] = hc21.s5;
-        CC21[6*N] = hc21.s6;
-        CC21[7*N] = hc21.s7;
-        
-        CC30[0*N] = hc30.s0;
-        CC30[1*N] = hc30.s1;
-        CC30[2*N] = hc30.s2;
-        CC30[3*N] = hc30.s3;
-        CC30[4*N] = hc30.s4;
-        CC30[5*N] = hc30.s5;
-        CC30[6*N] = hc30.s6;
-        CC30[7*N] = hc30.s7;
-
-        CC31[0*N] = hc31.s0;
-        CC31[1*N] = hc31.s1;
-        CC31[2*N] = hc31.s2;
-        CC31[3*N] = hc31.s3;
-        CC31[4*N] = hc31.s4;
-        CC31[5*N] = hc31.s5;
-        CC31[6*N] = hc31.s6;
-        CC31[7*N] = hc31.s7;
+        store_C(c00, (sg_C+chan_id));
+        store_C(c01, (sg_C+8+chan_id));
+        store_C(c10, (sg_C+8*N+chan_id));
+        store_C(c11, (sg_C+8*N+8+chan_id));
+        store_C(c20, (sg_C+16*N+chan_id));
+        store_C(c21, (sg_C+16*N+8+chan_id));
+        store_C(c30, (sg_C+24*N+chan_id));
+        store_C(c31, (sg_C+24*N+8+chan_id));
+#endif
     }
 '''
 
@@ -811,27 +746,38 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     }
     '''
     # Each subgroup would output MBLOCK * 8 = 32 rows of data.
-    prepack_ker = cl.kernels(prepack, "")
-    kernels = cl.kernels(src, "")
-    M = 512
-    N = 512
+
+    SG_M = (4*8)
+    SG_N = (2*8)
+    M_WG_SGS = 8
+    N_WG_SGS = 16
+    M_BLOCK = (SG_M * M_WG_SGS)
+    N_BLOCK = (SG_N * N_WG_SGS)
+    K_BLOCK = 64
+    SG_SIZE=8
+
+    M = 2048
+    N = 1024
     # ONE XMX would accumulate 16
-    K = 2048
-    vRANGE = 10
+    K = 1024
+    vRANGE = 3
     #np.random.seed(0);
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     # B layout is [N, K]
     B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
     B_PACK = B
     A_PACK = A
+    DEBUG = 0
 
+    prepack_ker = kernel_cache(prepack, "")
+    kernels = kernel_cache(src, options=f"-DSG_SIZE={SG_SIZE} -DK_BLOCK={K_BLOCK} -DM_BLOCK={M_BLOCK} -DN_BLOCK={N_BLOCK} -DSG_M={SG_M} -DSG_N={SG_N} -DN_WG_SGS={N_WG_SGS} -DDEBUG={DEBUG} -DUSE_DPAS=1")
     C = np.matmul(A, B.transpose(1,0))
     tC = cl.tensor([M, N], np.dtype(np.float16))
     tA = cl.tensor(A)
     tB = cl.tensor(B)
     tB_pack = cl.tensor(B_PACK)
-    tA_pack = cl.tensor(A_PACK)
-    prepack_ker.enqueue("prepackA", [N, int(K/16)],[8, 64], tA, tA_pack)
+    #tA_pack = cl.tensor(A_PACK)
+    # prepack_ker.enqueue("prepackA", [N, int(K/16)],[8, 64], tA, tA_pack)
     prepack_ker.enqueue("prepackB", [N, K],[8, 128], tB, tB_pack)
     cl.finish()
     # One DSS would calculate to output C [256, 256]. One DSS(WG) would has [8, 128] work items. 8 is hw threads, 128 = 16 *8 = EUs * subgroup_size.
@@ -841,19 +787,25 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     # Consider one subgroup is one VE core using 1 hw threads.
     # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
     # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
-    kernels.enqueue("XMX_GEMM", [16, 256],[8, 128], tA, tB_pack, tC, M, N, K)
-    cl.finish()
-
-    compare(C, tC.numpy())
+    for i in range(0, 3):
+        kernels.enqueue("XMX_GEMM", [int(M/SG_M), int(N/SG_N*SG_SIZE)],[8, 128], tA, tB_pack, tC, M, N, K)
+    res  = cl.finish()
+    for ns in res:
+        flops = (M * K * N * 2)
+        rd_bytes = (M*K + K*N)*2
+        total_work_groups = M//M_BLOCK * N//N_BLOCK
+        actual_rd = total_work_groups * (M_BLOCK*K + N_BLOCK*K)*2
+        print(f"XMX_tput: {flops*1e-9:.1f} Gflop / {ns*1e-3:.1f} us = {flops/ns*1e-3:.3f} TFlops/s    {rd_bytes/1e6:.1f}=>{actual_rd/1e6:.1f} MB  / {ns*1e-3:.1f} us = {actual_rd/ns:.1f} GB/s")
+    if DEBUG != 1:
+        compare(C, tC.numpy())
 
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
 cl.profiling(True)
-# test_xmx_8x8()
-# test_xmx_prepack_8x8()
-# test_split_xmx()
-# test_gemm_multi_dss()
-# test_xmx_gflops()
-# test_xmx_gflops()
-test_gemm_one_dss()
+test_xmx_8x8()
+test_xmx_prepack_8x8()
+test_split_xmx()
+test_gemm_multi_dss()
+test_xmx_gflops()
+test_mm_tput()
 
 print("-------------------------")
