@@ -84,13 +84,14 @@ if __name__ == "__main__":
         return output.numpy(), durations
     
     def sdpa_impl(q : torch.Tensor, k : torch.Tensor, v : torch.Tensor, attention_mask : torch.Tensor, scale : torch.Tensor, Hq, Hk, HEAD_SIZE, is_optimized):
-        print(f'{q.size()=}\n{k.size()=}\n{v.size()=}')
-        B, L, _, _ = q.size()
-        query = q.view(B, L, Hq, HEAD_SIZE).transpose(1, 2).contiguous()
-        key = k.view(B, L, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
-        value = v.view(B, L, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
+        # print(f'{q.size()=}\n{k.size()=}\n{v.size()=}')
+        B, Lq, _, _ = q.size()
+        _, Lk, _, _ = k.size()
+        query = q.view(B, Lq, Hq, HEAD_SIZE).transpose(1, 2).contiguous()
+        key = k.view(B, Lk, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
+        value = v.view(B, Lk, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
 
-        attn_mask = torch.broadcast_to(attention_mask, [B, L, L])[:, None, :, :].contiguous()
+        attn_mask = torch.broadcast_to(attention_mask, [B, Lq, Lk])[:, None, :, :].contiguous()
         # attn_mask = torch.tril(b, diagonal=1)
         # print("shapes : ", query.shape, key.shape, value.shape)
 
@@ -105,16 +106,16 @@ if __name__ == "__main__":
 
         shape_info = [
             # // input0 query
-            B, Hq, 1, 1, 1, 1, L, HEAD_SIZE,
+            B, Hq, 1, 1, 1, 1, Lq, HEAD_SIZE,
             # // input1 key
-            B, Hk, 1, 1, 1, 1, L, HEAD_SIZE, 0, 0,
+            B, Hk, 1, 1, 1, 1, Lk, HEAD_SIZE, 0, 0,
             # // input2 value
-            B, Hk, 1, 1, 1, 1, L, HEAD_SIZE, 0, 0,
+            B, Hk, 1, 1, 1, 1, Lk, HEAD_SIZE, 0, 0,
             #  input3 attn_mask
-            1, 1, 1, 1, 1, 1, L, L,
+            B, 1, 1, 1, 1, 1, Lq, Lk,
             #  input4 scale
             #  output
-            B, Hq, 1, 1, 1, 1, L, HEAD_SIZE
+            B, Hq, 1, 1, 1, 1, Lq, HEAD_SIZE
         ]
         # print(f"len(shape_info)={len(shape_info)}, shape_info={shape_info}")
 
@@ -125,12 +126,12 @@ if __name__ == "__main__":
         durations = cl.finish()
         return output.numpy(), durations
 
-    def test_acc(B, Hq, Hk, HEAD_SIZE, L, use_randn = True):
+    def test_acc(B, Hq, Hk, HEAD_SIZE, Lq, Lk, use_randn = False):
         # reference torch impl
         # qkv = torch.randn([B, L, (Hq + Hk + Hk) * HEAD_SIZE], dtype=torch.float16)
-        attention_mask = torch.zeros([B, L], dtype=torch.float16)
-        # const float head_size_scaler = 1.0f / sqrt(convert_float(S));
-        scale = torch.ones([1], dtype=torch.float16) * math.sqrt(HEAD_SIZE)
+        attention_mask = torch.zeros([B, Lk], dtype=torch.float16)
+        # scale = torch.ones([1], dtype=torch.float16) * math.sqrt(HEAD_SIZE)
+        scale = torch.ones([1], dtype=torch.float16)
         print(f'====================={scale=}, {scale.dtype=}')
         
         if use_randn:
@@ -145,9 +146,9 @@ if __name__ == "__main__":
             # v = torch.from_numpy(v)
             # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
             # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            q = torch.randn([B, L, Hq, HEAD_SIZE], dtype=torch.float16)
-            k = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
-            v = torch.randn([B, L, Hk, HEAD_SIZE], dtype=torch.float16)
+            q = torch.randn([B, Lq, Hq, HEAD_SIZE], dtype=torch.float16)
+            k = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
+            v = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
             # np.save("q.npy", q)
             # np.save("k.npy", k)
             # np.save("v.npy", v)
@@ -161,28 +162,28 @@ if __name__ == "__main__":
             # q = torch.from_numpy(q)
             # k = torch.from_numpy(k)
             # v = torch.from_numpy(v)
-            q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            v = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
+            q = torch.ones([B, Lq, Hq, HEAD_SIZE], dtype=torch.float16)
+            k = torch.ones([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
+            v = torch.ones([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
             # np.save("q_samenumber.npy", q)
             # np.save("k_samenumber.npy", k)
             # np.save("v_samenumber.npy", v)
-            print(f'{Colors.CYAN} q k v shape = {q.shape=} {k.shape=} {v.shape=}.{Colors.END}')
-        qkv = torch.cat((q, k, v), 2)
-        qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))
-        
+            # print(f'{Colors.CYAN} q k v shape = {q.shape=} {k.shape=} {v.shape=}.{Colors.END}')
+
+        # qkv = torch.cat((q, k, v), 2)
+        # qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))        
         # ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
         # print(f'{ref0=}\n')
         # for i, ns in enumerate(durs):
         #     print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
-        # print(f'{ref=}\n')
+        print(f'{ref=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         opt, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, True)
-        # print(f'{opt=}\n')
+        print(f'{opt=}\n')
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
             
@@ -191,21 +192,28 @@ if __name__ == "__main__":
         try:
             if not np.allclose(ref, opt, atol=0.01, rtol=0.01, equal_nan=True):
                 pos = np.where(np.abs(ref - opt) > 0.01)
-                # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
-                # print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
+                # print(f"{pos[2]=}")
+                # for d in set(pos[2]):
+                #     print(f"{d=}")
+                print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
                 raise Exception("failed.")
             print(f'{Colors.GREEN} PASS at shape = {opt.shape}.{Colors.END}')
         except Exception as inst:
             print(f'{Colors.RED} FAIL at shape = {opt.shape}.{Colors.END}')
 
-    # "B, Hq, Hk, HEAD_SIZE, L"
-    test_acc(1, 28, 7, 128, 8410)   # tail
-    test_acc(1, 24, 6, 128, 2134)   # tail
-    # test_acc(1, 28, 7, 128, 64*128)
-    # test_acc(1, 24, 6, 128, 16*128)
-    # test_acc(1, 1, 1, 128, 16*512)
-    # test_acc(1, 1, 1, 128, 16*2)
-    # test_acc(1, 1, 1, 128, 16+1)
-    # for k in range(1, 10):
-    #     test_acc(1, 1, 1, 128, 16*k+1)
+    # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
+    for _ in range(1):
+        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
+        test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
+        # test_acc(1, 28, 7, 128, 64*128, 64*128)
+        # test_acc(1, 24, 6, 128, 16*128)
+        # test_acc(1, 1, 1, 128, 1, 17*128, True)
+        test_acc(1, 1, 1, 128, 1, 64*128, True)  # 16*512
+        # test_acc(1, 1, 1, 128, 6*128)
+        # test_acc(1, 1, 1, 128, 16*512)
+        # test_acc(1, 1, 1, 128, 16*2)
+        # test_acc(1, 1, 1, 128, 16+1)
+        # for k in range(20, 21):
+        #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
