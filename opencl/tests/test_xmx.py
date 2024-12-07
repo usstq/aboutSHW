@@ -648,7 +648,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         c30 = 0.f;
         c31 = 0.f;
         __local uint*  local_B_ptr = (__local uint*)(buffB + sg_B_offset_local);
-        __local uint*  local_A_ptr = (__local uint)(buffA + sg_A_offset_local);
+        __local uint*  local_A_ptr = (__local uint*)(buffA + sg_A_offset_local);
 
         __attribute__((opencl_unroll_hint(1)))
         for (kblk2 = 0; kblk2 < K/K_BLOCK; kblk2++) {
@@ -707,28 +707,32 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
 #endif
         }
-#if DEBUG == 0
+#if  DEBUG == 0
+            __local ushort * scratch_buffA = (__local ushort *)buffA + sgid * 128;
+            __local ushort * scratch_buffB = (__local ushort *)buffB + sgid * 128;
 
-#define store_C(C_REG, C_addr) {                                \
-        half8 hc = convert_half8(C_REG);                        \
-        C_addr[0*N] = hc.s0;                                    \
-        C_addr[1*N] = hc.s1;                                    \
-        C_addr[2*N] = hc.s2;                                    \
-        C_addr[3*N] = hc.s3;                                    \
-        C_addr[4*N] = hc.s4;                                    \
-        C_addr[5*N] = hc.s5;                                    \
-        C_addr[6*N] = hc.s6;                                    \
-        C_addr[7*N] = hc.s7;                                    \  
-        }
+            int scratch_offset = chan_id * 8;
+            int sgc_offset = chan_id * N;
 
-        store_C(c00, (sg_C+chan_id));
-        store_C(c01, (sg_C+8+chan_id));
-        store_C(c10, (sg_C+8*N+chan_id));
-        store_C(c11, (sg_C+8*N+8+chan_id));
-        store_C(c20, (sg_C+16*N+chan_id));
-        store_C(c21, (sg_C+16*N+8+chan_id));
-        store_C(c30, (sg_C+24*N+chan_id));
-        store_C(c31, (sg_C+24*N+8+chan_id));
+            intel_sub_group_block_write_us8((scratch_buffA), as_ushort8(convert_half8(c00)));
+            intel_sub_group_block_write_us8((scratch_buffA+64), as_ushort8(convert_half8(c01)));
+            *(__global half8*)(sg_C+sgc_offset) = *(__local half8*)(scratch_buffA +scratch_offset);
+            *(__global half8*)(sg_C+8+sgc_offset) = *(__local half8*)(scratch_buffA+64 +scratch_offset);
+
+            intel_sub_group_block_write_us8((scratch_buffB), as_ushort8(convert_half8(c10)));
+            intel_sub_group_block_write_us8((scratch_buffB+64), as_ushort8(convert_half8(c11)));
+            *(__global half8*)(sg_C+sgc_offset+8*N) = *(__local half8*)(scratch_buffB +scratch_offset);
+             *(__global half8*)(sg_C+8+sgc_offset+8*N) = *(__local half8*)(scratch_buffB+64 +scratch_offset);
+
+            intel_sub_group_block_write_us8((scratch_buffA), as_ushort8(convert_half8(c20)));
+            intel_sub_group_block_write_us8((scratch_buffA+64), as_ushort8(convert_half8(c21)));
+            *(__global half8*)(sg_C+sgc_offset+16*N) = *(__local half8*)(scratch_buffA +scratch_offset);
+             *(__global half8*)(sg_C+8+sgc_offset+16*N) = *(__local half8*)(scratch_buffA+64 +scratch_offset);
+
+            intel_sub_group_block_write_us8((scratch_buffB), as_ushort8(convert_half8(c30)));
+            intel_sub_group_block_write_us8((scratch_buffB+64), as_ushort8(convert_half8(c31)));
+            *(__global half8*)(sg_C+sgc_offset+24*N) = *(__local half8*)(scratch_buffB +scratch_offset);
+             *(__global half8*)(sg_C+8+sgc_offset+24*N) = *(__local half8*)(scratch_buffB+64 +scratch_offset);
 #endif
     }
 '''
@@ -817,10 +821,10 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
 
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
 cl.profiling(True)
-test_xmx_8x8()
-test_xmx_prepack_8x8()
-test_split_xmx()
-test_gemm_multi_dss()
-test_xmx_gflops()
+# test_xmx_8x8()
+# test_xmx_prepack_8x8()
+# test_split_xmx()
+# test_gemm_multi_dss()
+# test_xmx_gflops()
 test_mm_tput()
 print("-------------------------")
