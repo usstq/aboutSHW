@@ -649,64 +649,67 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         c31 = 0.f;
         __local uint*  local_B_ptr = (__local uint*)(buffB + sg_B_offset_local);
         __local uint*  local_A_ptr = (__local uint*)(buffA + sg_A_offset_local);
-
-        __attribute__((opencl_unroll_hint(1)))
-        for (kblk2 = 0; kblk2 < K/K_BLOCK; kblk2++) {
-#if DEBUG == 0
-            int copy_A_src_k = (kblk2*4 + sgidx_n / 4) * 16;
-            half16 dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
-            *(__local half16*)(buffA+copy_A_dest_offset) = dataA;
-
-            uint8 data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
-            intel_sub_group_block_write8((__local uint*)(buffB+copy_B_dest_offset), data_B);
-            barrier(CLK_LOCAL_MEM_FENCE);
-#endif
+        //XMX compute
+        {
             __attribute__((opencl_unroll_hint(1)))
-            for (kblk = 0; kblk < K_BLOCK/16; kblk++) {
-#if USE_DPAS
-                int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
-                int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
-                int8 a0 = as_int8(intel_sub_group_block_read8(local_A_ptr));
-                int8 a1 = as_int8(intel_sub_group_block_read8(local_A_ptr+64));
-                int8 a2 = as_int8(intel_sub_group_block_read8(local_A_ptr+128));
-                int8 a3 = as_int8(intel_sub_group_block_read8(local_A_ptr+192));
-                c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
-                c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
-                c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
-                c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
-                c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
-                c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
-                c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
-                c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
-#elif USE_DPASW
-                int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
-                int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
-                int4 a0 = as_int4(intel_sub_group_block_read4(local_A_ptr));
-                int4 a1 = as_int4(intel_sub_group_block_read4(local_A_ptr+64));
-                int4 a2 = as_int4(intel_sub_group_block_read4(local_A_ptr+128));
-                int4 a3 = as_int4(intel_sub_group_block_read4(local_A_ptr+192));
-                c00 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c00);
-                c01 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b1, c01);
-                c10 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b0, c10);
-                c11 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b1, c11);
-                c20 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b0, c20);
-                c21 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b1, c21);
-                c30 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b0, c30);
-                c31 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b1, c31);
-#endif
-                //accumulate next 16 k, A_step = 64*4, B_step = 64*2
-                local_A_ptr +=256;
-                local_B_ptr +=128;
-            }
-#if DEBUG == 0
-            barrier(CLK_LOCAL_MEM_FENCE);
-            //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
-            copy_B_src += 1024;
-            local_A_ptr -= 1024;
-            local_B_ptr -= 512;
+            for (kblk2 = 0; kblk2 < K/K_BLOCK; kblk2++) {
+    #if DEBUG == 0
+                int copy_A_src_k = (kblk2*4 + sgidx_n / 4) * 16;
+                half16 dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
+                *(__local half16*)(buffA+copy_A_dest_offset) = dataA;
 
-#endif
-        }
+                uint8 data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
+                intel_sub_group_block_write8((__local uint*)(buffB+copy_B_dest_offset), data_B);
+                barrier(CLK_LOCAL_MEM_FENCE);
+    #endif
+                __attribute__((opencl_unroll_hint(1)))
+                for (kblk = 0; kblk < K_BLOCK/16; kblk++) {
+    #if USE_DPAS
+                    int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
+                    int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
+                    int8 a0 = as_int8(intel_sub_group_block_read8(local_A_ptr));
+                    int8 a1 = as_int8(intel_sub_group_block_read8(local_A_ptr+64));
+                    int8 a2 = as_int8(intel_sub_group_block_read8(local_A_ptr+128));
+                    int8 a3 = as_int8(intel_sub_group_block_read8(local_A_ptr+192));
+                    c00 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b0, c00);
+                    c01 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b1, c01);
+                    c10 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b0, c10);
+                    c11 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b1, c11);
+                    c20 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b0, c20);
+                    c21 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b1, c21);
+                    c30 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b0, c30);
+                    c31 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b1, c31);
+    #elif USE_DPASW
+                    int8 b0 = as_int8(intel_sub_group_block_read8(local_B_ptr));
+                    int8 b1 = as_int8(intel_sub_group_block_read8(local_B_ptr+64));
+                    int4 a0 = as_int4(intel_sub_group_block_read4(local_A_ptr));
+                    int4 a1 = as_int4(intel_sub_group_block_read4(local_A_ptr+64));
+                    int4 a2 = as_int4(intel_sub_group_block_read4(local_A_ptr+128));
+                    int4 a3 = as_int4(intel_sub_group_block_read4(local_A_ptr+192));
+                    c00 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b0, c00);
+                    c01 = intel_sub_group_f16_f16_split_matrix_mad_k16(a0, b1, c01);
+                    c10 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b0, c10);
+                    c11 = intel_sub_group_f16_f16_split_matrix_mad_k16(a1, b1, c11);
+                    c20 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b0, c20);
+                    c21 = intel_sub_group_f16_f16_split_matrix_mad_k16(a2, b1, c21);
+                    c30 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b0, c30);
+                    c31 = intel_sub_group_f16_f16_split_matrix_mad_k16(a3, b1, c31);
+    #endif
+                    //accumulate next 16 k, A_step = 64*4, B_step = 64*2
+                    local_A_ptr +=256;
+                    local_B_ptr +=128;
+                }
+    #if DEBUG == 0
+                barrier(CLK_LOCAL_MEM_FENCE);
+                //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
+                copy_B_src += 1024;
+                local_A_ptr -= 1024;
+                local_B_ptr -= 512;
+
+    #endif
+            }
+        }//end of XMX compute
+
 #if  DEBUG == 0
             __local ushort * scratch_buffA = (__local ushort *)buffA + sgid * 128;
             __local ushort * scratch_buffB = (__local ushort *)buffB + sgid * 128;
@@ -737,7 +740,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     }
 '''
 
-    prepack =  r'''
+    preprocess =  r'''
 
     // Prepack A from mk to M{8mK[4k4m(8m16k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
@@ -751,7 +754,6 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         uint8 data = *((__global uint8*)src + s_offset);
         *((__global uint8*)dest + d_offset) = data;
     }
-
     // Prepack B from kn to N{16nK[4k2n(8k8n2k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackB(__global half * src, __global half * dest) {
@@ -763,6 +765,15 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int d_offset = (n_id/16)*(k_size/16*256) +(k_id/16*256)+((n_id/8)%2)*128+ ((k_id/2)%8) * 16 + (n_id%8)*2 + (k_id)%2;
         half data = *(src + s_offset);
         *(dest + d_offset) = data;
+    }
+
+    __kernel void res_C(__global half * A, __global half *B,  __global half *CC, int N, int K) {
+        int m_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
+        float sum = 0.f;
+        for (int i = 0; i < K; i++)
+            sum += A[m_idx*K+i]*B[n_idx*K+i];
+        CC[m_idx*N+n_idx] = sum;
     }
     '''
     # Each subgroup would output MBLOCK * 8 = 32 rows of data.
@@ -789,16 +800,17 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     A_PACK = A
     DEBUG = 0
 
-    prepack_ker = kernel_cache(prepack, "")
+    prepocess_ker = kernel_cache(preprocess, "")
     kernels = kernel_cache(src, options=f"-DSG_SIZE={SG_SIZE} -DK_BLOCK={K_BLOCK} -DM_BLOCK={M_BLOCK} -DN_BLOCK={N_BLOCK} -DSG_M={SG_M} -DSG_N={SG_N} -DN_WG_SGS={N_WG_SGS} -DDEBUG={DEBUG} -DUSE_DPASW=1")
-    C = np.matmul(A, B.transpose(1,0))
+    tRefC = cl.tensor([M, N], np.dtype(np.float16))
     tC = cl.tensor([M, N], np.dtype(np.float16))
     tA = cl.tensor(A)
     tB = cl.tensor(B)
     tB_pack = cl.tensor(B_PACK)
     #tA_pack = cl.tensor(A_PACK)
-    # prepack_ker.enqueue("prepackA", [N, int(K/16)],[8, 64], tA, tA_pack)
-    prepack_ker.enqueue("prepackB", [N, K],[8, 128], tB, tB_pack)
+    # prepocess_ker.enqueue("prepackA", [N, int(K/16)],[8, 64], tA, tA_pack)
+    prepocess_ker.enqueue("prepackB", [N, K],[8, 128], tB, tB_pack)
+    prepocess_ker.enqueue("res_C", [M, N],[8, 128], tA, tB, tRefC, N, K)
     cl.finish()
     # One DSS would calculate to output C [256, 256]. One DSS(WG) would has [8, 128] work items. 8 is hw threads, 128 = 16 *8 = EUs * subgroup_size.
     # subgroup number on on DSS is 8*128/subgroup_size = 128;  Matrix C [256, 256] is divided by subgroups [8, 16].
@@ -807,7 +819,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     # Consider one subgroup is one VE core using 1 hw threads.
     # Subgroup size is 8, doesn't mean can only output 8 columns on the C.
     # work items doesn't mean one element. one work item means  a collection of parallel executions of a kernel.
-    for i in range(0, 3):
+    for i in range(0, 10):
         kernels.enqueue("XMX_GEMM", [int(M/SG_M), int(N/SG_N*SG_SIZE)],[8, 128], tA, tB_pack, tC, M, N, K)
     res  = cl.finish()
     for ns in res:
@@ -817,7 +829,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         actual_rd = total_work_groups * (M_BLOCK*K + N_BLOCK*K)*2
         print(f"XMX_tput: {flops*1e-9:.1f} Gflop / {ns*1e-3:.1f} us = {flops/ns*1e-3:.3f} TFlops/s    {rd_bytes/1e6:.1f}=>{actual_rd/1e6:.1f} MB  / {ns*1e-3:.1f} us = {actual_rd/ns:.1f} GB/s")
     if DEBUG != 1:
-        compare(C, tC.numpy())
+        compare(tRefC.numpy(), tC.numpy())
 
 ## step by step to understand how to use XMX and how to distribute workloads on GPU A770
 cl.profiling(True)
