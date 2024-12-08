@@ -620,7 +620,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         // when doing copying B, `16n` dimension is divided by 16 VEs(divided result:sgidx_n), `4k2n` combined dimension is divided by 6 HW threads(divided result: sgidx_m ). Each HW would copy  (8k8n2k) elements.
         // The stide on `16n` diemsnion is `K/64*1024` , the stride on `4k2n` is 128.
 
-        __global half *copy_B_src = ( B + N_BLOCK * lgid_n  * K) + sgidx_n * 1024 * K/64 +  sgidx_m * 128;
+        __global half *copy_B_src = ( B + N_BLOCK * lgid_n  * K) + sgidx_n * 1024 +  sgidx_m * 128;
         int copy_B_dest_offset = sgidx_n * 1024 + sgidx_m * 128;
 
         //Prepack A from mk to M{8mK[4k4m(8m16k)]}, a is `8m` dim, b is `4k` dim, c is `4m` dim.
@@ -702,7 +702,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     #if DEBUG == 0
                 barrier(CLK_LOCAL_MEM_FENCE);
                 //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
-                copy_B_src += 1024;
+                copy_B_src += 16*1024;
                 local_A_ptr -= 1024;
                 local_B_ptr -= 512;
 
@@ -762,7 +762,8 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int n_size = get_global_size(0);
         int k_size = get_global_size(1);
         int s_offset = n_id * k_size + k_id;
-        int d_offset = (n_id/16)*(k_size/16*256) +(k_id/16*256)+((n_id/8)%2)*128+ ((k_id/2)%8) * 16 + (n_id%8)*2 + (k_id)%2;
+        //int d_offset = (n_id/16)*(k_size/16*256) +(k_id/16*256)+((n_id/8)%2)*128+ ((k_id/2)%8) * 16 + (n_id%8)*2 + (k_id)%2;
+        int d_offset = (n_id/256)*k_size*256 + (k_id/64)*64*256 + (n_id/16%16)*1024+ (k_id/16%4)*256+(n_id/8%2)*128 + (k_id/2%8)*16 + (n_id%8)*2 + (k_id%2);
         half data = *(src + s_offset);
         *(dest + d_offset) = data;
     }
@@ -790,7 +791,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
     M = 2048
     N = 1024
     # ONE XMX would accumulate 16
-    K = 1024
+    K = 2048
     vRANGE = 3
     #np.random.seed(0);
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
