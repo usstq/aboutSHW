@@ -624,11 +624,9 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int copy_B_dest_offset = sgidx_n * 1024 + sgidx_m * 128;
 
         //Prepack A from mk to M{8mK[4k4m(8m16k)]}, a is `8m` dim, b is `4k` dim, c is `4m` dim.
-        //int a =  sgidx_m;
-        //int b =  sgidx_n / 4;
-        //int c =  sgidx_n % 4;
-        int copy_A_src_m = (sgidx_m *4 + sgidx_n % 4) * 8 + chan_id;
-        int copy_A_dest_offset = sgidx_m * 2048 + (sgidx_n / 4 *4+ sgidx_n % 4)*128 + chan_id*16;
+        __global half* sg_copy_A_src = ( A + M_BLOCK * lgid_m  * K)+(sgidx_m *16 + sgidx_n ) * 2 * K;
+        __local half* sg_copy_A_dest = buffA + sgidx_m*2048 + sgidx_n*32;
+
 #endif
         int sg_B_offset_local = sgidx_n * 1024;
 #if USE_DPAS
@@ -654,13 +652,22 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
             __attribute__((opencl_unroll_hint(1)))
             for (kblk2 = 0; kblk2 < K/K_BLOCK; kblk2++) {
     #if DEBUG == 0
-                int copy_A_src_k = (kblk2*4 + sgidx_n / 4) * 16;
-                half16 dataA = *(half16*)(wg_A + (copy_A_src_m)*K+copy_A_src_k);
-                *(__local half16*)(buffA+copy_A_dest_offset) = dataA;
+            {
+                uint4 r0 = intel_sub_group_block_read4((__global uint *)(sg_copy_A_src));
+                uint4 r1 = intel_sub_group_block_read4((__global uint *)(sg_copy_A_src + K));
+                uint2 a0 = (uint2)(r0.s0, r1.s0);
+                uint2 a1 = (uint2)(r0.s1, r1.s1);
+                uint2 a2 = (uint2)(r0.s2, r1.s2);
+                uint2 a3 = (uint2)(r0.s3, r1.s3);
+                intel_sub_group_block_write2((__local uint*)(sg_copy_A_dest), a0);
+                intel_sub_group_block_write2((__local uint*)(sg_copy_A_dest + 32*16*1), a1);
+                intel_sub_group_block_write2((__local uint*)(sg_copy_A_dest + 32*16*2), a2);
+                intel_sub_group_block_write2((__local uint*)(sg_copy_A_dest + 32*16*3), a3);
 
                 uint8 data_B = intel_sub_group_block_read8((__global uint*)(copy_B_src));
                 intel_sub_group_block_write8((__local uint*)(buffB+copy_B_dest_offset), data_B);
                 barrier(CLK_LOCAL_MEM_FENCE);
+            }
     #endif
                 __attribute__((opencl_unroll_hint(1)))
                 for (kblk = 0; kblk < K_BLOCK/16; kblk++) {
@@ -703,6 +710,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
                 barrier(CLK_LOCAL_MEM_FENCE);
                 //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
                 copy_B_src += 16*1024;
+                sg_copy_A_src += K_BLOCK;
                 local_A_ptr -= 1024;
                 local_B_ptr -= 512;
 
