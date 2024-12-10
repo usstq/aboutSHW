@@ -130,8 +130,8 @@ if __name__ == "__main__":
         # reference torch impl
         # qkv = torch.randn([B, L, (Hq + Hk + Hk) * HEAD_SIZE], dtype=torch.float16)
         attention_mask = torch.zeros([B, Lk], dtype=torch.float16)
-        # scale = torch.ones([1], dtype=torch.float16) * math.sqrt(HEAD_SIZE)
-        scale = torch.ones([1], dtype=torch.float16)
+        scale = torch.ones([1], dtype=torch.float16) / math.sqrt(HEAD_SIZE)
+        # scale = torch.ones([1], dtype=torch.float16)
         print(f'====================={scale=}, {scale.dtype=}')
         
         if use_randn:
@@ -170,12 +170,13 @@ if __name__ == "__main__":
             # np.save("v_samenumber.npy", v)
             # print(f'{Colors.CYAN} q k v shape = {q.shape=} {k.shape=} {v.shape=}.{Colors.END}')
 
-        # qkv = torch.cat((q, k, v), 2)
-        # qkv = torch.reshape(qkv, (B, L, (Hq + Hk + Hk) * HEAD_SIZE))        
-        # ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
-        # print(f'{ref0=}\n')
-        # for i, ns in enumerate(durs):
-        #     print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+        if Lq == Lk:
+            qkv = torch.cat((q, k, v), 2)
+            qkv = torch.reshape(qkv, (B, Lq, (Hq + Hk + Hk) * HEAD_SIZE))        
+            ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
+            print(f'{ref0=}\n')
+            for i, ns in enumerate(durs):
+                print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
         print(f'{ref=}\n')
@@ -196,6 +197,9 @@ if __name__ == "__main__":
                 # for d in set(pos[2]):
                 #     print(f"{d=}")
                 print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                if not pos[0].size > 0:
+                    pos = np.where(np.isnan(opt))
+                    print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
                 print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
                 raise Exception("failed.")
             print(f'{Colors.GREEN} PASS at shape = {opt.shape}.{Colors.END}')
@@ -204,16 +208,12 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
-        test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
-        # test_acc(1, 28, 7, 128, 64*128, 64*128)
-        # test_acc(1, 24, 6, 128, 16*128)
-        # test_acc(1, 1, 1, 128, 1, 17*128, True)
-        test_acc(1, 1, 1, 128, 1, 64*128, True)  # 16*512
-        # test_acc(1, 1, 1, 128, 6*128)
-        # test_acc(1, 1, 1, 128, 16*512)
-        # test_acc(1, 1, 1, 128, 16*2)
-        # test_acc(1, 1, 1, 128, 16+1)
+        # test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
+        # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
+        # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
+        # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
+        test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
+        # test_acc(1, 1, 1, 128, 1, 3*128, False)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
