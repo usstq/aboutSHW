@@ -7,6 +7,7 @@
 #include <cstring>
 #include <x86intrin.h>
 #include <sstream>
+#include "simd.hpp"
 
 #ifndef ASSERT
 #    define ASSERT(cond)                                                     \
