@@ -7,7 +7,7 @@ class SDPA_opt:
     def __init__(self, Hq, Hk, HEAD_SIZE, is_optimized):
         self.is_optimized = is_optimized
         
-        self.SG_SCALE_FACTOR=1
+        self.SG_SCALE_FACTOR=2
         self.SUBGROUP_SIZE=16
         SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
@@ -210,10 +210,10 @@ if __name__ == "__main__":
     for _ in range(1):
         test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
         test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
-        # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
-        # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
-        # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
-        # test_acc(1, 1, 1, 128, 1, 3*128, False)
+        test_acc(1, 28, 7, 128, 64*128, 64*128, True)
+        test_acc(1, 24, 6, 128, 16*128, 16*128, False)
+        test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
+        test_acc(1, 1, 1, 128, 1, 3*128, False)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
