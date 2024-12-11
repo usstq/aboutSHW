@@ -78,6 +78,7 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
 
     std::stringstream ss;
     int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
+    (void)(dummy);
     auto dt_value = get_delta_ms();
     std::string dt_unit = "ms";
     if (dt_value > 1000.0f) {

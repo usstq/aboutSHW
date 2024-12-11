@@ -81,6 +81,22 @@ class jit_generator : public Xbyak::CodeGenerator {
   const char * name() {
     return ker_name;
   }
+ 
+ 
+  int finalize(const char* name="N/A") {
+    ker_name = name;
+#ifdef JIT_DEBUG
+    if (!jit_debug().empty()) {
+      std::cout << "jit_generator generate() is done: " << name << std::endl;
+      if (jit_debug() == name || jit_debug() == "*") {
+        dump();
+      }
+    }
+#endif
+    jit_ker_ = getCode();
+    return (jit_ker_) ? 0 : -1;
+  }
+
  protected:
   const size_t num_abi_save_gpr_regs =
       sizeof(abi_save_gpr_regs) / sizeof(abi_save_gpr_regs[0]);
@@ -113,18 +129,9 @@ class jit_generator : public Xbyak::CodeGenerator {
     if (err_code != Xbyak::ERR_NONE)
       return err_code;
     generate();
-    ker_name = name;
-#ifdef JIT_DEBUG
-    if (!jit_debug().empty()) {
-      std::cout << "jit_generator generate() is done: " << name << std::endl;
-      if (jit_debug() == name || jit_debug() == "*") {
-        dump();
-      }
-    }
-#endif
-    jit_ker_ = getCode();
-    return (jit_ker_) ? 0 : -1;
+    finalize(name);
   }
+
 
  public:
   template <typename... kernel_args_t>
