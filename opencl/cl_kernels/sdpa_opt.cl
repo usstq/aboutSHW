@@ -4234,8 +4234,6 @@ KERNEL(sdpa_opt)
                 float correction_factor = native_exp(max_val_prev - qk_max_new);
                 float pre_exp_sum_fixed = pre_exp_sum * correction_factor;
                 exp_sum_new += pre_exp_sum_fixed;
-                float scale_fixed = pre_exp_sum_fixed / exp_sum_new; // FIXME: should be pre_exp_sum/exp_sum_new ??
-                float scale = 1.0f / exp_sum_new;
 
                 for (uint k = sglid; k < HEAD_SIZE; k += SUBGROUP_SIZE) {
                     slm_output_prev[m][k] = convert_half(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_output_prev[m][k]) * correction_factor);
@@ -4327,15 +4325,11 @@ KERNEL(sdpa_opt)
                     }
                 }
             }
-
             {
-                barrier(CLK_LOCAL_MEM_FENCE);
-                MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) acc_output_res = OUTPUT_VAL_ZERO;
+                MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) acc_output_res;
                 for (uint m = 0; m < query_len; m++) {
                     acc_output_res[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE));
                     output_acc[m] += acc_output_res[m];
-                }
-                for (uint m = 0; m < query_len; m++) {
                     intel_sub_group_block_write_us((const __local ushort*)slm_output_prev + m * HEAD_SIZE + sgid * SUBGROUP_SIZE, as_short(output_acc[m]));
                 }
             }
