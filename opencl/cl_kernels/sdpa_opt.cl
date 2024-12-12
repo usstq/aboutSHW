@@ -4112,7 +4112,6 @@ KERNEL(sdpa_opt)
     }
     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) output_acc = OUTPUT_VAL_ZERO;
     __attribute__((opencl_unroll_hint(1))) for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
-        SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
         const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
 #                ifdef INPUT1_DIMS_ORDER
@@ -4177,6 +4176,7 @@ KERNEL(sdpa_opt)
             }
         }
         {
+            SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
             unroll_for(uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
 #        if HAS_SCALE_INPUT
                 const OUTPUT_TYPE scale_val = *scale;
@@ -4190,14 +4190,11 @@ KERNEL(sdpa_opt)
 #        endif
                 qk_acc[i] = INPUT0_MIN_FUNC(INPUT0_MAX_FUNC(qk_acc[i], INPUT0_VAL_MIN), INPUT0_VAL_MAX);
                 qk_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max, TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]));
-            }
-        }
-        {
-            slm_qk_max_vals[sglid][sgid] = qk_max;
-            qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
-            for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
+
                 slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = qk_acc[i];
             }
+
+            slm_qk_max_vals[sglid][sgid] = qk_max;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -4226,14 +4223,16 @@ KERNEL(sdpa_opt)
                 exp_sum_new = sub_group_reduce_add(exp_sum_new);
 
                 // update
-                float pre_exp_sum = slm_exp_sum_prev[m];
-                float correction_factor = native_exp(max_val_prev - qk_max_new);
-                float pre_exp_sum_fixed = pre_exp_sum * correction_factor;
-                exp_sum_new += pre_exp_sum_fixed;
+                if (sglid == 0) {
+                    float pre_exp_sum = slm_exp_sum_prev[m];
+                    float correction_factor = native_exp(max_val_prev - qk_max_new);
+                    float pre_exp_sum_fixed = pre_exp_sum * correction_factor;
+                    exp_sum_new += pre_exp_sum_fixed;
 
-                slm_update_factor[m] = correction_factor;
-                slm_max_val_prev[m] = qk_max_new;
-                slm_exp_sum_prev[m] = exp_sum_new;             
+                    slm_update_factor[m] = correction_factor;
+                    slm_max_val_prev[m] = qk_max_new;
+                    slm_exp_sum_prev[m] = exp_sum_new;
+                }
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
@@ -4258,7 +4257,7 @@ KERNEL(sdpa_opt)
 #                endif
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
                     unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                        qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len + sglid]; // 7, 48, 0
+                        qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len + sglid];
                     }
                     unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
                         INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
@@ -4327,8 +4326,6 @@ KERNEL(sdpa_opt)
                     output_acc[seq_idx] = acc_output_res[seq_idx];
                 }
             }
-
-            // barrier(CLK_LOCAL_MEM_FENCE);
         } // w*v
     } // end of loop in kv_len
     if (sgid >= (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) { // head_size/subgroup_size=128/16=8
