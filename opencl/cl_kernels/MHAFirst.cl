@@ -1,3 +1,93 @@
+// global_id [Hq, batch_size]
+__kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+                    int batch_size,
+                    int L,                        // input seq-length
+                    __global half * param_output,      // [batch_size, L, Hq * head_size]
+                    __global half * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global half * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
+                    __global float * param_attn_score,  // [batch_size, Hq, max_kv_len]
+                    int kv_seq_len0,
+                    int Hq,
+                    int Hk,
+                    int max_kv_len,
+                    int head_size,
+                    int head_group_size,
+                    float head_size_scaler
+                    ) {
+    
+    int h = get_global_id(0);
+    int b = get_global_id(1);
+
+    if (h >= Hq) return;
+    if (b >= batch_size) return;
+
+    int HQKV = Hq + Hk + Hk;
+    int hkv = h / head_group_size;
+
+    __global half * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
+    __global half * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
+    __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
+
+    // q: head_size
+    // k: head_size
+    // v: head_size
+
+    // concat k & v into cache
+    __global half * dst_k = cache_k + kv_seq_len0*head_size;
+    __global half * dst_v = cache_v + kv_seq_len0*head_size;
+
+    for(int l = 0; l < L; l++) {
+        __global half * cur_k = param_qkv + ((b * L + l) * HQKV + Hq + hkv) * head_size;
+        __global half * cur_v = cur_k + Hk*head_size;
+        for(int i = 0; i < head_size; i++) {
+            *dst_k++ = cur_k[i];
+            *dst_v++ = cur_v[i];
+        }
+    }
+
+    __global half * q = param_qkv + ((b * L + 0) * HQKV + h) * head_size;
+    __global half * output = param_output + ((b * L + 0)*Hq + h)*head_size;
+
+    for(int ql = 0; ql < L; ql++, q += (HQKV * head_size), output += (Hq*head_size)) {
+        //////////// q * cache_k
+        __global half * pk = cache_k;
+        float max_attn_score = -1e9f;
+
+        // causal_mask & attn_mask is not applied explicitly
+        int kv_len = ql + kv_seq_len0;
+
+        for(int p = 0; p <= kv_len; p++, pk += head_size) {
+            float dot_prod = 0;
+            for(int i = 0; i < head_size; i++)
+                dot_prod += q[i] * pk[i];
+
+            dot_prod *= head_size_scaler;
+            attn_score[p] = dot_prod;
+            if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+        }
+
+        //////////// softmax
+        float softmax_scale = 0;
+        for(int p = 0; p <= kv_len; p++) {
+            float a = exp(attn_score[p] - max_attn_score);
+            attn_score[p] = a;
+            softmax_scale += a;
+        }
+        softmax_scale = 1.0f / softmax_scale;
+
+        //////////// attn_score * cache_v
+        for(int i = 0; i < head_size; i++) {
+            __global half * pv = cache_v;
+            float sum = 0;
+            for(int p = 0; p <= kv_len; p++, pv += head_size) {
+                float scale = attn_score[p] * softmax_scale;
+                sum += scale * pv[i];
+            }
+            output[i] = sum;
+        }
+    }
+}
+
 __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv) * S)]
                     int L1,                             // input seq-length
                     __global half * param_cache_k,     // [B, Hk, max_kv_len, S]
@@ -14,7 +104,7 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
     int HQKV = HQ + HK + HK;
 
     // concat k & v into cache
-    __global half * dst_k = param_cache_k +
+    __global half * dst_k = param_cache_k + 
         ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
     __global half * dst_v = param_cache_v +
         ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
@@ -42,7 +132,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     const int id_sg = get_sub_group_id();
     const int id_sg_local = get_sub_group_local_id();
     const int id_local = get_local_id(2);
-    
+
     const int HQKV = HQ + HK + HK;
     const int head_group_size = HQ / HK;
     const int hkv = h / head_group_size;
@@ -59,7 +149,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     __global half* output = param_output + ((b * L1 + query_start) * HQ + h) * S;
 
     // store prev iteration state
-    __local half prev_output_share[SGS][S];  // FIXME: not initialized
+    __local half prev_output_share[SGS][S];
     __local half prev_max_attn_score_share[SGS];
     __local half prev_exp_sum_share[SGS];
 
@@ -80,7 +170,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             if (m < query_len) {
                 half q_val = as_half(intel_sub_group_block_read_us((const __global ushort*)cur_q + m * qkv_stride + id_sg * SGS));
                 q_share[id_local][m] = q_val;
-            } else { // FIXME: why else?
+            } else {
                 // avoid q*k to check if M is varying
                 q_share[id_local][m] = 0;
             }
@@ -96,13 +186,8 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
     for (int i = 0, key_n_start = 0; i < kv_block_num; i++, key_n_start += kv_block) {
         // 2 compute q*k, each sg will compute: dot(A([16, K]), B([L1 / kv_block, 16, K])) = C([L1 / kv_block, 16, 16])
         // each sg will process SGS key lines
-        // const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
-        const int key_len_in_kv_block = min(kv_block, max(0, (int)L1 - key_n_start)); // FIXME: bug?
+        const int key_len_in_kv_block = min(kv_block, max(0, query_end - key_n_start));
         const int key_n_start_sg = key_n_start + id_sg * SGS;
-        // if (id_sg_local == 0) {
-        //     printf("cur_mb_blocks_num %d %d %d: kv_block=%d, %d, %d, %d\n", cur_mb_blocks_num, id_sg, id_sg_local,
-        //     kv_block, query_end, key_n_start, key_len_in_kv_block);
-        // }
         half16 dot_prod = 0;
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
@@ -276,10 +361,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
 
         // 5 w*v
         uint value_len_in_kv_block = key_len_in_kv_block;
-        half16 sum;
-        for (uint m = 0; m < query_len; m++) {
-            sum[m] = as_half(intel_sub_group_block_read_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS));
-        }
+        half16 sum = 0.0h;
         uint k = 0;
         for (; k + SGS <= value_len_in_kv_block; k += SGS) {
             const uint v_row = key_n_start + k;
@@ -315,6 +397,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             }
         }
         for (uint m = 0; m < query_len; m++) {
+            sum[m] += as_half(intel_sub_group_block_read_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS));
             intel_sub_group_block_write_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS, as_short(sum[m]));
         }
         // 6 output
@@ -426,15 +509,16 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
         }
     }
     // reduce in sg
+    __local half exp_sum_share[S / SGS];
     exp_sum = sub_group_reduce_add(exp_sum);
     if (id_sg_local == 0) {
-        max_qk_dot_share[id_sg] = exp_sum;
+        exp_sum_share[id_sg] = exp_sum;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     // reduce across sg
     exp_sum = 0;
     if (id_sg_local < S / SGS) {
-        exp_sum = max_qk_dot_share[id_sg_local];
+        exp_sum = exp_sum_share[id_sg_local];
     }
     exp_sum = sub_group_reduce_add(exp_sum);
     if (part_num > 1 && id_local == 0) {

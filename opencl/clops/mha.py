@@ -2,98 +2,6 @@ from . import cl
 import numpy as np
 from .utils import *
 
-cl_kernel_sources_ref = r'''
-// global_id [Hq, batch_size]
-__kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
-                    int batch_size,
-                    int L,                        // input seq-length
-                    __global half * param_output,      // [batch_size, L, Hq * head_size]
-                    __global half * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
-                    __global half * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
-                    __global float * param_attn_score,  // [batch_size, Hq, max_kv_len]
-                    int kv_seq_len0,
-                    int Hq,
-                    int Hk,
-                    int max_kv_len,
-                    int head_size,
-                    int head_group_size,
-                    float head_size_scaler
-                    ) {
-    
-    int h = get_global_id(0);
-    int b = get_global_id(1);
-
-    if (h >= Hq) return;
-    if (b >= batch_size) return;
-
-    int HQKV = Hq + Hk + Hk;
-    int hkv = h / head_group_size;
-
-    __global half * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
-    __global half * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
-    __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
-
-    // q: head_size
-    // k: head_size
-    // v: head_size
-
-    // concat k & v into cache
-    __global half * dst_k = cache_k + kv_seq_len0*head_size;
-    __global half * dst_v = cache_v + kv_seq_len0*head_size;
-
-    for(int l = 0; l < L; l++) {
-        __global half * cur_k = param_qkv + ((b * L + l) * HQKV + Hq + hkv) * head_size;
-        __global half * cur_v = cur_k + Hk*head_size;
-        for(int i = 0; i < head_size; i++) {
-            *dst_k++ = cur_k[i];
-            *dst_v++ = cur_v[i];
-        }
-    }
-
-    __global half * q = param_qkv + ((b * L + 0) * HQKV + h) * head_size;
-    __global half * output = param_output + ((b * L + 0)*Hq + h)*head_size;
-
-    for(int ql = 0; ql < L; ql++, q += (HQKV * head_size), output += (Hq*head_size)) {
-        //////////// q * cache_k
-        __global half * pk = cache_k;
-        float max_attn_score = -1e9f;
-
-        // causal_mask & attn_mask is not applied explicitly
-        int kv_len = ql + kv_seq_len0;
-
-        for(int p = 0; p <= kv_len; p++, pk += head_size) {
-            float dot_prod = 0;
-            for(int i = 0; i < head_size; i++)
-                dot_prod += q[i] * pk[i];
-
-            dot_prod *= head_size_scaler;
-            attn_score[p] = dot_prod;
-            if (max_attn_score < dot_prod) max_attn_score = dot_prod;
-        }
-
-        //////////// softmax
-        float softmax_scale = 0;
-        for(int p = 0; p <= kv_len; p++) {
-            float a = exp(attn_score[p] - max_attn_score);
-            attn_score[p] = a;
-            softmax_scale += a;
-        }
-        softmax_scale = 1.0f / softmax_scale;
-
-        //////////// attn_score * cache_v
-        for(int i = 0; i < head_size; i++) {
-            __global half * pv = cache_v;
-            float sum = 0;
-            for(int p = 0; p <= kv_len; p++, pv += head_size) {
-                float scale = attn_score[p] * softmax_scale;
-                sum += scale * pv[i];
-            }
-            output[i] = sum;
-        }
-    }
-}
-'''
-
 class MHA:
     def __init__(self, head_cnt_q, head_cnt_k, head_size, max_kv_len, use_ref=False, kv_block=64):
         '''
@@ -114,12 +22,10 @@ class MHA:
         self.concat_block = 256
         options = f'-D FMACNT=4 -DUNROLL=4 -DS={head_size} -DSGS={self.sub_group_size} -DHQ={head_cnt_q} -DHK={head_cnt_k} \
                     -DMAX_KV_LEN={max_kv_len} -DKV_BLOCK={self.kv_block} -DCONCAT_BLOCK={self.concat_block}'
-        
-        with open("cl_kernels/MHAFirst.cl", "r") as file:
+        with open(f"cl_kernels/MHAFirst.cl", "r") as file:
             # Read the entire file content into a string
             cl_kernel_sources = file.read()
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
-        self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
     def __call__(self, qkv, attention_mask):
 
@@ -147,7 +53,7 @@ class MHA:
         # attn_score is just a temp/scratch cl-buffer
         if self.use_ref:
             attn_score = cl.tensor([B, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
-            self.cl_kernels_ref.enqueue("MHA",
+            self.cl_kernels.enqueue("MHA",
                                    [self.head_cnt_q, B],
                                    [1, 1],
                                    qkv,
@@ -205,7 +111,6 @@ class MHA:
                                        part_num)
             else:
                 mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
-                print(cl_kernels.info("MHAFirst", [1, 1, self.S], 16))
                 cl_kernels.enqueue("MHAFirst",
                                    [B, self.head_cnt_q, self.S * mb_blocks_num],
                                    [1, 1, self.S],
@@ -219,16 +124,16 @@ class MHA:
 if __name__ == "__main__":
     import torch
     from . import utils
-    H = 32
-    HK = 32
+    H = 1
+    HK = 1
     S = 128
     MAX_KV_LEN = 256*8
-    B = 16
-    KV_BLOCK = 32
+    B = 1
+    KV_BLOCK = 128
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
-    first_token = 128*2-4  #KV_BLOCK - 2
-    second_token_num = 80
+    first_token = 3*128  #KV_BLOCK - 2
+    second_token_num = 1
     KV_LEN = 0
     for idx in range(second_token_num):
         L0 = KV_LEN
