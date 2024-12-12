@@ -60,6 +60,74 @@ struct vmm<avx512> {
 
 template <backend_type BT>
 class cjit : public jit_generator {};
+#if 0
+template <>
+class cjit<emu> : public jit_generator {
+    union sregister{
+        int64_t i64;
+        int32_t i32;
+        operator int64_t() const {
+            return i64;
+        }
+    };
+    union vregister {
+        float f32[8];
+        int32_t i32[8];
+        bool mask[8];
+    };
+    using pregister = vregister;
+
+    sregister var(int idx = -1) {
+        return sregister();
+    }
+    sregister arg(int i) {
+        return var(i);
+    }
+    vregister vec() {
+        return vregister();
+    }
+
+    cjit() {}
+
+    // vector version for: (idx + step) will not pass the stop
+    template <typename B, typename E, typename S = size_t>
+    void j_loop_vec(sregister& idx, const B& start, const E& stop, const S& step, std::function<void()>&& fn) {
+        Xbyak::Label loop, exit;
+        for (idx.i64 = static_cast<int64_t>(start); idx.i64 + step <= static_cast<int64_t>(stop); idx.i64 += step) {
+            fn();
+        }
+    }
+
+    struct address {
+        const sregister base;
+        const sregister idx;
+        const pregister mask;
+        const int scales;
+        const int displacement;
+        bool with_idx;
+        address(const sregister& base, const sregister& idx = {}, const int scales = 32, const int displacement = 0)
+            : base(base),
+              idx(idx),
+              scales(scales),
+              displacement(displacement) {}
+        address(const pregister& mask, const sregister& base, const sregister& idx = {}, const int scales = 32, const int displacement = 0)
+            : mask(mask),
+              base(base),
+              idx(idx),
+              scales(scales),
+              displacement(displacement) {}
+        uintptr_t addr() const {
+            if (idx.reg)
+                return Xbyak::Address(0, false, *(base.reg) + (*(idx.reg)) * scales + displacement);
+            else
+                return Xbyak::Address(0, false, *(base.reg) + displacement);
+        }
+    };
+
+
+
+};
+#endif
 
 template <>
 class cjit<avx2> : public jit_generator {
@@ -88,52 +156,8 @@ public:
     };
     using pregister = vregister;
 
-    constexpr static size_t NUM_SREGS = 16;
-    constexpr static size_t SIMDW = 8;
-    constexpr static size_t NUM_VREGS = 16;
-
-    std::vector<int> m_free_srf_regs;
-    std::vector<int> m_free_vrf_regs;
-    std::vector<int> m_free_mask_regs;  // mask/predicate regs
-
     cjit() {
-        for (size_t i = 0; i < NUM_SREGS; i++)
-            m_free_srf_regs.push_back(i);
-        for (size_t i = 0; i < NUM_VREGS; i++)
-            m_free_vrf_regs.push_back(i);
-    }
-
-    sregister var(int idx = -1) {
-        if (m_free_srf_regs.empty())
-            throw std::runtime_error("No free registers");
-        if (idx >= 0) {
-            // user-specified idx
-            auto it = std::find(m_free_srf_regs.begin(), m_free_srf_regs.end(), idx);
-            if (it == m_free_srf_regs.end())
-                throw std::runtime_error(std::string("No required register : ") + std::to_string(idx));
-            m_free_srf_regs.erase(it);
-        } else {
-            idx = m_free_srf_regs.back();
-            m_free_srf_regs.pop_back();
-        }
-        return std::shared_ptr<Xbyak::Reg64>(new Xbyak::Reg64(idx), [this](Xbyak::Reg64* preg) {
-            this->m_free_srf_regs.push_back(preg->getIdx());
-            delete preg;
-        });
-    }
-    sregister arg(int i) {
-        return var(abi_param_regs[i]);
-    }
-
-    vregister vec() {
-        if (m_free_vrf_regs.empty())
-            throw std::runtime_error("No free vector registers");
-        auto idx = m_free_vrf_regs.back();
-        m_free_vrf_regs.pop_back();
-        return std::shared_ptr<Xbyak::Ymm>(new Xbyak::Ymm(idx), [this](Xbyak::Ymm* preg) {
-            this->m_free_vrf_regs.push_back(preg->getIdx());
-            delete preg;
-        });
+        init_regs();
     }
 
     template <typename B, typename E, typename S = size_t>
@@ -223,10 +247,10 @@ public:
         if (element_bits != 32)
             throw std::runtime_error("on 32-bits unit size supported for mask on AVX2");
         static int32_t mem_mask[] = {-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0};
-        auto mask = vec();
+        auto mask = m_inject_frames.back().local_vreg();
         // generate the mask
-        auto tmp = var();
-        auto idx = var();
+        auto tmp = m_inject_frames.back().local_sreg();
+        auto idx = m_inject_frames.back().local_sreg();
         mov(idx, count);
         and_(idx, 7);
         neg(idx);
@@ -236,6 +260,7 @@ public:
         vmovdqu(mask, ptr[(*tmp.reg) + *(idx.reg)*4]);
         return mask;
     }
+
     // void j_load(const address& addr) {
     //     vmaskmovps(dst, mask, ptr[base]);
     // }
@@ -258,7 +283,7 @@ public:
         if (v == 0) {
             vpxor(dst, dst, dst);
         } else {
-            auto tmp = var();
+            auto tmp = m_inject_frames.back().local_sreg();
             mov(tmp, *reinterpret_cast<uint32_t*>(&v));
             vmovd(dst, tmp);
             vbroadcastss(dst, dst);
@@ -271,7 +296,7 @@ public:
         if (v == 0) {
             vpxor(dst, dst, dst);
         } else {
-            auto tmp = var();
+            auto tmp = m_inject_frames.back().local_sreg();
             mov(tmp.r32(), *reinterpret_cast<uint32_t*>(&v));
             //printf("============ %d %d \n", dst.xmm().isXMM(), tmp.r32().isREG(32));
             vmovd(dst.xmm(), tmp.r32());
@@ -283,43 +308,210 @@ public:
         ret();
         finalize();
     }
+
+    int inject_frame_level = 1;
+    constexpr static size_t SIMDW = 8;
+    constexpr static size_t NUM_SREGS = 16;
+    constexpr static size_t NUM_VREGS = 16;
+
+    // owner id:
+    //  -2  arch reserved register, always keep untouched (like RSP)
+    //  -1  function caller used register, must be preserved to/from stack before using
+    //   0  free register, can be used w/o preserv
+    //  >0  onwer inject frame index
+    int m_srf_owner[NUM_SREGS];
+    int m_vrf_owner[NUM_VREGS];
+
+    void init_regs() {
+        inject_frame_level = 0;
+        for (size_t i = 0; i < NUM_SREGS; i++) {
+            m_srf_owner[i] = 0; // free : no need to push/pop
+            m_vrf_owner[i] = 0; // free : no need to push/pop
+        }
+        for (size_t i = 0; i < sizeof(abi_save_gpr_regs)/sizeof(abi_save_gpr_regs[0]); i++) {
+            // owner id -1 means caller owns it, need to 
+            m_srf_owner[abi_save_gpr_regs[i]] = -1;
+        }
+        // RSP is always kept untouched.
+        m_srf_owner[Xbyak::Operand::RSP] = -2;
+    }
+
+    // frame stack concept:
+    //  manages visiblity of registers
+    struct inject_frame {
+        cjit<avx2>& h;
+        std::vector<std::pair<int, int>> arg_sregs;
+        std::vector<std::pair<int, int>> arg_vregs;
+        std::vector<int> sreg_saved_on_stack;
+
+        inject_frame(cjit<avx2>& h, const std::vector<sregister>& visible_sregs, const std::vector<vregister>& visible_vregs)
+            : h(h) {
+            // when allocation/free happens on swappable register
+            // it always happens in stack style (LIFO), and each reg's life-time is maintained by it's own shared_ptr
+            //
+            // In C++, local variables within a function or block are constructed in the order they are defined
+            // and destructed in the reverse order of their construction. This behavior is deterministic and
+            // follows the Last-In-First-Out (LIFO) principle.
+            //
+            // Given this fact, all regs's lifecycle are maintained by it's own shared_ptr with custom-deleter,
+            // even when stack-swapping is required.
+            h.inject_frame_level ++;
+
+            // set injector's arg register status to `already allocated & owned by current inject_frame`
+            for (auto& r : visible_sregs) {
+                auto idx = r.reg->getIdx();
+                arg_sregs.emplace_back(idx, h.m_srf_owner[idx]);
+                h.m_srf_owner[idx] = h.inject_frame_level;
+            }
+            for (auto& r : visible_vregs) {
+                auto idx = r.ymm->getIdx();
+                arg_vregs.emplace_back(idx, h.m_vrf_owner[idx]);
+                h.m_vrf_owner[idx] = h.inject_frame_level;
+            }
+        }
+        ~inject_frame() {
+            // restore orginal owner id for arguments
+            for (auto& r : arg_sregs) {
+                h.m_srf_owner[r.first] = r.second;
+            }
+            for (auto& r : arg_vregs) {
+                h.m_vrf_owner[r.first] = r.second;
+            }
+            h.inject_frame_level --;
+        }
+        sregister arg(int arg_idx) {
+            return local_sreg(abi_param_regs[arg_idx]);
+        }
+        sregister local_sreg(int idx = -1) {
+            if (idx >= 0) {
+                if (h.m_srf_owner[idx] != 0) {
+                    throw std::runtime_error(std::string("Specified sregister ") + std::to_string(idx) + " is owned by " + std::to_string(h.m_srf_owner[idx]));
+                }
+                h.m_srf_owner[idx] = h.inject_frame_level;
+                auto* ph = &h;
+                return std::shared_ptr<Xbyak::Reg64>(new Xbyak::Reg64(idx), [ph](Xbyak::Reg64* preg) {
+                    ph->m_srf_owner[preg->getIdx()] = 0;
+                    delete preg;
+                });
+            }
+            // try to allocate free reg:
+            for (size_t i = 0; i < NUM_SREGS; i++) {
+                if (h.m_srf_owner[i] == 0) {
+                    h.m_srf_owner[i] = h.inject_frame_level;
+                    return std::shared_ptr<Xbyak::Reg64>(new Xbyak::Reg64(i), [this](Xbyak::Reg64* preg) {
+                        h.m_srf_owner[preg->getIdx()] = 0;
+                        delete preg;
+                    });
+                }
+            }
+            // try to allocate swappable reg
+            for (size_t i = 0; i < NUM_SREGS; i++) {
+                auto owner = h.m_srf_owner[i];
+                if (owner < -1) continue; // skip reserved register (like RSP)
+                if (owner != h.inject_frame_level) {
+                    h.m_srf_owner[i] = h.inject_frame_level;
+                    h.push(Xbyak::Reg64(i));
+                    return std::shared_ptr<Xbyak::Reg64>(new Xbyak::Reg64(i), [this, owner](Xbyak::Reg64* preg) {
+                        h.pop(*preg);
+                        h.m_srf_owner[preg->getIdx()] = owner;
+                        delete preg;
+                    });
+                }
+            }
+            throw std::runtime_error("No free or swappable sregister available!");
+        }
+
+        vregister local_vreg() {
+            // try to allocate free reg:
+            for (size_t i = 0; i < NUM_VREGS; i++) {
+                if (h.m_vrf_owner[i] == 0) {
+                    h.m_vrf_owner[i] = h.inject_frame_level;
+                    return std::shared_ptr<Xbyak::Ymm>(new Xbyak::Ymm(i), [this](Xbyak::Ymm* preg) {
+                        h.m_vrf_owner[preg->getIdx()] = 0;
+                        delete preg;
+                    });
+                }
+            }
+            // try to allocate swappable reg
+            for (size_t i = 0; i < NUM_SREGS; i++) {
+                auto owner = h.m_srf_owner[i];
+                if (owner != h.inject_frame_level) {
+                    h.m_srf_owner[i] = h.inject_frame_level;
+                    h.sub(h.rsp, 32);
+                    h.vmovups(Xbyak::Ymm(i), h.ptr[h.rsp]);
+                    return std::shared_ptr<Xbyak::Ymm>(new Xbyak::Ymm(i), [this, owner](Xbyak::Ymm* preg) {
+                        h.vmovups(h.ptr[h.rsp], *preg);
+                        h.add(h.rsp, 32);
+                        h.m_srf_owner[preg->getIdx()] = owner;
+                        delete preg;
+                    });
+                }
+            }
+            throw std::runtime_error("No free or swappable vregister available!");
+        }
+    };
+
+    std::vector<inject_frame> m_inject_frames;
+
+    std::shared_ptr<inject_frame> new_frame(const std::vector<sregister>& sregs = {}, const std::vector<vregister>& vregs = {}) {
+        // these are registers that are preserved in current frame
+        // do not swap to memory
+        m_inject_frames.emplace_back(*this, sregs, vregs);
+        return std::shared_ptr<inject_frame>(&m_inject_frames.back(), [this](inject_frame* f){
+            m_inject_frames.pop_back();
+        });
+    }
+    // injector can also use parent frame w/o allocate it's own frame (as long as it's light-weighted)
+    inject_frame& current_frame() {
+        return m_inject_frames.back();
+    }
 };
-
 /*
-    the code that generate code: G
-    the generated code         : B
+universal injector : call-syntax w/o call instruction
 
-    G calls B: OK
-    B calls G:
-    only happens once at compilation time
+parameter is passed in as raw register references
+all non-parameter register can be preserved on stack if there is no enough regs
+but how it knows which registers can be saved and how many of them should be saved?
+we need explictly tell framwork the registers used for args cannot be touched.
+all other 'invisible' registers can be swapped to memory if required.    
 */
 
-template <backend_type BT>
-std::shared_ptr<cjit<BT>> func_body() {
-    auto h = std::make_shared<cjit<BT>>();
-    auto src1 = h->arg(0);
-    auto src2 = h->arg(1);
-    auto dst = h->arg(2);
-    auto cnt = h->arg(3);
+template <class CJIT, class VREG>
+void kernel_compute(CJIT& h, VREG c, VREG a, VREG b) {
+    h->j_add(c, a, b);
+}
 
-    auto idx = h->var();
-    auto value1 = h->vec();
-    auto value2 = h->vec();
+template <class CJIT, class SREG>
+void func_compute(CJIT& h, SREG src1, SREG src2, SREG dst, SREG cnt) {
+    auto frame = h->new_frame({src1, src2, dst, cnt}, {});
+    auto idx = frame->local_sreg();
+    auto value1 = frame->local_vreg();
+    auto value2 = frame->local_vreg();
 
     auto simdw = h->SIMDW;
     h->j_loop_vec(idx, 0, cnt, simdw, [&]() {
         h->j_load(value1, {src1, idx, 4});
         h->j_load(value2, {src2, idx, 4});
-        h->j_add(value1, value1, value2);
+        kernel_compute(h, value1, value1, value2);
         h->j_store(value1, {dst, idx, 4});
     });
 
     auto mask = h->j_tail_mask(32, cnt);
     h->j_load(value1, {mask, src1, idx, 4});
     h->j_load(value2, {mask, src2, idx, 4});
-    h->j_add(value1, value1, value2);
+    kernel_compute(h, value1, value1, value2);
     h->j_store(value1, {mask, dst, idx, 4});
+}
 
+template <backend_type BT>
+std::shared_ptr<cjit<BT>> func_body() {
+    auto h = std::make_shared<cjit<BT>>();
+    auto frame = h->new_frame();
+    auto src1 = frame->arg(0);
+    auto src2 = frame->arg(1);
+    auto dst = frame->arg(2);
+    auto cnt = frame->arg(3);
+    func_compute(h, src1, src2, dst, cnt);
     h->finish();
     return h;
 }
