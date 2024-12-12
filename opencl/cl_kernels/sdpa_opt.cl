@@ -3809,9 +3809,9 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define IS_CAUSAL                          0
 #define HAS_ATTN_MASK_INPUT                1
 #define HAS_SCALE_INPUT                    1
-// #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
-// #define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
-// #define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
 #define TARGET_SEQ_LEN                     (shape_info[6])
 // #define NUM_HEADS                          28
 // #define NUM_KV_HEADS                       -1

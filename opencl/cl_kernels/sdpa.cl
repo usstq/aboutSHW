@@ -3346,13 +3346,13 @@ typedef struct float0 {
 
 //====================================================
 // Kernel template: sdpa_opt_multi_tokens
-// Kernel name: sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define KERNEL(name)                      __kernel void sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define KERNEL_ID                         sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define FUNC(name)                        _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define FUNC_CALL(name)                   _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
-#define CONST_ARRAY_DECL(name)            __constant size_t _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa[]
-#define CONST_ARRAY_REF(name)             _##name##_sdpa_opt_multi_tokens_6761455398808095608_0_0__sa
+// Kernel name: sdpa_opt_multi_tokens
+#define KERNEL(name)                      __kernel void sdpa_opt_multi_tokens
+#define KERNEL_ID                         sdpa_opt_multi_tokens
+#define FUNC(name)                        _##name##_sdpa_opt_multi_tokens
+#define FUNC_CALL(name)                   _##name##_sdpa_opt_multi_tokens
+#define CONST_ARRAY_DECL(name)            __constant size_t _##name##_sdpa_opt_multi_tokens[]
+#define CONST_ARRAY_REF(name)             _##name##_sdpa_opt_multi_tokens
 #define FP64_SUPPORTED                    1
 #define FP16_SUPPORTED                    1
 #define FP16_UNIT_USED                    1
@@ -3809,9 +3809,9 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define IS_CAUSAL                          0
 #define HAS_ATTN_MASK_INPUT                1
 #define HAS_SCALE_INPUT                    1
-// #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
-// #define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
-// #define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
 #define TARGET_SEQ_LEN                     (shape_info[6])
 // #define NUM_HEADS                          28
 // #define NUM_KV_HEADS                       -1
