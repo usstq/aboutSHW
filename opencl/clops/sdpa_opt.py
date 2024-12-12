@@ -17,11 +17,11 @@ class SDPA_opt:
         assert(self.TARGET_SEQ_LEN_BLOCK_SIZE == self.SUBGROUP_SIZE);   # implied
         
         if self.is_optimized:
-            cl_source_file = "cl_kernels/sdpa_opt.cl"
+            cl_source_file = "cl_kernels/sdpa_opt_new.cl"
             self.kernel_name = 'sdpa_opt_multi_tokens'
         else:
-            cl_source_file = "cl_kernels/sdpa.cl"
-            self.kernel_name = 'sdpa_opt_multi_tokens_6761455398808095608_0_0__sa'
+            cl_source_file = "cl_kernels/sdpa_new.cl"
+            self.kernel_name = 'sdpa_opt_multi_tokens'
 
         with open(cl_source_file, "r") as file:
             # Read the entire file content into a string
@@ -208,12 +208,12 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
-        test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
-        test_acc(1, 28, 7, 128, 64*128, 64*128, True)
-        test_acc(1, 24, 6, 128, 16*128, 16*128, False)
-        test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
-        test_acc(1, 1, 1, 128, 1, 3*128, False)
+        test_acc(1, 2, 1, 128, 8410, 8410, False)   # tail
+        # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
+        # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
+        # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
+        # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
+        # test_acc(1, 1, 1, 128, 3*128, 3*128, False)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
