@@ -1561,273 +1561,305 @@ typedef struct float0 { float s0; } float0;
 #define FUNC_CALL(name)  _##name##_sdpa_opt_multi_tokens
 #define CONST_ARRAY_DECL(name) __constant size_t  _##name##_sdpa_opt_multi_tokens []
 #define CONST_ARRAY_REF(name)  _##name##_sdpa_opt_multi_tokens
-#define FP64_SUPPORTED 0
-#define FP16_SUPPORTED 1
-#define FP16_UNIT_USED 1
-#define INT8_UNIT_USED 0
-#define INT32_UNIT_USED 0
-#define INT64_UNIT_USED 0
-#define UINT8_UNIT_USED 0
-#define UINT32_UNIT_USED 0
-#define UNIT_TYPE half
-#define UNIT_VAL_MAX HALF_MAX
-#define UNIT_VAL_MIN -UNIT_VAL_MAX
-#define UNIT_VAL_ONE 1.0h
-#define UNIT_VAL_ZERO 0.0h
-#define TO_UNIT_TYPE(v) convert_half(v)
-#define TO_UNIT_TYPE_SAT(v) convert_half(v)
-#define AS_UNIT_TYPE(v) as_half(v)
-#define UNIT_MAX_FUNC fmax
-#define UNIT_MIN_FUNC fmin
-#define UNIT_ABS_FUNC fabs
-#define UNIT_TYPE_SIZE 2
-#define UNIT_IS_FP 1
-#define NL_M as_float(0x0)/*0.000000e+00*/
-#define NL_N as_float(0x0)/*0.000000e+00*/
-#define ACTIVATION_FUNC_TYPE half
-#define ACTIVATION_FUNC_VAL_MAX HALF_MAX
-#define ACTIVATION_FUNC_VAL_MIN -ACTIVATION_FUNC_VAL_MAX
-#define ACTIVATION_FUNC_VAL_ONE 1.0h
-#define ACTIVATION_FUNC_VAL_ZERO 0.0h
-#define TO_ACTIVATION_FUNC_TYPE(v) convert_half(v)
-#define TO_ACTIVATION_FUNC_TYPE_SAT(v) convert_half(v)
-#define AS_ACTIVATION_FUNC_TYPE(v) as_half(v)
-#define ACTIVATION_FUNC_MAX_FUNC fmax
-#define ACTIVATION_FUNC_MIN_FUNC fmin
-#define ACTIVATION_FUNC_ABS_FUNC fabs
-#define ACTIVATION_FUNC_TYPE_SIZE 2
-#define ACTIVATION_FUNC_IS_FP 1
-#define ACTIVATION_PARAMS NL_M, NL_N
-#define ACTIVATION_FUNC(input, m, n) input
-#define ACTIVATION(input, params) ACTIVATION_FUNC(input, params)
-#define INPUT0_SIZE_X 128
-#define INPUT0_SIZE_Y (shape_info[6] )
-#define INPUT0_SIZE_Z 1
-#define INPUT0_SIZE_W 1
-#define INPUT0_SIZE_U 1
-#define INPUT0_SIZE_V 1
-#define INPUT0_FEATURE_NUM 16
-#define INPUT0_BATCH_NUM (shape_info[0] )
-#define INPUT0_PAD_BEFORE_SIZE_X 0
-#define INPUT0_PAD_BEFORE_SIZE_Y 0
-#define INPUT0_PAD_BEFORE_SIZE_Z 0
-#define INPUT0_PAD_BEFORE_SIZE_W 0
-#define INPUT0_PAD_BEFORE_SIZE_U 0
-#define INPUT0_PAD_BEFORE_SIZE_V 0
-#define INPUT0_PAD_BEFORE_FEATURE_NUM 0
-#define INPUT0_PAD_BEFORE_BATCH_NUM 0
-#define INPUT0_PAD_AFTER_SIZE_X 0
-#define INPUT0_PAD_AFTER_SIZE_Y 0
-#define INPUT0_PAD_AFTER_SIZE_Z 0
-#define INPUT0_PAD_AFTER_SIZE_W 0
-#define INPUT0_PAD_AFTER_SIZE_U 0
-#define INPUT0_PAD_AFTER_SIZE_V 0
-#define INPUT0_PAD_AFTER_FEATURE_NUM 0
-#define INPUT0_PAD_AFTER_BATCH_NUM 0
-#define INPUT0_X_PITCH 1
-#define INPUT0_Y_PITCH 128
-#define INPUT0_Z_PITCH (128*(shape_info[6]  + 0))
-#define INPUT0_W_PITCH (128*(shape_info[6]  + 0)*1)
-#define INPUT0_U_PITCH (128*(shape_info[6]  + 0)*1*1)
-#define INPUT0_V_PITCH (128*(shape_info[6]  + 0)*1*1*1)
-#define INPUT0_FEATURE_PITCH (128*(shape_info[6]  + 0)*1*1*1*1)
-#define INPUT0_BATCH_PITCH (128*(shape_info[6]  + 0)*1*1*1*1*16)
+#define FP64_SUPPORTED                    1
+#define FP16_SUPPORTED                    1
+#define FP16_UNIT_USED                    1
+#define INT8_UNIT_USED                    0
+#define INT32_UNIT_USED                   0
+#define INT64_UNIT_USED                   0
+#define UINT8_UNIT_USED                   0
+#define UINT32_UNIT_USED                  0
+#define UNIT_TYPE                         half
+#define UNIT_VAL_MAX                      HALF_MAX
+#define UNIT_VAL_MIN                      -UNIT_VAL_MAX
+#define UNIT_VAL_ONE                      1.0h
+#define UNIT_VAL_ZERO                     0.0h
+#define TO_UNIT_TYPE(v)                   convert_half(v)
+#define TO_UNIT_TYPE_SAT(v)               convert_half(v)
+#define AS_UNIT_TYPE(v)                   as_half(v)
+#define UNIT_MAX_FUNC                     fmax
+#define UNIT_MIN_FUNC                     fmin
+#define UNIT_ABS_FUNC                     fabs
+#define UNIT_TYPE_SIZE                    2
+#define UNIT_IS_FP                        1
+#define NL_M                              as_float(0x0) /*0.000000e+00*/
+#define NL_N                              as_float(0x0) /*0.000000e+00*/
+#define ACTIVATION_FUNC_TYPE              half
+#define ACTIVATION_FUNC_VAL_MAX           HALF_MAX
+#define ACTIVATION_FUNC_VAL_MIN           -ACTIVATION_FUNC_VAL_MAX
+#define ACTIVATION_FUNC_VAL_ONE           1.0h
+#define ACTIVATION_FUNC_VAL_ZERO          0.0h
+#define TO_ACTIVATION_FUNC_TYPE(v)        convert_half(v)
+#define TO_ACTIVATION_FUNC_TYPE_SAT(v)    convert_half(v)
+#define AS_ACTIVATION_FUNC_TYPE(v)        as_half(v)
+#define ACTIVATION_FUNC_MAX_FUNC          fmax
+#define ACTIVATION_FUNC_MIN_FUNC          fmin
+#define ACTIVATION_FUNC_ABS_FUNC          fabs
+#define ACTIVATION_FUNC_TYPE_SIZE         2
+#define ACTIVATION_FUNC_IS_FP             1
+#define ACTIVATION_PARAMS                 NL_M, NL_N
+#define ACTIVATION_FUNC(input, m, n)      input
+#define ACTIVATION(input, params)         ACTIVATION_FUNC(input, params)
+#define INPUT0_SIZE_X                     128
+#define INPUT0_SIZE_Y                     (shape_info[6])
+#define INPUT0_SIZE_Z                     1
+#define INPUT0_SIZE_W                     1
+#define INPUT0_SIZE_U                     1
+#define INPUT0_SIZE_V                     1
+#define INPUT0_FEATURE_NUM                28
+#define INPUT0_BATCH_NUM                  (shape_info[0])
+#define INPUT0_PAD_BEFORE_SIZE_X          0
+#define INPUT0_PAD_BEFORE_SIZE_Y          0
+#define INPUT0_PAD_BEFORE_SIZE_Z          0
+#define INPUT0_PAD_BEFORE_SIZE_W          0
+#define INPUT0_PAD_BEFORE_SIZE_U          0
+#define INPUT0_PAD_BEFORE_SIZE_V          0
+#define INPUT0_PAD_BEFORE_FEATURE_NUM     0
+#define INPUT0_PAD_BEFORE_BATCH_NUM       0
+#define INPUT0_PAD_AFTER_SIZE_X           0
+#define INPUT0_PAD_AFTER_SIZE_Y           0
+#define INPUT0_PAD_AFTER_SIZE_Z           0
+#define INPUT0_PAD_AFTER_SIZE_W           0
+#define INPUT0_PAD_AFTER_SIZE_U           0
+#define INPUT0_PAD_AFTER_SIZE_V           0
+#define INPUT0_PAD_AFTER_FEATURE_NUM      0
+#define INPUT0_PAD_AFTER_BATCH_NUM        0
+#define INPUT0_X_PITCH                    1
+#define INPUT0_Y_PITCH                    128
+#define INPUT0_Z_PITCH                    (128 * (shape_info[6] + 0))
+#define INPUT0_W_PITCH                    (128 * (shape_info[6] + 0) * 1)
+#define INPUT0_U_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1)
+#define INPUT0_V_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1 * 1)
+#define INPUT0_FEATURE_PITCH              (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
+#define INPUT0_BATCH_PITCH                (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
 #define INPUT0_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT0, b, f, y, x)
-#define INPUT0_GET_INDEX(b, f, y, x) GET_DATA_INDEX(INPUT0, b, f, y, x)
-#define INPUT0_GET_INDEX_RAW(b, f, y, x) GET_DATA_INDEX_RAW(INPUT0, b, f, y, x)
-#define INPUT0_VIEW_OFFSET 0
-#define INPUT0_LENGTH 0
-#define INPUT0_DIMS 4
-#define INPUT0_SIMPLE 1
-#define INPUT0_GROUPED 0
-#define INPUT0_LAYOUT_BFYX 1
-#define INPUT0_TYPE half
-#define INPUT0_VAL_MAX HALF_MAX
-#define INPUT0_VAL_MIN -INPUT0_VAL_MAX
-#define INPUT0_VAL_ONE 1.0h
-#define INPUT0_VAL_ZERO 0.0h
-#define TO_INPUT0_TYPE(v) convert_half(v)
-#define TO_INPUT0_TYPE_SAT(v) convert_half(v)
-#define AS_INPUT0_TYPE(v) as_half(v)
-#define INPUT0_MAX_FUNC fmax
-#define INPUT0_MIN_FUNC fmin
-#define INPUT0_ABS_FUNC fabs
-#define INPUT0_TYPE_SIZE 2
-#define INPUT0_IS_FP 1
-#define INPUT0_OFFSET ((INPUT0_X_PITCH*INPUT0_PAD_BEFORE_SIZE_X) + (INPUT0_Y_PITCH*INPUT0_PAD_BEFORE_SIZE_Y) + (INPUT0_Z_PITCH*INPUT0_PAD_BEFORE_SIZE_Z) + (INPUT0_W_PITCH*INPUT0_PAD_BEFORE_SIZE_W) + (INPUT0_FEATURE_PITCH*INPUT0_PAD_BEFORE_FEATURE_NUM) + (INPUT0_BATCH_PITCH*INPUT0_PAD_BEFORE_BATCH_NUM))
-#define INPUT0_PAD_BEFORE (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT0_PAD_AFTER (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT1_SIZE_X 128
-#define INPUT1_SIZE_Y (shape_info[14] )
-#define INPUT1_SIZE_Z 1
-#define INPUT1_SIZE_W 1
-#define INPUT1_SIZE_U 1
-#define INPUT1_SIZE_V 1
-#define INPUT1_FEATURE_NUM 4
-#define INPUT1_BATCH_NUM (shape_info[8] )
-#define INPUT1_PAD_BEFORE_SIZE_X 0
-#define INPUT1_PAD_BEFORE_SIZE_Y (shape_info[16])
-#define INPUT1_PAD_BEFORE_SIZE_Z 0
-#define INPUT1_PAD_BEFORE_SIZE_W 0
-#define INPUT1_PAD_BEFORE_SIZE_U 0
-#define INPUT1_PAD_BEFORE_SIZE_V 0
-#define INPUT1_PAD_BEFORE_FEATURE_NUM 0
-#define INPUT1_PAD_BEFORE_BATCH_NUM 0
-#define INPUT1_PAD_AFTER_SIZE_X 0
-#define INPUT1_PAD_AFTER_SIZE_Y (shape_info[17])
-#define INPUT1_PAD_AFTER_SIZE_Z 0
-#define INPUT1_PAD_AFTER_SIZE_W 0
-#define INPUT1_PAD_AFTER_SIZE_U 0
-#define INPUT1_PAD_AFTER_SIZE_V 0
-#define INPUT1_PAD_AFTER_FEATURE_NUM 0
-#define INPUT1_PAD_AFTER_BATCH_NUM 0
-#define INPUT1_X_PITCH 1
-#define INPUT1_Y_PITCH 128
-#define INPUT1_Z_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17])))
-#define INPUT1_W_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17]))*1)
-#define INPUT1_U_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17]))*1*1)
-#define INPUT1_V_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17]))*1*1*1)
-#define INPUT1_FEATURE_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17]))*1*1*1*1)
-#define INPUT1_BATCH_PITCH (128*(shape_info[14]  + (shape_info[16] + shape_info[17]))*1*1*1*1*4)
+#define INPUT0_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT0, b, f, y, x)
+#define INPUT0_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT0, b, f, y, x)
+#define INPUT0_VIEW_OFFSET                0
+#define INPUT0_LENGTH                     0
+#define INPUT0_DIMS                       4
+#define INPUT0_SIMPLE                     1
+#define INPUT0_GROUPED                    0
+#define INPUT0_LAYOUT_BFYX                1
+#define INPUT0_TYPE                       half
+#define INPUT0_VAL_MAX                    HALF_MAX
+#define INPUT0_VAL_MIN                    -INPUT0_VAL_MAX
+#define INPUT0_VAL_ONE                    1.0h
+#define INPUT0_VAL_ZERO                   0.0h
+#define TO_INPUT0_TYPE(v)                 convert_half(v)
+#define TO_INPUT0_TYPE_SAT(v)             convert_half(v)
+#define AS_INPUT0_TYPE(v)                 as_half(v)
+#define INPUT0_MAX_FUNC                   fmax
+#define INPUT0_MIN_FUNC                   fmin
+#define INPUT0_ABS_FUNC                   fabs
+#define INPUT0_TYPE_SIZE                  2
+#define INPUT0_IS_FP                      1
+#define INPUT0_OFFSET                                                                                                                          \
+    ((INPUT0_X_PITCH * INPUT0_PAD_BEFORE_SIZE_X) + (INPUT0_Y_PITCH * INPUT0_PAD_BEFORE_SIZE_Y) + (INPUT0_Z_PITCH * INPUT0_PAD_BEFORE_SIZE_Z) + \
+     (INPUT0_W_PITCH * INPUT0_PAD_BEFORE_SIZE_W) + (INPUT0_FEATURE_PITCH * INPUT0_PAD_BEFORE_FEATURE_NUM) + (INPUT0_BATCH_PITCH * INPUT0_PAD_BEFORE_BATCH_NUM))
+#define INPUT0_PAD_BEFORE          \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT0_PAD_AFTER           \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT1_SIZE_X                     128
+#define INPUT1_SIZE_Y                     (shape_info[14])
+#define INPUT1_SIZE_Z                     1
+#define INPUT1_SIZE_W                     1
+#define INPUT1_SIZE_U                     1
+#define INPUT1_SIZE_V                     1
+#define INPUT1_FEATURE_NUM                7
+#define INPUT1_BATCH_NUM                  (shape_info[8])
+#define INPUT1_PAD_BEFORE_SIZE_X          0
+#define INPUT1_PAD_BEFORE_SIZE_Y          (shape_info[16])
+#define INPUT1_PAD_BEFORE_SIZE_Z          0
+#define INPUT1_PAD_BEFORE_SIZE_W          0
+#define INPUT1_PAD_BEFORE_SIZE_U          0
+#define INPUT1_PAD_BEFORE_SIZE_V          0
+#define INPUT1_PAD_BEFORE_FEATURE_NUM     0
+#define INPUT1_PAD_BEFORE_BATCH_NUM       0
+#define INPUT1_PAD_AFTER_SIZE_X           0
+#define INPUT1_PAD_AFTER_SIZE_Y           (shape_info[17])
+#define INPUT1_PAD_AFTER_SIZE_Z           0
+#define INPUT1_PAD_AFTER_SIZE_W           0
+#define INPUT1_PAD_AFTER_SIZE_U           0
+#define INPUT1_PAD_AFTER_SIZE_V           0
+#define INPUT1_PAD_AFTER_FEATURE_NUM      0
+#define INPUT1_PAD_AFTER_BATCH_NUM        0
+#define INPUT1_X_PITCH                    1
+#define INPUT1_Y_PITCH                    128
+#define INPUT1_Z_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])))
+#define INPUT1_W_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
+#define INPUT1_U_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
+#define INPUT1_V_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
+#define INPUT1_FEATURE_PITCH              (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
+#define INPUT1_BATCH_PITCH                (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT1_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT1, b, f, y, x)
-#define INPUT1_GET_INDEX(b, f, y, x) GET_DATA_INDEX(INPUT1, b, f, y, x)
-#define INPUT1_GET_INDEX_RAW(b, f, y, x) GET_DATA_INDEX_RAW(INPUT1, b, f, y, x)
-#define INPUT1_VIEW_OFFSET 0
-#define INPUT1_LENGTH 0
-#define INPUT1_DIMS 4
-#define INPUT1_SIMPLE 1
-#define INPUT1_GROUPED 0
-#define INPUT1_LAYOUT_BFYX 1
-#define INPUT1_TYPE half
-#define INPUT1_VAL_MAX HALF_MAX
-#define INPUT1_VAL_MIN -INPUT1_VAL_MAX
-#define INPUT1_VAL_ONE 1.0h
-#define INPUT1_VAL_ZERO 0.0h
-#define TO_INPUT1_TYPE(v) convert_half(v)
-#define TO_INPUT1_TYPE_SAT(v) convert_half(v)
-#define AS_INPUT1_TYPE(v) as_half(v)
-#define INPUT1_MAX_FUNC fmax
-#define INPUT1_MIN_FUNC fmin
-#define INPUT1_ABS_FUNC fabs
-#define INPUT1_TYPE_SIZE 2
-#define INPUT1_IS_FP 1
-#define INPUT1_OFFSET ((INPUT1_X_PITCH*INPUT1_PAD_BEFORE_SIZE_X) + (INPUT1_Y_PITCH*INPUT1_PAD_BEFORE_SIZE_Y) + (INPUT1_Z_PITCH*INPUT1_PAD_BEFORE_SIZE_Z) + (INPUT1_W_PITCH*INPUT1_PAD_BEFORE_SIZE_W) + (INPUT1_FEATURE_PITCH*INPUT1_PAD_BEFORE_FEATURE_NUM) + (INPUT1_BATCH_PITCH*INPUT1_PAD_BEFORE_BATCH_NUM))
-#define INPUT1_PAD_BEFORE (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT1_PAD_AFTER (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT2_SIZE_X 128
-#define INPUT2_SIZE_Y (shape_info[24] )
-#define INPUT2_SIZE_Z 1
-#define INPUT2_SIZE_W 1
-#define INPUT2_SIZE_U 1
-#define INPUT2_SIZE_V 1
-#define INPUT2_FEATURE_NUM 4
-#define INPUT2_BATCH_NUM (shape_info[18] )
-#define INPUT2_PAD_BEFORE_SIZE_X 0
-#define INPUT2_PAD_BEFORE_SIZE_Y (shape_info[26])
-#define INPUT2_PAD_BEFORE_SIZE_Z 0
-#define INPUT2_PAD_BEFORE_SIZE_W 0
-#define INPUT2_PAD_BEFORE_SIZE_U 0
-#define INPUT2_PAD_BEFORE_SIZE_V 0
-#define INPUT2_PAD_BEFORE_FEATURE_NUM 0
-#define INPUT2_PAD_BEFORE_BATCH_NUM 0
-#define INPUT2_PAD_AFTER_SIZE_X 0
-#define INPUT2_PAD_AFTER_SIZE_Y (shape_info[27])
-#define INPUT2_PAD_AFTER_SIZE_Z 0
-#define INPUT2_PAD_AFTER_SIZE_W 0
-#define INPUT2_PAD_AFTER_SIZE_U 0
-#define INPUT2_PAD_AFTER_SIZE_V 0
-#define INPUT2_PAD_AFTER_FEATURE_NUM 0
-#define INPUT2_PAD_AFTER_BATCH_NUM 0
-#define INPUT2_X_PITCH 1
-#define INPUT2_Y_PITCH 128
-#define INPUT2_Z_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27])))
-#define INPUT2_W_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27]))*1)
-#define INPUT2_U_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27]))*1*1)
-#define INPUT2_V_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27]))*1*1*1)
-#define INPUT2_FEATURE_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27]))*1*1*1*1)
-#define INPUT2_BATCH_PITCH (128*(shape_info[24]  + (shape_info[26] + shape_info[27]))*1*1*1*1*4)
+#define INPUT1_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT1, b, f, y, x)
+#define INPUT1_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT1, b, f, y, x)
+#define INPUT1_VIEW_OFFSET                0
+#define INPUT1_LENGTH                     0
+#define INPUT1_DIMS                       4
+#define INPUT1_SIMPLE                     1
+#define INPUT1_GROUPED                    0
+#define INPUT1_LAYOUT_BFYX                1
+#define INPUT1_TYPE                       half
+#define INPUT1_VAL_MAX                    HALF_MAX
+#define INPUT1_VAL_MIN                    -INPUT1_VAL_MAX
+#define INPUT1_VAL_ONE                    1.0h
+#define INPUT1_VAL_ZERO                   0.0h
+#define TO_INPUT1_TYPE(v)                 convert_half(v)
+#define TO_INPUT1_TYPE_SAT(v)             convert_half(v)
+#define AS_INPUT1_TYPE(v)                 as_half(v)
+#define INPUT1_MAX_FUNC                   fmax
+#define INPUT1_MIN_FUNC                   fmin
+#define INPUT1_ABS_FUNC                   fabs
+#define INPUT1_TYPE_SIZE                  2
+#define INPUT1_IS_FP                      1
+#define INPUT1_OFFSET                                                                                                                          \
+    ((INPUT1_X_PITCH * INPUT1_PAD_BEFORE_SIZE_X) + (INPUT1_Y_PITCH * INPUT1_PAD_BEFORE_SIZE_Y) + (INPUT1_Z_PITCH * INPUT1_PAD_BEFORE_SIZE_Z) + \
+     (INPUT1_W_PITCH * INPUT1_PAD_BEFORE_SIZE_W) + (INPUT1_FEATURE_PITCH * INPUT1_PAD_BEFORE_FEATURE_NUM) + (INPUT1_BATCH_PITCH * INPUT1_PAD_BEFORE_BATCH_NUM))
+#define INPUT1_PAD_BEFORE          \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT1_PAD_AFTER           \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT2_SIZE_X                     128
+#define INPUT2_SIZE_Y                     (shape_info[24])
+#define INPUT2_SIZE_Z                     1
+#define INPUT2_SIZE_W                     1
+#define INPUT2_SIZE_U                     1
+#define INPUT2_SIZE_V                     1
+#define INPUT2_FEATURE_NUM                7
+#define INPUT2_BATCH_NUM                  (shape_info[18])
+#define INPUT2_PAD_BEFORE_SIZE_X          0
+#define INPUT2_PAD_BEFORE_SIZE_Y          (shape_info[26])
+#define INPUT2_PAD_BEFORE_SIZE_Z          0
+#define INPUT2_PAD_BEFORE_SIZE_W          0
+#define INPUT2_PAD_BEFORE_SIZE_U          0
+#define INPUT2_PAD_BEFORE_SIZE_V          0
+#define INPUT2_PAD_BEFORE_FEATURE_NUM     0
+#define INPUT2_PAD_BEFORE_BATCH_NUM       0
+#define INPUT2_PAD_AFTER_SIZE_X           0
+#define INPUT2_PAD_AFTER_SIZE_Y           (shape_info[27])
+#define INPUT2_PAD_AFTER_SIZE_Z           0
+#define INPUT2_PAD_AFTER_SIZE_W           0
+#define INPUT2_PAD_AFTER_SIZE_U           0
+#define INPUT2_PAD_AFTER_SIZE_V           0
+#define INPUT2_PAD_AFTER_FEATURE_NUM      0
+#define INPUT2_PAD_AFTER_BATCH_NUM        0
+#define INPUT2_X_PITCH                    1
+#define INPUT2_Y_PITCH                    128
+#define INPUT2_Z_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])))
+#define INPUT2_W_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
+#define INPUT2_U_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
+#define INPUT2_V_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
+#define INPUT2_FEATURE_PITCH              (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
+#define INPUT2_BATCH_PITCH                (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT2_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT2, b, f, y, x)
-#define INPUT2_GET_INDEX(b, f, y, x) GET_DATA_INDEX(INPUT2, b, f, y, x)
-#define INPUT2_GET_INDEX_RAW(b, f, y, x) GET_DATA_INDEX_RAW(INPUT2, b, f, y, x)
-#define INPUT2_VIEW_OFFSET 0
-#define INPUT2_LENGTH 0
-#define INPUT2_DIMS 4
-#define INPUT2_SIMPLE 1
-#define INPUT2_GROUPED 0
-#define INPUT2_LAYOUT_BFYX 1
-#define INPUT2_TYPE half
-#define INPUT2_VAL_MAX HALF_MAX
-#define INPUT2_VAL_MIN -INPUT2_VAL_MAX
-#define INPUT2_VAL_ONE 1.0h
-#define INPUT2_VAL_ZERO 0.0h
-#define TO_INPUT2_TYPE(v) convert_half(v)
-#define TO_INPUT2_TYPE_SAT(v) convert_half(v)
-#define AS_INPUT2_TYPE(v) as_half(v)
-#define INPUT2_MAX_FUNC fmax
-#define INPUT2_MIN_FUNC fmin
-#define INPUT2_ABS_FUNC fabs
-#define INPUT2_TYPE_SIZE 2
-#define INPUT2_IS_FP 1
-#define INPUT2_OFFSET ((INPUT2_X_PITCH*INPUT2_PAD_BEFORE_SIZE_X) + (INPUT2_Y_PITCH*INPUT2_PAD_BEFORE_SIZE_Y) + (INPUT2_Z_PITCH*INPUT2_PAD_BEFORE_SIZE_Z) + (INPUT2_W_PITCH*INPUT2_PAD_BEFORE_SIZE_W) + (INPUT2_FEATURE_PITCH*INPUT2_PAD_BEFORE_FEATURE_NUM) + (INPUT2_BATCH_PITCH*INPUT2_PAD_BEFORE_BATCH_NUM))
-#define INPUT2_PAD_BEFORE (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT2_PAD_AFTER (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT3_SIZE_X (shape_info[35] )
-#define INPUT3_SIZE_Y (shape_info[34] )
-#define INPUT3_SIZE_Z 1
-#define INPUT3_SIZE_W 1
-#define INPUT3_SIZE_U 1
-#define INPUT3_SIZE_V 1
-#define INPUT3_FEATURE_NUM (shape_info[29] )
-#define INPUT3_BATCH_NUM (shape_info[28] )
-#define INPUT3_PAD_BEFORE_SIZE_X 0
-#define INPUT3_PAD_BEFORE_SIZE_Y 0
-#define INPUT3_PAD_BEFORE_SIZE_Z 0
-#define INPUT3_PAD_BEFORE_SIZE_W 0
-#define INPUT3_PAD_BEFORE_SIZE_U 0
-#define INPUT3_PAD_BEFORE_SIZE_V 0
-#define INPUT3_PAD_BEFORE_FEATURE_NUM 0
-#define INPUT3_PAD_BEFORE_BATCH_NUM 0
-#define INPUT3_PAD_AFTER_SIZE_X 0
-#define INPUT3_PAD_AFTER_SIZE_Y 0
-#define INPUT3_PAD_AFTER_SIZE_Z 0
-#define INPUT3_PAD_AFTER_SIZE_W 0
-#define INPUT3_PAD_AFTER_SIZE_U 0
-#define INPUT3_PAD_AFTER_SIZE_V 0
-#define INPUT3_PAD_AFTER_FEATURE_NUM 0
-#define INPUT3_PAD_AFTER_BATCH_NUM 0
-#define INPUT3_X_PITCH 1
-#define INPUT3_Y_PITCH (shape_info[35]  + 0)
-#define INPUT3_Z_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0))
-#define INPUT3_W_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0)*1)
-#define INPUT3_U_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0)*1*1)
-#define INPUT3_V_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0)*1*1*1)
-#define INPUT3_FEATURE_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0)*1*1*1*1)
-#define INPUT3_BATCH_PITCH ((shape_info[35]  + 0)*(shape_info[34]  + 0)*1*1*1*1*(shape_info[29]  + 0))
+#define INPUT2_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT2, b, f, y, x)
+#define INPUT2_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT2, b, f, y, x)
+#define INPUT2_VIEW_OFFSET                0
+#define INPUT2_LENGTH                     0
+#define INPUT2_DIMS                       4
+#define INPUT2_SIMPLE                     1
+#define INPUT2_GROUPED                    0
+#define INPUT2_LAYOUT_BFYX                1
+#define INPUT2_TYPE                       half
+#define INPUT2_VAL_MAX                    HALF_MAX
+#define INPUT2_VAL_MIN                    -INPUT2_VAL_MAX
+#define INPUT2_VAL_ONE                    1.0h
+#define INPUT2_VAL_ZERO                   0.0h
+#define TO_INPUT2_TYPE(v)                 convert_half(v)
+#define TO_INPUT2_TYPE_SAT(v)             convert_half(v)
+#define AS_INPUT2_TYPE(v)                 as_half(v)
+#define INPUT2_MAX_FUNC                   fmax
+#define INPUT2_MIN_FUNC                   fmin
+#define INPUT2_ABS_FUNC                   fabs
+#define INPUT2_TYPE_SIZE                  2
+#define INPUT2_IS_FP                      1
+#define INPUT2_OFFSET                                                                                                                          \
+    ((INPUT2_X_PITCH * INPUT2_PAD_BEFORE_SIZE_X) + (INPUT2_Y_PITCH * INPUT2_PAD_BEFORE_SIZE_Y) + (INPUT2_Z_PITCH * INPUT2_PAD_BEFORE_SIZE_Z) + \
+     (INPUT2_W_PITCH * INPUT2_PAD_BEFORE_SIZE_W) + (INPUT2_FEATURE_PITCH * INPUT2_PAD_BEFORE_FEATURE_NUM) + (INPUT2_BATCH_PITCH * INPUT2_PAD_BEFORE_BATCH_NUM))
+#define INPUT2_PAD_BEFORE          \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT2_PAD_AFTER           \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT3_SIZE_X                     (shape_info[35])
+#define INPUT3_SIZE_Y                     (shape_info[34])
+#define INPUT3_SIZE_Z                     1
+#define INPUT3_SIZE_W                     1
+#define INPUT3_SIZE_U                     1
+#define INPUT3_SIZE_V                     1
+#define INPUT3_FEATURE_NUM                1
+#define INPUT3_BATCH_NUM                  1
+#define INPUT3_PAD_BEFORE_SIZE_X          0
+#define INPUT3_PAD_BEFORE_SIZE_Y          0
+#define INPUT3_PAD_BEFORE_SIZE_Z          0
+#define INPUT3_PAD_BEFORE_SIZE_W          0
+#define INPUT3_PAD_BEFORE_SIZE_U          0
+#define INPUT3_PAD_BEFORE_SIZE_V          0
+#define INPUT3_PAD_BEFORE_FEATURE_NUM     0
+#define INPUT3_PAD_BEFORE_BATCH_NUM       0
+#define INPUT3_PAD_AFTER_SIZE_X           0
+#define INPUT3_PAD_AFTER_SIZE_Y           0
+#define INPUT3_PAD_AFTER_SIZE_Z           0
+#define INPUT3_PAD_AFTER_SIZE_W           0
+#define INPUT3_PAD_AFTER_SIZE_U           0
+#define INPUT3_PAD_AFTER_SIZE_V           0
+#define INPUT3_PAD_AFTER_FEATURE_NUM      0
+#define INPUT3_PAD_AFTER_BATCH_NUM        0
+#define INPUT3_X_PITCH                    1
+#define INPUT3_Y_PITCH                    (shape_info[35] + 0)
+#define INPUT3_Z_PITCH                    ((shape_info[35] + 0) * (shape_info[34] + 0))
+#define INPUT3_W_PITCH                    ((shape_info[35] + 0) * (shape_info[34] + 0) * 1)
+#define INPUT3_U_PITCH                    ((shape_info[35] + 0) * (shape_info[34] + 0) * 1 * 1)
+#define INPUT3_V_PITCH                    ((shape_info[35] + 0) * (shape_info[34] + 0) * 1 * 1 * 1)
+#define INPUT3_FEATURE_PITCH              ((shape_info[35] + 0) * (shape_info[34] + 0) * 1 * 1 * 1 * 1)
+#define INPUT3_BATCH_PITCH                ((shape_info[35] + 0) * (shape_info[34] + 0) * 1 * 1 * 1 * 1 * 1)
 #define INPUT3_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT3, b, f, y, x)
-#define INPUT3_GET_INDEX(b, f, y, x) GET_DATA_INDEX(INPUT3, b, f, y, x)
-#define INPUT3_GET_INDEX_RAW(b, f, y, x) GET_DATA_INDEX_RAW(INPUT3, b, f, y, x)
-#define INPUT3_VIEW_OFFSET 0
-#define INPUT3_LENGTH 0
-#define INPUT3_DIMS 4
-#define INPUT3_SIMPLE 1
-#define INPUT3_GROUPED 0
-#define INPUT3_LAYOUT_BFYX 1
-#define INPUT3_TYPE half
-#define INPUT3_VAL_MAX HALF_MAX
-#define INPUT3_VAL_MIN -INPUT3_VAL_MAX
-#define INPUT3_VAL_ONE 1.0h
-#define INPUT3_VAL_ZERO 0.0h
-#define TO_INPUT3_TYPE(v) convert_half(v)
-#define TO_INPUT3_TYPE_SAT(v) convert_half(v)
-#define AS_INPUT3_TYPE(v) as_half(v)
-#define INPUT3_MAX_FUNC fmax
-#define INPUT3_MIN_FUNC fmin
-#define INPUT3_ABS_FUNC fabs
-#define INPUT3_TYPE_SIZE 2
-#define INPUT3_IS_FP 1
-#define INPUT3_OFFSET ((INPUT3_X_PITCH*INPUT3_PAD_BEFORE_SIZE_X) + (INPUT3_Y_PITCH*INPUT3_PAD_BEFORE_SIZE_Y) + (INPUT3_Z_PITCH*INPUT3_PAD_BEFORE_SIZE_Z) + (INPUT3_W_PITCH*INPUT3_PAD_BEFORE_SIZE_W) + (INPUT3_FEATURE_PITCH*INPUT3_PAD_BEFORE_FEATURE_NUM) + (INPUT3_BATCH_PITCH*INPUT3_PAD_BEFORE_BATCH_NUM))
-#define INPUT3_PAD_BEFORE (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define INPUT3_PAD_AFTER (size_t []){ 0,0,0,0,0,0,0,0,0, } 
+#define INPUT3_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT3, b, f, y, x)
+#define INPUT3_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT3, b, f, y, x)
+#define INPUT3_VIEW_OFFSET                0
+#define INPUT3_LENGTH                     0
+#define INPUT3_DIMS                       4
+#define INPUT3_SIMPLE                     1
+#define INPUT3_GROUPED                    0
+#define INPUT3_LAYOUT_BFYX                1
+#define INPUT3_TYPE                       half
+#define INPUT3_VAL_MAX                    HALF_MAX
+#define INPUT3_VAL_MIN                    -INPUT3_VAL_MAX
+#define INPUT3_VAL_ONE                    1.0h
+#define INPUT3_VAL_ZERO                   0.0h
+#define TO_INPUT3_TYPE(v)                 convert_half(v)
+#define TO_INPUT3_TYPE_SAT(v)             convert_half(v)
+#define AS_INPUT3_TYPE(v)                 as_half(v)
+#define INPUT3_MAX_FUNC                   fmax
+#define INPUT3_MIN_FUNC                   fmin
+#define INPUT3_ABS_FUNC                   fabs
+#define INPUT3_TYPE_SIZE                  2
+#define INPUT3_IS_FP                      1
+#define INPUT3_OFFSET                                                                                                                          \
+    ((INPUT3_X_PITCH * INPUT3_PAD_BEFORE_SIZE_X) + (INPUT3_Y_PITCH * INPUT3_PAD_BEFORE_SIZE_Y) + (INPUT3_Z_PITCH * INPUT3_PAD_BEFORE_SIZE_Z) + \
+     (INPUT3_W_PITCH * INPUT3_PAD_BEFORE_SIZE_W) + (INPUT3_FEATURE_PITCH * INPUT3_PAD_BEFORE_FEATURE_NUM) + (INPUT3_BATCH_PITCH * INPUT3_PAD_BEFORE_BATCH_NUM))
+#define INPUT3_PAD_BEFORE          \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define INPUT3_PAD_AFTER           \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
 #define INPUT4_SIZE_X                     1
 #define INPUT4_SIZE_Y                     1
 #define INPUT4_SIZE_Z                     1
@@ -1909,101 +1941,111 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define OUTPUT_SIZE_X 128
-#define OUTPUT_SIZE_Y (shape_info[50] )
-#define OUTPUT_SIZE_Z 1
-#define OUTPUT_SIZE_W 1
-#define OUTPUT_SIZE_U 1
-#define OUTPUT_SIZE_V 1
-#define OUTPUT_FEATURE_NUM 16
-#define OUTPUT_BATCH_NUM (shape_info[44] )
-#define OUTPUT_PAD_BEFORE_SIZE_X 0
-#define OUTPUT_PAD_BEFORE_SIZE_Y 0
-#define OUTPUT_PAD_BEFORE_SIZE_Z 0
-#define OUTPUT_PAD_BEFORE_SIZE_W 0
-#define OUTPUT_PAD_BEFORE_SIZE_U 0
-#define OUTPUT_PAD_BEFORE_SIZE_V 0
-#define OUTPUT_PAD_BEFORE_FEATURE_NUM 0
-#define OUTPUT_PAD_BEFORE_BATCH_NUM 0
-#define OUTPUT_PAD_AFTER_SIZE_X 0
-#define OUTPUT_PAD_AFTER_SIZE_Y 0
-#define OUTPUT_PAD_AFTER_SIZE_Z 0
-#define OUTPUT_PAD_AFTER_SIZE_W 0
-#define OUTPUT_PAD_AFTER_SIZE_U 0
-#define OUTPUT_PAD_AFTER_SIZE_V 0
-#define OUTPUT_PAD_AFTER_FEATURE_NUM 0
-#define OUTPUT_PAD_AFTER_BATCH_NUM 0
-#define OUTPUT_X_PITCH 1
-#define OUTPUT_Y_PITCH 128
-#define OUTPUT_Z_PITCH (128*(shape_info[50]  + 0))
-#define OUTPUT_W_PITCH (128*(shape_info[50]  + 0)*1)
-#define OUTPUT_U_PITCH (128*(shape_info[50]  + 0)*1*1)
-#define OUTPUT_V_PITCH (128*(shape_info[50]  + 0)*1*1*1)
-#define OUTPUT_FEATURE_PITCH (128*(shape_info[50]  + 0)*1*1*1*1)
-#define OUTPUT_BATCH_PITCH (128*(shape_info[50]  + 0)*1*1*1*1*16)
+#define OUTPUT_SIZE_X                     128
+#define OUTPUT_SIZE_Y                     (shape_info[42])
+#define OUTPUT_SIZE_Z                     1
+#define OUTPUT_SIZE_W                     1
+#define OUTPUT_SIZE_U                     1
+#define OUTPUT_SIZE_V                     1
+#define OUTPUT_FEATURE_NUM                28
+#define OUTPUT_BATCH_NUM                  (shape_info[36])
+#define OUTPUT_PAD_BEFORE_SIZE_X          0
+#define OUTPUT_PAD_BEFORE_SIZE_Y          0
+#define OUTPUT_PAD_BEFORE_SIZE_Z          0
+#define OUTPUT_PAD_BEFORE_SIZE_W          0
+#define OUTPUT_PAD_BEFORE_SIZE_U          0
+#define OUTPUT_PAD_BEFORE_SIZE_V          0
+#define OUTPUT_PAD_BEFORE_FEATURE_NUM     0
+#define OUTPUT_PAD_BEFORE_BATCH_NUM       0
+#define OUTPUT_PAD_AFTER_SIZE_X           0
+#define OUTPUT_PAD_AFTER_SIZE_Y           0
+#define OUTPUT_PAD_AFTER_SIZE_Z           0
+#define OUTPUT_PAD_AFTER_SIZE_W           0
+#define OUTPUT_PAD_AFTER_SIZE_U           0
+#define OUTPUT_PAD_AFTER_SIZE_V           0
+#define OUTPUT_PAD_AFTER_FEATURE_NUM      0
+#define OUTPUT_PAD_AFTER_BATCH_NUM        0
+#define OUTPUT_X_PITCH                    1
+#define OUTPUT_Y_PITCH                    128
+#define OUTPUT_Z_PITCH                    (128 * (shape_info[42] + 0))
+#define OUTPUT_W_PITCH                    (128 * (shape_info[42] + 0) * 1)
+#define OUTPUT_U_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1)
+#define OUTPUT_V_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1 * 1)
+#define OUTPUT_FEATURE_PITCH              (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
+#define OUTPUT_BATCH_PITCH                (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
 #define OUTPUT_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(OUTPUT, b, f, y, x)
-#define OUTPUT_GET_INDEX(b, f, y, x) GET_DATA_INDEX(OUTPUT, b, f, y, x)
-#define OUTPUT_GET_INDEX_RAW(b, f, y, x) GET_DATA_INDEX_RAW(OUTPUT, b, f, y, x)
-#define OUTPUT_VIEW_OFFSET 0
-#define OUTPUT_LENGTH 0
-#define OUTPUT_DIMS 4
-#define OUTPUT_SIMPLE 1
-#define OUTPUT_GROUPED 0
-#define OUTPUT_LAYOUT_BFYX 1
-#define OUTPUT_TYPE half
-#define OUTPUT_VAL_MAX HALF_MAX
-#define OUTPUT_VAL_MIN -OUTPUT_VAL_MAX
-#define OUTPUT_VAL_ONE 1.0h
-#define OUTPUT_VAL_ZERO 0.0h
-#define TO_OUTPUT_TYPE(v) convert_half(v)
-#define TO_OUTPUT_TYPE_SAT(v) convert_half(v)
-#define AS_OUTPUT_TYPE(v) as_half(v)
-#define OUTPUT_MAX_FUNC fmax
-#define OUTPUT_MIN_FUNC fmin
-#define OUTPUT_ABS_FUNC fabs
-#define OUTPUT_TYPE_SIZE 2
-#define OUTPUT_IS_FP 1
-#define OUTPUT_OFFSET ((OUTPUT_X_PITCH*OUTPUT_PAD_BEFORE_SIZE_X) + (OUTPUT_Y_PITCH*OUTPUT_PAD_BEFORE_SIZE_Y) + (OUTPUT_Z_PITCH*OUTPUT_PAD_BEFORE_SIZE_Z) + (OUTPUT_W_PITCH*OUTPUT_PAD_BEFORE_SIZE_W) + (OUTPUT_FEATURE_PITCH*OUTPUT_PAD_BEFORE_FEATURE_NUM) + (OUTPUT_BATCH_PITCH*OUTPUT_PAD_BEFORE_BATCH_NUM))
-#define OUTPUT_PAD_BEFORE (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define OUTPUT_PAD_AFTER (size_t []){ 0,0,0,0,0,0,0,0,0, } 
-#define IS_DYNAMIC 1
-#define OPTIONAL_SHAPE_INFO_ARG __global const int* shape_info,
+#define OUTPUT_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(OUTPUT, b, f, y, x)
+#define OUTPUT_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(OUTPUT, b, f, y, x)
+#define OUTPUT_VIEW_OFFSET                0
+#define OUTPUT_LENGTH                     0
+#define OUTPUT_DIMS                       4
+#define OUTPUT_SIMPLE                     1
+#define OUTPUT_GROUPED                    0
+#define OUTPUT_LAYOUT_BFYX                1
+#define OUTPUT_TYPE                       half
+#define OUTPUT_VAL_MAX                    HALF_MAX
+#define OUTPUT_VAL_MIN                    -OUTPUT_VAL_MAX
+#define OUTPUT_VAL_ONE                    1.0h
+#define OUTPUT_VAL_ZERO                   0.0h
+#define TO_OUTPUT_TYPE(v)                 convert_half(v)
+#define TO_OUTPUT_TYPE_SAT(v)             convert_half(v)
+#define AS_OUTPUT_TYPE(v)                 as_half(v)
+#define OUTPUT_MAX_FUNC                   fmax
+#define OUTPUT_MIN_FUNC                   fmin
+#define OUTPUT_ABS_FUNC                   fabs
+#define OUTPUT_TYPE_SIZE                  2
+#define OUTPUT_IS_FP                      1
+#define OUTPUT_OFFSET                                                                                                                          \
+    ((OUTPUT_X_PITCH * OUTPUT_PAD_BEFORE_SIZE_X) + (OUTPUT_Y_PITCH * OUTPUT_PAD_BEFORE_SIZE_Y) + (OUTPUT_Z_PITCH * OUTPUT_PAD_BEFORE_SIZE_Z) + \
+     (OUTPUT_W_PITCH * OUTPUT_PAD_BEFORE_SIZE_W) + (OUTPUT_FEATURE_PITCH * OUTPUT_PAD_BEFORE_FEATURE_NUM) + (OUTPUT_BATCH_PITCH * OUTPUT_PAD_BEFORE_BATCH_NUM))
+#define OUTPUT_PAD_BEFORE          \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define OUTPUT_PAD_AFTER           \
+    (size_t[]) {                   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, \
+    }
+#define IS_DYNAMIC                 1
+#define OPTIONAL_SHAPE_INFO_ARG    __global const int *shape_info,
 #define OPTIONAL_SHAPE_INFO_TENSOR shape_info,
-#define LayerID indirectsdpa:__module.model.layers.0.self_attn/aten::scaled_dot_product_attention/ScaledDotProductAttention
-#define BROADCAST_GROUP_SIZE 4
-#define DO_BROADCAST_KEY_VALUE f /= 4;
-#define IS_CAUSAL 0
-#define HAS_ATTN_MASK_INPUT 1
-#define HAS_SCALE_INPUT 1
-#define IS_KV_COMPRESSED 0
-#define INPUT0_DIMS_ORDER b,f,w,z,y,x
-#define INPUT1_DIMS_ORDER b,f,w,z,y,x
-#define INPUT2_DIMS_ORDER b,f,w,z,y,x
-#define TARGET_SEQ_LEN (shape_info[6] )
-// #define NUM_HEADS 16
-// #define NUM_KV_HEADS -1
-#define SOURCE_SEQ_LEN (shape_info[14] )
-#define SOFTMAX_ACCUMULATOR_TYPE float
-#define SOFTMAX_ACCUMULATOR_VAL_MAX FLT_MAX
-#define SOFTMAX_ACCUMULATOR_VAL_MIN -SOFTMAX_ACCUMULATOR_VAL_MAX
-#define SOFTMAX_ACCUMULATOR_VAL_ONE 1.0f
-#define SOFTMAX_ACCUMULATOR_VAL_ZERO 0.0f
-#define TO_SOFTMAX_ACCUMULATOR_TYPE(v) convert_float(v)
+#define LayerID \
+    sdpa:       \
+    sdpa
+#define BROADCAST_GROUP_SIZE               4
+#define DO_BROADCAST_KEY_VALUE             f /= 4;
+#define IS_CAUSAL                          0
+#define HAS_ATTN_MASK_INPUT                1
+#define HAS_SCALE_INPUT                    1
+#define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT1_DIMS_ORDER                  b, f, w, z, y, x
+#define INPUT2_DIMS_ORDER                  b, f, w, z, y, x
+#define TARGET_SEQ_LEN                     (shape_info[6])
+// #define NUM_HEADS                          28
+// #define NUM_KV_HEADS                       -1
+#define SOURCE_SEQ_LEN                     (shape_info[14])
+#define SOFTMAX_ACCUMULATOR_TYPE           float
+#define SOFTMAX_ACCUMULATOR_VAL_MAX        FLT_MAX
+#define SOFTMAX_ACCUMULATOR_VAL_MIN        -SOFTMAX_ACCUMULATOR_VAL_MAX
+#define SOFTMAX_ACCUMULATOR_VAL_ONE        1.0f
+#define SOFTMAX_ACCUMULATOR_VAL_ZERO       0.0f
+#define TO_SOFTMAX_ACCUMULATOR_TYPE(v)     convert_float(v)
 #define TO_SOFTMAX_ACCUMULATOR_TYPE_SAT(v) convert_float(v)
-#define AS_SOFTMAX_ACCUMULATOR_TYPE(v) as_float(v)
-#define SOFTMAX_ACCUMULATOR_MAX_FUNC fmax
-#define SOFTMAX_ACCUMULATOR_MIN_FUNC fmin
-#define SOFTMAX_ACCUMULATOR_ABS_FUNC fabs
-#define SOFTMAX_ACCUMULATOR_TYPE_SIZE 4
-#define SOFTMAX_ACCUMULATOR_IS_FP 1
-#define SUBGROUP_SIZE 16
-// #define HEAD_SIZE 128
-// #define SEQ_LEN_PARTITION_SIZE 256
-#define TARGET_SEQ_LEN_BLOCK_SIZE 16
-#define SDPA_STAGE_0 1
-// #define SG_SCALE_FACTOR 2
+#define AS_SOFTMAX_ACCUMULATOR_TYPE(v)     as_float(v)
+#define SOFTMAX_ACCUMULATOR_MAX_FUNC       fmax
+#define SOFTMAX_ACCUMULATOR_MIN_FUNC       fmin
+#define SOFTMAX_ACCUMULATOR_ABS_FUNC       fabs
+#define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
+#define SOFTMAX_ACCUMULATOR_IS_FP          1
+#define SUBGROUP_SIZE                      16
+// #define HEAD_SIZE                          128
+// #define SEQ_LEN_PARTITION_SIZE             (SG_SCALE_FACTOR * HEAD_SIZE)
+#define TARGET_SEQ_LEN_BLOCK_SIZE          16
+#define SDPA_STAGE_0                       1
+// #define SG_SCALE_FACTOR                    2
 #define STATIC_SCALE_VALUE_INV as_float(0x413504f3)/*1.131371e+01*/
 #define STATIC_SCALE_VALUE as_float(0x3db504f3)/*8.838835e-02*/
+#define LOAD_KEY_LEFTOVERS_IN_CALC_LOOP 1
 
 // query_input   [batch, heads_num, q_len, head_size]
 // key_input     [batch, kv_heads_num, kv_len, head_size]

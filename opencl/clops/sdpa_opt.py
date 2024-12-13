@@ -91,7 +91,7 @@ if __name__ == "__main__":
         key = k.view(B, Lk, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
         value = v.view(B, Lk, Hk, HEAD_SIZE).transpose(1, 2).contiguous()
 
-        attn_mask = torch.broadcast_to(attention_mask, [B, Lq, Lk])[:, None, :, :].contiguous()
+        attn_mask = torch.broadcast_to(attention_mask[:, None, :], [B, Lq, Lk])[:, None, :, :].contiguous()
         # attn_mask = torch.tril(b, diagonal=1)
         # print("shapes : ", query.shape, key.shape, value.shape)
 
@@ -208,12 +208,13 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(1, 2, 1, 128, 8410, 8410, False)   # tail
+        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
         # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
         # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
         # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
         # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
         # test_acc(1, 1, 1, 128, 3*128, 3*128, False)
+        # test_acc(2, 1, 1, 128, 1, 128, True)   # tail
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
