@@ -137,7 +137,7 @@ void debug_log(const char * file_path, int line, Ts... args) {
     (void)(dummy);
     std::cout << file_path << ":" << line << "   " << ss.str() << "" << std::endl;
 }
-#define DEBUG_LOG(...) debug_log(__FILE__, __LINE__, __VA_ARGS__)
+#define DEBUG_LOG(...) debug_log(__FILE__, __LINE__, ## __VA_ARGS__)
 #else
 #define DEBUG_LOG(...) 
 #endif
@@ -176,7 +176,7 @@ public:
     using VREG = vregister;
 
     cjit() {
-        init_regs();
+        init_frame();
     }
 
     template <typename B, typename E, typename S = size_t>
@@ -266,10 +266,10 @@ public:
         if (element_bits != 32)
             throw std::runtime_error("on 32-bits unit size supported for mask on AVX2");
         static int32_t mem_mask[] = {-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0};
-        auto mask = m_inject_frames.back().local_vreg();
+        auto mask = cur_frame().local_vreg();
         // generate the mask
-        auto tmp = m_inject_frames.back().local_sreg();
-        auto idx = m_inject_frames.back().local_sreg();
+        auto tmp = cur_frame().local_sreg();
+        auto idx = cur_frame().local_sreg();
         mov(idx, count);
         and_(idx, 7);
         neg(idx);
@@ -305,7 +305,7 @@ public:
         if (v == 0) {
             vpxor(dst, dst, dst);
         } else {
-            auto tmp = m_inject_frames.back().local_sreg();
+            auto tmp = cur_frame().local_sreg();
             mov(tmp, *reinterpret_cast<uint32_t*>(&v));
             vmovd(dst, tmp);
             vbroadcastss(dst, dst);
@@ -318,17 +318,12 @@ public:
         if (v == 0) {
             vpxor(dst, dst, dst);
         } else {
-            auto tmp = m_inject_frames.back().local_sreg();
+            auto tmp = cur_frame().local_sreg();
             mov(tmp.r32(), *reinterpret_cast<uint32_t*>(&v));
             //printf("============ %d %d \n", dst.xmm().isXMM(), tmp.r32().isREG(32));
             vmovd(dst.xmm(), tmp.r32());
             vbroadcastss(dst, dst.xmm());
         }
-    }
-
-    void finish() {
-        ret();
-        finalize();
     }
 
     int inject_frame_level = 1;
@@ -344,29 +339,44 @@ public:
     int m_srf_owner[NUM_SREGS];
     int m_vrf_owner[NUM_VREGS];
 
-    void init_regs() {
-        inject_frame_level = 0;
+    void init_frame() {
+        inject_frame_level = 1;
         for (size_t i = 0; i < NUM_SREGS; i++) {
             m_srf_owner[i] = 0; // free : no need to push/pop
             m_vrf_owner[i] = 0; // free : no need to push/pop
         }
         for (size_t i = 0; i < sizeof(abi_save_gpr_regs)/sizeof(abi_save_gpr_regs[0]); i++) {
-            // owner id -1 means caller owns it, need to 
-            m_srf_owner[abi_save_gpr_regs[i]] = -1;
+            // owner id 1 means caller owns it, need to 
+            m_srf_owner[abi_save_gpr_regs[i]] = 1;
         }
         // RSP is always kept untouched.
         m_srf_owner[Xbyak::Operand::RSP] = -2;
     }
 
-    // frame stack concept:
-    //  manages visiblity of registers
-    struct inject_frame {
+    // stack frame for inline/inject only:
+    //   manages visiblity of registers
+    //   we need to extract total number of free-registers required for
+    //   current frame, and preserve enough of registers by adding pre/postamble
+    // but how can we know the total number of free-registers for current frame?
+    // 1. since there is no IR, we must run the generation process once to only collect
+    //    number of registers required. then we run again with this knowledge.
+    // 2. we put a pre/postamble code area filled with nop instruction and later-on 
+    //    at frame destruction time, we change those nop instruction to push/pops.
+    // 3. most easy solution: we just preserve all non-free sreg/vreg onto stack
+    //    since call_inline_frame is supposed to represent a relatively big function call.
+    //    and normal injector shouldn't use it (they should just allocated from current frame).
+    struct call_inline_frame {
         cjit<avx2>& h;
-        std::vector<std::pair<int, int>> arg_sregs;
-        std::vector<std::pair<int, int>> arg_vregs;
-        std::vector<int> sreg_saved_on_stack;
+        struct reginfo {
+            int id;
+            int owner;
+            bool pushed;
+            reginfo(int id, int owner, bool pushed) : id(id), owner(owner), pushed(pushed) {}
+        };
+        std::vector<reginfo> arg_sregs;
+        std::vector<reginfo> arg_vregs;
 
-        inject_frame(cjit<avx2>& h, const std::vector<sregister>& visible_sregs, const std::vector<vregister>& visible_vregs)
+        call_inline_frame(cjit<avx2>& h, const std::vector<sregister>& visible_sregs, const std::vector<vregister>& visible_vregs)
             : h(h) {
             // when allocation/free happens on swappable register
             // it always happens in stack style (LIFO), and each reg's life-time is maintained by it's own shared_ptr
@@ -378,29 +388,67 @@ public:
             // Given this fact, all regs's lifecycle are maintained by it's own shared_ptr with custom-deleter,
             // even when stack-swapping is required.
             h.inject_frame_level ++;
-            DEBUG_LOG("Entering inject_frame at level ", h.inject_frame_level);
-            // set injector's arg register status to `already allocated & owned by current inject_frame`
+            DEBUG_LOG("Entering call_inline_frame at level ", h.inject_frame_level);
+            // set injector's arg register status to `already allocated & owned by current call_inline_frame`
             for (auto& r : visible_sregs) {
                 auto idx = r.reg->getIdx();
-                arg_sregs.emplace_back(idx, h.m_srf_owner[idx]);
+                arg_sregs.emplace_back(idx, h.m_srf_owner[idx], false);
                 h.m_srf_owner[idx] = h.inject_frame_level;
             }
             for (auto& r : visible_vregs) {
                 auto idx = r.ymm->getIdx();
-                arg_vregs.emplace_back(idx, h.m_vrf_owner[idx]);
+                arg_vregs.emplace_back(idx, h.m_vrf_owner[idx], false);
                 h.m_vrf_owner[idx] = h.inject_frame_level;
             }
+            // we will save all sreg & vreg with owner to stack since call_inline_frame means a big function
+            // this is allows temporary registers to be used w/o any push/pop
+            // (if we have a way to know in advance how many sregs & vregs is going to be used, we can
+            // protect them selectively rather than all of them, but as a thin wrapper of jit we don't have that)
+            for (size_t i = 0; i < NUM_SREGS; i++) {
+                auto owner = h.m_srf_owner[i];
+                if (owner != 0 && owner != -2 && owner != h.inject_frame_level) {
+                    arg_sregs.emplace_back(i, owner, true); // record orginal owner & set it to 0 (since it's free now)
+                    h.m_srf_owner[i] = 0;
+                    h.push(Xbyak::Reg64(i));
+                    DEBUG_LOG("pushed sreg ", i);
+                }
+            }
+            for (size_t i = 0; i < NUM_VREGS; i++) {
+                auto owner = h.m_vrf_owner[i];
+                if (owner != 0 && owner != -2 && owner != h.inject_frame_level) {
+                    arg_vregs.emplace_back(i, owner, true);
+                    h.sub(h.rsp, 32);
+                    h.vmovups(Xbyak::Ymm(i), h.ptr[h.rsp]);
+                    DEBUG_LOG("pushed vreg ", i);
+                }
+            }
         }
-        ~inject_frame() {
-            DEBUG_LOG("freeing inject_frame at level ", h.inject_frame_level);
+        ~call_inline_frame() {
             // restore orginal owner id for arguments
-            for (auto& r : arg_sregs) {
-                h.m_srf_owner[r.first] = r.second;
+            for (auto it = arg_vregs.rbegin(); it != arg_vregs.rend(); ++it) {
+                h.m_vrf_owner[it->id] = it->owner;
+                if (it->pushed) {
+                    h.vmovups(h.ptr[h.rsp], Xbyak::Ymm(it->id));
+                    h.add(h.rsp, 32);
+                    DEBUG_LOG("popped vreg ", it->id);
+                }
             }
-            for (auto& r : arg_vregs) {
-                h.m_vrf_owner[r.first] = r.second;
+            for (auto it = arg_sregs.rbegin(); it != arg_sregs.rend(); ++it) {
+                h.m_srf_owner[it->id] = it->owner;
+                if (it->pushed) {
+                    h.pop(Xbyak::Reg64(it->id));
+                    DEBUG_LOG("popped sreg ", it->id);
+                }
             }
+            DEBUG_LOG("Exit call_inline_frame at level ", h.inject_frame_level);
             h.inject_frame_level --;
+
+            if (h.inject_frame_level == 1) {
+                // this is last frame, do final works
+                DEBUG_LOG("Finalize");
+                h.ret();
+                h.finalize();
+            }
         }
         sregister arg(int arg_idx) {
             return local_sreg(abi_param_regs[arg_idx]);
@@ -429,22 +477,7 @@ public:
                     });
                 }
             }
-            // try to allocate swappable reg
-            for (size_t i = 0; i < NUM_SREGS; i++) {
-                auto owner = h.m_srf_owner[i];
-                if (owner < -1) continue; // skip reserved register (like RSP)
-                if (owner != h.inject_frame_level) {
-                    h.m_srf_owner[i] = h.inject_frame_level;
-                    h.push(Xbyak::Reg64(i));
-                    return std::shared_ptr<Xbyak::Reg64>(new Xbyak::Reg64(i), [ph, owner](Xbyak::Reg64* preg) {
-                        DEBUG_LOG("\tfreeing local swapped sreg #", preg->getIdx());
-                        ph->pop(*preg);
-                        ph->m_srf_owner[preg->getIdx()] = owner;
-                        delete preg;
-                    });
-                }
-            }
-            throw std::runtime_error("No free or swappable sregister available!");
+            throw std::runtime_error("No free sregister available!");
         }
 
         vregister local_vreg() {
@@ -460,49 +493,28 @@ public:
                     });
                 }
             }
-            // try to allocate swappable reg
-            for (size_t i = 0; i < NUM_SREGS; i++) {
-                auto owner = h.m_srf_owner[i];
-                if (owner != h.inject_frame_level) {
-                    h.m_srf_owner[i] = h.inject_frame_level;
-                    h.sub(h.rsp, 32);
-                    h.vmovups(Xbyak::Ymm(i), h.ptr[h.rsp]);
-                    return std::shared_ptr<Xbyak::Ymm>(new Xbyak::Ymm(i), [ph, owner](Xbyak::Ymm* preg) {
-                        DEBUG_LOG("\tfreeing swapped free vreg #", preg->getIdx());
-                        ph->vmovups(ph->ptr[ph->rsp], *preg);
-                        ph->add(ph->rsp, 32);
-                        ph->m_srf_owner[preg->getIdx()] = owner;
-                        delete preg;
-                    });
-                }
-            }
-            throw std::runtime_error("No free or swappable vregister available!");
+            throw std::runtime_error("No free vregister available!");
         }
     };
 
-    std::list<inject_frame> m_inject_frames;
+    std::list<call_inline_frame> m_inject_frames;
 
-    std::shared_ptr<inject_frame> new_frame(const std::vector<sregister>& sregs = {}, const std::vector<vregister>& vregs = {}) {
+    std::shared_ptr<call_inline_frame> new_frame(const std::vector<sregister>& sregs = {}, const std::vector<vregister>& vregs = {}) {
         // these are registers that are preserved in current frame
         // do not swap to memory
         m_inject_frames.emplace_back(*this, sregs, vregs);
-        return std::shared_ptr<inject_frame>(&m_inject_frames.back(), [this](inject_frame* f){
+        return std::shared_ptr<call_inline_frame>(&m_inject_frames.back(), [this](call_inline_frame* f){
             m_inject_frames.pop_back();
         });
     }
     // injector can also use parent frame w/o allocate it's own frame (as long as it's light-weighted)
-    inject_frame& current_frame() {
+    call_inline_frame& cur_frame() {
         return m_inject_frames.back();
     }
 };
+
 /*
 universal injector : call-syntax w/o call instruction
-
-parameter is passed in as raw register references
-all non-parameter register can be preserved on stack if there is no enough regs
-but how it knows which registers can be saved and how many of them should be saved?
-we need explictly tell framwork the registers used for args cannot be touched.
-all other 'invisible' registers can be swapped to memory if required.    
 */
 
 template <class CJIT, class VREG>
@@ -541,7 +553,6 @@ std::shared_ptr<cjit<BT>> func_body() {
     auto dst = frame->arg(2);
     auto M = frame->arg(3);
     auto N = frame->arg(4);
-
     auto idx = frame->local_sreg();
     h.j_foreach(idx, 0, M, 1, [&](){
         func_compute(h, src1, src2, dst, N);
@@ -549,7 +560,5 @@ std::shared_ptr<cjit<BT>> func_body() {
         h.j_add(src2, N, 4);
         h.j_add(dst, N, 4);
     });
-    h.finish();
-
     return ph;
 }
