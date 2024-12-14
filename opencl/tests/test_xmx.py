@@ -616,15 +616,26 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         //C base of SG
         __global half *sg_C = (C + M_BLOCK * lgid_m * N + N_BLOCK * lgid_n) + (sgidx_m * SG_M) * N +  sgidx_n * SG_N;
 #if DEBUG == 0
-        // B is prepacked to N{16nK[4k2n(8k8n2k)]} , () means in DPAS,   [] means in local memory, {} means one xe core.
-        // when doing copying B, `16n` dimension is divided by 16 VEs(divided result:sgidx_n), `4k2n` combined dimension is divided by 6 HW threads(divided result: sgidx_m ). Each HW would copy  (8k8n2k) elements.
-        // The stide on `16n` diemsnion is `K/64*1024` , the stride on `4k2n` is 128.
+        // B is prepacked to NK{16n[4k2n(8k8n2k)]} , () means in DPAS,   [] means in local memory, {} means one xe core.
+        // when doing copying B, `16n` dimension is divided by 16 VEs(sgidx_n in current code), `4k2n` combined dimension is divided by 8 HW threads(sgidx_m in current code). Each HW would copy  (8k8n2k) elements.
+        // The stide on `16n` diemsnion is `1024` , the stride on `4k2n` is 128.
 
         __global half *copy_B_src = ( B + N_BLOCK * lgid_n  * K) + sgidx_n * 1024 +  sgidx_m * 128;
         int copy_B_dest_offset = sgidx_n * 1024 + sgidx_m * 128;
 
-        //Prepack A from mk to M{8mK[4k4m(8m16k)]}, a is `8m` dim, b is `4k` dim, c is `4m` dim.
+        /*Prepack A from mk(M8m4m8mK4k16k) to MK{8m[4k4m(8m16k)]}. There would be 2 steps to do the prepack
+        Step 1:  8m4m8mK4k16k(also same with [8m][16m]2mK4k16k)->  K8m4m8m4k16k(same with K[8m][16m]2m4k16k)
+                 `[8m]` divided by  8HW threads, `[16m]` divided by 16 EUs. sgidx_m is submodule HW thread idx, sgidx_n is EU idx.
+                 Each submodule load 2m4k16k into register(2 adjacent rows and each row has  64 contineous elements). Each row can load 64 elements via subgroup_read.
+                 from graph memory/cache to GRFs . 2 subgroup_read , each subgroup_read would load 64 elements into int4 vector.
+        Step 2:  [8m][16m]2m4k16k -> [8m]4k[16m]2m16k(same with :8m[4k4m(8m16k)]).
+                 2xint4 vector ->4xint2 vector. 2m16k is memory contineous. 32 elemments.
+        Step 3:  subgroup_write into related local memory.
+                 4 subgroup_writes. Every subgroup write would write 32 elements into local memory.
+        */
+        // The  m_index =  M_BLOCK * lgid_m + (sgidx_m *16 + sgidx_n ) * 2
         __global half* sg_copy_A_src = ( A + M_BLOCK * lgid_m  * K)+(sgidx_m *16 + sgidx_n ) * 2 * K;
+        //The dest layout [8m]4k[16m]2m16k(same with :8m[4k4m(8m16k)]).
         __local half* sg_copy_A_dest = buffA + sgidx_m*2048 + sgidx_n*32;
 
 #endif
@@ -708,7 +719,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
                 }
     #if DEBUG == 0
                 barrier(CLK_LOCAL_MEM_FENCE);
-                //B layout,  N{16nK[4k2n(8k8n2k)]}, stide of `K` dim  = 4*2*8*8*2 =1024
+                //B layout,  NK{16n[4k2n(8k8n2k)]}, stide of `K` dim  = 16*1024
                 copy_B_src += 16*1024;
                 sg_copy_A_src += K_BLOCK;
                 local_A_ptr -= 1024;
@@ -719,6 +730,8 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         }//end of XMX compute
 
 #if  DEBUG == 0
+            // first store the subC into SLM with 8x8 tiling by sub-group write. Then scatter store data from SLM to DDR memory.
+            // The biggest contenious element number of contineous copy is 8 elelments.
             __local ushort * scratch_buffA = (__local ushort *)buffA + sgid * 128;
             __local ushort * scratch_buffB = (__local ushort *)buffB + sgid * 128;
 
@@ -762,7 +775,7 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         uint8 data = *((__global uint8*)src + s_offset);
         *((__global uint8*)dest + d_offset) = data;
     }
-    // Prepack B from kn to N{16nK[4k2n(8k8n2k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
+    // Prepack B from kn to NK{16n[4k2n(8k8n2k)]} for fp16,  () means in DPAS,   [] means in local memory, {} means one xe core.
     __attribute__((intel_reqd_sub_group_size(8)))
     __kernel void prepackB(__global half * src, __global half * dest) {
         int n_id = get_global_id(0);
@@ -770,7 +783,6 @@ __kernel void XMX_GEMM(__global half * A, __global half * B, __global half * C, 
         int n_size = get_global_size(0);
         int k_size = get_global_size(1);
         int s_offset = n_id * k_size + k_id;
-        //int d_offset = (n_id/16)*(k_size/16*256) +(k_id/16*256)+((n_id/8)%2)*128+ ((k_id/2)%8) * 16 + (n_id%8)*2 + (k_id)%2;
         int d_offset = (n_id/256)*k_size*256 + (k_id/64)*64*256 + (n_id/16%16)*1024+ (k_id/16%4)*256+(n_id/8%2)*128 + (k_id/2%8)*16 + (n_id%8)*2 + (k_id%2);
         half data = *(src + s_offset);
         *(dest + d_offset) = data;
