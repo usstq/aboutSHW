@@ -191,6 +191,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         half16 dot_prod = 0;
         if (key_n_start_sg <= query_start) {
             const uint key_len_in_sg = min(key_n_start_sg + SGS, query_end) - key_n_start_sg;
+            // printf("========== query_end=%d, key_len_in_sg=%d\n", query_end, key_len_in_sg);
             // loop whole token, 16 items each due to key can be loaded 16 items at a time by using one SIMD read
             if (key_len_in_sg == SGS) {
                 for (uint k = 0; k < S; k += SGS) {
@@ -237,6 +238,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                     qk_dot_share[id_sg_local][id_sg * SGS + n] = dot_prod[n];
                 }
             } else {
+                // printf("================================================\n");
                 for (uint k = 0; k < S; k += SGS) {
                     half query_val[SGS];
                     __attribute__((opencl_unroll_hint))
@@ -318,6 +320,21 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
+        // debug
+        // if (id_sg == 0 && id_sg_local == 0 && cur_mb_blocks_num == 0) {
+        //     printf("O=%f key_len_in_kv_block=%d @%d, %d, %d, %d\n", prev_output_share[0][0], key_len_in_kv_block,
+        //             cur_mb_blocks_num, i, id_sg, id_sg_local);
+        //     for (uint i = 0; i < query_len; i++) {
+        //         printf("i=%d  \n", i);
+        //         for (uint j = 0; j < kv_block; j++) {
+        //             printf("[%d]%.3f ", j,
+        //                     qk_dot_share[i][j]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
+        // barrier(CLK_LOCAL_MEM_FENCE);
+
         // each sg will compute a whole row of query
         for (uint m = id_sg; m < query_len; m += S / SGS) {
             // reduce across sg
@@ -358,24 +375,21 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             prev_exp_sum_share[m] = exp_sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
-        if (id_sg == 0 && id_sg_local == 0) {
-            printf("O=%f @%d, %d, %d, %d\n", prev_output_share[0][0],
-                    cur_mb_blocks_num, i, id_sg, id_sg_local);
-            for (uint i = 0; i < query_len; i++) {
-                printf("i=%d, scale=%f  \n", i, prev_exp_sum_share[i]);
-                for (uint j = 0; j < kv_block; j++) {
-                    printf("[%d]%.3f ", j,
-                            qk_dot_share[i][j]);
-                }
-                printf("\n");
-                for (uint j = 0; j < kv_block; j++) {
-                    printf("[%d]%.3f ", j,
-                            qk_dot_share[i][j]*prev_exp_sum_share[i]);
-                }
-                printf("\n");
-            }
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // // debugs
+        // if (id_sg == 0 && id_sg_local == 0 && cur_mb_blocks_num == 0) {
+        //     printf("O=%f @%d, %d, %d, %d\n", prev_output_share[0][0],
+        //             cur_mb_blocks_num, i, id_sg, id_sg_local);
+        //     for (uint i = 0; i < query_len; i++) {
+        //         printf("i=%d, l=%f, m=%f  \n", i, prev_exp_sum_share[i], prev_max_attn_score_share[i]);
+        //         for (uint j = 0; j < kv_block; j++) {
+        //             printf("[%d]%.3f ", j,
+        //                     qk_dot_share[i][j]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
+        // barrier(CLK_LOCAL_MEM_FENCE);
 
         // 5 w*v
         uint value_len_in_kv_block = key_len_in_kv_block;
@@ -414,6 +428,9 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 }
             }
         }
+        // if (id_sg == 0 && cur_mb_blocks_num == 0) {
+        //     printf("sum[%d]=%f", id_sg_local, sum[id_sg_local]);
+        // }
         for (uint m = 0; m < query_len; m++) {
             sum[m] += as_half(intel_sub_group_block_read_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS));
             intel_sub_group_block_write_us((const __local ushort*)prev_output_share + m * S + id_sg * SGS, as_short(sum[m]));

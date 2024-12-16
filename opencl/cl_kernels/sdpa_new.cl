@@ -1600,7 +1600,7 @@ typedef struct float0 { float s0; } float0;
 #define ACTIVATION_PARAMS                 NL_M, NL_N
 #define ACTIVATION_FUNC(input, m, n)      input
 #define ACTIVATION(input, params)         ACTIVATION_FUNC(input, params)
-#define INPUT0_SIZE_X                     128
+#define INPUT0_SIZE_X                     HEAD_SIZE
 #define INPUT0_SIZE_Y                     (shape_info[6])
 #define INPUT0_SIZE_Z                     1
 #define INPUT0_SIZE_W                     1
@@ -1625,13 +1625,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT0_PAD_AFTER_FEATURE_NUM      0
 #define INPUT0_PAD_AFTER_BATCH_NUM        0
 #define INPUT0_X_PITCH                    1
-#define INPUT0_Y_PITCH                    128
-#define INPUT0_Z_PITCH                    (128 * (shape_info[6] + 0))
-#define INPUT0_W_PITCH                    (128 * (shape_info[6] + 0) * 1)
-#define INPUT0_U_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1)
-#define INPUT0_V_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1 * 1)
-#define INPUT0_FEATURE_PITCH              (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
-#define INPUT0_BATCH_PITCH                (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
+#define INPUT0_Y_PITCH                    HEAD_SIZE
+#define INPUT0_Z_PITCH                    (HEAD_SIZE * (shape_info[6] + 0))
+#define INPUT0_W_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1)
+#define INPUT0_U_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1)
+#define INPUT0_V_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1)
+#define INPUT0_FEATURE_PITCH              (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
+#define INPUT0_BATCH_PITCH                (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
 #define INPUT0_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT0, b, f, y, x)
@@ -1665,7 +1665,7 @@ typedef struct float0 { float s0; } float0;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT1_SIZE_X                     128
+#define INPUT1_SIZE_X                     HEAD_SIZE
 #define INPUT1_SIZE_Y                     (shape_info[14])
 #define INPUT1_SIZE_Z                     1
 #define INPUT1_SIZE_W                     1
@@ -1690,13 +1690,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT1_PAD_AFTER_FEATURE_NUM      0
 #define INPUT1_PAD_AFTER_BATCH_NUM        0
 #define INPUT1_X_PITCH                    1
-#define INPUT1_Y_PITCH                    128
-#define INPUT1_Z_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])))
-#define INPUT1_W_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
-#define INPUT1_U_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
-#define INPUT1_V_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
-#define INPUT1_FEATURE_PITCH              (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
-#define INPUT1_BATCH_PITCH                (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT1_Y_PITCH                    HEAD_SIZE
+#define INPUT1_Z_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])))
+#define INPUT1_W_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
+#define INPUT1_U_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
+#define INPUT1_V_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
+#define INPUT1_FEATURE_PITCH              (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
+#define INPUT1_BATCH_PITCH                (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT1_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT1, b, f, y, x)
@@ -1730,7 +1730,7 @@ typedef struct float0 { float s0; } float0;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT2_SIZE_X                     128
+#define INPUT2_SIZE_X                     HEAD_SIZE
 #define INPUT2_SIZE_Y                     (shape_info[24])
 #define INPUT2_SIZE_Z                     1
 #define INPUT2_SIZE_W                     1
@@ -1755,13 +1755,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT2_PAD_AFTER_FEATURE_NUM      0
 #define INPUT2_PAD_AFTER_BATCH_NUM        0
 #define INPUT2_X_PITCH                    1
-#define INPUT2_Y_PITCH                    128
-#define INPUT2_Z_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])))
-#define INPUT2_W_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
-#define INPUT2_U_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
-#define INPUT2_V_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
-#define INPUT2_FEATURE_PITCH              (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
-#define INPUT2_BATCH_PITCH                (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT2_Y_PITCH                    HEAD_SIZE
+#define INPUT2_Z_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])))
+#define INPUT2_W_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
+#define INPUT2_U_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
+#define INPUT2_V_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
+#define INPUT2_FEATURE_PITCH              (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
+#define INPUT2_BATCH_PITCH                (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT2_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT2, b, f, y, x)
@@ -1941,7 +1941,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define OUTPUT_SIZE_X                     128
+#define OUTPUT_SIZE_X                     HEAD_SIZE
 #define OUTPUT_SIZE_Y                     (shape_info[42])
 #define OUTPUT_SIZE_Z                     1
 #define OUTPUT_SIZE_W                     1
@@ -1966,13 +1966,13 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define OUTPUT_PAD_AFTER_FEATURE_NUM      0
 #define OUTPUT_PAD_AFTER_BATCH_NUM        0
 #define OUTPUT_X_PITCH                    1
-#define OUTPUT_Y_PITCH                    128
-#define OUTPUT_Z_PITCH                    (128 * (shape_info[42] + 0))
-#define OUTPUT_W_PITCH                    (128 * (shape_info[42] + 0) * 1)
-#define OUTPUT_U_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1)
-#define OUTPUT_V_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1 * 1)
-#define OUTPUT_FEATURE_PITCH              (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
-#define OUTPUT_BATCH_PITCH                (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
+#define OUTPUT_Y_PITCH                    HEAD_SIZE
+#define OUTPUT_Z_PITCH                    (HEAD_SIZE * (shape_info[42] + 0))
+#define OUTPUT_W_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1)
+#define OUTPUT_U_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1)
+#define OUTPUT_V_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1)
+#define OUTPUT_FEATURE_PITCH              (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
+#define OUTPUT_BATCH_PITCH                (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
 #define OUTPUT_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(OUTPUT, b, f, y, x)
@@ -2038,7 +2038,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
 #define SOFTMAX_ACCUMULATOR_IS_FP          1
 #define SUBGROUP_SIZE                      16
-// #define HEAD_SIZE                          128
+// #define HEAD_SIZE                          HEAD_SIZE
 // #define SEQ_LEN_PARTITION_SIZE             (SG_SCALE_FACTOR * HEAD_SIZE)
 #define TARGET_SEQ_LEN_BLOCK_SIZE          16
 #define SDPA_STAGE_0                       1

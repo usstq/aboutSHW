@@ -1600,7 +1600,7 @@ typedef struct float0 { float s0; } float0;
 #define ACTIVATION_PARAMS                 NL_M, NL_N
 #define ACTIVATION_FUNC(input, m, n)      input
 #define ACTIVATION(input, params)         ACTIVATION_FUNC(input, params)
-#define INPUT0_SIZE_X                     128
+#define INPUT0_SIZE_X                     HEAD_SIZE
 #define INPUT0_SIZE_Y                     (shape_info[6])
 #define INPUT0_SIZE_Z                     1
 #define INPUT0_SIZE_W                     1
@@ -1625,13 +1625,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT0_PAD_AFTER_FEATURE_NUM      0
 #define INPUT0_PAD_AFTER_BATCH_NUM        0
 #define INPUT0_X_PITCH                    1
-#define INPUT0_Y_PITCH                    128
-#define INPUT0_Z_PITCH                    (128 * (shape_info[6] + 0))
-#define INPUT0_W_PITCH                    (128 * (shape_info[6] + 0) * 1)
-#define INPUT0_U_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1)
-#define INPUT0_V_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1 * 1)
-#define INPUT0_FEATURE_PITCH              (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
-#define INPUT0_BATCH_PITCH                (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
+#define INPUT0_Y_PITCH                    HEAD_SIZE
+#define INPUT0_Z_PITCH                    (HEAD_SIZE * (shape_info[6] + 0))
+#define INPUT0_W_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1)
+#define INPUT0_U_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1)
+#define INPUT0_V_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1)
+#define INPUT0_FEATURE_PITCH              (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
+#define INPUT0_BATCH_PITCH                (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
 #define INPUT0_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT0, b, f, y, x)
@@ -1665,7 +1665,7 @@ typedef struct float0 { float s0; } float0;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT1_SIZE_X                     128
+#define INPUT1_SIZE_X                     HEAD_SIZE
 #define INPUT1_SIZE_Y                     (shape_info[14])
 #define INPUT1_SIZE_Z                     1
 #define INPUT1_SIZE_W                     1
@@ -1690,13 +1690,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT1_PAD_AFTER_FEATURE_NUM      0
 #define INPUT1_PAD_AFTER_BATCH_NUM        0
 #define INPUT1_X_PITCH                    1
-#define INPUT1_Y_PITCH                    128
-#define INPUT1_Z_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])))
-#define INPUT1_W_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
-#define INPUT1_U_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
-#define INPUT1_V_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
-#define INPUT1_FEATURE_PITCH              (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
-#define INPUT1_BATCH_PITCH                (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT1_Y_PITCH                    HEAD_SIZE
+#define INPUT1_Z_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])))
+#define INPUT1_W_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
+#define INPUT1_U_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
+#define INPUT1_V_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
+#define INPUT1_FEATURE_PITCH              (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
+#define INPUT1_BATCH_PITCH                (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT1_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT1, b, f, y, x)
@@ -1730,7 +1730,7 @@ typedef struct float0 { float s0; } float0;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT2_SIZE_X                     128
+#define INPUT2_SIZE_X                     HEAD_SIZE
 #define INPUT2_SIZE_Y                     (shape_info[24])
 #define INPUT2_SIZE_Z                     1
 #define INPUT2_SIZE_W                     1
@@ -1755,13 +1755,13 @@ typedef struct float0 { float s0; } float0;
 #define INPUT2_PAD_AFTER_FEATURE_NUM      0
 #define INPUT2_PAD_AFTER_BATCH_NUM        0
 #define INPUT2_X_PITCH                    1
-#define INPUT2_Y_PITCH                    128
-#define INPUT2_Z_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])))
-#define INPUT2_W_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
-#define INPUT2_U_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
-#define INPUT2_V_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
-#define INPUT2_FEATURE_PITCH              (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
-#define INPUT2_BATCH_PITCH                (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT2_Y_PITCH                    HEAD_SIZE
+#define INPUT2_Z_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])))
+#define INPUT2_W_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
+#define INPUT2_U_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
+#define INPUT2_V_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
+#define INPUT2_FEATURE_PITCH              (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
+#define INPUT2_BATCH_PITCH                (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT2_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT2, b, f, y, x)
@@ -1941,7 +1941,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define OUTPUT_SIZE_X                     128
+#define OUTPUT_SIZE_X                     HEAD_SIZE
 #define OUTPUT_SIZE_Y                     (shape_info[42])
 #define OUTPUT_SIZE_Z                     1
 #define OUTPUT_SIZE_W                     1
@@ -1966,13 +1966,13 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define OUTPUT_PAD_AFTER_FEATURE_NUM      0
 #define OUTPUT_PAD_AFTER_BATCH_NUM        0
 #define OUTPUT_X_PITCH                    1
-#define OUTPUT_Y_PITCH                    128
-#define OUTPUT_Z_PITCH                    (128 * (shape_info[42] + 0))
-#define OUTPUT_W_PITCH                    (128 * (shape_info[42] + 0) * 1)
-#define OUTPUT_U_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1)
-#define OUTPUT_V_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1 * 1)
-#define OUTPUT_FEATURE_PITCH              (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
-#define OUTPUT_BATCH_PITCH                (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
+#define OUTPUT_Y_PITCH                    HEAD_SIZE
+#define OUTPUT_Z_PITCH                    (HEAD_SIZE * (shape_info[42] + 0))
+#define OUTPUT_W_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1)
+#define OUTPUT_U_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1)
+#define OUTPUT_V_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1)
+#define OUTPUT_FEATURE_PITCH              (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
+#define OUTPUT_BATCH_PITCH                (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
 #define OUTPUT_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(OUTPUT, b, f, y, x)
@@ -2038,7 +2038,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
 #define SOFTMAX_ACCUMULATOR_IS_FP          1
 #define SUBGROUP_SIZE                      16
-// #define HEAD_SIZE                          128
+// #define HEAD_SIZE                          HEAD_SIZE
 // #define SEQ_LEN_PARTITION_SIZE             (SG_SCALE_FACTOR * HEAD_SIZE)
 #define TARGET_SEQ_LEN_BLOCK_SIZE          16
 #define SDPA_STAGE_0                       1
@@ -2274,7 +2274,7 @@ inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG
 #endif
 
     // Apply scale to attn_mask
-#if IS_CAUSAL || HAS_ATTN_MASK_INPUT
+#if HAS_ATTN_MASK_INPUT
     mask_vec *= scale_val;
 #endif
 
@@ -2464,7 +2464,15 @@ KERNEL(sdpa_opt)(
     for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
         const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
-
+#if IS_CAUSAL
+        const int query_end = target_seq_idx + seq_idx_end;
+        const int key_len_in_kv_block = min((int)partition_seq_len, max(0, query_end - (int)start_partition_idx));
+#else
+        const int key_len_in_kv_block = partition_seq_len;
+#endif
+#if IS_CAUSAL
+        if (seq_len <= target_seq_idx) { // keep tril i.e. m >= n
+#endif
 #if IS_PAGED_ATTENTION
 #ifdef BROADCAST_GROUP_SIZE
         const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
@@ -2494,9 +2502,11 @@ KERNEL(sdpa_opt)(
 #endif
 #endif
 
-            int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);
+            int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);  // key_len_in_sg
+#if IS_CAUSAL
+            MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc = OUTPUT_VAL_ZERO;
+#else  // !IS_CAUSAL
             MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc;
-
             qk_acc = FUNC_CALL(load_attn_mask)(OPTIONAL_SHAPE_INFO_TENSOR
                             b0_idx,
                             b1_idx,
@@ -2510,7 +2520,7 @@ KERNEL(sdpa_opt)(
                             ATTN_MASK_BUFFER
                             ATTN_SCALE_BUFFER
                             PA_BUFFERS);
-
+#endif  // !IS_CAUSAL
             if (seq_len_calc_size >= SUBGROUP_SIZE) {
 #if IS_KV_COMPRESSED
                 const uint comp_offset = GET_COMPRESSION_INDEX(KEY_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, seq_len + sglid, 0);
@@ -2626,6 +2636,10 @@ KERNEL(sdpa_opt)(
             {
                 SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
                 unroll_for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
+#if IS_CAUSAL
+                // casual mask: valid only if query <= kv_len
+                if (seq_len + i <= target_seq_idx + sglid) {
+#endif  // IS_CAUSAL
 #if !APPLY_SCALES_TO_QUERY
 #if HAS_SCALE_INPUT
                     const OUTPUT_TYPE scale_val = *scale;
@@ -2641,19 +2655,44 @@ KERNEL(sdpa_opt)(
 #endif
 
                     qk_acc[i] = INPUT0_MIN_FUNC(INPUT0_MAX_FUNC(qk_acc[i], INPUT0_VAL_MIN), INPUT0_VAL_MAX);
-
+#if IS_CAUSAL
+                } else {
+                    qk_acc[i] = -1e9f;
+                }
+#endif  // IS_CAUSAL
                     qk_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max, TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]));
                     slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = qk_acc[i];
                 }
                 slm_qk_max_vals[sglid][sgid] = qk_max;
             }
-
+#if IS_CAUSAL
+        } else { // skip triu
+            unroll_for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
+                slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = 0.0h;
+            }
+            slm_qk_max_vals[sglid][sgid] = -1e9f;
+        }
+#endif
         barrier(CLK_LOCAL_MEM_FENCE);
+
+        // debug
+        // if (sgid == 0 && sglid == 0 && target_seq_idx == 0) {
+        //     printf("O=%f key_len_in_kv_block=%d @%d, %d, %d, %d\n", output_acc[sglid], key_len_in_kv_block,
+        //             target_seq_idx, start_partition_idx, sgid, sglid);
+        //     for (uint i = 0; i < seq_idx_end; i++) {
+        //         printf("i=%d \n", i);
+        //         for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
+        //             printf("[%d]%.3f ", j,
+        //                     slm_qk_vals[i][j]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
+        // barrier(CLK_LOCAL_MEM_FENCE);
 
         {
             // SoftMax calculation
             // each sg will compute a whole row of query
-            const int key_len_in_kv_block = SEQ_LEN_PARTITION_SIZE;
             for (uint m = sgid; m < seq_idx_end; m += SUBGROUPS_PER_WG) {
                 // rowmax
                 SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
@@ -2668,7 +2707,7 @@ KERNEL(sdpa_opt)(
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
+                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) {
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][k]) - qk_max_new);
                     slm_qk_vals[m][k] = convert_half(a);
                     exp_sum_new += a;
@@ -2690,24 +2729,25 @@ KERNEL(sdpa_opt)(
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        if (sgid == 0 && sglid == 0) {
-            printf("O=%f @%d, %d, %d, %d\n", output_acc[sglid],
-                    target_seq_idx, start_partition_idx, sgid, sglid);
-            for (uint i = 0; i < seq_idx_end; i++) {
-                printf("i=%d, scale=%f  \n", i, slm_exp_sum_prev[i]);
-                for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
-                    printf("[%d]%.3f ", j,
-                            slm_qk_vals[i][j]/slm_exp_sum_prev[i]);
-                }
-                printf("\n");
-                for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
-                    printf("[%d]%.3f ", j,
-                            slm_qk_vals[i][j]);
-                }
-                printf("\n");
-            }
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+        // // debug
+        // if (sgid == 0 && sglid == 0 && target_seq_idx == 0) {
+        //     printf("O=%f @%d, %d, %d, %d\n", output_acc[sglid],
+        //             target_seq_idx, start_partition_idx, sgid, sglid);
+        //     for (uint i = 0; i < seq_idx_end; i++) {
+        //         printf("i=%d, l=%f, m=%f  \n", i, slm_exp_sum_prev[i], slm_max_val_prev[i]);
+        //         // for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
+        //         //     printf("[%d]%.3f ", j,
+        //         //             slm_qk_vals[i][j]/slm_exp_sum_prev[i]);
+        //         // }
+        //         // printf("\n");
+        //         for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
+        //             printf("[%d]%.3f ", j,
+        //                     slm_qk_vals[i][j]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
+        // barrier(CLK_LOCAL_MEM_FENCE);
 
         {
             // QK*V calculation
@@ -2924,6 +2964,11 @@ KERNEL(sdpa_opt)(
                 }
 
             }
+
+            // if (sgid == 0 && target_seq_idx == 0) {
+            //     printf("sum[%d]=%f", sglid, acc_output_res[sglid]);
+            //     printf("slm_update_factor=%f", slm_update_factor[sglid]);
+            // }
 
             {
                 // Rescale acc_output_res values and save current iter results to global accumulator
