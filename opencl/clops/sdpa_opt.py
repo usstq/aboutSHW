@@ -206,15 +206,33 @@ if __name__ == "__main__":
         except Exception as inst:
             print(f'{Colors.RED} FAIL at shape = {opt.shape}.{Colors.END}')
 
+        if Lq == Lk:
+            try:
+                if not np.allclose(ref0, opt, atol=0.01, rtol=0.01, equal_nan=True):
+                    pos = np.where(np.abs(ref0 - opt) > 0.01)
+                    # print(f"{pos[2]=}")
+                    # for d in set(pos[2]):
+                    #     print(f"{d=}")
+                    print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    if not pos[0].size > 0:
+                        pos = np.where(np.isnan(opt))
+                        print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    print(f'ref_val = {ref0[pos]}\nopt_val={opt[pos]}\n')
+                    raise Exception("failed.")
+                print(f'{Colors.GREEN} ref0 PASS at shape = {opt.shape}.{Colors.END}')
+            except Exception as inst:
+                print(f'{Colors.RED} ref0 FAIL at shape = {opt.shape}.{Colors.END}')
+
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
+        # test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
         # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
         # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
         # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
         # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
-        # test_acc(1, 1, 1, 128, 3*128, 3*128, False)
-        # test_acc(2, 1, 1, 128, 1, 128, True)   # tail
+        # test_acc(1, 1, 1, 128, 3*128, 3*128, True)
+        test_acc(2, 28, 7, 128, 3*128, 3*128, True)
+        # test_acc(1, 1, 1, 16, 1*16, 1*16, True)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)

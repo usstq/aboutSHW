@@ -2014,7 +2014,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     sdpa
 #define BROADCAST_GROUP_SIZE               4
 #define DO_BROADCAST_KEY_VALUE             f /= 4;
-#define IS_CAUSAL                          0
+#define IS_CAUSAL                          1
 #define HAS_ATTN_MASK_INPUT                1
 #define HAS_SCALE_INPUT                    1
 #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x

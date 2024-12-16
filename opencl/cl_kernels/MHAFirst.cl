@@ -358,6 +358,24 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
             prev_exp_sum_share[m] = exp_sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
+        if (id_sg == 0 && id_sg_local == 0) {
+            printf("O=%f @%d, %d, %d, %d\n", prev_output_share[0][0],
+                    cur_mb_blocks_num, i, id_sg, id_sg_local);
+            for (uint i = 0; i < query_len; i++) {
+                printf("i=%d, scale=%f  \n", i, prev_exp_sum_share[i]);
+                for (uint j = 0; j < kv_block; j++) {
+                    printf("[%d]%.3f ", j,
+                            qk_dot_share[i][j]);
+                }
+                printf("\n");
+                for (uint j = 0; j < kv_block; j++) {
+                    printf("[%d]%.3f ", j,
+                            qk_dot_share[i][j]*prev_exp_sum_share[i]);
+                }
+                printf("\n");
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
 
         // 5 w*v
         uint value_len_in_kv_block = key_len_in_kv_block;

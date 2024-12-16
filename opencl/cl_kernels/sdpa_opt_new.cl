@@ -2014,7 +2014,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     sdpa
 #define BROADCAST_GROUP_SIZE               4
 #define DO_BROADCAST_KEY_VALUE             f /= 4;
-#define IS_CAUSAL                          0
+#define IS_CAUSAL                          1
 #define HAS_ATTN_MASK_INPUT                1
 #define HAS_SCALE_INPUT                    1
 #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
@@ -2686,6 +2686,25 @@ KERNEL(sdpa_opt)(
                     slm_max_val_prev[m] = qk_max_new;
                     slm_exp_sum_prev[m] = exp_sum_new;
                 }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        if (sgid == 0 && sglid == 0) {
+            printf("O=%f @%d, %d, %d, %d\n", output_acc[sglid],
+                    target_seq_idx, start_partition_idx, sgid, sglid);
+            for (uint i = 0; i < seq_idx_end; i++) {
+                printf("i=%d, scale=%f  \n", i, slm_exp_sum_prev[i]);
+                for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
+                    printf("[%d]%.3f ", j,
+                            slm_qk_vals[i][j]/slm_exp_sum_prev[i]);
+                }
+                printf("\n");
+                for (uint j = 0; j < SEQ_LEN_PARTITION_SIZE; j++) {
+                    printf("[%d]%.3f ", j,
+                            slm_qk_vals[i][j]);
+                }
+                printf("\n");
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
