@@ -7,7 +7,7 @@ class SDPA_opt:
     def __init__(self, Hq, Hk, HEAD_SIZE, is_optimized):
         self.is_optimized = is_optimized
         
-        self.SG_SCALE_FACTOR=1
+        self.SG_SCALE_FACTOR=2
         self.SUBGROUP_SIZE=16
         SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
@@ -18,7 +18,7 @@ class SDPA_opt:
         
         if self.is_optimized:
             cl_source_file = "cl_kernels/sdpa_opt_new.cl"
-            self.kernel_name = 'sdpa_opt_multi_tokens'
+            self.kernel_name = 'sdpa_opt_multi_tokens_2'
         else:
             cl_source_file = "cl_kernels/sdpa_new.cl"
             self.kernel_name = 'sdpa_opt_multi_tokens'
@@ -174,19 +174,21 @@ if __name__ == "__main__":
             qkv = torch.cat((q, k, v), 2)
             qkv = torch.reshape(qkv, (B, Lq, (Hq + Hk + Hk) * HEAD_SIZE))        
             ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
-            print(f'{ref0=}\n')
+            # print(f'{ref0=}\n')
             for i, ns in enumerate(durs):
                 print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
-        print(f'{ref=}\n')
+        # print(f'{ref=}\n')
+        ref_t = 0
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+            ref_t += ns
 
         opt, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, True)
-        print(f'{opt=}\n')
+        # print(f'{opt=}\n')
         for i, ns in enumerate(durs):
-            print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+            print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms, with improvment {(ref_t - ns)/ref_t*100:.2f}% {Colors.END}')
             
         # print(f'all zeros? {np.all(ref == 0)} {np.all(opt == 0)}')
 
@@ -231,13 +233,13 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        # test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
-        # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
+        test_acc(2, 28, 7, 128, 8410, 8410, True)   # tail
+        test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
         test_acc(1, 28, 7, 128, 64*128, 64*128, True)
-        # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
-        # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
+        test_acc(1, 24, 6, 128, 16*128, 16*128, False)
+        test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
         test_acc(1, 1, 1, 128, 3*128, 3*128, True)
-        # test_acc(2, 28, 7, 128, 3*128, 3*128, True)
+        test_acc(2, 28, 7, 128, 3*128, 3*128, True)
         test_acc(1, 1, 1, 16, 2*16, 2*16, False)
         test_acc(1, 1, 1, 16, 16, 16, True)
         # for k in range(20, 21):

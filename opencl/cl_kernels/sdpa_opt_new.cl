@@ -1553,10 +1553,10 @@ typedef struct float15 { float s0; float s1; float s2; float s3; float s4; float
 typedef struct float0 { float s0; } float0;
 
 //====================================================
-// Kernel template: sdpa_opt_multi_tokens 
-// Kernel name: sdpa_opt_multi_tokens
-#define KERNEL(name) __kernel void sdpa_opt_multi_tokens
-#define KERNEL_ID sdpa_opt_multi_tokens
+// Kernel template: sdpa_opt_multi_tokens_2 
+// Kernel name: sdpa_opt_multi_tokens_2
+#define KERNEL(name) __kernel void sdpa_opt_multi_tokens_2
+#define KERNEL_ID sdpa_opt_multi_tokens_2
 #define FUNC(name)  _##name##_sdpa_opt_multi_tokens
 #define FUNC_CALL(name)  _##name##_sdpa_opt_multi_tokens
 #define CONST_ARRAY_DECL(name) __constant size_t  _##name##_sdpa_opt_multi_tokens []
@@ -2463,12 +2463,10 @@ KERNEL(sdpa_opt)(
     __attribute__((opencl_unroll_hint(1)))
     for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
-        const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
 #if IS_CAUSAL
-        const int query_end = target_seq_idx + seq_idx_end;
-        const int key_len_in_kv_block = min((int)partition_seq_len, max(0, query_end - (int)start_partition_idx));
+        const uint partition_seq_len = min((uint)SEQ_LEN_PARTITION_SIZE, (uint)max(0, (int)(target_seq_idx + seq_idx_end) - (int)start_partition_idx));
 #else
-        const int key_len_in_kv_block = partition_seq_len;
+        const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
 #endif
 #if IS_CAUSAL
         if (seq_len <= target_seq_idx) { // keep tril i.e. m >= n
@@ -2667,9 +2665,9 @@ KERNEL(sdpa_opt)(
             }
 #if IS_CAUSAL
         } else { // skip triu
-            unroll_for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
-                slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = 0.0h;
-            }
+            // unroll_for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
+            //     slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = 0.0h;
+            // }
             slm_qk_max_vals[sglid][sgid] = -1e9f;
         }
 #endif
@@ -2677,7 +2675,7 @@ KERNEL(sdpa_opt)(
 
         // debug
         // if (sgid == 0 && sglid == 0 && target_seq_idx == 0) {
-        //     printf("O=%f key_len_in_kv_block=%d @%d, %d, %d, %d\n", output_acc[sglid], key_len_in_kv_block,
+        //     printf("O=%f partition_seq_len=%d @%d, %d, %d, %d\n", output_acc[sglid], partition_seq_len,
         //             target_seq_idx, start_partition_idx, sgid, sglid);
         //     for (uint i = 0; i < seq_idx_end; i++) {
         //         printf("i=%d \n", i);
@@ -2707,7 +2705,7 @@ KERNEL(sdpa_opt)(
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) {
+                for (uint k = sglid; k < partition_seq_len; k += SUBGROUP_SIZE) {
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][k]) - qk_max_new);
                     slm_qk_vals[m][k] = convert_half(a);
                     exp_sum_new += a;
