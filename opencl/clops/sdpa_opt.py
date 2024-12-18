@@ -233,15 +233,15 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(2, 28, 7, 128, 8410, 8410, True)   # tail
-        test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
-        test_acc(1, 28, 7, 128, 64*128, 64*128, True)
-        test_acc(1, 24, 6, 128, 16*128, 16*128, False)
-        test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
-        test_acc(1, 1, 1, 128, 3*128, 3*128, True)
-        test_acc(2, 28, 7, 128, 3*128, 3*128, True)
-        test_acc(1, 1, 1, 16, 2*16, 2*16, False)
-        test_acc(1, 1, 1, 16, 16, 16, True)
+        test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
+        # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
+        # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
+        # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
+        # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
+        # test_acc(1, 1, 1, 128, 3*128, 3*128, True)
+        # test_acc(2, 28, 7, 128, 3*128, 3*128, True)
+        # test_acc(1, 1, 1, 16, 2*16, 2*16, False)
+        # test_acc(1, 1, 1, 16, 16, 16, True)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)

@@ -1553,10 +1553,10 @@ typedef struct float15 { float s0; float s1; float s2; float s3; float s4; float
 typedef struct float0 { float s0; } float0;
 
 //====================================================
-// Kernel template: sdpa_opt_multi_tokens_2 
-// Kernel name: sdpa_opt_multi_tokens_2
-#define KERNEL(name) __kernel void sdpa_opt_multi_tokens_2
-#define KERNEL_ID sdpa_opt_multi_tokens_2
+// Kernel template: sdpa_opt_multi_tokens 
+// Kernel name: sdpa_opt_multi_tokens
+#define KERNEL(name) __kernel void sdpa_opt_multi_tokens
+#define KERNEL_ID sdpa_opt_multi_tokens
 #define FUNC(name)  _##name##_sdpa_opt_multi_tokens
 #define FUNC_CALL(name)  _##name##_sdpa_opt_multi_tokens
 #define CONST_ARRAY_DECL(name) __constant size_t  _##name##_sdpa_opt_multi_tokens []
