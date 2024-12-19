@@ -2653,7 +2653,6 @@ KERNEL(sdpa_opt)(
         {
             // SoftMax calculation
             // each sg will compute a whole row of query
-            const int key_len_in_kv_block = SEQ_LEN_PARTITION_SIZE;
             for (uint m = sgid; m < seq_idx_end; m += SUBGROUPS_PER_WG) {
                 // rowmax
                 SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
@@ -2668,9 +2667,9 @@ KERNEL(sdpa_opt)(
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
+                for (uint k = sglid; k < partition_seq_len; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][k]) - qk_max_new);
-                    slm_qk_vals[m][k] = convert_half(a);
+                    slm_qk_vals[m][k] = TO_OUTPUT_TYPE(a);
                     exp_sum_new += a;
                 }
                 exp_sum_new = sub_group_reduce_add(exp_sum_new);
@@ -2937,7 +2936,7 @@ KERNEL(sdpa_opt)(
         }
 
 #if IS_PAGED_ATTENTION
-        uint output_offset = block_start_pos_new * HEAD_SIZE * NUM_HEADS + num_heads_dim * HEAD_SIZE + sgid * SUBGROUP_SIZE;
+        uint output_offset = block_start_pos * HEAD_SIZE * NUM_HEADS + num_heads_dim * HEAD_SIZE + sgid * SUBGROUP_SIZE;
         const uint output_pitch = HEAD_SIZE * NUM_HEADS;
 #else
         uint output_offset = OUTPUT_GET_INDEX(b0_idx, b1_idx, target_seq_idx, sgid * SUBGROUP_SIZE);
