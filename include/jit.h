@@ -75,8 +75,8 @@ class jit_generator : public Xbyak::CodeGenerator {
     return _jdbg;
   }
 
-  jit_generator()
-      : Xbyak::CodeGenerator(Xbyak::DEFAULT_MAX_CODE_SIZE * 4, (void*)0) {}
+  jit_generator(const char * _name="")
+      : Xbyak::CodeGenerator(Xbyak::DEFAULT_MAX_CODE_SIZE * 4, (void*)0), ker_name(_name) {}
 
   const char * name() {
     return ker_name;
@@ -95,6 +95,10 @@ class jit_generator : public Xbyak::CodeGenerator {
 #endif
     jit_ker_ = getCode();
     return (jit_ker_) ? 0 : -1;
+  }
+  
+  const void * jit_ker() const {
+    return jit_ker_;
   }
 
  protected:
