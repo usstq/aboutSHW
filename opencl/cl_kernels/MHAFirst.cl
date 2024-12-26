@@ -407,6 +407,9 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 intel_sub_group_block_write_us((__global ushort*)dst, as_short(sum[m]));
             }
         }
+
+        // protect slm_qk_vals as it is read in w*v stage and write in next round q*k stage.
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
 
