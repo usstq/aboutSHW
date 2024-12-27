@@ -11,6 +11,7 @@ class SDPA_opt:
         self.SUBGROUP_SIZE=16
         SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
+        BROADCAST_GROUP_SIZE=Hq//Hk
         
         assert(Hq % Hk == 0);     # implied
         assert(HEAD_SIZE % self.SUBGROUP_SIZE == 0);     # implied
@@ -28,7 +29,7 @@ class SDPA_opt:
             cl_kernel_sources = file.read()
         # print(cl_kernel_sources[:100])
         options = f'-DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} \
-                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -cl-mad-enable'
+                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -DBROADCAST_GROUP_SIZE={BROADCAST_GROUP_SIZE} -cl-mad-enable'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
     def __call__(self, shape_info_input, query_input, key_input, value_input, attn_mask_input, scale_input):
@@ -209,6 +210,8 @@ if __name__ == "__main__":
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
         test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
+        test_acc(1, 28, 14, 128, 4096, 4096, True)
+        test_acc(1, 28, 14, 64, 4096, 4096, True)
         # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
         # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
         # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
