@@ -2330,10 +2330,6 @@ KERNEL(sdpa_opt)(
     #error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
 #endif
 
-#if SUBGROUPS_PER_WG > SUBGROUP_SIZE
-    #error "sdpa_opt.cl: Number of subgroups per work group should be no more than subgroup_size"
-#endif
-
     // Define indexes variables using macro declarations to avoid register spills
     #define batch_idx ((uint)get_global_id(0))
     #define num_heads_dim ((uint)get_global_id(0))
@@ -2657,8 +2653,22 @@ KERNEL(sdpa_opt)(
         {
             // SoftMax calculation
             // each sg will compute a whole row of query
+            uint aligned_width = ((SUBGROUPS_PER_WG + (SUBGROUP_SIZE-1)) & ~(SUBGROUP_SIZE-1));
             for (uint m = sgid; m < seq_idx_end; m += SUBGROUPS_PER_WG) {
                 // rowmax
+#if 1
+                SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[m];
+                SOFTMAX_ACCUMULATOR_TYPE qk_max_new, qk_max_last = max_val_prev;
+                for (uint k = sglid; k <  aligned_width; k += SUBGROUP_SIZE) {
+                    if (k < SUBGROUPS_PER_WG) {
+                        qk_max_new = slm_qk_max_vals[m][k];
+                    } else {
+                        qk_max_new = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                    }
+                    qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(sub_group_reduce_max(qk_max_new), qk_max_last);
+                    qk_max_last = qk_max_new;
+                }
+#else
                 SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
                 if (sglid < SUBGROUPS_PER_WG) {
                     qk_max_new = slm_qk_max_vals[m][sglid];
@@ -2668,10 +2678,11 @@ KERNEL(sdpa_opt)(
                 qk_max_new = sub_group_reduce_max(qk_max_new);
                 SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[m];
                 qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max_new, max_val_prev);
+#endif
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < partition_seq_len; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
+                for (uint k = sglid; k < partition_seq_len; k += SUBGROUP_SIZE) {
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][k]) - qk_max_new);
                     slm_qk_vals[m][k] = TO_OUTPUT_TYPE(a);
                     exp_sum_new += a;
@@ -2688,6 +2699,8 @@ KERNEL(sdpa_opt)(
                     slm_update_factor[m] = correction_factor;
                     slm_max_val_prev[m] = qk_max_new;
                     slm_exp_sum_prev[m] = exp_sum_new;
+
+                    // printf("[%d, %d, %d, %d] qk_max_new = %f, %f, %f\n", target_seq_idx, sgid, sglid, start_partition_idx, qk_max_new, exp_sum_new, correction_factor);
                 }
             }
         }
@@ -2908,6 +2921,9 @@ KERNEL(sdpa_opt)(
                 }
 
             }
+
+            // protect slm_qk_vals as it is read in w*v stage and write in next round q*k stage.
+            barrier(CLK_LOCAL_MEM_FENCE);
 
             {
                 // Rescale acc_output_res values and save current iter results to global accumulator
