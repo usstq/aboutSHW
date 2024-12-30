@@ -21,7 +21,6 @@ inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int
 #include <cstring>
 #include <vector>
 #include <atomic>
-#include <x86intrin.h>
 #include <sys/mman.h>
 #include <thread>
 #include <iostream>
@@ -70,6 +69,37 @@ inline uint64_t get_time_ns() {
     return (tp0.tv_sec * 1000000000) + tp0.tv_nsec;    
 }
 
+#ifdef __i386__
+#include <x86intrin.h>
+uint64_t read_tsc(void) {
+    return __rdtsc();
+}
+uint64_t read_pmc(int index) {
+    return _rdpmc();
+}
+#endif
+
+#ifdef __aarch64__
+// SPDX-License-Identifier: GPL-2.0
+uint64_t read_tsc(void) {
+    uint64_t val;
+    /*
+     * According to ARM DDI 0487F.c, from Armv8.0 to Armv8.5 inclusive, the
+     * system counter is at least 56 bits wide; from Armv8.6, the counter
+     * must be 64 bits wide.  So the system counter could be less than 64
+     * bits wide and it is attributed with the flag 'cap_user_time_short'
+     * is true.
+     */
+    asm volatile("mrs %0, cntvct_el0" : "=r" (val));
+    return val;
+}
+uint64_t read_pmc(int index) {
+    uint64_t val;
+    asm volatile("mrs %0, PMCCNTR_EL0" : "=r"(val));
+    return val;
+}
+#endif
+
 struct TscCounter {
     uint64_t tsc_ticks_per_second;
     uint64_t tsc_ticks_base;
@@ -84,11 +114,11 @@ struct TscCounter {
         return (tsc_ticks1 - tsc_ticks0) * 1000000.0 / tsc_ticks_per_second;
     }
     TscCounter() {
-        uint64_t start_ticks = __rdtsc();
+        uint64_t start_ticks = read_tsc();
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        tsc_ticks_per_second = (__rdtsc() - start_ticks);
+        tsc_ticks_per_second = (read_tsc() - start_ticks);
         std::cout << LINUX_PERF_"tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
-        tsc_ticks_base = __rdtsc();
+        tsc_ticks_base = read_tsc();
 
         // use CLOCK_MONOTONIC_RAW instead of TSC
         tsc_ticks_per_second = 1000000000; // ns
@@ -1021,7 +1051,7 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     uint64_t rdpmc(int i, uint64_t base = 0) {
-        return (_rdpmc(events[i].pmc_index - 1) - base) & pmc_mask;
+        return (read_pmc(events[i].pmc_index - 1) - base) & pmc_mask;
     }
 
     template<class FN>
@@ -1033,7 +1063,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         if (use_pmc) {
             for(int i = 0; i < cnt; i++) {
                 if (events[i].pmc_index)
-                    pmc[i] = _rdpmc(events[i].pmc_index - 1);
+                    pmc[i] = read_pmc(events[i].pmc_index - 1);
                 else
                     pmc[i] = 0;
             }
@@ -1044,14 +1074,14 @@ struct PerfEventGroup : public IPerfEventDumper {
             }
         }
 
-        auto tsc0 = __rdtsc();
+        auto tsc0 = read_tsc();
         fn();
-        auto tsc1 = __rdtsc();
+        auto tsc1 = read_tsc();
 
         if (use_pmc) {
             for(int i = 0; i < cnt; i++) {
                 if (events[i].pmc_index)
-                    pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+                    pmc[i] = (read_pmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
                 else
                     pmc[i] = 0;
             }
@@ -1181,7 +1211,7 @@ struct PerfEventGroup : public IPerfEventDumper {
             if (use_pmc) {
                 for (size_t i =0; i < num_events; i++)
                     if (pevg->events[i].pmc_index)
-                        pd->data[i] = (_rdpmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
+                        pd->data[i] = (read_pmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
                     else
                         pd->data[i] = 0;
             } else {
@@ -1226,7 +1256,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         if (use_pmc) {
             for (size_t i =0; i < events.size() && i < pd->data_size; i++)
                 if (events[i].pmc_index)
-                    pd->data[i] = _rdpmc(events[i].pmc_index - 1);
+                    pd->data[i] = read_pmc(events[i].pmc_index - 1);
         } else {
             read();
             for (size_t i =0; i < events.size() && i < pd->data_size; i++)

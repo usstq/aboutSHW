@@ -38,7 +38,7 @@ class CLib:
         with tempfile.TemporaryDirectory() as tmp_dir:
             temp_name = next(tempfile._get_candidate_names())
             so_path = os.path.join(tmp_dir,temp_name+'.so')
-            args = f"gcc -fopenmp -shared -o {so_path} {options} -Wall -fpic -x c++ - -lstdc++"
+            args = f"gcc -fopenmp -shared -o {so_path} -Wall -fpic -x c++ - -lstdc++ {options}"
 
             # insert empty lines into source code so source line number can match
             src = "\n"*lineno_base + src

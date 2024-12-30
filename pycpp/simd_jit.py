@@ -1,13 +1,25 @@
 import numpy as np
 import pycpp
+import sys
+import platform
 
-@pycpp.clib("-march=core-avx2 -g")
+extra_flags = ""
+
+if platform.machine() == "aarch64":
+    extra_flags += "-L../thirdparty/xbyak_aarch64/lib/ -lxbyak_aarch64"
+
+@pycpp.clib(f"-std=c++11 -march=native -g {extra_flags}")
 def mylib():
     return r'''
-#define JIT_DEBUG 1
-#include "simd_jit.hpp"
+// show predefined macro
+// echo | gcc -dM -E -march=native -
+#include "simd_jit_tests.hpp"
 
 '''
+
+
+mylib.test()
+sys.exit(0)
 
 np.random.seed(0)
 np.set_printoptions(linewidth = 180)
