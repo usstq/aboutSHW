@@ -394,7 +394,7 @@ public:
     SRegExpr(const char* op, SRegExpr&& lhs) : pimpl(new RegExprImpl(op, lhs.pimpl)) {}
     SRegExpr(const char* op, SRegExpr&& lhs, SRegExpr&& rhs) : pimpl(new RegExprImpl(op, lhs.pimpl, rhs.pimpl)) {
         // regularize operand order to allow best reuse temp register
-        if (pimpl->is_op("+") || pimpl->is_op("*")) {
+        if (pimpl->is_op("+") || pimpl->is_op("*") || pimpl->is_op("&") || pimpl->is_op("|")) {
             if (!pimpl->rhs->is_leaf())
                 std::swap(pimpl->lhs, pimpl->rhs);
             else if (pimpl->lhs->is_imm())
@@ -557,7 +557,7 @@ public:
             auto ret = std::system("objdump -D -b binary -mi386:x86-64 -M intel temp.bin");
 #endif
 #ifdef __aarch64__
-            auto ret = std::system("objdump -D -b binary -maarch64 -M intel temp.bin");
+            auto ret = std::system("objdump -D -b binary -maarch64 temp.bin");
 #endif
             (void)ret;
         }
@@ -698,11 +698,6 @@ public:
     template <typename Fn, typename START, typename STEP>
     void for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step, const Fn& loop_body);
 
-    //***********************************************
-    // while_(rax > 0, loop_body) performs following:
-    //    while(rax > 0) {
-    //       loop_body();
-    //    }
     template <typename Fn>
     void while_(SRegExpr regcmp, const Fn& loop_body);
 
@@ -1412,7 +1407,156 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
             return;
         }
     }
-    //
+
+    // complex expression: need multiple passes on IR to work
+    // assign scratch register & convert to 2-OP instruction form
+    pimpl->const_folding();
+    if (debug_log)
+        expr.show(" After const folding");
+
+    // allocate scratch register
+    // ARM instruction is 3-OP, so both lhs & rhs can be reused
+    // but only rhs in ADD & SUB can be imm, and it can be 0-4095 only
+    static reg_pool scratch_reg_sn_pool("sreg_expr_scratch_registers", 32);
+    scratch_reg_sn_pool.clear();
+    auto scratch_reg_base = 1000;
+    auto alloc_scratch_reg = [&]() {
+        return scratch_reg_sn_pool.allocate() + scratch_reg_base;
+    };
+    auto free_scratch_reg = [&](int reg) {
+        scratch_reg_sn_pool.free(reg - scratch_reg_base);
+    };
+
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        if (p->lhs->is_imm()) {
+            // insert mov imm (since only rhs can be imm)
+            std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->lhs));
+            pmov->data = alloc_scratch_reg();
+            p->lhs = std::move(pmov);
+        }
+
+        if (p->rhs->is_imm()) {
+            auto imm32 = p->rhs->as_imm32();
+            bool is_op_support_imm = p->is_op("+") || p->is_op("-") || p->is_op(">>") || p->is_op("<<");
+            if (imm32 < 0 || imm32 > 4095 || (!is_op_support_imm)) {
+                auto rhs_temp_reg = alloc_scratch_reg();
+                std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->rhs));
+                pmov->data = rhs_temp_reg;
+                p->rhs = std::move(pmov);
+            }
+        }
+
+        // reuse lhs temp reg
+        if (!p->lhs->is_leaf()) {
+            p->data = p->lhs->data;
+            if (p->rhs && !p->rhs->is_leaf())
+                free_scratch_reg(p->rhs->data);
+            return true;
+        }
+        // reuse rhs temp reg
+        if (!p->rhs->is_leaf()) {
+            //   rhs = lhs + rhs
+            p->data = p->rhs->data;
+            return true;
+        }
+
+        auto new_scratch_reg_sn = alloc_scratch_reg();
+        p->data = new_scratch_reg_sn;
+        return true;
+    });
+
+    if (debug_log)
+        expr.show(" After scratch reg allocation & convert to 2-OP form");
+
+    // try to replace last scratch register with assign destination register
+    bool dst_register_assigned_inplace = false;
+    if (pdst && assign_op == '=') {
+        dst_register_assigned_inplace = pimpl->replace_scratch_with_dst(pdst->r64().getIdx());
+    }
+    if (debug_log)
+        expr.show(" After replace dst scratch register");
+
+    // allocate physical registers
+    std::map<int, SReg> scratch_regs;
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        if (p->data >= scratch_reg_base) {
+            auto it = scratch_regs.find(p->data);
+            if (it != scratch_regs.end()) {
+                p->data = it->second.r64().getIdx();
+            } else {
+                // allocate new scratch reg
+                auto sreg = get_sreg();
+                scratch_regs.emplace(p->data, sreg);
+                p->data = sreg.r64().getIdx();
+            }
+        }
+        return true;
+    });
+    if (debug_log)
+        expr.show(" After allocation of all scratch registers");
+
+    // emmit code
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        auto dst = XbyakSReg64(p->data);
+        if (p->is_op(" ")) {
+            OPENVINO_ASSERT(p->lhs->is_imm());
+            mov(dst, p->lhs->as_imm32());
+        } else if (p->is_op("+")) {
+            if (p->rhs->is_imm())
+                add(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else
+                add(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("-")) {
+            if (p->rhs->is_imm())
+                sub(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else
+                sub(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("*")) {
+            mul(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op(">>")) {
+            if (p->rhs->is_imm())
+                asr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else {
+                asr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+            }
+        } else if (p->is_op("<<")) {
+            if (p->rhs->is_imm())
+                lsl(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else {
+                lsl(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+            }
+        } else if (p->is_op("&")) {
+            and_(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("|")) {
+            orr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else {
+            OPENVINO_ASSERT(0, "Unsupported OP: ", p->op);
+        }
+        return true;
+    });
+
+    if (pdst) {
+        if (assign_op == '=' && !dst_register_assigned_inplace) {
+            mov(*pdst, pimpl->as_r64<XbyakSReg64>());
+        } else {
+            switch (assign_op) {
+            case '=':
+                break;
+            case '+':
+                add(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            case '-':
+                sub(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            case '*':
+                mul(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            default:
+                OPENVINO_ASSERT(false);
+                break;
+            }
+        }
+    }
 }
 
 #endif

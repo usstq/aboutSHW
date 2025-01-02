@@ -222,6 +222,80 @@ struct RegExprImpl {
         }
         return callback(root);
     }
+
+    void const_folding() {
+        for_each_op([&](RegExprImpl* p) {
+            if (p->is_op("-") && p->rhs->is_imm()) {
+                p->op = "+";
+                p->rhs->data = -(p->rhs->data);
+            }
+            return true;
+        });
+
+        for_each_op([&](RegExprImpl* p) {
+            if (p->rhs && !p->rhs->is_imm())
+                return true;
+
+            if (p->is_op("+")) {
+                if (p->lhs->is_op("+") && p->lhs->rhs->is_imm()) {
+                    p->rhs->data += p->lhs->rhs->as_imm32();
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+            }
+            if (p->is_op("*")) {
+                if (p->lhs->is_op("*") && p->lhs->rhs->is_imm()) {
+                    p->rhs->data *= p->lhs->rhs->as_imm32();
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+            }
+            return true;
+        });
+    }
+
+    bool replace_scratch_with_dst(int assign_dst_reg_idx) {
+        bool dst_register_assigned_inplace = false;
+        // try to replace last scratch register with assign destination register
+        auto assign_dst_reg_scratch_sn = data;
+        // find the appearance of last access
+        int last_access_exec_id = -1;
+        int op_exec_id = 0;
+        for_each_op([&](RegExprImpl* p) {
+            op_exec_id++;
+            if (p->lhs->is_reg() && p->lhs->data == assign_dst_reg_idx) {
+                last_access_exec_id = op_exec_id;
+            }
+            if (p->rhs && p->rhs->is_reg() && p->rhs->data == assign_dst_reg_idx) {
+                last_access_exec_id = op_exec_id;
+            }
+            return true;
+        });
+        // replace assign dst scratch with real assign dest reg
+        op_exec_id = 0;
+        bool replaced = false;
+        for_each_op([&](RegExprImpl* p) {
+            op_exec_id++;
+            if (op_exec_id >= last_access_exec_id && p->data == assign_dst_reg_scratch_sn) {
+                // the scratch reg has longer life-cycle, cannot replace
+                if (p->lhs->data == assign_dst_reg_scratch_sn)
+                    return false;
+                p->data = assign_dst_reg_idx;
+                replaced = true;
+            }
+            return true;
+        });
+        if (replaced) {
+            dst_register_assigned_inplace = true;
+            // remove useless mov
+            for_each_op([&](RegExprImpl* p) {
+                if (p->lhs->is_op(" ") && p->lhs->lhs->is_reg() && p->lhs->lhs->data == p->lhs->data) {
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+                return true;
+            });
+        }
+        return dst_register_assigned_inplace;
+    }
+
 };
 
 }  // namespace intel_cpu

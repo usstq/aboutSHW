@@ -155,8 +155,8 @@ extern "C" void test() {
         auto c = jit->get_sreg();
 
         // jit->add(c, a, b);
-        //c = a + b;
-        c *= 0x7fff1234;
+        c = a + (b>>1)*8;
+        
         jit->return_(c);
     }
     jit->ready();
