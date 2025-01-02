@@ -14,11 +14,21 @@ void _write_all(std::ostream& os, TS&&... args) {
     int dummy[sizeof...(TS)] = {(os << std::forward<TS>(args), 0)...};
     (void)dummy;
 }
+
+#ifdef __x86_64__
+#    define TRAP_INST() __asm__("int3");
+#endif
+
+#ifdef __aarch64__
+#    define TRAP_INST() __asm__("brk #0x1");
+#endif
+
 #define OPENVINO_ASSERT(cond, ...)                                                      \
     if (!(cond)) {                                                                      \
         std::stringstream ss;                                                           \
         _write_all(ss, __FILE__, ":", __LINE__, " ", #cond, " failed:", ##__VA_ARGS__); \
         std::cout << "\033[31m" << ss.str() << "\033[0m" << std::endl;                  \
+        TRAP_INST();                                                                    \
         throw std::runtime_error(ss.str());                                             \
     }
 
@@ -26,6 +36,21 @@ namespace ov {
 namespace intel_cpu {
 
 static const int SIMDJIT_DEBUG = std::getenv("SIMDJIT_DEBUG") ? std::atoi(std::getenv("SIMDJIT_DEBUG")) : 0;
+
+inline int jit_dump_asm(const char* name, const void* pcode, size_t size) {
+    std::cout << "\033[32m::::    " << name << "    ::::\033[0m" << std::endl;
+    std::ofstream outfile;
+    outfile.open("temp.bin", std::ios_base::binary);
+    outfile.write(reinterpret_cast<const char*>(pcode), size);
+    outfile.close();
+#ifdef __x86_64__
+    auto ret = std::system("objdump -D -b binary -mi386:x86-64 -M intel temp.bin");
+#endif
+#ifdef __aarch64__
+    auto ret = std::system("objdump -D -b binary -maarch64 temp.bin");
+#endif
+    return ret;
+}
 
 class reg_pool {
 public:
@@ -36,7 +61,7 @@ public:
     }
 
     void add_range(const std::vector<int>& reg_indices) {
-        for(auto& reg_index : reg_indices) {
+        for (auto& reg_index : reg_indices) {
             if (m_reg_slot.size() < reg_index)
                 m_reg_slot.resize(reg_index + 1, -1);
 
@@ -50,7 +75,7 @@ public:
         if (m_reg_slot.size() < reg_index_to)
             m_reg_slot.resize(reg_index_to + 1, -1);
 
-        for(int i = reg_index_from; i <= reg_index_to; i++) {
+        for (int i = reg_index_from; i <= reg_index_to; i++) {
             m_reg_slot[i] = m_reg_status.size();
             m_reg_status.push_back(i);
         }
@@ -88,7 +113,7 @@ private:
     const char* m_name;
     static constexpr int mark_used = 0x80000000;
     std::vector<int> m_reg_status;  //
-    std::vector<int> m_reg_slot;   //
+    std::vector<int> m_reg_slot;    //
 };
 
 struct RegExprImpl {
@@ -99,6 +124,21 @@ struct RegExprImpl {
     int data = -1;
     std::unique_ptr<RegExprImpl> lhs;
     std::unique_ptr<RegExprImpl> rhs;
+
+#ifdef __aarch64__
+    // for lowering to ARM instruction with shifted register as rhs
+    //  ADD  Xd, Xn, Xm{, shift #amount}
+    //  AND  Xd, Xn, Xm{, shift #amount}
+    //  EON  Xd, Xn, Xm{, shift #amount}
+    //  EOR  Xd, Xn, Xm{, shift #amount}
+    //  ORN  Xd, Xn, Xm{, shift #amount}
+    //  ORR  Xd, Xn, Xm{, shift #amount}
+    //  SUB  Xd, Xn, Xm{, shift #amount}
+    //  TST  Xn, Xm{, shift #amount}
+    enum class SHIFT_TYPE { NONE = 0, LSL, LSR, ASR, ROR };
+    SHIFT_TYPE shift_type = SHIFT_TYPE::NONE;
+    uint8_t shift_amount = 0;
+#endif
 
     template <typename T>
     T as_r64() {
@@ -135,8 +175,29 @@ struct RegExprImpl {
             return op[0] == name[0] && op[1] == name[1];
         else if (op[2] == 0)
             return op[0] == name[0] && op[1] == name[1] && op[2] == name[2];
+        else if (op[3] == 0)
+            return op[0] == name[0] && op[1] == name[1] && op[2] == name[2] && op[3] == name[3];
         return false;
     }
+
+    void try_swap_lhs_rhs() {
+        if (is_op("+") || is_op("*") || is_op("&") || is_op("|")) {
+            std::swap(lhs, rhs);
+        } else if (is_cmp()) {
+            std::swap(lhs, rhs);
+            if (is_op(">"))
+                op = "<";
+            else if (is_op(">="))
+                op = "<=";
+            else if (is_op("<"))
+                op = ">";
+            else if (is_op("<="))
+                op = ">=";
+        } else {
+            // no swap
+        }
+    }
+
     std::string to_string() const {
         if (is_leaf()) {
             if (std::string(op) == "i")
@@ -159,9 +220,7 @@ struct RegExprImpl {
     }
 
     void show_rpn() const {
-        std::cout << "\033[32m::::"
-                  << " orignal expression "
-                  << "::::\033[0m" << std::endl;
+        std::cout << "\033[32m::::" << " orignal expression " << "::::\033[0m" << std::endl;
         std::cout << "infix expression: ";
         _show_rpn(this, true);
         std::cout << std::endl;
@@ -202,7 +261,13 @@ struct RegExprImpl {
     RegExprImpl(const char* op, std::unique_ptr<RegExprImpl>& _lhs, std::unique_ptr<RegExprImpl>& _rhs)
         : op(op),
           lhs(std::move(_lhs)),
-          rhs(std::move(_rhs)) {}
+          rhs(std::move(_rhs)) {
+        // regularize operand order to allow best reuse temp register (or make rhs imm)
+        if (!rhs->is_leaf())
+            try_swap_lhs_rhs();
+        else if (lhs->is_imm())
+            try_swap_lhs_rhs();
+    }
 
     // for_each_op all op
     bool for_each_op(const std::function<bool(RegExprImpl* node)>& callback, RegExprImpl* root = nullptr) {
@@ -221,6 +286,79 @@ struct RegExprImpl {
                 return false;  // early terminate
         }
         return callback(root);
+    }
+
+    void const_folding() {
+        for_each_op([&](RegExprImpl* p) {
+            if (p->is_op("-") && p->rhs->is_imm()) {
+                p->op = "+";
+                p->rhs->data = -(p->rhs->data);
+            }
+            return true;
+        });
+
+        for_each_op([&](RegExprImpl* p) {
+            if (p->rhs && !p->rhs->is_imm())
+                return true;
+
+            if (p->is_op("+")) {
+                if (p->lhs->is_op("+") && p->lhs->rhs->is_imm()) {
+                    p->rhs->data += p->lhs->rhs->as_imm32();
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+            }
+            if (p->is_op("*")) {
+                if (p->lhs->is_op("*") && p->lhs->rhs->is_imm()) {
+                    p->rhs->data *= p->lhs->rhs->as_imm32();
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+            }
+            return true;
+        });
+    }
+
+    bool replace_scratch_with_dst(int assign_dst_reg_idx) {
+        bool dst_register_assigned_inplace = false;
+        // try to replace last scratch register with assign destination register
+        auto assign_dst_reg_scratch_sn = data;
+        // find the appearance of last access
+        int last_access_exec_id = -1;
+        int op_exec_id = 0;
+        for_each_op([&](RegExprImpl* p) {
+            op_exec_id++;
+            if (p->lhs->is_reg() && p->lhs->data == assign_dst_reg_idx) {
+                last_access_exec_id = op_exec_id;
+            }
+            if (p->rhs && p->rhs->is_reg() && p->rhs->data == assign_dst_reg_idx) {
+                last_access_exec_id = op_exec_id;
+            }
+            return true;
+        });
+        // replace assign dst scratch with real assign dest reg
+        op_exec_id = 0;
+        bool replaced = false;
+        for_each_op([&](RegExprImpl* p) {
+            op_exec_id++;
+            if (op_exec_id >= last_access_exec_id && p->data == assign_dst_reg_scratch_sn) {
+                // the scratch reg has longer life-cycle, cannot replace
+                if (p->lhs->data == assign_dst_reg_scratch_sn)
+                    return false;
+                p->data = assign_dst_reg_idx;
+                replaced = true;
+            }
+            return true;
+        });
+        if (replaced) {
+            dst_register_assigned_inplace = true;
+            // remove useless mov
+            for_each_op([&](RegExprImpl* p) {
+                if (p->lhs->is_op(" ") && p->lhs->lhs->is_reg() && p->lhs->lhs->data == p->lhs->data) {
+                    p->lhs = std::move(p->lhs->lhs);
+                }
+                return true;
+            });
+        }
+        return dst_register_assigned_inplace;
     }
 };
 

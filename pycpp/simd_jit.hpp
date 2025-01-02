@@ -247,15 +247,11 @@ struct jit_generator : public Xbyak_aarch64::CodeGenerator {
     }
 
     int finalize() {
-        /*
-        if (!jit_debug().empty()) {
-            std::cout << "jit_generator generate() is done: " << m_kernel_name << std::endl;
-            if (jit_debug() == m_kernel_name || jit_debug() == "*") {
-                dump();
-            }
-        }*/
         ready();
         jit_kernel_code = getCode();
+        if (ov::intel_cpu::SIMDJIT_DEBUG > 10) {
+            ov::intel_cpu::jit_dump_asm(m_kernel_name, jit_kernel_code, this->getSize());
+        }
         return (jit_kernel_code) ? 0 : -1;
     }
 
@@ -393,14 +389,6 @@ public:
     SRegExpr(const char* type, int data) : pimpl(new RegExprImpl(type, data)) {}
     SRegExpr(const char* op, SRegExpr&& lhs) : pimpl(new RegExprImpl(op, lhs.pimpl)) {}
     SRegExpr(const char* op, SRegExpr&& lhs, SRegExpr&& rhs) : pimpl(new RegExprImpl(op, lhs.pimpl, rhs.pimpl)) {
-        // regularize operand order to allow best reuse temp register
-        if (pimpl->is_op("+") || pimpl->is_op("*")) {
-            if (!pimpl->rhs->is_leaf())
-                std::swap(pimpl->lhs, pimpl->rhs);
-            else if (pimpl->lhs->is_imm())
-                std::swap(pimpl->lhs, pimpl->rhs);
-        }
-
         // create Addressing from the first leaf-op when expr pattern is valid:
         if (pimpl->lhs->is_reg() && pimpl->rhs->is_leaf()) {
             if (pimpl->is_op("+")) {
@@ -460,7 +448,25 @@ public:
         }
         pimpl->for_each_op([&](RegExprImpl* p) {
             std::cout << p->name() << " = " << p->lhs->name() << " " << p->op << " "
-                      << (p->rhs ? p->rhs->name() : std::string("( )")) << std::endl;
+                      << (p->rhs ? p->rhs->name() : std::string("( )"));
+            if (p->shift_type != RegExprImpl::SHIFT_TYPE::NONE) {
+                auto shift_amount = static_cast<int>(p->shift_amount);
+                switch (p->shift_type) {
+                case RegExprImpl::SHIFT_TYPE::ASR:
+                    std::cout << " >>(A) " << shift_amount;
+                    break;
+                case RegExprImpl::SHIFT_TYPE::LSR:
+                    std::cout << " >>(L) " << shift_amount;
+                    break;
+                case RegExprImpl::SHIFT_TYPE::LSL:
+                    std::cout << " <<(L) " << shift_amount;
+                    break;
+                case RegExprImpl::SHIFT_TYPE::ROR:
+                    std::cout << " >>(R) " << shift_amount;
+                    break;
+                }
+            }
+            std::cout << std::endl;
             return true;
         });
     }
@@ -478,6 +484,9 @@ inline SRegExpr operator-(SRegExpr&& lhs, SRegExpr&& rhs) {
 inline SRegExpr operator-(SRegExpr&& rhs) {
     SRegExpr lhs(0);
     return SRegExpr("-", std::move(lhs), std::move(rhs));
+}
+inline SRegExpr operator~(SRegExpr&& lhs) {
+    return SRegExpr("~", std::move(lhs));
 }
 /*
 inline SRegExpr operator/(SRegExpr&& lhs, SRegExpr&& rhs) {
@@ -535,42 +544,38 @@ inline SRegExpr operator!(SRegExpr&& lhs) {
     return SRegExpr("!", std::move(lhs));
 }
 
+template <typename T>
+struct convert_call_arg {
+    using type = T;
+};
+template <>
+struct convert_call_arg<int16_t> {
+    using type = int64_t;
+};
+template <>
+struct convert_call_arg<uint16_t> {
+    using type = int64_t;
+};
+template <>
+struct convert_call_arg<int32_t> {
+    using type = int64_t;
+};
+template <>
+struct convert_call_arg<uint32_t> {
+    using type = int64_t;
+};
+
 //=========================================================================================
 class SIMDJit : public jit_generator {
 public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(SIMDJit);
 
-    class JitDisassembler {
-    public:
-        size_t start;
-        SIMDJit* jit;
-        JitDisassembler(SIMDJit* jit) : jit(jit) {
-            start = jit->getSize();
-        }
-        ~JitDisassembler() {
-            auto cur_loc = jit->getSize();
-            std::ofstream outfile;
-            outfile.open("temp.bin", std::ios_base::binary);
-            outfile.write(reinterpret_cast<const char*>(jit->getJitCode()) + start, cur_loc - start);
-            outfile.close();
-#ifdef __x86_64__
-            auto ret = std::system("objdump -D -b binary -mi386:x86-64 -M intel temp.bin");
-#endif
-#ifdef __aarch64__
-            auto ret = std::system("objdump -D -b binary -maarch64 -M intel temp.bin");
-#endif
-            (void)ret;
-        }
-    };
-    friend class JitDisassembler;
-
-    const void* getJitCode() {
-        return CodeGenerator::getCode();
-    }
-    std::unique_ptr<JitDisassembler> get_disasm(int enable) {
+    std::shared_ptr<void> get_disasm(int enable) {
         if (enable) {
-            auto* dis = new JitDisassembler(this);
-            return std::unique_ptr<JitDisassembler>(dis);
+            auto start = getSize();
+            return std::shared_ptr<void>(nullptr, [start, this](void*) {
+                jit_dump_asm("", this->getCode() + start, this->getSize() - start);
+            });
         }
         return nullptr;
     }
@@ -582,12 +587,13 @@ public:
         preamble();
     }
 
-    // add an int64_t return value
     template <typename... kernel_args_t>
     int64_t operator()(kernel_args_t... args) const {
-        using jit_kernel_func_t = int64_t (*)(const kernel_args_t... args);
+        // all integer value types are converted into int64_t
+        using jit_kernel_func_t = int64_t (*)(const typename convert_call_arg<kernel_args_t>::type...);
         auto* fptr = (jit_kernel_func_t)jit_ker();
-        return (*fptr)(std::forward<kernel_args_t>(args)...);
+        // return (*fptr)(std::forward<kernel_args_t>(args)...);
+        return (*fptr)(args...);
     }
 
     SReg get_arg(int idx) {
@@ -698,11 +704,6 @@ public:
     template <typename Fn, typename START, typename STEP>
     void for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step, const Fn& loop_body);
 
-    //***********************************************
-    // while_(rax > 0, loop_body) performs following:
-    //    while(rax > 0) {
-    //       loop_body();
-    //    }
     template <typename Fn>
     void while_(SRegExpr regcmp, const Fn& loop_body);
 
@@ -713,6 +714,12 @@ public:
                     const std::function<void()>& then_body,
                     const std::function<void()>& else_body = {});
 
+    struct ExprStatus {
+        int scratch_reg_cnt;
+        int ops_cnt;
+        ExprStatus() = default;
+        ExprStatus(int scratch_reg_cnt, int ops_cnt) : scratch_reg_cnt(scratch_reg_cnt), ops_cnt(ops_cnt) {}
+    } expr_stat;
     // being specialization in platform-dependent header
     inline void evaluate(SRegExpr& expr,
                          const SReg* pdst = nullptr,
@@ -849,9 +856,10 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
     const bool do_assign = (pdst != nullptr) && (!do_jump);
 
     if (debug_log) {
+        if (pdst) {
+            std::cout << " assign-to : r" << pdst->r64().getIdx() << assign_op << " = ..." << std::endl;
+        }
         pimpl->show_rpn();
-        if (pdst)
-            std::cout << assign_op << " assign-to : r" << pdst->r64().getIdx() << std::endl;
     }
 
     // short expression optimization
@@ -1282,9 +1290,78 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
     }
 }
 #endif
-
+// https://courses.cs.washington.edu/courses/cse469/19wi/arm64.pdf
 //
 #ifdef __aarch64__
+
+template <typename Fn, typename START, typename STEP>
+void SIMDJit::for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step, const Fn& loop_body) {
+    Xbyak_aarch64::Label loop, exit;
+    mov(idx, start);
+
+    align(64);
+    L(loop);
+    add(idx, idx, step);
+    cmp(idx, stop);
+    b(Xbyak_aarch64::Cond::GT, exit);
+    sub(idx, idx, step);
+
+    loop_body();
+    add(idx, idx, step);
+
+    b(loop);
+    L(exit);
+    // at exit, idx is pointing to tail
+    sub(idx, idx, step);
+}
+
+template <typename Fn>
+void SIMDJit::while_(SRegExpr regcmp, const Fn& loop_body) {
+    Xbyak_aarch64::Label loop, exit;
+
+    align(64);
+    L(loop);
+
+    evaluate(regcmp, nullptr, 'F', exit);
+
+    loop_body();
+
+    b(loop);
+    L(exit);
+}
+
+template <typename Fn>
+void SIMDJit::do_while_(SRegExpr regcmp, const Fn& loop_body) {
+    Xbyak_aarch64::Label loop;
+
+    align(64);
+    L(loop);
+
+    loop_body();
+
+    evaluate(regcmp, nullptr, 'T', loop);
+}
+
+inline void SIMDJit::if_(SRegExpr regcmp,
+                         const std::function<void()>& then_body,
+                         const std::function<void()>& else_body) {
+    Xbyak_aarch64::Label if_else, if_exit;
+
+    evaluate(regcmp, nullptr, 'F', if_else);
+
+    then_body();
+
+    if (else_body)
+        b(if_exit);
+
+    L(if_else);
+
+    if (else_body)
+        else_body();
+
+    L(if_exit);
+}
+
 inline const SReg& SReg::operator=(const SReg& rhs) const {
     jit->mov(*reg, rhs);
     return *this;
@@ -1338,9 +1415,11 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
     const bool do_assign = (pdst != nullptr) && (!do_jump);
 
     if (debug_log) {
+        if (pdst) {
+            std::cout << "r" << pdst->r64().getIdx() << " " << assign_op << (assign_op == '=' ? " " : "= ")
+                      << std::endl;
+        }
         pimpl->show_rpn();
-        if (pdst)
-            std::cout << assign_op << " assign-to : r" << pdst->r64().getIdx() << std::endl;
     }
 
     // short expression optimization
@@ -1393,7 +1472,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 }
             }
             auto imm_reg = get_sreg();
-            mov(imm_reg, lhs->as_imm32());
+            mov(imm_reg, imm32);
 
             switch (actual_op) {
             case '+':
@@ -1412,7 +1491,409 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
             return;
         }
     }
-    //
+
+    // complex expression: need multiple passes on IR to work
+    // assign scratch register & convert to 2-OP instruction form
+    pimpl->const_folding();
+    if (debug_log)
+        expr.show(" After const folding");
+
+    // replace special useless op
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        if (p->rhs && p->rhs->is_imm()) {
+            auto imm32 = p->rhs->as_imm32();
+            if (imm32 == 0 && p->is_op("&")) {
+                // & 0 ===> = 0
+                p->op = " ";
+                p->lhs = std::move(p->rhs);
+                return true;
+            }
+            if (imm32 == 0 && (p->is_op("|") || p->is_op("^") || p->is_op("*"))) {
+                p->op = "NOP"; // "NOP" : pass-through (dst = lhs)
+            }
+        }
+        if (p->lhs->is_op("NOP")) {
+            p->lhs = std::move(p->lhs->lhs);
+        }
+        if (p->rhs && p->rhs->is_op("NOP")) {
+            p->lhs = std::move(p->rhs->lhs);
+        }
+    });
+
+    // using shifted register when possible
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        // dst = lhs op (rhs << 3)
+        // dst = lhs op (rhs >> 3)
+        // dst = lhs op (rhs * 2^n)
+        //
+        if (!p->rhs)
+            return true;
+        if (p->is_op("+") || p->is_op("-") || p->is_op("&") || p->is_op("|") || p->is_op("^")) {
+            if (p->rhs->is_reg() && p->lhs->is_op() && (!p->is_op("-"))) {
+                // most likely optimization happens on lhs
+                std::swap(p->lhs, p->rhs);
+                std::cout << p->name() << ":" << __LINE__ << std::endl;
+            }
+            if (!p->rhs->rhs)
+                return true;
+            std::cout << p->name() << ":" << __LINE__ << std::endl;
+            if (!p->rhs->lhs->is_reg() && !p->rhs->lhs->is_op())
+                return true;
+            std::cout << p->name() << ":" << __LINE__ << std::endl;
+            if (!p->rhs->rhs->is_imm())
+                return true;
+            std::cout << p->name() << ":" << __LINE__ << std::endl;
+            auto imm32 = p->rhs->rhs->as_imm32();
+            if (imm32 < 0)
+                return true;
+
+            RegExprImpl::SHIFT_TYPE shift_type = RegExprImpl::SHIFT_TYPE::NONE;
+            if (p->rhs->is_op(">>") || p->rhs->is_op("<<")) {
+                OPENVINO_ASSERT(imm32 >= 0 && imm32 < 64);
+                if (p->rhs->is_op(">>"))
+                    p->shift_type = RegExprImpl::SHIFT_TYPE::ASR;
+                if (p->rhs->is_op("<<"))
+                    p->shift_type = RegExprImpl::SHIFT_TYPE::LSL;
+                p->rhs = std::move(p->rhs->lhs);
+                p->shift_amount = imm32;
+                return true;
+            }
+
+            if (p->rhs->is_op("*")) {
+                std::cout << p->name() << ":" << __LINE__ << std::endl;
+                p->shift_amount = 0;
+                while ((imm32 & 1) == 0) {
+                    imm32 = imm32 >> 1;
+                    p->shift_amount++;
+                }
+                if (imm32 == 1) {
+                    p->shift_type = RegExprImpl::SHIFT_TYPE::LSL;
+                    p->rhs = std::move(p->rhs->lhs);
+                    return true;
+                }
+                // this removes some bits from imm32 : (rhs*imm32)
+                if (p->shift_amount > 0) {
+                    p->shift_type = RegExprImpl::SHIFT_TYPE::LSL;
+                    p->rhs->rhs->data = imm32;
+                    return true;
+                }
+            }
+        }
+        return true;
+    });
+    if (debug_log)
+        expr.show(" After fusing shift");
+
+    // allocate scratch register
+    // ARM instruction is 3-OP, so both lhs & rhs can be reused
+    // but only rhs in ADD & SUB can be imm, and it can be 0-4095 only
+    static reg_pool scratch_reg_sn_pool("sreg_expr_scratch_registers", 32);
+    scratch_reg_sn_pool.clear();
+    auto scratch_reg_base = 1000;
+    auto alloc_scratch_reg = [&]() {
+        return scratch_reg_sn_pool.allocate() + scratch_reg_base;
+    };
+    auto free_scratch_reg = [&](int reg) {
+        scratch_reg_sn_pool.free(reg - scratch_reg_base);
+    };
+
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        if (p->lhs->is_imm()) {
+            // insert mov imm (since only rhs can be imm)
+            std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->lhs));
+            pmov->data = alloc_scratch_reg();
+            p->lhs = std::move(pmov);
+        }
+
+        // some op (~, !, -) has no rhs
+        if (p->rhs && p->rhs->is_imm()) {
+            auto imm32 = p->rhs->as_imm32();
+            bool is_op_support_imm = p->is_op("+") || p->is_op("-") || p->is_op(">>") || p->is_op("<<") || p->is_cmp();
+            if (p->is_op("&") || p->is_op("|") || p->is_op("^")) {
+                // check if imm32 is Bitmask immediates
+                // https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+                // here for simplicity we only check 64-bits case
+                uint32_t temp_imm = reinterpret_cast<uint32_t&>(imm32);
+                int num_bit_switch = 0;
+                uint32_t last_bit = temp_imm & 1;
+                for (int i = 1; i < 32; i++) {
+                    uint32_t cur_bit = temp_imm & (1<<i);
+                    if (last_bit != cur_bit)
+                        num_bit_switch ++;
+                }
+                OPENVINO_ASSERT(num_bit_switch > 0);
+                if (num_bit_switch == 1 || num_bit_switch == 2) {
+                    is_op_support_imm = true;
+                }
+            }
+            if (imm32 < 0 || imm32 > 4095 || (!is_op_support_imm)) {
+                auto rhs_temp_reg = alloc_scratch_reg();
+                std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->rhs));
+                pmov->data = rhs_temp_reg;
+                p->rhs = std::move(pmov);
+            }
+        }
+
+        // reuse lhs temp reg
+        if (!p->lhs->is_leaf()) {
+            p->data = p->lhs->data;
+            if (p->rhs && !p->rhs->is_leaf())
+                free_scratch_reg(p->rhs->data);
+            return true;
+        }
+        // reuse rhs temp reg
+        if (p->rhs && !p->rhs->is_leaf()) {
+            //   rhs = lhs + rhs
+            p->data = p->rhs->data;
+            return true;
+        }
+
+        auto new_scratch_reg_sn = alloc_scratch_reg();
+        p->data = new_scratch_reg_sn;
+        return true;
+    });
+
+    if (debug_log)
+        expr.show(" After scratch reg allocation & convert to 2-OP form");
+
+    // try to replace last scratch register with assign destination register
+    bool dst_register_assigned_inplace = false;
+    if (pdst && assign_op == '=') {
+        dst_register_assigned_inplace = pimpl->replace_scratch_with_dst(pdst->r64().getIdx());
+    }
+    if (debug_log)
+        expr.show(" After replace dst scratch register");
+
+    // allocate physical registers
+    std::map<int, SReg> scratch_regs;
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        if (p->data >= scratch_reg_base) {
+            auto it = scratch_regs.find(p->data);
+            if (it != scratch_regs.end()) {
+                p->data = it->second.r64().getIdx();
+            } else {
+                // allocate new scratch reg
+                auto sreg = get_sreg();
+                scratch_regs.emplace(p->data, sreg);
+                p->data = sreg.r64().getIdx();
+            }
+        }
+        return true;
+    });
+
+    if (debug_log)
+        expr.show(" After allocation of all scratch registers");
+
+    auto shift_mode = [](RegExprImpl::SHIFT_TYPE sh) {
+        switch (sh) {
+        case RegExprImpl::SHIFT_TYPE::LSL:
+            return Xbyak_aarch64::ShMod::LSL;
+        case RegExprImpl::SHIFT_TYPE::LSR:
+            return Xbyak_aarch64::ShMod::LSR;
+        case RegExprImpl::SHIFT_TYPE::ASR:
+            return Xbyak_aarch64::ShMod::ASR;
+        case RegExprImpl::SHIFT_TYPE::ROR:
+            return Xbyak_aarch64::ShMod::ROR;
+        }
+        return Xbyak_aarch64::ShMod::NONE;
+    };
+
+    expr_stat.scratch_reg_cnt = scratch_regs.size();
+    expr_stat.ops_cnt = 0;
+
+    // emmit code
+    pimpl->for_each_op([&](RegExprImpl* p) {
+        auto dst = XbyakSReg64(p->data);
+        expr_stat.ops_cnt++;
+        if (p->is_op(" ")) {
+            OPENVINO_ASSERT(p->lhs->is_imm());
+            mov(dst, p->lhs->as_imm32());
+        } else if (p->is_op("+")) {
+            if (p->rhs->is_imm())
+                add(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else
+                add(dst,
+                    p->lhs->as_r64<XbyakSReg64>(),
+                    p->rhs->as_r64<XbyakSReg64>(),
+                    shift_mode(p->shift_type),
+                    p->shift_amount);
+        } else if (p->is_op("-")) {
+            if (p->rhs->is_imm())
+                sub(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else
+                sub(dst,
+                    p->lhs->as_r64<XbyakSReg64>(),
+                    p->rhs->as_r64<XbyakSReg64>(),
+                    shift_mode(p->shift_type),
+                    p->shift_amount);
+        } else if (p->is_op("*")) {
+            mul(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op(">>")) {
+            if (p->rhs->is_imm())
+                asr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else {
+                asr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+            }
+        } else if (p->is_op("<<")) {
+            if (p->rhs->is_imm())
+                lsl(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else {
+                lsl(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+            }
+        } else if (p->is_op("&")) {
+            if (p->rhs->is_imm())
+                and_(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else if (p->shift_amount)
+                and_(dst,
+                     p->lhs->as_r64<XbyakSReg64>(),
+                     p->rhs->as_r64<XbyakSReg64>(),
+                     shift_mode(p->shift_type),
+                     p->shift_amount);
+            else
+                and_(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("&&")) {
+            if (p->rhs->is_imm())
+                and_(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32() ? 1 : 0);
+            else if (p->shift_amount)
+                and_(dst,
+                     p->lhs->as_r64<XbyakSReg64>(),
+                     p->rhs->as_r64<XbyakSReg64>(),
+                     shift_mode(p->shift_type),
+                     p->shift_amount);
+            else
+                and_(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("|")) {
+            if (p->rhs->is_imm())
+                orr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else if (p->shift_amount)
+                orr(dst,
+                    p->lhs->as_r64<XbyakSReg64>(),
+                    p->rhs->as_r64<XbyakSReg64>(),
+                    shift_mode(p->shift_type),
+                    p->shift_amount);
+            else
+                orr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("||")) {
+            if (p->rhs->is_imm())
+                orr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32() ? 1 : 0);
+            else if (p->shift_amount)
+                orr(dst,
+                    p->lhs->as_r64<XbyakSReg64>(),
+                    p->rhs->as_r64<XbyakSReg64>(),
+                    shift_mode(p->shift_type),
+                    p->shift_amount);
+            else
+                orr(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("^")) {
+            if (p->rhs->is_imm())
+                eor(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else if (p->shift_amount)
+                eor(dst,
+                    p->lhs->as_r64<XbyakSReg64>(),
+                    p->rhs->as_r64<XbyakSReg64>(),
+                    shift_mode(p->shift_type),
+                    p->shift_amount);
+            else
+                eor(dst, p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("~")) {
+            mvn(dst, p->lhs->as_r64<XbyakSReg64>());
+        } else if (p->is_op("!")) {
+            eor(dst, p->lhs->as_r64<XbyakSReg64>(), 1);
+        } else if (p->is_cmp()) {
+            if (p->rhs->is_imm())
+                cmp(p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_imm32());
+            else
+                cmp(p->lhs->as_r64<XbyakSReg64>(), p->rhs->as_r64<XbyakSReg64>());
+            if (!(do_jump && p == pimpl)) {
+                if (p->is_op("=="))
+                    cset(dst, Xbyak_aarch64::Cond::EQ);
+                else if (p->is_op("!="))
+                    cset(dst, Xbyak_aarch64::Cond::NE);
+                else if (p->is_op(">"))
+                    cset(dst, Xbyak_aarch64::Cond::GT);
+                else if (p->is_op(">="))
+                    cset(dst, Xbyak_aarch64::Cond::GE);
+                else if (p->is_op("<"))
+                    cset(dst, Xbyak_aarch64::Cond::LT);
+                else if (p->is_op("<="))
+                    cset(dst, Xbyak_aarch64::Cond::LE);
+                else
+                    OPENVINO_ASSERT(false);
+            }
+        } else {
+            OPENVINO_ASSERT(false, "Unsupported OP: ", p->op);
+        }
+        return true;
+    });
+
+    if (debug_log) {
+        std::cout << "expr statistics :  scratch_reg_cnt = " << expr_stat.scratch_reg_cnt
+                  << ", ops_cnt = " << expr_stat.ops_cnt << std::endl;
+    }
+
+    if (pdst) {
+        if (assign_op == '=' && !dst_register_assigned_inplace) {
+            mov(*pdst, pimpl->as_r64<XbyakSReg64>());
+        } else {
+            switch (assign_op) {
+            case '=':
+                break;
+            case '+':
+                add(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            case '-':
+                sub(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            case '*':
+                mul(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
+                break;
+            default:
+                OPENVINO_ASSERT(false);
+                break;
+            }
+        }
+    }
+
+    // generate jump
+    if (assign_op == 'T') {
+        if (pimpl->is_cmp()) {
+            if (pimpl->is_op("=="))
+                b(Xbyak_aarch64::Cond::EQ, label);
+            if (pimpl->is_op("!="))
+                b(Xbyak_aarch64::Cond::NE, label);
+            if (pimpl->is_op(">"))
+                b(Xbyak_aarch64::Cond::GT, label);
+            if (pimpl->is_op(">="))
+                b(Xbyak_aarch64::Cond::GE, label);
+            if (pimpl->is_op("<"))
+                b(Xbyak_aarch64::Cond::LT, label);
+            if (pimpl->is_op("<="))
+                b(Xbyak_aarch64::Cond::LE, label);
+        } else {
+            // convert final value to ZF
+            cmp(pimpl->as_r64<XbyakSReg64>(), 0);
+            b(Xbyak_aarch64::Cond::NE, label);
+        }
+    } else if (assign_op == 'F') {
+        if (pimpl->is_cmp()) {
+            if (pimpl->is_op("=="))
+                b(Xbyak_aarch64::Cond::NE, label);
+            if (pimpl->is_op("!="))
+                b(Xbyak_aarch64::Cond::EQ, label);
+            if (pimpl->is_op(">"))
+                b(Xbyak_aarch64::Cond::LE, label);
+            if (pimpl->is_op(">="))
+                b(Xbyak_aarch64::Cond::LT, label);
+            if (pimpl->is_op("<"))
+                b(Xbyak_aarch64::Cond::GE, label);
+            if (pimpl->is_op("<="))
+                b(Xbyak_aarch64::Cond::GT, label);
+        } else {
+            // convert final value to ZF
+            cmp(pimpl->as_r64<XbyakSReg64>(), 0);
+            b(Xbyak_aarch64::Cond::EQ, label);
+        }
+    }
 }
 
 #endif
