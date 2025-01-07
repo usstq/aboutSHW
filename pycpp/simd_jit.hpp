@@ -449,6 +449,7 @@ public:
         pimpl->for_each_op([&](RegExprImpl* p) {
             std::cout << p->name() << " = " << p->lhs->name() << " " << p->op << " "
                       << (p->rhs ? p->rhs->name() : std::string("( )"));
+#ifdef __aarch64__
             if (p->shift_type != RegExprImpl::SHIFT_TYPE::NONE) {
                 auto shift_amount = static_cast<int>(p->shift_amount);
                 switch (p->shift_type) {
@@ -466,6 +467,7 @@ public:
                     break;
                 }
             }
+#endif
             std::cout << std::endl;
             return true;
         });
@@ -990,7 +992,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             return true;
         }
 
-        if (!p->rhs->is_leaf() && p->is_op("-")) {
+        if (p->rhs && !p->rhs->is_leaf() && p->is_op("-")) {
             // reuse rhs scratch by replacing 'lhs - rhs' with 'neg(lhs)+rhs'
             p->op = "n+";
             std::swap(p->lhs, p->rhs);
@@ -1029,7 +1031,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
         //   - allocate new scratch for dst
         //   - insert a `dst = lhs` before current op
         auto new_scratch_reg_sn = scratch_reg_sn_pool.allocate() + scratch_reg_base;
-        if (!p->rhs->is_leaf())
+        if (p->rhs && !p->rhs->is_leaf())
             scratch_reg_sn_pool.free(p->rhs->data - scratch_reg_base);
 
         // some instruction support 3-OP w/o need to insert mov
@@ -1037,7 +1039,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             p->data = new_scratch_reg_sn;
             return true;
         }
-
+        
         // insert 'dst = lhs' in lhs data-path (when there is no 3-OP instruction)
         // space op " " means simply move lhs to dst `dst = lhs`
         std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->lhs));
@@ -1119,9 +1121,13 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
     if (debug_log)
         expr.show(" After allocation of all scratch registers");
 
+    expr_stat.scratch_reg_cnt = scratch_regs.size();
+    expr_stat.ops_cnt = 0;
+
     // emmit code
     pimpl->for_each_op([&](RegExprImpl* p) {
         auto dst = XbyakSReg64(p->data);
+        expr_stat.ops_cnt ++;
         if (p->is_op(" ")) {
             if (p->lhs->is_imm())
                 mov(dst, p->lhs->as_imm32());
@@ -1176,6 +1182,8 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             else {
                 or_(dst, p->rhs->as_r64<XbyakSReg64>());
             }
+        } else if (p->is_op("~")) {
+            not_(dst);
         } else if (p->is_op("&&")) {
             if (p->rhs->is_imm())
                 and_(dst, p->rhs->as_imm32() ? 1 : 0);
@@ -1246,6 +1254,11 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                 break;
             }
         }
+    }
+
+    if (debug_log) {
+        std::cout << "expr statistics :  scratch_reg_cnt = " << expr_stat.scratch_reg_cnt
+                  << ", ops_cnt = " << expr_stat.ops_cnt << std::endl;
     }
 
     // generate jump
