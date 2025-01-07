@@ -120,20 +120,20 @@ if __name__ == "__main__":
         print(f'====================={scale=}, {scale.dtype=}')
         
         if use_randn:
-            with open('q.npy', 'rb') as f:
-                q = np.load(f)
-            with open('k.npy', 'rb') as f:
-                k = np.load(f)
-            with open('v.npy', 'rb') as f:
-                v = np.load(f)
-            q = torch.from_numpy(q)
-            k = torch.from_numpy(k)
-            v = torch.from_numpy(v)
+            # with open('q.npy', 'rb') as f:
+            #     q = np.load(f)
+            # with open('k.npy', 'rb') as f:
+            #     k = np.load(f)
+            # with open('v.npy', 'rb') as f:
+            #     v = np.load(f)
+            # q = torch.from_numpy(q)
+            # k = torch.from_numpy(k)
+            # v = torch.from_numpy(v)
             # q = torch.ones([B, L, Hq, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
             # k = torch.ones([B, L, Hk, HEAD_SIZE], dtype=torch.float16)*torch.randn([1], dtype=torch.float16)
-            # q = torch.randn([B, Lq, Hq, HEAD_SIZE], dtype=torch.float16)
-            # k = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
-            # v = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
+            q = torch.randn([B, Lq, Hq, HEAD_SIZE], dtype=torch.float16)
+            k = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
+            v = torch.randn([B, Lk, Hk, HEAD_SIZE], dtype=torch.float16)
             # np.save("q.npy", q)
             # np.save("k.npy", k)
             # np.save("v.npy", v)
@@ -184,6 +184,6 @@ if __name__ == "__main__":
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
-        test_acc(1, 40, 40, 128, 256, 256, True)   # tail
+        test_acc(1, 40, 40, 128, 1024, 1024, True)   # tail
 # vtune -collect gpu-hotspots -knob characterization-mode=overview -knob collect-memory-bandwidth=true -knob analyze-power-usage=false --
     sys.exit(0)
