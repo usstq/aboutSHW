@@ -1,3358 +1,1566 @@
+
 #ifdef intel_convert_as_bfloat16_float
-#    define _convert_as_bfloat16_float(val) intel_convert_as_bfloat16_float(val)
+#define _convert_as_bfloat16_float(val) intel_convert_as_bfloat16_float(val)
 #else
 inline float _convert_as_bfloat16_float(ushort source) {
-    uint u = 0;
-    if ((source >> 15)) {
-        u = 1 << 31;
-    }
-    u += (((source >> 7) & 0b11111111)) << 23;
-    u += (source & 0b1111111) << 16;
-    float* f = &u;
-    return *f;
+ uint u = 0;
+ if ( (source>>15) ) {
+ u = 1 << 31;
+ }
+ u += ( ( (source >> 7) & 0b11111111)) << 23;
+ u += (source & 0b1111111) << 16;
+ float* f = &u;
+ return *f;
 }
 #endif
 #ifdef intel_convert_bfloat16_as_ushort
-#    define _convert_bfloat16_as_ushort(val) intel_convert_bfloat16_as_ushort(val)
+#define _convert_bfloat16_as_ushort(val) intel_convert_bfloat16_as_ushort(val)
 #else
 inline ushort _convert_bfloat16_as_ushort(float source) {
-    uint* in = &source;
-    ushort u = 0;
-    if ((*in >> 31)) {
-        u = 1 << 15;
-    }
-    u += (((*in >> 23) & 0b11111111)) << 7;
-    u += (*in >> 16) & 0b1111111;
-    return u;
+ uint* in = &source;
+ ushort u = 0;
+ if ( (*in>>31) ) {
+ u = 1 << 15;
+ }
+ u += ( ( (*in >> 23) & 0b11111111)) << 7;
+ u += (*in >> 16) & 0b1111111;
+ return u;
 }
 #endif
 
 #if defined(cl_khr_fp16)
-#    pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #endif
 #if !defined(cl_intel_subgroups) && defined(cl_khr_subgroups)
-#    pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #endif
-#define __CAT(x, y)                                    x##y
-#define CAT(x, y)                                      __CAT(x, y)
+#define __CAT(x, y) x##y
+#define CAT(x, y) __CAT(x, y)
 #define OFFSET_GLOBAL_PTR(elem_type, ptr, byte_offset) ((__global elem_type*)((__global char*)(ptr) + (byte_offset)))
-#define MULTIPLY_OFFSET(elem_type, byte_offset)        ((byte_offset) * sizeof(elem_type))
+#define MULTIPLY_OFFSET(elem_type, byte_offset) ((byte_offset) * sizeof(elem_type))
 #if OPT_HINTS_SUPPORTED
-#    define ASSUME_HINT(x) __builtin_assume(x)
+# define ASSUME_HINT(x) __builtin_assume(x)
 #else
-#    define ASSUME_HINT(x) \
-        do {               \
-        } while (0)
+# define ASSUME_HINT(x) do { } while (0)
 #endif
 #define unroll_for __attribute__((opencl_unroll_hint)) for
-#define CEIL_DIV(a, b)                      (((a) + (b) - 1) / (b))
-#define ALIGN(a, b)                         (CEIL_DIV(a, b) * (b))
-#define MIN(a, b)                           ((a) < (b) ? (a) : (b))
-#define MAX(a, b)                           ((a) > (b) ? (a) : (b))
-#define CLAMP(v, l, u)                      MAX((l), MIN((v), (u)))
-#define MAKE_VECTOR_TYPE_IMPL_1(elem_type)  elem_type
-#define MAKE_VECTOR_TYPE_IMPL_2(elem_type)  CAT(elem_type, 2)
-#define MAKE_VECTOR_TYPE_IMPL_3(elem_type)  CAT(elem_type, 3)
-#define MAKE_VECTOR_TYPE_IMPL_4(elem_type)  CAT(elem_type, 4)
-#define MAKE_VECTOR_TYPE_IMPL_8(elem_type)  CAT(elem_type, 8)
+#define CEIL_DIV(a, b) (((a) + (b) - 1)/(b))
+#define ALIGN(a, b) (CEIL_DIV(a, b) * (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define CLAMP(v,l,u) MAX((l),MIN((v),(u)))
+#define MAKE_VECTOR_TYPE_IMPL_1(elem_type) elem_type
+#define MAKE_VECTOR_TYPE_IMPL_2(elem_type) CAT(elem_type, 2)
+#define MAKE_VECTOR_TYPE_IMPL_3(elem_type) CAT(elem_type, 3)
+#define MAKE_VECTOR_TYPE_IMPL_4(elem_type) CAT(elem_type, 4)
+#define MAKE_VECTOR_TYPE_IMPL_8(elem_type) CAT(elem_type, 8)
 #define MAKE_VECTOR_TYPE_IMPL_16(elem_type) CAT(elem_type, 16)
-#define MAKE_VECTOR_TYPE(elem_type, size)   CAT(MAKE_VECTOR_TYPE_IMPL_, size)(elem_type)
-#define AS_TYPE(type, val)                  CAT(as_, type)(val)
-#define TYPE_SIZE_uchar                     1
-#define TYPE_SIZE_char                      1
-#define TYPE_SIZE_ushort                    2
-#define TYPE_SIZE_short                     2
-#define TYPE_SIZE_half                      2
-#define TYPE_SIZE_int                       4
-#define TYPE_SIZE_uint                      4
-#define TYPE_SIZE_float                     4
-#define TYPE_SIZE_ulong                     8
-#define TYPE_SIZE_long                      8
-#define TYPE_SIZE(type)                     CAT(TYPE_SIZE_, type)
+#define MAKE_VECTOR_TYPE(elem_type, size) CAT(MAKE_VECTOR_TYPE_IMPL_, size)(elem_type)
+#define AS_TYPE(type, val) CAT(as_, type)(val)
+#define TYPE_SIZE_uchar 1
+#define TYPE_SIZE_char 1
+#define TYPE_SIZE_ushort 2
+#define TYPE_SIZE_short 2
+#define TYPE_SIZE_half 2
+#define TYPE_SIZE_int 4
+#define TYPE_SIZE_uint 4
+#define TYPE_SIZE_float 4
+#define TYPE_SIZE_ulong 8
+#define TYPE_SIZE_long 8
+#define TYPE_SIZE(type) CAT(TYPE_SIZE_, type)
 #ifdef cl_intel_required_subgroup_size
-#    define REQD_SUB_GROUP_SIZE(sg_size) __attribute__((intel_reqd_sub_group_size(sg_size)))
+#define REQD_SUB_GROUP_SIZE(sg_size) __attribute__((intel_reqd_sub_group_size(sg_size)))
 #else
-#    define REQD_SUB_GROUP_SIZE(sg_size)
+#define REQD_SUB_GROUP_SIZE(sg_size)
 #endif
 
-#define GET_DATA_INDEX(prefix, b, f, y, x) \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (f) * CAT(prefix, _FEATURE_PITCH) + (b) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_RAW(prefix, i0, i1, i2, i3) \
-    CAT(prefix, _OFFSET) + (i0) * CAT(prefix, _PITCHES)[0] + (i1) * CAT(prefix, _PITCHES)[1] + (i2) * CAT(prefix, _PITCHES)[2] + (i3) * CAT(prefix, _PITCHES)[3]
-#define GET_DATA_INDEX_SAFE(prefix, b, f, y, x)                                                                                      \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) + \
-        (f % CAT(prefix, _FEATURE_NUM)) * CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM)) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_5D(prefix, b, f, z, y, x)                                                                                                         \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (f) * CAT(prefix, _FEATURE_PITCH) + \
-        (b) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_5D_RAW(prefix, i0, i1, i2, i3, i4)                                                                                                          \
-    CAT(prefix, _OFFSET) + (i0) * CAT(prefix, _PITCHES)[0] + (i1) * CAT(prefix, _PITCHES)[1] + (i2) * CAT(prefix, _PITCHES)[2] + (i3) * CAT(prefix, _PITCHES)[3] + \
-        (i4) * CAT(prefix, _PITCHES)[4]
-#define GET_DATA_INDEX_5D_SAFE(prefix, b, f, z, y, x)                                                                                \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) + \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (f % CAT(prefix, _FEATURE_NUM)) * CAT(prefix, _FEATURE_PITCH) +         \
-        (b % CAT(prefix, _BATCH_NUM)) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_6D(prefix, b, f, w, z, y, x)                                                                                                \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (w) * CAT(prefix, _W_PITCH) + \
-        (f) * CAT(prefix, _FEATURE_PITCH) + (b) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_6D_SAFE(prefix, b, f, w, z, y, x)                                                                                                                          \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) +                                              \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W)) * CAT(prefix, _W_PITCH) + (f % CAT(prefix, _FEATURE_NUM)) * CAT(prefix, _FEATURE_PITCH) + \
-        (b % CAT(prefix, _BATCH_NUM)) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_6D_RAW(prefix, i0, i1, i2, i3, i4, i5)                                                                                                      \
-    CAT(prefix, _OFFSET) + (i0) * CAT(prefix, _PITCHES)[0] + (i1) * CAT(prefix, _PITCHES)[1] + (i2) * CAT(prefix, _PITCHES)[2] + (i3) * CAT(prefix, _PITCHES)[3] + \
-        (i4) * CAT(prefix, _PITCHES)[4] + (i5) * CAT(prefix, _PITCHES)[5]
-#define GET_DATA_INDEX_7D(prefix, b, f, u, w, z, y, x)                                                                                                                           \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (w) * CAT(prefix, _W_PITCH) + (u) * CAT(prefix, _U_PITCH) + \
-        (f) * CAT(prefix, _FEATURE_PITCH) + (b) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_7D_SAFE(prefix, b, f, u, w, z, y, x)                                                                                                            \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) +                                   \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W)) * CAT(prefix, _W_PITCH) + (u % CAT(prefix, _SIZE_U)) * CAT(prefix, _U_PITCH) + \
-        (f % CAT(prefix, _FEATURE_NUM)) * CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM)) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_7D_RAW(prefix, i0, i1, i2, i3, i4, i5, i6)                                                                                                  \
-    CAT(prefix, _OFFSET) + (i0) * CAT(prefix, _PITCHES)[0] + (i1) * CAT(prefix, _PITCHES)[1] + (i2) * CAT(prefix, _PITCHES)[2] + (i3) * CAT(prefix, _PITCHES)[3] + \
-        (i4) * CAT(prefix, _PITCHES)[4] + (i5) * CAT(prefix, _PITCHES)[5] + (i6) * CAT(prefix, _PITCHES)[6]
-#define GET_DATA_INDEX_8D(prefix, b, f, v, u, w, z, y, x)                                                                                                                        \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (w) * CAT(prefix, _W_PITCH) + (u) * CAT(prefix, _U_PITCH) + \
-        (v) * CAT(prefix, _V_PITCH) + (f) * CAT(prefix, _FEATURE_PITCH) + (b) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_8D_SAFE(prefix, b, f, v, u, w, z, y, x)                                                                                                         \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) +                                   \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W)) * CAT(prefix, _W_PITCH) + (u % CAT(prefix, _SIZE_U)) * CAT(prefix, _U_PITCH) + \
-        (v % CAT(prefix, _SIZE_V)) * CAT(prefix, _V_PITCH) + (f % CAT(prefix, _FEATURE_NUM)) * CAT(prefix, _FEATURE_PITCH) +                                           \
-        (b % CAT(prefix, _BATCH_NUM)) * CAT(prefix, _BATCH_PITCH)
-#define GET_DATA_INDEX_8D_RAW(prefix, i0, i1, i2, i3, i4, i5, i6, i7)                                                                                              \
-    CAT(prefix, _OFFSET) + (i0) * CAT(prefix, _PITCHES)[0] + (i1) * CAT(prefix, _PITCHES)[1] + (i2) * CAT(prefix, _PITCHES)[2] + (i3) * CAT(prefix, _PITCHES)[3] + \
-        (i4) * CAT(prefix, _PITCHES)[4] + (i5) * CAT(prefix, _PITCHES)[5] + (i6) * CAT(prefix, _PITCHES)[6] + (i7) * CAT(prefix, _PITCHES)[7]
-#define GET_DATA_BS_FYX_BSV8_INDEX(prefix, b, f, y, x, sub_group_size) \
-    CAT(prefix, _OFFSET) + ((b) % (sub_group_size)) +                  \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (f) * CAT(prefix, _FEATURE_PITCH) + ((b) / (sub_group_size)) * CAT(prefix, _BATCH_PITCH))
-inline uint get_b_fs_yx_fsv_index(uint b,
-                                  uint f,
-                                  uint y,
-                                  uint x,
-                                  uint x_size,
-                                  uint y_size,
-                                  uint f_size,
-                                  uint b_size,
-                                  uint b_pad_before,
-                                  uint b_pad_after,
-                                  uint f_pad_before,
-                                  uint f_pad_after,
-                                  uint y_pad_before,
-                                  uint y_pad_after,
-                                  uint x_pad_before,
-                                  uint x_pad_after,
-                                  uint alignment) {
-    const uint feature = f + f_pad_before;
-    const uint fs = feature / alignment;
-    const uint fsv = feature % alignment;
-    const uint x_pitch = alignment;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint fs_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
-    const uint output_offset = (b_pad_before + b) * b_pitch + fs * fs_pitch + (y_pad_before + y) * y_pitch + (x_pad_before + x) * x_pitch + fsv;
-    return output_offset;
+#define GET_DATA_INDEX(prefix, b, f, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + (b)*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_RAW(prefix, i0, i1, i2, i3) CAT(prefix, _OFFSET) + (i0)*CAT(prefix, _PITCHES)[0] + (i1)*CAT(prefix, _PITCHES)[1] + (i2)*CAT(prefix, _PITCHES)[2] + (i3)*CAT(prefix, _PITCHES)[3]
+#define GET_DATA_INDEX_SAFE(prefix, b, f, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (f % CAT(prefix, _FEATURE_NUM))*CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM ))*CAT(prefix, _BATCH_PITCH)
+ #define GET_DATA_INDEX_5D(prefix, b, f, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + (b)*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_5D_RAW(prefix, i0, i1, i2, i3, i4) CAT(prefix, _OFFSET) + (i0)*CAT(prefix, _PITCHES)[0] + (i1)*CAT(prefix, _PITCHES)[1] + (i2)*CAT(prefix, _PITCHES)[2] + (i3)*CAT(prefix, _PITCHES)[3] + (i4)*CAT(prefix, _PITCHES)[4]
+#define GET_DATA_INDEX_5D_SAFE(prefix, b, f, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (f % CAT(prefix, _FEATURE_NUM))*CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM ))*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_6D(prefix, b, f, w, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (w)*CAT(prefix, _W_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + (b)*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_6D_SAFE(prefix, b, f, w, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W ))*CAT(prefix, _W_PITCH) + (f % CAT(prefix, _FEATURE_NUM))*CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM ))*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_6D_RAW(prefix, i0, i1, i2, i3, i4, i5) CAT(prefix, _OFFSET) + (i0)*CAT(prefix, _PITCHES)[0] + (i1)*CAT(prefix, _PITCHES)[1] + (i2)*CAT(prefix, _PITCHES)[2] + (i3)*CAT(prefix, _PITCHES)[3] + (i4)*CAT(prefix, _PITCHES)[4] + (i5)*CAT(prefix, _PITCHES)[5]
+#define GET_DATA_INDEX_7D(prefix, b, f, u, w, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (w)*CAT(prefix, _W_PITCH) + (u)*CAT(prefix, _U_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + (b)*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_7D_SAFE(prefix, b, f, u, w, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W ))*CAT(prefix, _W_PITCH) + (u % CAT(prefix, _SIZE_U ))*CAT(prefix, _U_PITCH) + (f % CAT(prefix, _FEATURE_NUM))*CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM ))*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_7D_RAW(prefix, i0, i1, i2, i3, i4, i5, i6) CAT(prefix, _OFFSET) + (i0)*CAT(prefix, _PITCHES)[0] + (i1)*CAT(prefix, _PITCHES)[1] + (i2)*CAT(prefix, _PITCHES)[2] + (i3)*CAT(prefix, _PITCHES)[3] + (i4)*CAT(prefix, _PITCHES)[4] + (i5)*CAT(prefix, _PITCHES)[5] + (i6)*CAT(prefix, _PITCHES)[6]
+#define GET_DATA_INDEX_8D(prefix, b, f, v, u, w, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (w)*CAT(prefix, _W_PITCH) + (u)*CAT(prefix, _U_PITCH) + (v)*CAT(prefix, _V_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + (b)*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_8D_SAFE(prefix, b, f, v, u, w, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (w % CAT(prefix, _SIZE_W ))*CAT(prefix, _W_PITCH) + (u % CAT(prefix, _SIZE_U ))*CAT(prefix, _U_PITCH) + (v % CAT(prefix, _SIZE_V ))*CAT(prefix, _V_PITCH) + (f % CAT(prefix, _FEATURE_NUM))*CAT(prefix, _FEATURE_PITCH) + (b % CAT(prefix, _BATCH_NUM ))*CAT(prefix, _BATCH_PITCH)
+#define GET_DATA_INDEX_8D_RAW(prefix, i0, i1, i2, i3, i4, i5, i6, i7) CAT(prefix, _OFFSET) + (i0)*CAT(prefix, _PITCHES)[0] + (i1)*CAT(prefix, _PITCHES)[1] + (i2)*CAT(prefix, _PITCHES)[2] + (i3)*CAT(prefix, _PITCHES)[3] + (i4)*CAT(prefix, _PITCHES)[4] + (i5)*CAT(prefix, _PITCHES)[5] + (i6)*CAT(prefix, _PITCHES)[6] + (i7)*CAT(prefix, _PITCHES)[7]
+#define GET_DATA_BS_FYX_BSV8_INDEX(prefix, b, f, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((b) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (f)*CAT(prefix, _FEATURE_PITCH) + ((b) / (sub_group_size))*CAT(prefix, _BATCH_PITCH) )
+inline uint get_b_fs_yx_fsv_index(uint b, uint f, uint y, uint x,
+ uint x_size, uint y_size, uint f_size, uint b_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after, uint alignment) {
+ const uint feature = f + f_pad_before;
+ const uint fs = feature / alignment;
+ const uint fsv = feature % alignment;
+ const uint x_pitch = alignment;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint fs_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
+ const uint output_offset = (b_pad_before + b) * b_pitch +
+ fs * fs_pitch +
+ (y_pad_before + y) * y_pitch +
+ (x_pad_before + x) * x_pitch
+ + fsv;
+ return output_offset;
 }
-inline uint get_b_fs_yx_fsv_index_safe(uint b,
-                                       uint f,
-                                       uint y,
-                                       uint x,
-                                       uint x_size,
-                                       uint y_size,
-                                       uint f_size,
-                                       uint b_size,
-                                       uint b_pad_before,
-                                       uint b_pad_after,
-                                       uint f_pad_before,
-                                       uint f_pad_after,
-                                       uint y_pad_before,
-                                       uint y_pad_after,
-                                       uint x_pad_before,
-                                       uint x_pad_after,
-                                       uint alignment) {
-    const uint f_mod = f_pad_before + (f % f_size);
-    const uint fs = f_mod / alignment;
-    const uint fsv = f_mod % alignment;
-    const uint x_pitch = alignment;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint fs_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
-    const uint output_offset = (b_pad_before + (b % b_size)) * b_pitch + fs * fs_pitch + (y_pad_before + (y % y_size)) * y_pitch + (x_pad_before + (x % x_size)) * x_pitch + fsv;
-    return output_offset;
+inline uint get_b_fs_yx_fsv_index_safe(uint b, uint f, uint y, uint x,
+ uint x_size, uint y_size, uint f_size, uint b_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after, uint alignment) {
+ const uint f_mod = f_pad_before + (f % f_size);
+ const uint fs = f_mod / alignment;
+ const uint fsv = f_mod % alignment;
+ const uint x_pitch = alignment;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint fs_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
+ const uint output_offset = (b_pad_before + (b % b_size)) * b_pitch +
+ fs * fs_pitch +
+ (y_pad_before + (y % y_size)) * y_pitch +
+ (x_pad_before + (x % x_size)) * x_pitch
+ + fsv;
+ return output_offset;
 }
-#define GET_DATA_B_FS_YX_FSV16_INDEX(prefix, b, f, y, x)        \
-    get_b_fs_yx_fsv_index(b,                                    \
-                          f,                                    \
-                          y,                                    \
-                          x,                                    \
-                          CAT(prefix, _SIZE_X),                 \
-                          CAT(prefix, _SIZE_Y),                 \
-                          CAT(prefix, _FEATURE_NUM),            \
-                          CAT(prefix, _BATCH_NUM),              \
-                          CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                          CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                          CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                          CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                          CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                          CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                          16)
-#define GET_DATA_B_FS_YX_FSV16_INDEX_SAFE(prefix, b, f, y, x)        \
-    get_b_fs_yx_fsv_index_safe(b,                                    \
-                               f,                                    \
-                               y,                                    \
-                               x,                                    \
-                               CAT(prefix, _SIZE_X),                 \
-                               CAT(prefix, _SIZE_Y),                 \
-                               CAT(prefix, _FEATURE_NUM),            \
-                               CAT(prefix, _BATCH_NUM),              \
-                               CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                               CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                               CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                               CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                               CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                               CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                               16)
-#define GET_DATA_B_FS_YX_FSV2_INDEX(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index(b,                                    \
-                          f,                                    \
-                          y,                                    \
-                          x,                                    \
-                          CAT(prefix, _SIZE_X),                 \
-                          CAT(prefix, _SIZE_Y),                 \
-                          CAT(prefix, _FEATURE_NUM),            \
-                          CAT(prefix, _BATCH_NUM),              \
-                          CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                          CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                          CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                          CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                          CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                          CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                          2)
-#define GET_DATA_B_FS_YX_FSV2_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index_safe(b,                                    \
-                               f,                                    \
-                               y,                                    \
-                               x,                                    \
-                               CAT(prefix, _SIZE_X),                 \
-                               CAT(prefix, _SIZE_Y),                 \
-                               CAT(prefix, _FEATURE_NUM),            \
-                               CAT(prefix, _BATCH_NUM),              \
-                               CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                               CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                               CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                               CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                               CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                               CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                               2)
-#define GET_DATA_B_FS_YX_FSV4_INDEX(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index(b,                                    \
-                          f,                                    \
-                          y,                                    \
-                          x,                                    \
-                          CAT(prefix, _SIZE_X),                 \
-                          CAT(prefix, _SIZE_Y),                 \
-                          CAT(prefix, _FEATURE_NUM),            \
-                          CAT(prefix, _BATCH_NUM),              \
-                          CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                          CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                          CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                          CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                          CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                          CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                          4)
-#define GET_DATA_B_FS_YX_FSV4_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index_safe(b,                                    \
-                               f,                                    \
-                               y,                                    \
-                               x,                                    \
-                               CAT(prefix, _SIZE_X),                 \
-                               CAT(prefix, _SIZE_Y),                 \
-                               CAT(prefix, _FEATURE_NUM),            \
-                               CAT(prefix, _BATCH_NUM),              \
-                               CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                               CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                               CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                               CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                               CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                               CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                               4)
-#define GET_DATA_B_FS_YX_FSV8_INDEX(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index(b,                                    \
-                          f,                                    \
-                          y,                                    \
-                          x,                                    \
-                          CAT(prefix, _SIZE_X),                 \
-                          CAT(prefix, _SIZE_Y),                 \
-                          CAT(prefix, _FEATURE_NUM),            \
-                          CAT(prefix, _BATCH_NUM),              \
-                          CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                          CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                          CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                          CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                          CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                          CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                          8)
-#define GET_DATA_B_FS_YX_FSV8_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_b_fs_yx_fsv_index_safe(b,                                    \
-                               f,                                    \
-                               y,                                    \
-                               x,                                    \
-                               CAT(prefix, _SIZE_X),                 \
-                               CAT(prefix, _SIZE_Y),                 \
-                               CAT(prefix, _FEATURE_NUM),            \
-                               CAT(prefix, _BATCH_NUM),              \
-                               CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                               CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                               CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                               CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                               CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                               CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                               8)
-#define GET_DATA_B_FS_YX_FSV32_INDEX(prefix, b, f, y, x)        \
-    get_b_fs_yx_fsv_index(b,                                    \
-                          f,                                    \
-                          y,                                    \
-                          x,                                    \
-                          CAT(prefix, _SIZE_X),                 \
-                          CAT(prefix, _SIZE_Y),                 \
-                          CAT(prefix, _FEATURE_NUM),            \
-                          CAT(prefix, _BATCH_NUM),              \
-                          CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                          CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                          CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                          CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                          CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                          CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                          CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                          32)
-#define GET_DATA_B_FS_YX_FSV32_INDEX_SAFE(prefix, b, f, y, x)        \
-    get_b_fs_yx_fsv_index_safe(b,                                    \
-                               f,                                    \
-                               y,                                    \
-                               x,                                    \
-                               CAT(prefix, _SIZE_X),                 \
-                               CAT(prefix, _SIZE_Y),                 \
-                               CAT(prefix, _FEATURE_NUM),            \
-                               CAT(prefix, _BATCH_NUM),              \
-                               CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                               CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                               CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                               CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                               CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                               CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                               CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                               32)
-inline uint get_fs_b_yx_fsv32_index(uint b,
-                                    uint f,
-                                    uint y,
-                                    uint x,
-                                    uint x_pad_before,
-                                    uint x_size,
-                                    uint x_pad_after,
-                                    uint y_pad_before,
-                                    uint y_size,
-                                    uint y_pad_after,
-                                    uint f_pad_before,
-                                    uint size_b) {
-    const uint feature_tile_size = 32;
-    const uint x_total_size = x_pad_before + x_size + x_pad_after;
-    const uint y_total_size = y_pad_before + y_size + y_pad_after;
-    const uint real_x = x + x_pad_before;
-    const uint real_y = y + y_pad_before;
-    const uint real_f = f + f_pad_before;
-    const uint x_pitch = feature_tile_size;
-    const uint y_pitch = x_pitch * x_total_size;
-    const uint b_pitch = y_pitch * y_total_size;
-    const uint f_tile_pitch = b_pitch * size_b;
-    const uint feature_tile_number = real_f / feature_tile_size;
-    const uint feature_local_number = real_f % feature_tile_size;
-    size_t index = 0;
-    index += feature_tile_number * f_tile_pitch;
-    index += b * b_pitch;
-    index += real_y * y_pitch;
-    index += real_x * x_pitch;
-    index += feature_local_number;
-    return index;
+#define GET_DATA_B_FS_YX_FSV16_INDEX(prefix, b, f, y, x) get_b_fs_yx_fsv_index( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16)
+#define GET_DATA_B_FS_YX_FSV16_INDEX_SAFE(prefix, b, f, y, x) get_b_fs_yx_fsv_index_safe( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16)
+#define GET_DATA_B_FS_YX_FSV2_INDEX(prefix, b, f, y, x) get_b_fs_yx_fsv_index( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 2)
+#define GET_DATA_B_FS_YX_FSV2_INDEX_SAFE(prefix, b, f, y, x) get_b_fs_yx_fsv_index_safe( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 2)
+#define GET_DATA_B_FS_YX_FSV4_INDEX(prefix, b, f, y, x) get_b_fs_yx_fsv_index( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4)
+#define GET_DATA_B_FS_YX_FSV4_INDEX_SAFE(prefix, b, f, y, x) get_b_fs_yx_fsv_index_safe( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4)
+#define GET_DATA_B_FS_YX_FSV8_INDEX(prefix, b, f, y, x) get_b_fs_yx_fsv_index( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8)
+#define GET_DATA_B_FS_YX_FSV8_INDEX_SAFE(prefix, b, f, y, x) get_b_fs_yx_fsv_index_safe( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8)
+#define GET_DATA_B_FS_YX_FSV32_INDEX(prefix, b, f, y, x) get_b_fs_yx_fsv_index( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32)
+#define GET_DATA_B_FS_YX_FSV32_INDEX_SAFE(prefix, b, f, y, x) get_b_fs_yx_fsv_index_safe( b, f, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32)
+inline uint get_fs_b_yx_fsv32_index(uint b, uint f, uint y, uint x,
+ uint x_pad_before, uint x_size, uint x_pad_after,
+ uint y_pad_before, uint y_size, uint y_pad_after,
+ uint f_pad_before,
+ uint size_b)
+{
+ const uint feature_tile_size = 32;
+ const uint x_total_size = x_pad_before + x_size + x_pad_after;
+ const uint y_total_size = y_pad_before + y_size + y_pad_after;
+ const uint real_x = x + x_pad_before;
+ const uint real_y = y + y_pad_before;
+ const uint real_f = f + f_pad_before;
+ const uint x_pitch = feature_tile_size;
+ const uint y_pitch = x_pitch * x_total_size;
+ const uint b_pitch = y_pitch * y_total_size;
+ const uint f_tile_pitch = b_pitch * size_b;
+ const uint feature_tile_number = real_f / feature_tile_size;
+ const uint feature_local_number = real_f % feature_tile_size;
+ size_t index = 0;
+ index += feature_tile_number * f_tile_pitch;
+ index += b * b_pitch;
+ index += real_y * y_pitch;
+ index += real_x * x_pitch;
+ index += feature_local_number;
+ return index;
 }
-inline uint get_fs_b_yx_fsv32_index_safe(uint b,
-                                         uint f,
-                                         uint y,
-                                         uint x,
-                                         uint x_pad_before,
-                                         uint x_size,
-                                         uint x_pad_after,
-                                         uint y_pad_before,
-                                         uint y_size,
-                                         uint y_pad_after,
-                                         uint f_pad_before,
-                                         uint f_size,
-                                         uint size_b) {
-    const uint feature_tile_size = 32;
-    const uint x_total_size = x_pad_before + x_size + x_pad_after;
-    const uint y_total_size = y_pad_before + y_size + y_pad_after;
-    const uint real_x = (x % x_size) + x_pad_before;
-    const uint real_y = (y % y_size) + y_pad_before;
-    const uint real_f = (f % f_size) + f_pad_before;
-    const uint x_pitch = feature_tile_size;
-    const uint y_pitch = x_pitch * x_total_size;
-    const uint b_pitch = y_pitch * y_total_size;
-    const uint f_tile_pitch = b_pitch * size_b;
-    const uint feature_tile_number = real_f / feature_tile_size;
-    const uint feature_local_number = real_f % feature_tile_size;
-    size_t index = 0;
-    index += feature_tile_number * f_tile_pitch;
-    index += b * b_pitch;
-    index += real_y * y_pitch;
-    index += real_x * x_pitch;
-    index += feature_local_number;
-    return index;
+inline uint get_fs_b_yx_fsv32_index_safe(uint b, uint f, uint y, uint x,
+ uint x_pad_before, uint x_size, uint x_pad_after,
+ uint y_pad_before, uint y_size, uint y_pad_after,
+ uint f_pad_before, uint f_size,
+ uint size_b)
+{
+ const uint feature_tile_size = 32;
+ const uint x_total_size = x_pad_before + x_size + x_pad_after;
+ const uint y_total_size = y_pad_before + y_size + y_pad_after;
+ const uint real_x = (x % x_size) + x_pad_before;
+ const uint real_y = (y % y_size) + y_pad_before;
+ const uint real_f = (f % f_size) + f_pad_before;
+ const uint x_pitch = feature_tile_size;
+ const uint y_pitch = x_pitch * x_total_size;
+ const uint b_pitch = y_pitch * y_total_size;
+ const uint f_tile_pitch = b_pitch * size_b;
+ const uint feature_tile_number = real_f / feature_tile_size;
+ const uint feature_local_number = real_f % feature_tile_size;
+ size_t index = 0;
+ index += feature_tile_number * f_tile_pitch;
+ index += b * b_pitch;
+ index += real_y * y_pitch;
+ index += real_x * x_pitch;
+ index += feature_local_number;
+ return index;
 }
-#define GET_DATA_FS_B_YX_FSV32_INDEX(prefix, b, f, y, x)          \
-    get_fs_b_yx_fsv32_index(b,                                    \
-                            f,                                    \
-                            y,                                    \
-                            x,                                    \
-                            CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                            CAT(prefix, _SIZE_X),                 \
-                            CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                            CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                            CAT(prefix, _SIZE_Y),                 \
-                            CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                            CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                            CAT(prefix, _BATCH_NUM))
-#define GET_DATA_FS_B_YX_FSV32_INDEX_SAFE(prefix, b, f, y, x)          \
-    get_fs_b_yx_fsv32_index_safe(b,                                    \
-                                 f,                                    \
-                                 y,                                    \
-                                 x,                                    \
-                                 CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                 CAT(prefix, _SIZE_X),                 \
-                                 CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                 CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                 CAT(prefix, _SIZE_Y),                 \
-                                 CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                 CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                 CAT(prefix, _FEATURE_NUM),            \
-                                 CAT(prefix, _BATCH_NUM))
-#define GET_DATA_B_FS_ZYX_FSV2_INDEX(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index(b,                                    \
-                           f,                                    \
-                           z,                                    \
-                           y,                                    \
-                           x,                                    \
-                           CAT(prefix, _SIZE_X),                 \
-                           CAT(prefix, _SIZE_Y),                 \
-                           CAT(prefix, _SIZE_Z),                 \
-                           CAT(prefix, _FEATURE_NUM),            \
-                           CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                           CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                           CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                           CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                           2)
-#define GET_DATA_B_FS_ZYX_FSV2_INDEX_SAFE(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index_safe(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                2)
-#define GET_DATA_B_FS_ZYX_FSV4_INDEX(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index(b,                                    \
-                           f,                                    \
-                           z,                                    \
-                           y,                                    \
-                           x,                                    \
-                           CAT(prefix, _SIZE_X),                 \
-                           CAT(prefix, _SIZE_Y),                 \
-                           CAT(prefix, _SIZE_Z),                 \
-                           CAT(prefix, _FEATURE_NUM),            \
-                           CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                           CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                           CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                           CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                           4)
-#define GET_DATA_B_FS_ZYX_FSV4_INDEX_SAFE(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index_safe(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                4)
-#define GET_DATA_B_FS_ZYX_FSV8_INDEX(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index(b,                                    \
-                           f,                                    \
-                           z,                                    \
-                           y,                                    \
-                           x,                                    \
-                           CAT(prefix, _SIZE_X),                 \
-                           CAT(prefix, _SIZE_Y),                 \
-                           CAT(prefix, _SIZE_Z),                 \
-                           CAT(prefix, _FEATURE_NUM),            \
-                           CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                           CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                           CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                           CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                           8)
-#define GET_DATA_B_FS_ZYX_FSV8_INDEX_SAFE(prefix, b, f, z, y, x)      \
-    get_b_fs_zyx_fsv_index_safe(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                8)
-#define GET_DATA_B_FS_ZYX_FSV16_INDEX(prefix, b, f, z, y, x)     \
-    get_b_fs_zyx_fsv_index(b,                                    \
-                           f,                                    \
-                           z,                                    \
-                           y,                                    \
-                           x,                                    \
-                           CAT(prefix, _SIZE_X),                 \
-                           CAT(prefix, _SIZE_Y),                 \
-                           CAT(prefix, _SIZE_Z),                 \
-                           CAT(prefix, _FEATURE_NUM),            \
-                           CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                           CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                           CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                           CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                           16)
-#define GET_DATA_B_FS_ZYX_FSV16_INDEX_SAFE(prefix, b, f, z, y, x)     \
-    get_b_fs_zyx_fsv_index_safe(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16)
-#define GET_DATA_B_FS_ZYX_FSV32_INDEX(prefix, b, f, z, y, x)     \
-    get_b_fs_zyx_fsv_index(b,                                    \
-                           f,                                    \
-                           z,                                    \
-                           y,                                    \
-                           x,                                    \
-                           CAT(prefix, _SIZE_X),                 \
-                           CAT(prefix, _SIZE_Y),                 \
-                           CAT(prefix, _SIZE_Z),                 \
-                           CAT(prefix, _FEATURE_NUM),            \
-                           CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                           CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                           CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                           CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                           CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                           CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                           32)
-#define GET_DATA_B_FS_ZYX_FSV32_INDEX_SAFE(prefix, b, f, z, y, x)     \
-    get_b_fs_zyx_fsv_index_safe(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                32)
-inline uint get_b_fs_zyx_fsv_index(uint b,
-                                   uint f,
-                                   uint z,
-                                   uint y,
-                                   uint x,
-                                   uint x_size,
-                                   uint y_size,
-                                   uint z_size,
-                                   uint f_size,
-                                   uint b_pad_before,
-                                   uint b_pad_after,
-                                   uint f_pad_before,
-                                   uint f_pad_after,
-                                   uint z_pad_before,
-                                   uint z_pad_after,
-                                   uint y_pad_before,
-                                   uint y_pad_after,
-                                   uint x_pad_before,
-                                   uint x_pad_after,
-                                   uint alignment) {
-    const uint feature = f + f_pad_before;
-    const uint fs = feature / alignment;
-    const uint fsv = feature % alignment;
-    const uint x_pitch = alignment;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
-    const uint output_offset = (b_pad_before + b) * b_pitch + fs * fs_pitch + (z_pad_before + z) * z_pitch + (y_pad_before + y) * y_pitch + (x_pad_before + x) * x_pitch + fsv;
-    return output_offset;
+#define GET_DATA_FS_B_YX_FSV32_INDEX(prefix, b, f, y, x) get_fs_b_yx_fsv32_index( b, f, y, x, CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _BATCH_NUM))
+#define GET_DATA_FS_B_YX_FSV32_INDEX_SAFE(prefix, b, f, y, x) get_fs_b_yx_fsv32_index_safe( b, f, y, x, CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM))
+#define GET_DATA_B_FS_ZYX_FSV2_INDEX(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 2)
+#define GET_DATA_B_FS_ZYX_FSV2_INDEX_SAFE(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 2)
+#define GET_DATA_B_FS_ZYX_FSV4_INDEX(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4)
+#define GET_DATA_B_FS_ZYX_FSV4_INDEX_SAFE(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4)
+#define GET_DATA_B_FS_ZYX_FSV8_INDEX(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8)
+#define GET_DATA_B_FS_ZYX_FSV8_INDEX_SAFE(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8)
+#define GET_DATA_B_FS_ZYX_FSV16_INDEX(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16)
+#define GET_DATA_B_FS_ZYX_FSV16_INDEX_SAFE(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y),  CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16)
+#define GET_DATA_B_FS_ZYX_FSV32_INDEX(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32)
+#define GET_DATA_B_FS_ZYX_FSV32_INDEX_SAFE(prefix, b, f, z, y, x) get_b_fs_zyx_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32)
+inline uint get_b_fs_zyx_fsv_index(uint b, uint f, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint f_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint z_pad_before, uint z_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after,
+ uint alignment)
+{
+ const uint feature = f + f_pad_before;
+ const uint fs = feature / alignment;
+ const uint fsv = feature % alignment;
+ const uint x_pitch = alignment;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
+ const uint output_offset = (b_pad_before + b) * b_pitch +
+ fs * fs_pitch +
+ (z_pad_before + z) * z_pitch +
+ (y_pad_before + y) * y_pitch +
+ (x_pad_before + x) * x_pitch
+ + fsv;
+ return output_offset;
 }
-inline uint get_b_fs_zyx_fsv_index_safe(uint b,
-                                        uint f,
-                                        uint z,
-                                        uint y,
-                                        uint x,
-                                        uint x_size,
-                                        uint y_size,
-                                        uint z_size,
-                                        uint f_size,
-                                        uint b_pad_before,
-                                        uint b_pad_after,
-                                        uint f_pad_before,
-                                        uint f_pad_after,
-                                        uint z_pad_before,
-                                        uint z_pad_after,
-                                        uint y_pad_before,
-                                        uint y_pad_after,
-                                        uint x_pad_before,
-                                        uint x_pad_after,
-                                        uint alignment) {
-    const uint f_mod = f_pad_before + (f % f_size);
-    const uint fs = f_mod / alignment;
-    const uint fsv = f_mod % alignment;
-    const uint x_pitch = alignment;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
-    const uint output_offset = (b_pad_before + b) * b_pitch + fs * fs_pitch + (z_pad_before + (z % z_size)) * z_pitch + (y_pad_before + (y % y_size)) * y_pitch +
-                               (x_pad_before + (x % x_size)) * x_pitch + fsv;
-    return output_offset;
+inline uint get_b_fs_zyx_fsv_index_safe(uint b, uint f, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint f_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint z_pad_before, uint z_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after,
+ uint alignment) {
+ const uint f_mod = f_pad_before + (f % f_size);
+ const uint fs = f_mod / alignment;
+ const uint fsv = f_mod % alignment;
+ const uint x_pitch = alignment;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint b_pitch = fs_pitch * ((total_f_size + alignment - 1) / alignment);
+ const uint output_offset = (b_pad_before + b) * b_pitch +
+ fs * fs_pitch +
+ (z_pad_before + (z % z_size)) * z_pitch +
+ (y_pad_before + (y % y_size)) * y_pitch +
+ (x_pad_before + (x % x_size)) * x_pitch
+ + fsv;
+ return output_offset;
 }
-inline uint get_bs_fs_zyx_bsv_fsv_index_safe(uint b,
-                                             uint f,
-                                             uint z,
-                                             uint y,
-                                             uint x,
-                                             uint x_size,
-                                             uint y_size,
-                                             uint z_size,
-                                             uint f_size,
-                                             uint b_size,
-                                             uint b_pad_before,
-                                             uint b_pad_after,
-                                             uint f_pad_before,
-                                             uint f_pad_after,
-                                             uint z_pad_before,
-                                             uint z_pad_after,
-                                             uint y_pad_before,
-                                             uint y_pad_after,
-                                             uint x_pad_before,
-                                             uint x_pad_after,
-                                             uint alignmentB,
-                                             uint alignmentF) {
-    const uint b_mod = b_pad_before + (b % b_size);
-    const uint f_mod = f_pad_before + (f % f_size);
-    const uint bs = b_mod / alignmentB;
-    const uint bsv = b_mod % alignmentB;
-    const uint fs = f_mod / alignmentF;
-    const uint fsv = f_mod % alignmentF;
-    const uint x_pitch = alignmentF * alignmentB;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
-    const uint bs_pitch = fs_pitch * ((total_f_size + alignmentF - 1) / alignmentF);
-    const uint output_offset = bs * bs_pitch + fs * fs_pitch + (z_pad_before + (z % z_size)) * z_pitch + (y_pad_before + (y % y_size)) * y_pitch +
-                               (x_pad_before + (x % x_size)) * x_pitch + (bsv * alignmentF) + fsv;
-    return output_offset;
+inline uint get_bs_fs_zyx_bsv_fsv_index_safe(uint b, uint f, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint f_size, uint b_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint z_pad_before, uint z_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after, uint alignmentB, uint alignmentF) {
+ const uint b_mod = b_pad_before + (b % b_size);
+ const uint f_mod = f_pad_before + (f % f_size);
+ const uint bs = b_mod / alignmentB;
+ const uint bsv = b_mod % alignmentB;
+ const uint fs = f_mod / alignmentF;
+ const uint fsv = f_mod % alignmentF;
+ const uint x_pitch = alignmentF * alignmentB;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
+ const uint bs_pitch = fs_pitch * ((total_f_size + alignmentF - 1) / alignmentF);
+ const uint output_offset = bs * bs_pitch +
+ fs * fs_pitch +
+ (z_pad_before + (z % z_size)) * z_pitch +
+ (y_pad_before + (y % y_size)) * y_pitch +
+ (x_pad_before + (x % x_size)) * x_pitch +
+ (bsv * alignmentF)
+ + fsv;
+ return output_offset;
 }
-inline uint get_bs_fs_zyx_bsv_fsv_index(uint b,
-                                        uint f,
-                                        uint z,
-                                        uint y,
-                                        uint x,
-                                        uint x_size,
-                                        uint y_size,
-                                        uint z_size,
-                                        uint f_size,
-                                        uint b_pad_before,
-                                        uint b_pad_after,
-                                        uint f_pad_before,
-                                        uint f_pad_after,
-                                        uint z_pad_before,
-                                        uint z_pad_after,
-                                        uint y_pad_before,
-                                        uint y_pad_after,
-                                        uint x_pad_before,
-                                        uint x_pad_after,
-                                        uint b_alignment,
-                                        uint f_alignment) {
-    const uint feature = f + f_pad_before;
-    const uint fs = feature / f_alignment;
-    const uint fsv = feature % f_alignment;
-    const uint bs = (b + b_pad_before) / b_alignment;
-    const uint bsv = (b + b_pad_before) % b_alignment;
-    const uint bsv_pitch = f_alignment;
-    const uint x_pitch = bsv_pitch * b_alignment;
-    const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
-    const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
-    const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
-    const uint total_f_size = f_pad_before + f_size + f_pad_after;
-    const uint bs_pitch = fs_pitch * ((total_f_size + f_alignment - 1) / f_alignment);
-    const uint output_offset = bs * bs_pitch + fs * fs_pitch + (z_pad_before + z) * z_pitch + (y_pad_before + y) * y_pitch + (x_pad_before + x) * x_pitch + bsv * bsv_pitch + fsv;
-    return output_offset;
+inline uint get_bs_fs_zyx_bsv_fsv_index(uint b, uint f, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint f_size,
+ uint b_pad_before, uint b_pad_after,
+ uint f_pad_before, uint f_pad_after,
+ uint z_pad_before, uint z_pad_after,
+ uint y_pad_before, uint y_pad_after,
+ uint x_pad_before, uint x_pad_after,
+ uint b_alignment, uint f_alignment) {
+ const uint feature = f + f_pad_before;
+ const uint fs = feature / f_alignment;
+ const uint fsv = feature % f_alignment;
+ const uint bs = (b + b_pad_before) / b_alignment;
+ const uint bsv = (b + b_pad_before) % b_alignment;
+ const uint bsv_pitch = f_alignment;
+ const uint x_pitch = bsv_pitch * b_alignment;
+ const uint y_pitch = x_pitch * (x_pad_before + x_size + x_pad_after);
+ const uint z_pitch = y_pitch * (y_pad_before + y_size + y_pad_after);
+ const uint fs_pitch = z_pitch * (z_pad_before + z_size + z_pad_after);
+ const uint total_f_size = f_pad_before + f_size + f_pad_after;
+ const uint bs_pitch = fs_pitch * ((total_f_size + f_alignment - 1) / f_alignment);
+ const uint output_offset = bs * bs_pitch +
+ fs * fs_pitch +
+ (z_pad_before + z) * z_pitch +
+ (y_pad_before + y) * y_pitch +
+ (x_pad_before + x) * x_pitch +
+ bsv * bsv_pitch
+ + fsv;
+ return output_offset;
 }
-#define GET_DATA_BS_FS_YX_BSV16_FSV16_INDEX(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                16)
-#define GET_DATA_BS_FS_YX_BSV16_FSV32_INDEX(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                32)
-#define GET_DATA_BS_FS_ZYX_BSV32_FSV32_INDEX(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                32,                                   \
-                                32)
-#define GET_DATA_BS_FS_YX_BSV32_FSV32_INDEX(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                32,                                   \
-                                32)
-#define GET_DATA_BS_FS_YX_BSV4_FSV4_INDEX(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                4,                                    \
-                                4)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV4_INDEX(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                4)
-#define GET_DATA_BS_FS_YX_BSV16_FSV4_INDEX(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                4)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV8_INDEX(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                8)
-#define GET_DATA_BS_FS_YX_BSV16_FSV8_INDEX(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                8)
-#define GET_DATA_BS_FS_ZYX_BSV8_FSV4_INDEX(prefix, b, f, z, y, x)     \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                8,                                    \
-                                4)
-#define GET_DATA_BS_FS_YX_BSV8_FSV4_INDEX(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                8,                                    \
-                                4)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV2_INDEX(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                2)
-#define GET_DATA_BS_FS_YX_BSV16_FSV2_INDEX(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                2)
-#define GET_DATA_BS_FS_ZYX_BSV8_FSV2_INDEX(prefix, b, f, z, y, x)     \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                8,                                    \
-                                2)
-#define GET_DATA_BS_FS_YX_BSV8_FSV2_INDEX(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                8,                                    \
-                                2)
-#define GET_DATA_BS_FS_YX_BSV4_FSV2_INDEX(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                4,                                    \
-                                2)
-#define GET_DATA_BS_FS_ZYX_BSV32_FSV16_INDEX(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                32,                                   \
-                                16)
-#define GET_DATA_BS_FS_YX_BSV32_FSV16_INDEX(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                0,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                32,                                   \
-                                16)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV32_INDEX(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                32)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV16_INDEX(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index(b,                                    \
-                                f,                                    \
-                                z,                                    \
-                                y,                                    \
-                                x,                                    \
-                                CAT(prefix, _SIZE_X),                 \
-                                CAT(prefix, _SIZE_Y),                 \
-                                CAT(prefix, _SIZE_Z),                 \
-                                CAT(prefix, _FEATURE_NUM),            \
-                                CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                16,                                   \
-                                16)
-#define GET_DATA_BS_FS_YX_BSV16_FSV16_INDEX_SAFE(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     16)
-#define GET_DATA_BS_FS_ZYX_BSV32_FSV32_INDEX_SAFE(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     32,                                   \
-                                     32)
-#define GET_DATA_BS_FS_YX_BSV32_FSV32_INDEX_SAFE(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     32,                                   \
-                                     32)
-#define GET_DATA_BS_FS_YX_BSV4_FSV4_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     4,                                    \
-                                     4)
-#define GET_DATA_BS_FS_YX_BSV16_FSV4_INDEX_SAFE(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     4)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV4_INDEX_SAFE(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     4)
-#define GET_DATA_BS_FS_YX_BSV16_FSV8_INDEX_SAFE(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     8)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV8_INDEX_SAFE(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     8)
-#define GET_DATA_BS_FS_YX_BSV8_FSV4_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     8,                                    \
-                                     4)
-#define GET_DATA_BS_FS_ZYX_BSV8_FSV4_INDEX_SAFE(prefix, b, f, z, y, x)     \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     8,                                    \
-                                     4)
-#define GET_DATA_BS_FS_YX_BSV16_FSV2_INDEX_SAFE(prefix, b, f, y, x)        \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     2)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV2_INDEX_SAFE(prefix, b, f, z, y, x)    \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     2)
-#define GET_DATA_BS_FS_YX_BSV8_FSV2_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     8,                                    \
-                                     2)
-#define GET_DATA_BS_FS_ZYX_BSV8_FSV2_INDEX_SAFE(prefix, b, f, z, y, x)     \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     8,                                    \
-                                     2)
-#define GET_DATA_BS_FS_YX_BSV4_FSV2_INDEX_SAFE(prefix, b, f, y, x)         \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     4,                                    \
-                                     2)
-#define GET_DATA_BS_FS_ZYX_BSV32_FSV16_INDEX_SAFE(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     32,                                   \
-                                     16)
-#define GET_DATA_BS_FS_YX_BSV32_FSV16_INDEX_SAFE(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     32,                                   \
-                                     16)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV32_INDEX_SAFE(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     32)
-#define GET_DATA_BS_FS_YX_BSV16_FSV32_INDEX_SAFE(prefix, b, f, y, x)       \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     0,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     32)
-#define GET_DATA_BS_FS_ZYX_BSV16_FSV16_INDEX_SAFE(prefix, b, f, z, y, x)   \
-    get_bs_fs_zyx_bsv_fsv_index_safe(b,                                    \
-                                     f,                                    \
-                                     z,                                    \
-                                     y,                                    \
-                                     x,                                    \
-                                     CAT(prefix, _SIZE_X),                 \
-                                     CAT(prefix, _SIZE_Y),                 \
-                                     CAT(prefix, _SIZE_Z),                 \
-                                     CAT(prefix, _FEATURE_NUM),            \
-                                     CAT(prefix, _BATCH_NUM),              \
-                                     CAT(prefix, _PAD_BEFORE_BATCH_NUM),   \
-                                     CAT(prefix, _PAD_AFTER_BATCH_NUM),    \
-                                     CAT(prefix, _PAD_BEFORE_FEATURE_NUM), \
-                                     CAT(prefix, _PAD_AFTER_FEATURE_NUM),  \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Z),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Z),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_Y),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_Y),       \
-                                     CAT(prefix, _PAD_BEFORE_SIZE_X),      \
-                                     CAT(prefix, _PAD_AFTER_SIZE_X),       \
-                                     16,                                   \
-                                     16)
+#define GET_DATA_BS_FS_YX_BSV16_FSV16_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 16)
+#define GET_DATA_BS_FS_YX_BSV16_FSV32_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 32)
+#define GET_DATA_BS_FS_ZYX_BSV32_FSV32_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x,  CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 32)
+#define GET_DATA_BS_FS_YX_BSV32_FSV32_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 32)
+#define GET_DATA_BS_FS_YX_BSV4_FSV4_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4, 4)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV4_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 4)
+#define GET_DATA_BS_FS_YX_BSV16_FSV4_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 4)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV8_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 8)
+#define GET_DATA_BS_FS_YX_BSV16_FSV8_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 8)
+#define GET_DATA_BS_FS_ZYX_BSV8_FSV4_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 4)
+#define GET_DATA_BS_FS_YX_BSV8_FSV4_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 4)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV2_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 2)
+#define GET_DATA_BS_FS_YX_BSV16_FSV2_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 2)
+#define GET_DATA_BS_FS_ZYX_BSV8_FSV2_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y),  CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 2)
+#define GET_DATA_BS_FS_YX_BSV8_FSV2_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 2)
+#define GET_DATA_BS_FS_YX_BSV4_FSV2_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4, 2)
+#define GET_DATA_BS_FS_ZYX_BSV32_FSV16_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 16)
+#define GET_DATA_BS_FS_YX_BSV32_FSV16_INDEX(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 16)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV32_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 32)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV16_INDEX(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 16)
+#define GET_DATA_BS_FS_YX_BSV16_FSV16_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 16)
+#define GET_DATA_BS_FS_ZYX_BSV32_FSV32_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 32)
+#define GET_DATA_BS_FS_YX_BSV32_FSV32_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 32)
+#define GET_DATA_BS_FS_YX_BSV4_FSV4_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4, 4)
+#define GET_DATA_BS_FS_YX_BSV16_FSV4_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x,  CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 4)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV4_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 4)
+#define GET_DATA_BS_FS_YX_BSV16_FSV8_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 8)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV8_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 8)
+#define GET_DATA_BS_FS_YX_BSV8_FSV4_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 4)
+#define GET_DATA_BS_FS_ZYX_BSV8_FSV4_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 4)
+#define GET_DATA_BS_FS_YX_BSV16_FSV2_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 2)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV2_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 2)
+#define GET_DATA_BS_FS_YX_BSV8_FSV2_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 2)
+#define GET_DATA_BS_FS_ZYX_BSV8_FSV2_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 8, 2)
+#define GET_DATA_BS_FS_YX_BSV4_FSV2_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z),  CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 4, 2)
+#define GET_DATA_BS_FS_ZYX_BSV32_FSV16_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 16)
+#define GET_DATA_BS_FS_YX_BSV32_FSV16_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 32, 16)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV32_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 32)
+#define GET_DATA_BS_FS_YX_BSV16_FSV32_INDEX_SAFE(prefix, b, f, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 32)
+#define GET_DATA_BS_FS_ZYX_BSV16_FSV16_INDEX_SAFE(prefix, b, f, z, y, x) get_bs_fs_zyx_bsv_fsv_index_safe( b, f, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _FEATURE_NUM), CAT(prefix, _BATCH_NUM), CAT(prefix, _PAD_BEFORE_BATCH_NUM), CAT(prefix, _PAD_AFTER_BATCH_NUM), CAT(prefix, _PAD_BEFORE_FEATURE_NUM), CAT(prefix, _PAD_AFTER_FEATURE_NUM), CAT(prefix, _PAD_BEFORE_SIZE_Z), CAT(prefix, _PAD_AFTER_SIZE_Z), CAT(prefix, _PAD_BEFORE_SIZE_Y), CAT(prefix, _PAD_AFTER_SIZE_Y), CAT(prefix, _PAD_BEFORE_SIZE_X), CAT(prefix, _PAD_AFTER_SIZE_X), 16, 16)
 
-#define GET_FILTER_OS_IS_YX_ISV_OSV_INDEX(prefix, o, i, y, x, osv, isv) \
-    get_os_is_zyx_isv_osv_index(o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv)
-#define GET_FILTER_IS_OS_YX_OSV_ISV_INDEX(prefix, o, i, y, x, osv, isv) \
-    get_os_is_zyx_isv_osv_index(i, o, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), isv, osv)
-#define GET_FILTER_IS_OS_YX_ISV_OSV_INDEX(prefix, o, i, y, x, osv, isv) \
-    get_is_os_zyx_isv_osv_index(o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv)
-#define GET_FILTER_OS_IS_ZYX_ISV_OSV_INDEX(prefix, o, i, z, y, x, osv, isv) \
-    get_os_is_zyx_isv_osv_index(o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv)
-#define GET_FILTER_IS_OS_ZYX_ISV16_OSV16_INDEX(prefix, o, i, z, y, x, sub_group_size)                                                                                          \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                                                                                                                          \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + (z) * (sub_group_size) * CAT(prefix, _Z_PITCH) + \
-                            ((i) % (sub_group_size)) + ((o) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size)) * CAT(prefix, _IFM_PITCH))
-#define GET_FILTER_IS_OS_YX_ISV16_OSV16_INDEX(prefix, o, i, y, x, sub_group_size)                                                                        \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                                                                                                    \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + \
-                            ((o) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size)) * CAT(prefix, _IFM_PITCH))
-#define GET_FILTER_OS_IS_YX_ISV8_OSV16_ISV2_INDEX(prefix, o, i, y, x, sub_group_size) \
-    get_os_is_zyx_isv8_osv16_isv2_index(0,                                            \
-                                        o,                                            \
-                                        i,                                            \
-                                        0,                                            \
-                                        y,                                            \
-                                        x,                                            \
-                                        CAT(prefix, _SIZE_X),                         \
-                                        CAT(prefix, _SIZE_Y),                         \
-                                        CAT(prefix, _SIZE_Z),                         \
-                                        CAT(prefix, _GROUPS_NUM),                     \
-                                        CAT(prefix, _OFM_NUM),                        \
-                                        CAT(prefix, _IFM_NUM),                        \
-                                        CAT(prefix, _OFFSET))
-#define GET_FILTER_OS_IS_ZYX_ISV8_OSV16_ISV2_INDEX(prefix, o, i, z, y, x, sub_group_size) \
-    get_os_is_zyx_isv8_osv16_isv2_index(0,                                                \
-                                        o,                                                \
-                                        i,                                                \
-                                        z,                                                \
-                                        y,                                                \
-                                        x,                                                \
-                                        CAT(prefix, _SIZE_X),                             \
-                                        CAT(prefix, _SIZE_Y),                             \
-                                        CAT(prefix, _SIZE_Z),                             \
-                                        CAT(prefix, _GROUPS_NUM),                         \
-                                        CAT(prefix, _OFM_NUM),                            \
-                                        CAT(prefix, _IFM_NUM),                            \
-                                        CAT(prefix, _OFFSET))
-inline uint get_os_is_zyx_isv_osv_index(uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size) {
-    const uint isv = i % isv_size;
-    const uint osv = o % osv_size;
-    const uint is = i / isv_size;
-    const uint os = o / osv_size;
-    const uint x_pitch = osv_size * isv_size;
-    const uint y_pitch = x_pitch * x_size;
-    const uint z_pitch = y_pitch * y_size;
-    const uint is_pitch = z_pitch * z_size;
-    const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
-    const uint output_offset = osv + isv * osv_size + x * x_pitch + y * y_pitch + z * z_pitch + is * is_pitch + os * os_pitch;
-    return output_offset;
+#define GET_FILTER_OS_IS_YX_ISV_OSV_INDEX(prefix, o, i, y, x, osv, isv) get_os_is_zyx_isv_osv_index( o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv )
+#define GET_FILTER_IS_OS_YX_OSV_ISV_INDEX(prefix, o, i, y, x, osv, isv) get_os_is_zyx_isv_osv_index( i, o, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), isv, osv )
+#define GET_FILTER_IS_OS_YX_ISV_OSV_INDEX(prefix, o, i, y, x, osv, isv) get_is_os_zyx_isv_osv_index( o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv )
+#define GET_FILTER_OS_IS_ZYX_ISV_OSV_INDEX(prefix, o, i, z, y, x, osv, isv) get_os_is_zyx_isv_osv_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), osv, isv )
+#define GET_FILTER_IS_OS_ZYX_ISV16_OSV16_INDEX(prefix, o, i, z, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + (z)*(sub_group_size)*CAT(prefix, _Z_PITCH) + ((i) % (sub_group_size)) + ((o) / (sub_group_size))*(sub_group_size)*CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size))*CAT(prefix, _IFM_PITCH) )
+#define GET_FILTER_IS_OS_YX_ISV16_OSV16_INDEX(prefix, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + ((o) / (sub_group_size))*(sub_group_size)*CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size))*CAT(prefix, _IFM_PITCH) )
+#define GET_FILTER_OS_IS_YX_ISV8_OSV16_ISV2_INDEX(prefix, o, i, y, x, sub_group_size) get_os_is_zyx_isv8_osv16_isv2_index( 0, o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _GROUPS_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _OFFSET) )
+#define GET_FILTER_OS_IS_ZYX_ISV8_OSV16_ISV2_INDEX(prefix, o, i, z, y, x, sub_group_size) get_os_is_zyx_isv8_osv16_isv2_index( 0, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _GROUPS_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _OFFSET) )
+inline uint get_os_is_zyx_isv_osv_index(uint o, uint i, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size)
+{
+ const uint isv = i % isv_size;
+ const uint osv = o % osv_size;
+ const uint is = i / isv_size;
+ const uint os = o / osv_size;
+ const uint x_pitch = osv_size * isv_size;
+ const uint y_pitch = x_pitch * x_size;
+ const uint z_pitch = y_pitch * y_size;
+ const uint is_pitch = z_pitch * z_size;
+ const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
+ const uint output_offset =
+ osv +
+ isv * osv_size +
+ x * x_pitch +
+ y * y_pitch +
+ z * z_pitch +
+ is * is_pitch +
+ os * os_pitch;
+ return output_offset;
 }
-inline uint get_is_os_zyx_isv_osv_index(uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size) {
-    const uint isv = i % isv_size;
-    const uint osv = o % osv_size;
-    const uint is = i / isv_size;
-    const uint os = o / osv_size;
-    const uint x_pitch = osv_size * isv_size;
-    const uint y_pitch = x_pitch * x_size;
-    const uint z_pitch = y_pitch * y_size;
-    const uint os_pitch = z_pitch * z_size;
-    const uint is_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
-    const uint output_offset = osv + isv * osv_size + x * x_pitch + y * y_pitch + z * z_pitch + os * os_pitch + is * is_pitch;
-    return output_offset;
+inline uint get_is_os_zyx_isv_osv_index(uint o, uint i, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size)
+{
+ const uint isv = i % isv_size;
+ const uint osv = o % osv_size;
+ const uint is = i / isv_size;
+ const uint os = o / osv_size;
+ const uint x_pitch = osv_size * isv_size;
+ const uint y_pitch = x_pitch * x_size;
+ const uint z_pitch = y_pitch * y_size;
+ const uint os_pitch = z_pitch * z_size;
+ const uint is_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
+ const uint output_offset =
+ osv +
+ isv * osv_size +
+ x * x_pitch +
+ y * y_pitch +
+ z * z_pitch +
+ os * os_pitch +
+ is * is_pitch;
+ return output_offset;
 }
-inline uint get_os_is_zyx_osv_isv_index(uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size) {
-    const uint isv = i % isv_size;
-    const uint osv = o % osv_size;
-    const uint is = i / isv_size;
-    const uint os = o / osv_size;
-    const uint x_pitch = osv_size * isv_size;
-    const uint y_pitch = x_pitch * x_size;
-    const uint z_pitch = y_pitch * y_size;
-    const uint is_pitch = z_pitch * z_size;
-    const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
-    const uint output_offset = isv + osv * isv_size + x * x_pitch + y * y_pitch + z * z_pitch + is * is_pitch + os * os_pitch;
-    return output_offset;
+inline uint get_os_is_zyx_osv_isv_index(uint o, uint i, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size)
+{
+ const uint isv = i % isv_size;
+ const uint osv = o % osv_size;
+ const uint is = i / isv_size;
+ const uint os = o / osv_size;
+ const uint x_pitch = osv_size * isv_size;
+ const uint y_pitch = x_pitch * x_size;
+ const uint z_pitch = y_pitch * y_size;
+ const uint is_pitch = z_pitch * z_size;
+ const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
+ const uint output_offset =
+ isv +
+ osv * isv_size +
+ x * x_pitch +
+ y * y_pitch +
+ z * z_pitch +
+ is * is_pitch +
+ os * os_pitch;
+ return output_offset;
 }
-inline uint
-get_g_os_is_zyx_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size) {
-    const uint isv = i % isv_size;
-    const uint osv = o % osv_size;
-    const uint is = i / isv_size;
-    const uint os = o / osv_size;
-    const uint x_pitch = osv_size * isv_size;
-    const uint y_pitch = x_pitch * x_size;
-    const uint z_pitch = y_pitch * y_size;
-    const uint is_pitch = z_pitch * z_size;
-    const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
-    const uint g_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
-    const uint output_offset = isv + osv * isv_size + x * x_pitch + y * y_pitch + z * z_pitch + is * is_pitch + os * os_pitch + g * g_pitch;
-    return output_offset;
+inline uint get_g_os_is_zyx_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint x_size, uint y_size, uint z_size, uint i_size, uint o_size, uint osv_size, uint isv_size)
+{
+ const uint isv = i % isv_size;
+ const uint osv = o % osv_size;
+ const uint is = i / isv_size;
+ const uint os = o / osv_size;
+ const uint x_pitch = osv_size * isv_size;
+ const uint y_pitch = x_pitch * x_size;
+ const uint z_pitch = y_pitch * y_size;
+ const uint is_pitch = z_pitch * z_size;
+ const uint os_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
+ const uint g_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
+ const uint output_offset =
+ isv +
+ osv * isv_size +
+ x * x_pitch +
+ y * y_pitch +
+ z * z_pitch +
+ is * is_pitch +
+ os * os_pitch +
+ g * g_pitch;
+ return output_offset;
 }
-#define GET_FILTER_G_OS_IS_ZYX_OSV16_ISV16_INDEX(prefix, g, o, i, z, y, x) \
-    get_g_os_is_zyx_osv_isv_index(g, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
-#define GET_FILTER_OS_IS_YX_OSV16_ISV16_INDEX(prefix, o, i, y, x) \
-    get_os_is_zyx_osv_isv_index(o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
-#define GET_FILTER_OS_IS_ZYX_OSV16_ISV16_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_osv_isv_index(o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
-#define GET_FILTER_OS_IS_ZYX_OSV32_ISV16_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_osv_isv_index(o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 32, 16)
-#define GET_FILTER_OS_IS_ZYX_OSV64_ISV16_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_osv_isv_index(o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 64, 16)
-#define GET_FILTER_G_OS_IS_YX_ISV8_OSV16_ISV2_INDEX(prefix, g, o, i, y, x, sub_group_size) \
-    get_os_is_zyx_isv8_osv16_isv2_index(g,                                                 \
-                                        o,                                                 \
-                                        i,                                                 \
-                                        0,                                                 \
-                                        y,                                                 \
-                                        x,                                                 \
-                                        CAT(prefix, _SIZE_X),                              \
-                                        CAT(prefix, _SIZE_Y),                              \
-                                        CAT(prefix, _SIZE_Z),                              \
-                                        CAT(prefix, _GROUPS_NUM),                          \
-                                        CAT(prefix, _OFM_NUM),                             \
-                                        CAT(prefix, _IFM_NUM),                             \
-                                        CAT(prefix, _OFFSET))
-#define GET_FILTER_G_OS_IS_ZYX_ISV8_OSV16_ISV2_INDEX(prefix, g, o, i, z, y, x, sub_group_size) \
-    get_os_is_zyx_isv8_osv16_isv2_index(g,                                                     \
-                                        o,                                                     \
-                                        i,                                                     \
-                                        z,                                                     \
-                                        y,                                                     \
-                                        x,                                                     \
-                                        CAT(prefix, _SIZE_X),                                  \
-                                        CAT(prefix, _SIZE_Y),                                  \
-                                        CAT(prefix, _SIZE_Z),                                  \
-                                        CAT(prefix, _GROUPS_NUM),                              \
-                                        CAT(prefix, _OFM_NUM),                                 \
-                                        CAT(prefix, _IFM_NUM),                                 \
-                                        CAT(prefix, _OFFSET))
-inline uint
-get_os_is_zyx_isv8_osv16_isv2_index(uint g, uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size, uint g_size, uint o_size, uint i_size, uint offset) {
-    const uint group_offset = g * o_size * i_size * z_size * y_size * x_size;
-    const uint xyz_offset = (x + y * x_size + z * x_size * y_size) * 8 * 16 * 2;
-    const uint i2_val = i % 2;
-    const uint i2_slice = i / 2;
-    const uint i8_v = i2_slice % 8;
-    const uint i8_s = i2_slice / 8;
-    const uint i2_offset = i2_val;
-    const uint o_offset = (o % 16) * 2 + (o / 16) * 16 * i_size * x_size * y_size * z_size;
-    const uint i8_offset = 8 * 16 * 2 * x_size * y_size * z_size * i8_s + 16 * 2 * i8_v;
-    const size_t idx = offset + group_offset + xyz_offset + i2_offset + i8_offset + o_offset;
-    return idx;
+#define GET_FILTER_G_OS_IS_ZYX_OSV16_ISV16_INDEX(prefix, g, o, i, z, y, x) get_g_os_is_zyx_osv_isv_index( g, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
+#define GET_FILTER_OS_IS_YX_OSV16_ISV16_INDEX(prefix, o, i, y, x) get_os_is_zyx_osv_isv_index( o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
+#define GET_FILTER_OS_IS_ZYX_OSV16_ISV16_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_osv_isv_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 16, 16)
+#define GET_FILTER_OS_IS_ZYX_OSV32_ISV16_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_osv_isv_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 32, 16)
+#define GET_FILTER_OS_IS_ZYX_OSV64_ISV16_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_osv_isv_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 64, 16)
+#define GET_FILTER_G_OS_IS_YX_ISV8_OSV16_ISV2_INDEX(prefix, g, o, i, y, x, sub_group_size) get_os_is_zyx_isv8_osv16_isv2_index( g, o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _GROUPS_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _OFFSET) )
+#define GET_FILTER_G_OS_IS_ZYX_ISV8_OSV16_ISV2_INDEX(prefix, g, o, i, z, y, x, sub_group_size) get_os_is_zyx_isv8_osv16_isv2_index( g, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _GROUPS_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _OFFSET) )
+inline uint get_os_is_zyx_isv8_osv16_isv2_index(uint g, uint o, uint i, uint z, uint y, uint x, uint x_size, uint y_size, uint z_size,
+ uint g_size, uint o_size, uint i_size, uint offset)
+{
+ const uint group_offset = g * o_size * i_size * z_size * y_size * x_size;
+ const uint xyz_offset = (x + y * x_size + z * x_size * y_size)* 8*16*2;
+ const uint i2_val = i % 2;
+ const uint i2_slice = i / 2;
+ const uint i8_v = i2_slice % 8;
+ const uint i8_s = i2_slice / 8;
+ const uint i2_offset = i2_val;
+ const uint o_offset = (o % 16)*2 + (o / 16) * 16 * i_size * x_size * y_size * z_size;
+ const uint i8_offset = 8*16*2* x_size*y_size*z_size * i8_s + 16*2*i8_v;
+ const size_t idx = offset + group_offset + xyz_offset + i2_offset + i8_offset + o_offset;
+ return idx;
 }
-inline uint get_os_zyxi_osv16_index(uint o, uint i, uint z, uint y, uint x, uint i_size, uint o_size, uint x_size, uint y_size, uint z_size) {
-    const size_t idx = o % 16 + (o / 16) * i_size * x_size * y_size * z_size * 16 + 16 * (i + x * i_size + y * i_size * x_size + z * i_size * x_size * y_size);
-    return idx;
+inline uint get_os_zyxi_osv16_index(uint o, uint i, uint z, uint y, uint x, uint i_size, uint o_size, uint x_size, uint y_size, uint z_size)
+{
+ const size_t idx = o%16 + (o / 16)*i_size*x_size*y_size*z_size*16 +
+ 16 *(i+ x*i_size + y*i_size*x_size + z*i_size*x_size*y_size);
+ return idx;
 }
-#define GET_FILTER_OS_ZYXI_OSV16(prefix, o, i, z, y, x) \
-    get_os_zyxi_osv16_index(o, i, z, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z))
-#define GET_FILTER_GOIYX(prefix, g, o, i, y, x)                                                                                                        \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + (o) * CAT(prefix, _OFM_PITCH) + \
-        (g) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GIOYX(prefix, g, o, i, y, x)                                                                                                        \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + (o) * CAT(prefix, _OFM_PITCH) + \
-        (g) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GIOYX_SAFE(prefix, g, o, i, y, x)                                                                                 \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) + \
-        (i % CAT(prefix, _IFM_NUM)) * CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM)) * CAT(prefix, _OFM_PITCH) +              \
-        (g % CAT(prefix, _GROUPS_NUM)) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GOIYX_SAFE(prefix, g, o, i, y, x)                                                                                 \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) + \
-        (i % CAT(prefix, _IFM_NUM)) * CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM)) * CAT(prefix, _OFM_PITCH) +              \
-        (g % CAT(prefix, _GROUPS_NUM)) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_INDEX(prefix, g, o, i, y, x)      GET_FILTER_GOIYX(prefix, g, o, i, y, x)
+#define GET_FILTER_OS_ZYXI_OSV16(prefix, o, i, z, y, x) get_os_zyxi_osv16_index( o, i, z, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z))
+#define GET_FILTER_GOIYX(prefix, g, o, i, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + (g)*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GIOYX(prefix, g, o, i, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + (g)*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GIOYX_SAFE(prefix, g, o, i, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (i % CAT(prefix, _IFM_NUM))*CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM))*CAT(prefix, _OFM_PITCH) + (g % CAT(prefix, _GROUPS_NUM))*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GOIYX_SAFE(prefix, g, o, i, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (i % CAT(prefix, _IFM_NUM))*CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM))*CAT(prefix, _OFM_PITCH) + (g % CAT(prefix, _GROUPS_NUM))*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_INDEX(prefix, g, o, i, y, x) GET_FILTER_GOIYX(prefix, g, o, i, y, x)
 #define GET_FILTER_INDEX_SAFE(prefix, g, o, i, y, x) GET_FILTER_GOIYX_SAFE(prefix, g, o, i, y, x)
-#define GET_FILTER_GOIZYX(prefix, g, o, i, z, y, x)                                                                                                  \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + \
-        (o) * CAT(prefix, _OFM_PITCH) + (g) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GOIZYX_SAFE(prefix, g, o, i, z, y, x)                                                                                                                     \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) +                                         \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (i % CAT(prefix, _IFM_NUM)) * CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM)) * CAT(prefix, _OFM_PITCH) + \
-        (g % CAT(prefix, _GROUPS_NUM)) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GIOZYX(prefix, g, o, i, z, y, x)                                                                                                  \
-    CAT(prefix, _OFFSET) + (x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + \
-        (o) * CAT(prefix, _OFM_PITCH) + (g) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_GIOZYX_SAFE(prefix, g, o, i, z, y, x)                                                                                                                     \
-    CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X)) * CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y)) * CAT(prefix, _Y_PITCH) +                                         \
-        (z % CAT(prefix, _SIZE_Z)) * CAT(prefix, _Z_PITCH) + (i % CAT(prefix, _IFM_NUM)) * CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM)) * CAT(prefix, _OFM_PITCH) + \
-        (g % CAT(prefix, _GROUPS_NUM)) * CAT(prefix, _GROUPS_PITCH)
-#define GET_FILTER_INDEX_5D(prefix, g, o, i, z, y, x)      GET_FILTER_GOIZYX(prefix, g, o, i, z, y, x)
+#define GET_FILTER_GOIZYX(prefix, g, o, i, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + (g)*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GOIZYX_SAFE(prefix, g, o, i, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (i % CAT(prefix, _IFM_NUM))*CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM))*CAT(prefix, _OFM_PITCH) + (g % CAT(prefix, _GROUPS_NUM))*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GIOZYX(prefix, g, o, i, z, y, x) CAT(prefix, _OFFSET) + (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + (g)*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_GIOZYX_SAFE(prefix, g, o, i, z, y, x) CAT(prefix, _OFFSET) + (x % CAT(prefix, _SIZE_X ))*CAT(prefix, _X_PITCH) + (y % CAT(prefix, _SIZE_Y ))*CAT(prefix, _Y_PITCH) + (z % CAT(prefix, _SIZE_Z ))*CAT(prefix, _Z_PITCH) + (i % CAT(prefix, _IFM_NUM))*CAT(prefix, _IFM_PITCH) + (o % CAT(prefix, _OFM_NUM))*CAT(prefix, _OFM_PITCH) + (g % CAT(prefix, _GROUPS_NUM))*CAT(prefix, _GROUPS_PITCH)
+#define GET_FILTER_INDEX_5D(prefix, g, o, i, z, y, x) GET_FILTER_GOIZYX(prefix, g, o, i, z, y, x)
 #define GET_FILTER_INDEX_5D_SAFE(prefix, g, o, i, z, y, x) GET_FILTER_GOIZYX_SAFE(prefix, g, o, i, z, y, x)
-#define GET_FILTER_OS_IYX_OSV_INDEX(prefix, o, i, y, x, sub_group_size) \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                   \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
-#define GET_FILTER_OS_IYX_OSV_INDEX_INT4_PACKED(prefix, o, i, y, x, sub_group_size) \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                               \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * (CAT(prefix, _OFM_PITCH) / 2))
-#define GET_FILTER_OS_IS_YX_OSV_ISV_INDEX_INT4_PACKED(prefix, o, i, y, x, sub_group_size) \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                                     \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * (CAT(prefix, _OFM_PITCH) / 2))
-#define GET_FILTER_OS_IYX_OSV_ROTATE_180_INDEX(prefix, o, i, y, x, sub_group_size)                                                                                            \
-    CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) +                                                                                                                         \
-        (sub_group_size) * ((CAT(prefix, _SIZE_X) - x - 1) * CAT(prefix, _X_PITCH) + (CAT(prefix, _SIZE_Y) - y - 1) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + \
-                            ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
-inline uint
-get_gi_yxs_os_yxsv2_osv_index(uint g, uint o, uint i, uint y, uint x, uint x_size, uint g_pitch, uint i_pitch, uint y_pitch, uint x_pitch, uint offset, uint sub_group_size) {
-    const uint aligned_ofm_line = x_pitch;
-    const uint ifm_height_pitch = (i_pitch / aligned_ofm_line);
-    const uint dst_height = i * ifm_height_pitch + y * x_size + x;
-    const uint base_filter_index = y * x_size + x;
-    const uint aligned_height = dst_height & 0xfffffffe;
-    const uint base_filter_odd = (base_filter_index & 0x1);
-    uint slice_id = o / sub_group_size;
-    uint id_in_slice = o % sub_group_size;
-    uint slice_pitch = 2 * sub_group_size;
-    uint offset_in_slice = (int)(sub_group_size * base_filter_odd);
-    const uint in_line = (slice_pitch * slice_id + offset_in_slice + id_in_slice);
-    size_t idx = offset + aligned_height * aligned_ofm_line + in_line;
-    idx += g * g_pitch;
-    return idx;
+#define GET_FILTER_OS_IYX_OSV_INDEX(prefix, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) +  ((o) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
+#define GET_FILTER_OS_IYX_OSV_INDEX_INT4_PACKED(prefix, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*(CAT(prefix, _OFM_PITCH)/2) )
+#define GET_FILTER_OS_IS_YX_OSV_ISV_INDEX_INT4_PACKED(prefix, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*(CAT(prefix, _OFM_PITCH)/2) )
+#define GET_FILTER_OS_IYX_OSV_ROTATE_180_INDEX(prefix, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((o) % (sub_group_size)) + (sub_group_size)*( (CAT(prefix, _SIZE_X ) - x - 1)*CAT(prefix, _X_PITCH) + (CAT(prefix, _SIZE_Y ) - y - 1)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
+inline uint get_gi_yxs_os_yxsv2_osv_index(uint g, uint o, uint i, uint y, uint x, uint x_size, uint g_pitch, uint i_pitch,
+ uint y_pitch, uint x_pitch, uint offset, uint sub_group_size)
+{
+ const uint aligned_ofm_line = x_pitch;
+ const uint ifm_height_pitch = (i_pitch/aligned_ofm_line);
+ const uint dst_height = i*ifm_height_pitch + y*x_size + x;
+ const uint base_filter_index = y*x_size + x;
+ const uint aligned_height = dst_height & 0xfffffffe;
+ const uint base_filter_odd = (base_filter_index & 0x1);
+ uint slice_id = o / sub_group_size;
+ uint id_in_slice = o % sub_group_size;
+ uint slice_pitch = 2*sub_group_size;
+ uint offset_in_slice = (int)(sub_group_size*base_filter_odd);
+ const uint in_line = (slice_pitch*slice_id + offset_in_slice + id_in_slice);
+ size_t idx = offset + aligned_height*aligned_ofm_line + in_line;
+ idx += g * g_pitch;
+ return idx;
 }
-#define GET_FILTER_I_YXS_OS_YXSV2_OSV_INDEX(prefix, o, i, y, x, sub_group_size) \
-    get_gi_yxs_os_yxsv2_osv_index(0,                                            \
-                                  o,                                            \
-                                  i,                                            \
-                                  y,                                            \
-                                  x,                                            \
-                                  CAT(prefix, _SIZE_X),                         \
-                                  CAT(prefix, _GROUPS_PITCH),                   \
-                                  CAT(prefix, _IFM_PITCH),                      \
-                                  CAT(prefix, _Y_PITCH),                        \
-                                  CAT(prefix, _X_PITCH),                        \
-                                  CAT(prefix, _OFFSET),                         \
-                                  sub_group_size)
-inline uint
-get_giy_xs_os_xsv2_osv_index(uint g, uint o, uint i, uint y, uint x, uint x_size, uint g_pitch, uint i_pitch, uint y_pitch, uint x_pitch, uint offset, uint sub_group_size) {
-    const uint aligned_ofm_line = x_pitch;
-    const uint ifm_height_pitch = (i_pitch / aligned_ofm_line);
-    const uint aligned_x_line = y_pitch / x_pitch;
-    const uint dst_height = i * ifm_height_pitch + y * aligned_x_line + x;
-    const uint base_filter_index = x;
-    const uint aligned_height = dst_height & 0xfffffffe;
-    const uint base_filter_odd = (base_filter_index & 0x1);
-    uint slice_id = o / sub_group_size;
-    uint id_in_slice = o % sub_group_size;
-    uint slice_pitch = 2 * sub_group_size;
-    uint offset_in_slice = (int)(sub_group_size * base_filter_odd);
-    const bool last_line_in_base_filter = (x == (x_size - 1));
-    if (last_line_in_base_filter && base_filter_odd == 0) {
-        const uint element_in_slice = 32;
-        slice_id = o / element_in_slice;
-        id_in_slice = o % element_in_slice;
-        slice_pitch = 2 * element_in_slice;
-        offset_in_slice = 0;
-    }
-    const uint in_line = (slice_pitch * slice_id + offset_in_slice + id_in_slice);
-    size_t idx = offset + aligned_height * aligned_ofm_line + in_line;
-    idx += g * g_pitch;
-    return idx;
+#define GET_FILTER_I_YXS_OS_YXSV2_OSV_INDEX(prefix, o, i, y, x, sub_group_size) get_gi_yxs_os_yxsv2_osv_index( 0, o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _GROUPS_PITCH), CAT(prefix, _IFM_PITCH), CAT(prefix, _Y_PITCH), CAT(prefix, _X_PITCH), CAT(prefix, _OFFSET), sub_group_size)
+inline uint get_giy_xs_os_xsv2_osv_index(uint g, uint o, uint i, uint y, uint x, uint x_size, uint g_pitch,
+ uint i_pitch, uint y_pitch, uint x_pitch, uint offset, uint sub_group_size)
+{
+ const uint aligned_ofm_line = x_pitch;
+ const uint ifm_height_pitch = (i_pitch/aligned_ofm_line);
+ const uint aligned_x_line = y_pitch / x_pitch;
+ const uint dst_height = i*ifm_height_pitch + y*aligned_x_line + x;
+ const uint base_filter_index = x;
+ const uint aligned_height = dst_height & 0xfffffffe;
+ const uint base_filter_odd = (base_filter_index & 0x1);
+ uint slice_id = o / sub_group_size;
+ uint id_in_slice = o % sub_group_size;
+ uint slice_pitch = 2*sub_group_size;
+ uint offset_in_slice = (int)(sub_group_size*base_filter_odd);
+ const bool last_line_in_base_filter = (x == (x_size - 1));
+ if (last_line_in_base_filter && base_filter_odd == 0)
+ {
+ const uint element_in_slice = 32;
+ slice_id = o / element_in_slice;
+ id_in_slice = o % element_in_slice;
+ slice_pitch = 2*element_in_slice;
+ offset_in_slice = 0;
+ }
+ const uint in_line = (slice_pitch*slice_id + offset_in_slice + id_in_slice);
+ size_t idx = offset + aligned_height*aligned_ofm_line + in_line;
+ idx += g * g_pitch;
+ return idx;
 }
-#define GET_FILTER_IY_XS_OS_XSV2_OSV_INDEX(prefix, o, i, y, x, sub_group_size) \
-    get_giy_xs_os_xsv2_osv_index(0,                                            \
-                                 o,                                            \
-                                 i,                                            \
-                                 y,                                            \
-                                 x,                                            \
-                                 CAT(prefix, _SIZE_X),                         \
-                                 CAT(prefix, _GROUPS_PITCH),                   \
-                                 CAT(prefix, _IFM_PITCH),                      \
-                                 CAT(prefix, _Y_PITCH),                        \
-                                 CAT(prefix, _X_PITCH),                        \
-                                 CAT(prefix, _OFFSET),                         \
-                                 sub_group_size)
-inline uint get_is_os_zyx_isa8_osv8_isv2_index(uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv2_idx = i % 2;
-    const uint osv_idx = o % 8;
-    const uint isv1_idx = (i / 2) % 8;
-    const uint is_idx = i / 16;
-    const uint os_idx = o / 8;
-    const uint of_8_aligned = ((size_ofm + 7) / 8);
-    size_t idx = offset + isv2_idx + osv_idx * 2 + isv1_idx * 8 * 2 + x * 8 * 8 * 2 + y * size_x * 8 * 8 * 2 + z * size_y * size_x * 8 * 8 * 2 +
-                 os_idx * size_z * size_y * size_x * 8 * 8 * 2 + is_idx * of_8_aligned * size_z * size_y * size_x * 8 * 8 * 2;
-    return idx;
+#define GET_FILTER_IY_XS_OS_XSV2_OSV_INDEX(prefix, o, i, y, x, sub_group_size) get_giy_xs_os_xsv2_osv_index( 0, o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _GROUPS_PITCH), CAT(prefix, _IFM_PITCH), CAT(prefix, _Y_PITCH), CAT(prefix, _X_PITCH), CAT(prefix, _OFFSET), sub_group_size)
+inline uint get_is_os_zyx_isa8_osv8_isv2_index(uint o, uint i, uint z, uint y, uint x, uint size_x,
+ uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv2_idx = i % 2;
+ const uint osv_idx = o % 8;
+ const uint isv1_idx = (i / 2) % 8;
+ const uint is_idx = i / 16;
+ const uint os_idx = o / 8;
+ const uint of_8_aligned = ((size_ofm + 7) / 8);
+ size_t idx = offset +
+ isv2_idx +
+ osv_idx * 2 +
+ isv1_idx * 8 * 2 +
+ x * 8 * 8 * 2 +
+ y * size_x * 8 * 8 * 2 +
+ z * size_y * size_x * 8 * 8 * 2 +
+ os_idx * size_z * size_y * size_x * 8 * 8 * 2 +
+ is_idx * of_8_aligned * size_z * size_y * size_x * 8 * 8 * 2;
+ return idx;
 }
-inline uint get_g_os_is_zyx_isa_osv_isv_index(uint g,
-                                              uint o,
-                                              uint i,
-                                              uint z,
-                                              uint y,
-                                              uint x,
-                                              uint size_x,
-                                              uint size_y,
-                                              uint size_z,
-                                              uint size_ifm,
-                                              uint size_ofm,
-                                              uint offset,
-                                              uint isa,
-                                              uint osv,
-                                              uint isv) {
-    const uint isv2_idx = i % isv;
-    const uint osv_idx = o % osv;
-    const uint isv1_idx = (i / isv) % isa;
-    const uint is_idx = i / (isa * isv);
-    const uint os_idx = o / osv;
-    const uint if_aligned = ((size_ifm + (isa * isv) - 1) / (isa * isv));
-    const uint of_aligned = ((size_ofm + (osv - 1)) / osv);
-    size_t idx = offset + isv2_idx + osv_idx * isv + isv1_idx * osv * isv + x * isa * osv * isv + y * size_x * isa * osv * isv + z * size_y * size_x * isa * osv * isv +
-                 is_idx * size_z * size_y * size_x * isa * osv * isv + os_idx * if_aligned * size_z * size_y * size_x * isa * osv * isv +
-                 g * of_aligned * if_aligned * size_z * size_y * size_x * isa * osv * isv;
-    return idx;
+inline uint get_g_os_is_zyx_isa_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset,
+ uint isa, uint osv, uint isv)
+{
+ const uint isv2_idx = i % isv;
+ const uint osv_idx = o % osv;
+ const uint isv1_idx = (i / isv) % isa;
+ const uint is_idx = i / (isa * isv);
+ const uint os_idx = o / osv;
+ const uint if_aligned = ((size_ifm + (isa * isv) - 1) / (isa * isv));
+ const uint of_aligned = ((size_ofm + (osv - 1)) / osv);
+ size_t idx = offset +
+ isv2_idx +
+ osv_idx * isv +
+ isv1_idx * osv * isv +
+ x * isa * osv * isv +
+ y * size_x * isa * osv * isv +
+ z * size_y * size_x * isa * osv * isv +
+ is_idx * size_z * size_y * size_x * isa * osv * isv +
+ os_idx * if_aligned * size_z * size_y * size_x * isa * osv * isv +
+ g * of_aligned * if_aligned * size_z * size_y * size_x * isa * osv * isv;
+ return idx;
 }
-#define GET_FILTER_G_OS_IS_ZYX_ISA_OSV_ISV_INDEX(prefix, g, o, i, z, y, x, isa, osv, isv) \
-    get_g_os_is_zyx_isa_osv_isv_index(g,                                                  \
-                                      o,                                                  \
-                                      i,                                                  \
-                                      z,                                                  \
-                                      y,                                                  \
-                                      x,                                                  \
-                                      CAT(prefix, _SIZE_X),                               \
-                                      CAT(prefix, _SIZE_Y),                               \
-                                      CAT(prefix, _SIZE_Z),                               \
-                                      CAT(prefix, _IFM_NUM),                              \
-                                      CAT(prefix, _OFM_NUM),                              \
-                                      CAT(prefix, _OFFSET),                               \
-                                      isa,                                                \
-                                      osv,                                                \
-                                      isv)
-inline uint get_g_os_is_yx_isa8_osv8_isv4_index(uint g, uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv2_idx = i % 4;
-    const uint osv_idx = o % 8;
-    const uint isv1_idx = (i / 4) % 8;
-    const uint is_idx = i / 32;
-    const uint os_idx = o / 8;
-    const uint if_32_aligned = ((size_ifm + 31) / 32);
-    const uint of_8_aligned = ((size_ofm + 7) / 8);
-    size_t idx = offset + isv2_idx + osv_idx * 4 + isv1_idx * 8 * 4 + x * 8 * 8 * 4 + y * size_x * 8 * 8 * 4 + is_idx * size_y * size_x * 4 * 8 * 8 +
-                 os_idx * if_32_aligned * size_y * size_x * 4 * 8 * 8 + g * of_8_aligned * if_32_aligned * size_y * size_x * 4 * 8 * 8;
-    return idx;
+#define GET_FILTER_G_OS_IS_ZYX_ISA_OSV_ISV_INDEX(prefix, g, o, i, z, y, x, isa, osv, isv) get_g_os_is_zyx_isa_osv_isv_index( g, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET), isa, osv, isv)
+inline uint get_g_os_is_yx_isa8_osv8_isv4_index(uint g, uint o, uint i, uint y, uint x, uint size_x,
+ uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv2_idx = i % 4;
+ const uint osv_idx = o % 8;
+ const uint isv1_idx = (i / 4) % 8;
+ const uint is_idx = i / 32;
+ const uint os_idx = o / 8;
+ const uint if_32_aligned = ((size_ifm + 31) / 32);
+ const uint of_8_aligned = ((size_ofm + 7) / 8);
+ size_t idx = offset +
+ isv2_idx +
+ osv_idx * 4 +
+ isv1_idx * 8 * 4 +
+ x * 8 * 8 * 4 +
+ y * size_x * 8 * 8 * 4 +
+ is_idx * size_y * size_x * 4 * 8 * 8 +
+ os_idx * if_32_aligned * size_y * size_x * 4 * 8 * 8 +
+ g * of_8_aligned * if_32_aligned * size_y * size_x * 4 * 8 * 8;
+ return idx;
 }
-#define GET_FILTER_OS_IS_YX_ISA8_OSV8_ISV4_INDEX(prefix, o, i, y, x) \
-    get_g_os_is_yx_isa8_osv8_isv4_index(0, o, i, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
-inline uint get_is_os_yx_isa8_osv8_isv2_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv2_idx = i % 2;
-    const uint osv_idx = o % 8;
-    const uint isv1_idx = (i / 2) % 8;
-    const uint is_idx = i / 16;
-    const uint os_idx = o / 8;
-    const uint of_8_aligned = ((size_ofm + 7) / 8);
-    size_t idx = offset + isv2_idx + osv_idx * 2 + isv1_idx * 8 * 2 + x * 8 * 8 * 2 + y * size_x * 8 * 8 * 2 + os_idx * size_y * size_x * 2 * 8 * 8 +
-                 is_idx * of_8_aligned * size_y * size_x * 2 * 8 * 8;
-    return idx;
+#define GET_FILTER_OS_IS_YX_ISA8_OSV8_ISV4_INDEX(prefix, o, i, y, x) get_g_os_is_yx_isa8_osv8_isv4_index( 0, o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+inline uint get_is_os_yx_isa8_osv8_isv2_index(uint o, uint i, uint y, uint x, uint size_x,
+ uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+	const uint isv2_idx = i % 2;
+	const uint osv_idx = o % 8;
+	const uint isv1_idx = (i / 2) % 8;
+	const uint is_idx = i / 16;
+	const uint os_idx = o / 8;
+ const uint of_8_aligned = ((size_ofm + 7) / 8);
+	size_t idx = offset +
+ isv2_idx +
+ osv_idx * 2 +
+ isv1_idx * 8 * 2 +
+ x * 8 * 8 * 2 +
+ y * size_x * 8 * 8 * 2 +
+ os_idx * size_y * size_x * 2 * 8 * 8 +
+ is_idx * of_8_aligned * size_y * size_x * 2 * 8 * 8;
+ return idx;
 }
-inline uint get_is_os_yx_isa8_osv8_isv4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv2_idx = i % 4;
-    const uint osv_idx = o % 8;
-    const uint isv1_idx = (i / 4) % 8;
-    const uint is_idx = i / 32;
-    const uint os_idx = o / 8;
-    const uint of_8_aligned = ((size_ofm + 7) / 8);
-    size_t idx = offset + isv2_idx + osv_idx * 4 + isv1_idx * 8 * 4 + x * 8 * 8 * 4 + y * size_x * 8 * 8 * 4 + os_idx * size_y * size_x * 4 * 8 * 8 +
-                 is_idx * of_8_aligned * size_y * size_x * 4 * 8 * 8;
-    return idx;
+inline uint get_is_os_yx_isa8_osv8_isv4_index(uint o, uint i, uint y, uint x, uint size_x,
+ uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+	const uint isv2_idx = i % 4;
+	const uint osv_idx = o % 8;
+	const uint isv1_idx = (i / 4) % 8;
+	const uint is_idx = i / 32;
+	const uint os_idx = o / 8;
+ const uint of_8_aligned = ((size_ofm + 7) / 8);
+	size_t idx = offset +
+ isv2_idx +
+ osv_idx * 4 +
+ isv1_idx * 8 * 4 +
+ x * 8 * 8 * 4 +
+ y * size_x * 8 * 8 * 4 +
+ os_idx * size_y * size_x * 4 * 8 * 8 +
+ is_idx * of_8_aligned * size_y * size_x * 4 * 8 * 8;
+ return idx;
 }
-inline uint get_is_os_yx_osa8_isv16_osv4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint osv2_idx = o % 4;
-    const uint isv_idx = i % 16;
-    const uint osv1_idx = (o / 4) % 8;
-    const uint os_idx = o / 32;
-    const uint is_idx = i / 16;
-    const uint of_32_aligned = ((size_ofm + 31) / 32);
-    size_t idx = offset + osv2_idx + isv_idx * 4 + osv1_idx * 16 * 4 + x * 8 * 16 * 4 + y * size_x * 8 * 16 * 4 + os_idx * size_y * size_x * 4 * 16 * 8 +
-                 is_idx * of_32_aligned * size_y * size_x * 4 * 16 * 8;
-    return idx;
+inline uint get_is_os_yx_osa8_isv16_osv4_index(uint o, uint i, uint y, uint x, uint size_x,
+ uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+	const uint osv2_idx = o % 4;
+	const uint isv_idx = i % 16;
+	const uint osv1_idx = (o / 4) % 8;
+	const uint os_idx = o / 32;
+	const uint is_idx = i / 16;
+ const uint of_32_aligned = ((size_ofm + 31) / 32);
+	size_t idx = offset +
+ osv2_idx +
+ isv_idx * 4 +
+ osv1_idx * 16 * 4 +
+ x * 8 * 16 * 4 +
+ y * size_x * 8 * 16 * 4 +
+ os_idx * size_y * size_x * 4 * 16 * 8 +
+ is_idx * of_32_aligned * size_y * size_x * 4 * 16 * 8;
+ return idx;
 }
-inline uint get_os_is_zyx_isa8_osv8_isv4_index(uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint ifm_slices = (size_ifm + 31) / 32;
-    const uint isv2_idx = i % 4;
-    const uint osv_idx = o % 8;
-    const uint isv1_idx = (i / 4) % 8;
-    const uint is_idx = i / 32;
-    const uint os_idx = o / 8;
-    size_t idx = offset + isv2_idx + 4 * (osv_idx + 8 * isv1_idx);
-    idx += x * 4 * 8 * 8;
-    idx += y * size_x * 4 * 8 * 8;
-    idx += z * size_y * size_x * 4 * 8 * 8;
-    idx += is_idx * size_z * size_y * size_x * 4 * 8 * 8;
-    idx += os_idx * ifm_slices * size_z * size_y * size_x * 4 * 8 * 8;
-    return idx;
+inline uint get_os_is_zyx_isa8_osv8_isv4_index(uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z,
+ uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint ifm_slices = (size_ifm + 31)/32;
+ const uint isv2_idx = i % 4;
+ const uint osv_idx = o % 8;
+ const uint isv1_idx = (i / 4) % 8;
+ const uint is_idx = i / 32;
+ const uint os_idx = o / 8;
+ size_t idx = offset + isv2_idx + 4 * (osv_idx + 8 * isv1_idx);
+ idx += x * 4 * 8 * 8;
+ idx += y * size_x * 4 * 8 * 8;
+ idx += z * size_y * size_x * 4 * 8 * 8;
+ idx += is_idx * size_z * size_y * size_x * 4 * 8 * 8;
+ idx += os_idx * ifm_slices * size_z * size_y * size_x * 4 * 8 * 8;
+ return idx;
 }
-#define GET_FILTER_OS_IS_ZYX_ISA8_OSV8_ISV4_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_isa8_osv8_isv4_index(o,                                \
-                                       i,                                \
-                                       z,                                \
-                                       y,                                \
-                                       x,                                \
-                                       CAT(prefix, _SIZE_X),             \
-                                       CAT(prefix, _SIZE_Y),             \
-                                       CAT(prefix, _SIZE_Z),             \
-                                       CAT(prefix, _IFM_NUM),            \
-                                       CAT(prefix, _OFM_NUM),            \
-                                       CAT(prefix, _OFFSET))
-inline uint get_os_is_yx_isa8_osv16_isv4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint f_32_aligned = ((size_ifm + 31) / 32) * 32;
-    const uint isv2_idx = i % 4;
-    const uint osv_idx = o % 16;
-    const uint isv1_idx = (i / 4) % 8;
-    const uint is_idx = i / 32;
-    const uint os_idx = o / 16;
-    size_t idx = offset + isv2_idx + 4 * (osv_idx + 16 * isv1_idx);
-    idx += x * 4 * 8 * 16;
-    idx += y * size_x * 4 * 8 * 16;
-    idx += is_idx * size_y * size_x * 4 * 8 * 16;
-    idx += os_idx * (f_32_aligned / 32) * size_y * size_x * 4 * 8 * 16;
-    return idx;
+#define GET_FILTER_OS_IS_ZYX_ISA8_OSV8_ISV4_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_isa8_osv8_isv4_index( o, i, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+inline uint get_os_is_yx_isa8_osv16_isv4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint f_32_aligned = ((size_ifm + 31)/32) * 32;
+ const uint isv2_idx = i % 4;
+ const uint osv_idx = o % 16;
+ const uint isv1_idx = (i / 4) % 8;
+ const uint is_idx = i / 32;
+ const uint os_idx = o / 16;
+ size_t idx = offset + isv2_idx + 4 * (osv_idx + 16 * isv1_idx);
+ idx += x * 4 * 8 * 16;
+ idx += y * size_x * 4 * 8 * 16;
+ idx += is_idx * size_y * size_x * 4 * 8 * 16;
+ idx += os_idx * (f_32_aligned/32) * size_y * size_x * 4 * 8 * 16;
+ return idx;
 }
-#define GET_FILTER_OS_IS_YX_ISA8_OSV16_ISV4_INDEX(prefix, o, i, y, x) \
-    get_os_is_yx_isa8_osv16_isv4_index(o, i, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
-inline uint get_os_is_zyx_isa8_osv16_isv4_index(uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint ifm_slices = (size_ifm + 31) / 32;
-    const uint isv2_idx = i % 4;
-    const uint osv_idx = o % 16;
-    const uint isv1_idx = (i / 4) % 8;
-    const uint is_idx = i / 32;
-    const uint os_idx = o / 16;
-    size_t idx = offset + isv2_idx + 4 * (osv_idx + 16 * isv1_idx);
-    idx += x * 4 * 8 * 16;
-    idx += y * size_x * 4 * 8 * 16;
-    idx += z * size_y * size_x * 4 * 8 * 16;
-    idx += is_idx * size_z * size_y * size_x * 4 * 8 * 16;
-    idx += os_idx * ifm_slices * size_z * size_y * size_x * 4 * 8 * 16;
-    return idx;
+#define GET_FILTER_OS_IS_YX_ISA8_OSV16_ISV4_INDEX(prefix, o, i, y, x) get_os_is_yx_isa8_osv16_isv4_index( o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+inline uint get_os_is_zyx_isa8_osv16_isv4_index(uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z,
+ uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint ifm_slices = (size_ifm + 31)/32;
+ const uint isv2_idx = i % 4;
+ const uint osv_idx = o % 16;
+ const uint isv1_idx = (i / 4) % 8;
+ const uint is_idx = i / 32;
+ const uint os_idx = o / 16;
+ size_t idx = offset + isv2_idx + 4 * (osv_idx + 16 * isv1_idx);
+ idx += x * 4 * 8 * 16;
+ idx += y * size_x * 4 * 8 * 16;
+ idx += z * size_y * size_x * 4 * 8 * 16;
+ idx += is_idx * size_z * size_y * size_x * 4 * 8 * 16;
+ idx += os_idx * ifm_slices * size_z * size_y * size_x * 4 * 8 * 16;
+ return idx;
 }
-#define GET_FILTER_OS_IS_ZYX_ISA8_OSV16_ISV4_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_isa8_osv16_isv4_index(o,                                \
-                                        i,                                \
-                                        z,                                \
-                                        y,                                \
-                                        x,                                \
-                                        CAT(prefix, _SIZE_X),             \
-                                        CAT(prefix, _SIZE_Y),             \
-                                        CAT(prefix, _SIZE_Z),             \
-                                        CAT(prefix, _IFM_NUM),            \
-                                        CAT(prefix, _OFM_NUM),            \
-                                        CAT(prefix, _OFFSET))
-inline uint get_os_is_yx_osa4_isa8_osv8_isv4_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
-    const uint isv_idx = i % 4;
-    const uint isa_idx = (i / 4) % 8;
-    const uint is_idx = (i / 32);
-    const uint osv_idx = o_swizzled % 8;
-    const uint osa_idx = (o_swizzled / 8) % 4;
-    const uint os_idx = (o / 32);
-    const uint f_32_aligned = ((size_ifm + 31) / 32);
-    size_t idx = offset + isv_idx + osv_idx * 4 + isa_idx * 8 * 4 + osa_idx * 8 * 32 + x * 32 * 32 + y * size_x * 32 * 32 + is_idx * 32 * 32 * size_x * size_y +
-                 os_idx * 32 * 32 * f_32_aligned * size_x * size_y;
-    return idx;
+#define GET_FILTER_OS_IS_ZYX_ISA8_OSV16_ISV4_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_isa8_osv16_isv4_index( o, i, z, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+inline uint get_os_is_yx_osa4_isa8_osv8_isv4_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
+ const uint isv_idx = i % 4;
+ const uint isa_idx = (i / 4) % 8;
+ const uint is_idx = (i / 32);
+ const uint osv_idx = o_swizzled % 8;
+ const uint osa_idx = (o_swizzled / 8) % 4;
+ const uint os_idx = (o / 32);
+ const uint f_32_aligned = ((size_ifm + 31)/32);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 4 +
+ isa_idx * 8 * 4 +
+ osa_idx * 8 * 32 +
+ x * 32 * 32 +
+ y * size_x * 32 * 32 +
+ is_idx * 32 * 32 * size_x * size_y +
+ os_idx * 32 * 32 * f_32_aligned * size_x * size_y;
+ return idx;
 }
-inline uint
-get_os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4_index(uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
-    const uint isv_idx = i % 4;
-    const uint isa_idx = (i / 4) % 8;
-    const uint is_idx = (i / 32);
-    const uint osv_idx = o_swizzled % 8;
-    const uint osa_idx = (o_swizzled / 8) % 4;
-    const uint os_idx = (o / 32);
-    const uint f_32_aligned = ((size_ifm + 31) / 32);
-    size_t idx = offset + isv_idx + osv_idx * 4 + isa_idx * 8 * 4 + osa_idx * 8 * 32 + x * 32 * 32 + y * size_x * 32 * 32 + z * size_x * size_y * 32 * 32 +
-                 is_idx * 32 * 32 * size_x * size_y * size_z + os_idx * 32 * 32 * f_32_aligned * size_x * size_y * size_z;
-    return idx;
+inline uint get_os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4_index(uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z,
+ uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
+ const uint isv_idx = i % 4;
+ const uint isa_idx = (i / 4) % 8;
+ const uint is_idx = (i / 32);
+ const uint osv_idx = o_swizzled % 8;
+ const uint osa_idx = (o_swizzled / 8) % 4;
+ const uint os_idx = (o / 32);
+ const uint f_32_aligned = ((size_ifm + 31)/32);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 4 +
+ isa_idx * 8 * 4 +
+ osa_idx * 8 * 32 +
+ x * 32 * 32 +
+ y * size_x * 32 * 32 +
+ z * size_x * size_y * 32 * 32 +
+ is_idx * 32 * 32 * size_x * size_y * size_z +
+ os_idx * 32 * 32 * f_32_aligned * size_x * size_y * size_z;
+ return idx;
 }
-inline uint get_g_is_os_yx_osa4_isa8_osv8_isv4(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv_idx = i % 4;
-    const uint isa_idx = (i / 4) % 8;
-    const uint is_idx = (i / 32);
-    const uint osv_idx = o % 8;
-    const uint osa_idx = (o / 8) % 4;
-    const uint os_idx = (o / 32);
-    const uint ifm_32_aligned = ((size_ifm + 31) / 32);
-    const uint ofm_32_aligned = ((size_ofm + 31) / 32);
-    size_t idx = offset + isv_idx + osv_idx * 4 + isa_idx * 8 * 4 + osa_idx * 8 * 32 + x * 32 * 32 + y * size_x * 32 * 32 + z * size_y * size_x * 32 * 32 +
-                 os_idx * 32 * 32 * size_x * size_y * size_z + is_idx * 32 * 32 * ofm_32_aligned * size_x * size_y * size_z +
-                 g * 32 * 32 * ifm_32_aligned * ofm_32_aligned * size_x * size_y * size_z;
-    return idx;
+inline uint get_g_is_os_yx_osa4_isa8_osv8_isv4(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv_idx = i % 4;
+ const uint isa_idx = (i / 4) % 8;
+ const uint is_idx = (i / 32);
+ const uint osv_idx = o % 8;
+ const uint osa_idx = (o / 8) % 4;
+ const uint os_idx = (o / 32);
+ const uint ifm_32_aligned = ((size_ifm + 31) / 32);
+ const uint ofm_32_aligned = ((size_ofm + 31) / 32);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 4 +
+ isa_idx * 8 * 4 +
+ osa_idx * 8 * 32 +
+ x * 32 * 32 +
+ y * size_x * 32 * 32 +
+ z * size_y * size_x * 32 * 32 +
+ os_idx * 32 * 32 * size_x * size_y * size_z +
+ is_idx * 32 * 32 * ofm_32_aligned * size_x * size_y * size_z +
+ g * 32 * 32 * ifm_32_aligned * ofm_32_aligned * size_x * size_y * size_z;
+ return idx;
 }
-inline uint get_g_os_is_yx_osa4_isa8_osv8_isv4(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv_idx = i % 4;
-    const uint isa_idx = (i / 4) % 8;
-    const uint is_idx = (i / 32);
-    const uint osv_idx = o % 8;
-    const uint osa_idx = (o / 8) % 4;
-    const uint os_idx = (o / 32);
-    const uint ifm_32_aligned = ((size_ifm + 31) / 32);
-    const uint ofm_32_aligned = ((size_ofm + 31) / 32);
-    size_t idx = offset + isv_idx + osv_idx * 4 + isa_idx * 8 * 4 + osa_idx * 8 * 32 + x * 32 * 32 + y * size_x * 32 * 32 + z * size_y * size_x * 32 * 32 +
-                 is_idx * 32 * 32 * size_x * size_y * size_z + os_idx * 32 * 32 * ifm_32_aligned * size_x * size_y * size_z +
-                 g * 32 * 32 * ifm_32_aligned * ofm_32_aligned * size_x * size_y * size_z;
-    return idx;
+inline uint get_g_os_is_yx_osa4_isa8_osv8_isv4(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv_idx = i % 4;
+ const uint isa_idx = (i / 4) % 8;
+ const uint is_idx = (i / 32);
+ const uint osv_idx = o % 8;
+ const uint osa_idx = (o / 8) % 4;
+ const uint os_idx = (o / 32);
+ const uint ifm_32_aligned = ((size_ifm + 31)/32);
+ const uint ofm_32_aligned = ((size_ofm + 31)/32);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 4 +
+ isa_idx * 8 * 4 +
+ osa_idx * 8 * 32 +
+ x * 32 * 32 +
+ y * size_x * 32 * 32 +
+ z * size_y * size_x * 32 * 32 +
+ is_idx * 32 * 32 * size_x * size_y * size_z +
+ os_idx * 32 * 32 * ifm_32_aligned * size_x * size_y * size_z +
+ g * 32 * 32 * ifm_32_aligned * ofm_32_aligned * size_x * size_y * size_z;
+ return idx;
 }
-inline uint get_g_os_is_yx_osa4_isa8_osv8_isv2(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv_idx = i % 2;
-    const uint isa_idx = (i / 2) % 8;
-    const uint is_idx = (i / 16);
-    const uint osv_idx = o % 8;
-    const uint osa_idx = (o / 8) % 4;
-    const uint os_idx = (o / 32);
-    const uint ifm_16_aligned = ((size_ifm + 15) / 16);
-    const uint ofm_32_aligned = ((size_ofm + 31) / 32);
-    size_t idx = offset + isv_idx + osv_idx * 2 + isa_idx * 8 * 2 + osa_idx * 8 * 16 + x * 32 * 16 + y * size_x * 32 * 16 + z * size_y * size_x * 32 * 16 +
-                 is_idx * 32 * 16 * size_x * size_y * size_z + os_idx * 32 * 16 * ifm_16_aligned * size_x * size_y * size_z +
-                 g * 32 * 16 * ifm_16_aligned * ofm_32_aligned * size_x * size_y * size_z;
-    return idx;
+inline uint get_g_os_is_yx_osa4_isa8_osv8_isv2(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv_idx = i % 2;
+ const uint isa_idx = (i / 2) % 8;
+ const uint is_idx = (i / 16);
+ const uint osv_idx = o % 8;
+ const uint osa_idx = (o / 8) % 4;
+ const uint os_idx = (o / 32);
+ const uint ifm_16_aligned = ((size_ifm + 15)/16);
+ const uint ofm_32_aligned = ((size_ofm + 31)/32);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 2 +
+ isa_idx * 8 * 2 +
+ osa_idx * 8 * 16 +
+ x * 32 * 16 +
+ y * size_x * 32 * 16 +
+ z * size_y * size_x * 32 * 16 +
+ is_idx * 32 * 16 * size_x * size_y * size_z +
+ os_idx * 32 * 16 * ifm_16_aligned * size_x * size_y * size_z +
+ g * 32 * 16 * ifm_16_aligned * ofm_32_aligned * size_x * size_y * size_z;
+ return idx;
 }
-inline uint get_g_os_is_yx_osa2_isa8_osv8_isv2(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    const uint isv_idx = i % 2;
-    const uint isa_idx = (i / 2) % 8;
-    const uint is_idx = (i / 16);
-    const uint osv_idx = o % 8;
-    const uint osa_idx = (o / 8) % 2;
-    const uint os_idx = (o / 16);
-    const uint ifm_16_aligned = ((size_ifm + 15) / 16);
-    const uint ofm_16_aligned = ((size_ofm + 15) / 16);
-    size_t idx = offset + isv_idx + osv_idx * 2 + isa_idx * 8 * 2 + osa_idx * 8 * 16 + x * 16 * 16 + y * size_x * 16 * 16 + z * size_y * size_x * 16 * 16 +
-                 is_idx * 16 * 16 * size_x * size_y * size_z + os_idx * 16 * 16 * ifm_16_aligned * size_x * size_y * size_z +
-                 g * 16 * 16 * ifm_16_aligned * ofm_16_aligned * size_x * size_y * size_z;
-    return idx;
+inline uint get_g_os_is_yx_osa2_isa8_osv8_isv2(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint isv_idx = i % 2;
+ const uint isa_idx = (i / 2) % 8;
+ const uint is_idx = (i / 16);
+ const uint osv_idx = o % 8;
+ const uint osa_idx = (o / 8) % 2;
+ const uint os_idx = (o / 16);
+ const uint ifm_16_aligned = ((size_ifm + 15)/16);
+ const uint ofm_16_aligned = ((size_ofm + 15)/16);
+ size_t idx = offset +
+ isv_idx +
+ osv_idx * 2 +
+ isa_idx * 8 * 2 +
+ osa_idx * 8 * 16 +
+ x * 16 * 16 +
+ y * size_x * 16 * 16 +
+ z * size_y * size_x * 16 * 16 +
+ is_idx * 16 * 16 * size_x * size_y * size_z +
+ os_idx * 16 * 16 * ifm_16_aligned * size_x * size_y * size_z +
+ g * 16 * 16 * ifm_16_aligned * ofm_16_aligned * size_x * size_y * size_z;
+ return idx;
 }
-inline uint get_g_is_os_yx_isa2_osa8_isv8_osv2(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    return get_g_os_is_yx_osa2_isa8_osv8_isv2(g, i, o, z, y, x, size_x, size_y, size_z, size_ofm, size_ifm, offset);
+inline uint get_g_is_os_yx_isa2_osa8_isv8_osv2(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ return get_g_os_is_yx_osa2_isa8_osv8_isv2(g, i, o, z, y, x, size_x, size_y, size_z, size_ofm, size_ifm, offset);
 }
-inline uint get_g_is_os_yx_isa4_osa8_isv8_osv4(uint g, uint o, uint i, uint z, uint y, uint x, uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset) {
-    return get_g_os_is_yx_osa4_isa8_osv8_isv4(g, i, o, z, y, x, size_x, size_y, size_z, size_ofm, size_ifm, offset);
+inline uint get_g_is_os_yx_isa4_osa8_isv8_osv4(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint size_x, uint size_y, uint size_z, uint size_ifm, uint size_ofm, uint offset)
+{
+ return get_g_os_is_yx_osa4_isa8_osv8_isv4(g, i, o, z, y, x, size_x, size_y, size_z, size_ofm, size_ifm, offset);
 }
-#define GET_FILTER_OS_IS_YX_OSA4_ISA8_OSV8_ISV4_INDEX(prefix, o, i, y, x) \
-    get_g_os_is_yx_osa4_isa8_osv8_isv4(0, o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
-#define GET_FILTER_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_INDEX(prefix, o, i, z, y, x) \
-    get_g_os_is_yx_osa4_isa8_osv8_isv4(0,                                     \
-                                       o,                                     \
-                                       i,                                     \
-                                       z,                                     \
-                                       y,                                     \
-                                       x,                                     \
-                                       CAT(prefix, _SIZE_X),                  \
-                                       CAT(prefix, _SIZE_Y),                  \
-                                       CAT(prefix, _SIZE_Z),                  \
-                                       CAT(prefix, _IFM_NUM),                 \
-                                       CAT(prefix, _OFM_NUM),                 \
-                                       CAT(prefix, _OFFSET))
-#define GET_FILTER_OS_IS_YX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(prefix, o, i, y, x) \
-    get_os_is_yx_osa4_isa8_osv8_isv4_swizzled_by_4_index(o, i, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
-#define GET_FILTER_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4_index(o,                                \
-                                                          i,                                \
-                                                          z,                                \
-                                                          y,                                \
-                                                          x,                                \
-                                                          CAT(prefix, _SIZE_X),             \
-                                                          CAT(prefix, _SIZE_Y),             \
-                                                          CAT(prefix, _SIZE_Z),             \
-                                                          CAT(prefix, _IFM_NUM),            \
-                                                          CAT(prefix, _OFM_NUM),            \
-                                                          CAT(prefix, _OFFSET))
-inline uint get_is_o32_yx_isv32_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint i_size, uint o_size, uint x_size, uint y_size) {
-    const uint o_aligned_to_32 = ((o_size + 31) / 32) * 32;
-    const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
-    const uint i_aligned_to_32 = ((i_size + 31) / 32) * 32;
-    const uint i_val = i % 32;
-    const uint i_slice = i / 32;
-    const size_t idx = i_val + 32 * (x + x_size * (y + y_size * (o_swizzled + o_aligned_to_32 * i_slice)));
-    return idx;
+#define GET_FILTER_OS_IS_YX_OSA4_ISA8_OSV8_ISV4_INDEX(prefix, o, i, y, x) get_g_os_is_yx_osa4_isa8_osv8_isv4( 0, o, i, 0, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 1, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+#define GET_FILTER_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_INDEX(prefix, o, i, z, y, x) get_g_os_is_yx_osa4_isa8_osv8_isv4( 0, o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+#define GET_FILTER_OS_IS_YX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(prefix, o, i, y, x) get_os_is_yx_osa4_isa8_osv8_isv4_swizzled_by_4_index( o, i, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+#define GET_FILTER_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _OFFSET))
+inline uint get_is_o32_yx_isv32_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint i_size, uint o_size, uint x_size, uint y_size)
+{
+ const uint o_aligned_to_32 = ((o_size + 31) / 32) * 32;
+ const uint o_swizzled = (o % 4) * 8 + ((o % 32) / 4) + (o / 32) * 32;
+ const uint i_aligned_to_32 = ((i_size + 31) / 32) * 32;
+ const uint i_val = i % 32;
+ const uint i_slice = i / 32;
+ const size_t idx = i_val + 32* (x + x_size * (y + y_size * (o_swizzled + o_aligned_to_32 * i_slice) ) );
+ return idx;
 }
-#define GET_FILTER_G_OS_IS_YX_OSV16_ISV4_INDEX(prefix, g, o, i, y, x) \
-    get_g_os_is_yx_osv_isv(g, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16, 4)
-inline uint get_g_os_is_yx_osv_isv(uint g, uint o, uint i, uint y, uint x, uint i_size, uint o_size, uint x_size, uint y_size, uint osv_size, uint isv_size) {
-    return get_g_os_is_zyx_osv_isv_index(g, o, i, 0, y, x, x_size, y_size, 1, i_size, o_size, osv_size, isv_size);
+#define GET_FILTER_G_OS_IS_YX_OSV16_ISV4_INDEX(prefix, g, o, i, y, x)  get_g_os_is_yx_osv_isv( g, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16, 4)
+inline uint get_g_os_is_yx_osv_isv(uint g, uint o, uint i, uint y, uint x,
+ uint i_size,
+ uint o_size,
+ uint x_size,
+ uint y_size,
+ uint osv_size,
+ uint isv_size)
+{
+ return get_g_os_is_zyx_osv_isv_index(g, o, i, 0, y, x,
+ x_size, y_size, 1, i_size, o_size, osv_size, isv_size);
 }
-#define GET_FILTER_OS_IS_YX_OSV8_ISV4_INDEX(prefix, o, i, y, x) \
-    get_g_os_is_yx_osv_isv(0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 8, 4)
-#define GET_FILTER_OS_IS_YX_OSV16_ISV4_INDEX(prefix, o, i, y, x) \
-    get_g_os_is_yx_osv_isv(0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16, 4)
-#define GET_FILTER_OS_IS_YX_OSV32_ISV4_INDEX(prefix, o, i, y, x) \
-    get_g_os_is_yx_osv_isv(0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 32, 4)
-#define GET_FILTER_OS_IS_ZYX_OSV32_ISV4_INDEX(prefix, o, i, z, y, x) \
-    get_os_is_zyx_osv_isv_index(o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 32, 4)
-#define GET_FILTER_OS_IS_YX_OSV32_ISV4_SWIZZLED_BY_2_INDEX(prefix, o, i, y, x) \
-    get_os_is_yx_osv32_isv4_swizzled_by_2(o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_X))
-inline uint get_os_is_yx_osv32_isv4_swizzled_by_2(uint o, uint i, uint y, uint x, uint o_size, uint i_size, uint y_size, uint x_size) {
-    const uint osv = 32;
-    const uint os = o / osv;
-    const uint ofm_block = (o % osv) % 2;
-    const uint ofm_in_block = (o % osv) / 2;
-    const uint tile = 4;
-    const uint ifm_aligned = ((i_size + tile - 1) / tile) * tile;
-    const uint ifm_tile = i / tile;
-    const uint id = i - ifm_tile * tile;
-    uint idx = os * ifm_aligned * y_size * x_size * osv + ifm_tile * y_size * x_size * osv * tile + y * x_size * osv * tile + x * osv * tile + ofm_block * 16 * tile +
-               ofm_in_block * tile + id;
-    return idx;
+#define GET_FILTER_OS_IS_YX_OSV8_ISV4_INDEX(prefix, o, i, y, x) get_g_os_is_yx_osv_isv( 0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 8, 4)
+#define GET_FILTER_OS_IS_YX_OSV16_ISV4_INDEX(prefix, o, i, y, x) get_g_os_is_yx_osv_isv( 0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16, 4)
+#define GET_FILTER_OS_IS_YX_OSV32_ISV4_INDEX(prefix, o, i, y, x) get_g_os_is_yx_osv_isv( 0, o, i, y, x, CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 32, 4)
+#define GET_FILTER_OS_IS_ZYX_OSV32_ISV4_INDEX(prefix, o, i, z, y, x) get_os_is_zyx_osv_isv_index( o, i, z, y, x, CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_Z), CAT(prefix, _IFM_NUM), CAT(prefix, _OFM_NUM), 32, 4)
+#define GET_FILTER_OS_IS_YX_OSV32_ISV4_SWIZZLED_BY_2_INDEX(prefix, o, i, y, x) get_os_is_yx_osv32_isv4_swizzled_by_2( o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_Y), CAT(prefix, _SIZE_X))
+inline uint get_os_is_yx_osv32_isv4_swizzled_by_2(uint o, uint i, uint y, uint x,
+ uint o_size,
+ uint i_size,
+ uint y_size,
+ uint x_size)
+{
+ const uint osv = 32;
+ const uint os = o / osv;
+ const uint ofm_block = (o % osv) % 2;
+ const uint ofm_in_block = (o % osv) / 2;
+ const uint tile = 4;
+ const uint ifm_aligned = ((i_size + tile - 1) / tile) * tile;
+ const uint ifm_tile = i / tile;
+ const uint id = i - ifm_tile * tile;
+ uint idx = os * ifm_aligned * y_size * x_size * osv
+ + ifm_tile * y_size * x_size * osv * tile
+ + y * x_size * osv * tile
+ + x * osv * tile
+ + ofm_block * 16 * tile
+ + ofm_in_block * tile
+ + id;
+ return idx;
 }
-inline uint get_os_is_osv32_isv32_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset) {
-    const uint size_ifm_a = ((size_ifm + 31) / 32) * 32;
-    const uint o_hi = o / 32;
-    const uint o_lo = o % 32;
-    const uint i_hi = i / 32;
-    const uint i_lo = i % 32;
-    const uint o_lo1 = o_lo % 4;
-    const uint o_lo2 = (o_lo / 4) % 8;
-    const uint i_lo1 = i_lo % 4;
-    const uint i_lo2 = i_lo / 4;
-    const uint idx_in_group = o_lo2 * 4 + o_lo1 * (32 * 8) + i_lo2 * 32 + i_lo1;
-    const uint group_idx = o_hi * (size_ifm_a / 32) + i_hi;
-    return group_idx * (32 * 32) + idx_in_group;
+inline uint get_os_is_osv32_isv32_swizzled_by_4_index(uint o, uint i, uint y, uint x, uint size_x, uint size_y, uint size_ifm, uint size_ofm, uint offset)
+{
+ const uint size_ifm_a = ((size_ifm + 31)/32) * 32;
+ const uint o_hi = o / 32;
+ const uint o_lo = o % 32;
+ const uint i_hi = i / 32;
+ const uint i_lo = i % 32;
+ const uint o_lo1 = o_lo % 4;
+ const uint o_lo2 = (o_lo / 4) % 8;
+ const uint i_lo1 = i_lo % 4;
+ const uint i_lo2 = i_lo / 4;
+ const uint idx_in_group = o_lo2 * 4 + o_lo1 * (32 * 8) + i_lo2 * 32 + i_lo1;
+ const uint group_idx = o_hi * (size_ifm_a / 32) + i_hi;
+ return group_idx * (32 * 32) + idx_in_group;
 }
 inline uint get_os_i_yxs_osv_yxsv4_index(uint o, uint i, uint y, uint x, uint i_size, uint size_x, uint size_y, uint osv) {
-    const uint yxsv = 4;
-    uint yx = y * size_x + x;
-    uint yx_size_aligned = (size_x * size_y + yxsv - 1) / yxsv * yxsv;
-    uint os_index = o / osv;
-    uint yxs_index = yx / yxsv;
-    uint osv_index = o % osv;
-    uint yxsv_index = yx % yxsv;
-    uint index = 0;
-    index += yxsv_index;
-    index += osv_index * yxsv;
-    index += yxs_index * yxsv * osv;
-    index += i * osv * yx_size_aligned;
-    index += os_index * osv * yx_size_aligned * i_size;
-    return index;
+ const uint yxsv = 4;
+ uint yx = y * size_x + x;
+ uint yx_size_aligned = (size_x * size_y + yxsv - 1) / yxsv * yxsv;
+ uint os_index = o / osv;
+ uint yxs_index = yx / yxsv;
+ uint osv_index = o % osv;
+ uint yxsv_index = yx % yxsv;
+ uint index = 0;
+ index += yxsv_index;
+ index += osv_index * yxsv;
+ index += yxs_index * yxsv * osv;
+ index += i * osv * yx_size_aligned;
+ index += os_index * osv * yx_size_aligned * i_size;
+ return index;
 }
-#define GET_FILTER_G_OS_IYX_OSV16(prefix, g, o, i, y, x, sub_group_size)                 \
-    CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) + \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
+#define GET_FILTER_G_OS_IYX_OSV16(prefix, g, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
 #define GET_FILTER_OS_IYX_OSV16(prefix, o, i, y, x, sub_group_size) GET_FILTER_G_OS_IYX_OSV16(prefix, 0, o, i, y, x, sub_group_size)
-#define GET_FILTER_GS_OIYX_GSV16(prefix, g, o, i, y, x, sub_group_size)                                                                                 \
-    CAT(prefix, _OFFSET) + ((g) % (sub_group_size)) +                                                                                                   \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + (o) * CAT(prefix, _OFM_PITCH) + \
-                            ((g) / (sub_group_size)) * CAT(prefix, _GROUPS_PITCH))
-#define GET_FILTER_GS_OIZYX_GSV16(prefix, g, o, i, z, y, x, sub_group_size)                                                                           \
-    CAT(prefix, _OFFSET) + ((g) % (sub_group_size)) +                                                                                                 \
-        (sub_group_size) * ((x) * CAT(prefix, _X_PITCH) + (y) * CAT(prefix, _Y_PITCH) + (z) * CAT(prefix, _Z_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + \
-                            (o) * CAT(prefix, _OFM_PITCH) + ((g) / (sub_group_size)) * CAT(prefix, _GROUPS_PITCH))
-#define GET_FILTER_G_OS_IYX_OSV16_ROTATE_180(prefix, g, o, i, y, x, sub_group_size)                                                                                           \
-    CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) +                                                                                      \
-        (sub_group_size) * ((CAT(prefix, _SIZE_X) - x - 1) * CAT(prefix, _X_PITCH) + (CAT(prefix, _SIZE_Y) - y - 1) * CAT(prefix, _Y_PITCH) + (i) * CAT(prefix, _IFM_PITCH) + \
-                            ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
-#define GET_FILTER_G_IS_OS_ZYX_ISV16_OSV16_INDEX(prefix, g, o, i, z, y, x, sub_group_size)                                                                                     \
-    CAT(prefix, _OFFSET) + (g) * CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) +                                                                                       \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + (z) * (sub_group_size) * CAT(prefix, _Z_PITCH) + \
-                            ((i) % (sub_group_size)) + ((o) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size)) * CAT(prefix, _IFM_PITCH))
-#define GET_FILTER_G_IS_OS_YX_ISV16_OSV16_INDEX(prefix, g, o, i, y, x, sub_group_size)                                                                   \
-    CAT(prefix, _OFFSET) + (g) * CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) +                                                                 \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + \
-                            ((o) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size)) * CAT(prefix, _IFM_PITCH))
-#define GET_FILTER_G_OS_IS_ZYX_ISV16_OSV16_INDEX(prefix, g, o, i, z, y, x, sub_group_size)                                                                                     \
-    CAT(prefix, _OFFSET) + (g) * CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) +                                                                                       \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + (z) * (sub_group_size) * CAT(prefix, _Z_PITCH) + \
-                            ((i) % (sub_group_size)) + ((i) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
-#define GET_FILTER_GI_YXS_OS_YXSV2_OSV_INDEX(prefix, g, o, i, y, x, sub_group_size) \
-    get_gi_yxs_os_yxsv2_osv_index(g,                                                \
-                                  o,                                                \
-                                  i,                                                \
-                                  y,                                                \
-                                  x,                                                \
-                                  CAT(prefix, _SIZE_X),                             \
-                                  CAT(prefix, _GROUPS_PITCH),                       \
-                                  CAT(prefix, _IFM_PITCH),                          \
-                                  CAT(prefix, _Y_PITCH),                            \
-                                  CAT(prefix, _X_PITCH),                            \
-                                  CAT(prefix, _OFFSET),                             \
-                                  sub_group_size)
-#define GET_FILTER_GIY_XS_OS_XSV2_OSV_INDEX(prefix, g, o, i, y, x, sub_group_size) \
-    get_giy_xs_os_xsv2_osv_index(g,                                                \
-                                 o,                                                \
-                                 i,                                                \
-                                 y,                                                \
-                                 x,                                                \
-                                 CAT(prefix, _SIZE_X),                             \
-                                 CAT(prefix, _GROUPS_PITCH),                       \
-                                 CAT(prefix, _IFM_PITCH),                          \
-                                 CAT(prefix, _Y_PITCH),                            \
-                                 CAT(prefix, _X_PITCH),                            \
-                                 CAT(prefix, _OFFSET),                             \
-                                 sub_group_size)
+#define GET_FILTER_GS_OIYX_GSV16(prefix, g, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((g) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + ((g) / (sub_group_size))*CAT(prefix, _GROUPS_PITCH) )
+#define GET_FILTER_GS_OIZYX_GSV16(prefix, g, o, i, z, y, x, sub_group_size) CAT(prefix, _OFFSET) + ((g) % (sub_group_size)) + (sub_group_size)*( (x)*CAT(prefix, _X_PITCH) + (y)*CAT(prefix, _Y_PITCH) + (z)*CAT(prefix, _Z_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + (o)*CAT(prefix, _OFM_PITCH) + ((g) / (sub_group_size))*CAT(prefix, _GROUPS_PITCH) )
+#define GET_FILTER_G_OS_IYX_OSV16_ROTATE_180(prefix, g, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) + (sub_group_size)*( (CAT(prefix, _SIZE_X ) - x - 1)*CAT(prefix, _X_PITCH) + (CAT(prefix, _SIZE_Y ) - y - 1)*CAT(prefix, _Y_PITCH) + (i)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
+#define GET_FILTER_G_IS_OS_ZYX_ISV16_OSV16_INDEX(prefix, g, o, i, z, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g)*CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + (z)*(sub_group_size)*CAT(prefix, _Z_PITCH) + ((i) % (sub_group_size)) + ((o) / (sub_group_size))*(sub_group_size)*CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size))*CAT(prefix, _IFM_PITCH) )
+#define GET_FILTER_G_IS_OS_YX_ISV16_OSV16_INDEX(prefix, g, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g)*CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + ((o) / (sub_group_size))*(sub_group_size)*CAT(prefix, _OFM_PITCH) + ((i) / (sub_group_size))*CAT(prefix, _IFM_PITCH) )
+#define GET_FILTER_G_OS_IS_ZYX_ISV16_OSV16_INDEX(prefix, g, o, i, z, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g)*CAT(prefix, _GROUPS_PITCH) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + (z)*(sub_group_size)*CAT(prefix, _Z_PITCH) + ((i) % (sub_group_size)) + ((i) / (sub_group_size))*(sub_group_size)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
+#define GET_FILTER_GI_YXS_OS_YXSV2_OSV_INDEX(prefix, g, o, i, y, x, sub_group_size) get_gi_yxs_os_yxsv2_osv_index( g, o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _GROUPS_PITCH), CAT(prefix, _IFM_PITCH), CAT(prefix, _Y_PITCH), CAT(prefix, _X_PITCH), CAT(prefix, _OFFSET), sub_group_size)
+#define GET_FILTER_GIY_XS_OS_XSV2_OSV_INDEX(prefix, g, o, i, y, x, sub_group_size) get_giy_xs_os_xsv2_osv_index( g, o, i, y, x, CAT(prefix, _SIZE_X ), CAT(prefix, _GROUPS_PITCH), CAT(prefix, _IFM_PITCH), CAT(prefix, _Y_PITCH), CAT(prefix, _X_PITCH), CAT(prefix, _OFFSET), sub_group_size)
 inline uint get_gs_oi_yxs_gsv_yxsv4_index(uint g, uint o, uint i, uint y, uint x, uint o_size, uint i_size, uint size_x, uint size_y, const uint gsv) {
-    const uint yxsv = 4;
-    uint yx = y * size_x + x;
-    uint yx_size_aligned = (size_x * size_y + yxsv - 1) / yxsv * yxsv;
-    uint gs_index = g / gsv;
-    uint yxs_index = yx / yxsv;
-    uint gsv_index = g % gsv;
-    uint yxsv_index = yx % yxsv;
-    uint index = 0;
-    index += yxsv_index;
-    index += gsv_index * yxsv;
-    index += yxs_index * yxsv * gsv;
-    index += o * i * gsv * yx_size_aligned;
-    index += gs_index * gsv * yx_size_aligned * o_size * i_size;
-    return index;
+ const uint yxsv = 4;
+ uint yx = y * size_x + x;
+ uint yx_size_aligned = (size_x * size_y + yxsv - 1) / yxsv * yxsv;
+ uint gs_index = g / gsv;
+ uint yxs_index = yx / yxsv;
+ uint gsv_index = g % gsv;
+ uint yxsv_index = yx % yxsv;
+ uint index = 0;
+ index += yxsv_index;
+ index += gsv_index * yxsv;
+ index += yxs_index * yxsv * gsv;
+ index += o * i * gsv * yx_size_aligned;
+ index += gs_index * gsv * yx_size_aligned * o_size * i_size;
+ return index;
 }
-#define GET_FILTER_GS_OI_YXS_GSV4_YXSV4_INDEX(prefix, g, o, i, y, x) \
-    get_gs_oi_yxs_gsv_yxsv4_index(g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 4)
-#define GET_FILTER_GS_OI_YXS_GSV16_YXSV4_INDEX(prefix, g, o, i, y, x) \
-    get_gs_oi_yxs_gsv_yxsv4_index(g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16)
-#define GET_FILTER_GS_OI_YXS_GSV32_YXSV4_INDEX(prefix, g, o, i, y, x) \
-    get_gs_oi_yxs_gsv_yxsv4_index(g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 32)
-#define GET_FILTER_G_OS_IS_YX_ISV16_OSV16_INDEX(prefix, g, o, i, y, x, sub_group_size)                                                                   \
-    CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) +                                                                 \
-        (sub_group_size) * ((x) * (sub_group_size) * CAT(prefix, _X_PITCH) + (y) * (sub_group_size) * CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + \
-                            ((i) / (sub_group_size)) * (sub_group_size) * CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size)) * CAT(prefix, _OFM_PITCH))
-inline uint
-get_g_os_zyx_is_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x, uint g_size, uint o_size, uint i_size, uint z_size, uint y_size, uint x_size, uint osv, uint isv) {
-    uint is_size = (i_size + isv - 1) / isv;
-    uint os_size = (o_size + osv - 1) / osv;
-    uint isv_index = i % isv;
-    uint osv_index = o % osv;
-    uint is_index = i / isv;
-    uint os_index = o / osv;
-    uint isv_pitch = 1;
-    uint osv_pitch = isv_pitch * isv;
-    uint is_pitch = osv_pitch * osv;
-    uint x_pitch = is_pitch * is_size;
-    uint y_pitch = x_pitch * x_size;
-    uint z_pitch = y_pitch * y_size;
-    uint os_pitch = z_pitch * z_size;
-    uint g_pitch = os_pitch * os_size;
-    uint index = 0;
-    index += isv_index * isv_pitch;
-    index += osv_index * osv_pitch;
-    index += is_index * is_pitch;
-    index += x * x_pitch;
-    index += y * y_pitch;
-    index += z * z_pitch;
-    index += os_index * os_pitch;
-    index += g * g_pitch;
-    return index;
+#define GET_FILTER_GS_OI_YXS_GSV4_YXSV4_INDEX(prefix, g, o, i, y, x) get_gs_oi_yxs_gsv_yxsv4_index( g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 4)
+#define GET_FILTER_GS_OI_YXS_GSV16_YXSV4_INDEX(prefix, g, o, i, y, x) get_gs_oi_yxs_gsv_yxsv4_index( g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 16)
+#define GET_FILTER_GS_OI_YXS_GSV32_YXSV4_INDEX(prefix, g, o, i, y, x) get_gs_oi_yxs_gsv_yxsv4_index( g, o, i, y, x, CAT(prefix, _OFM_NUM), CAT(prefix, _IFM_NUM), CAT(prefix, _SIZE_X), CAT(prefix, _SIZE_Y), 32)
+#define GET_FILTER_G_OS_IS_YX_ISV16_OSV16_INDEX(prefix, g, o, i, y, x, sub_group_size) CAT(prefix, _OFFSET) + (g * CAT(prefix, _GROUPS_PITCH)) + ((o) % (sub_group_size)) + (sub_group_size)*( (x)*(sub_group_size)*CAT(prefix, _X_PITCH) + (y)*(sub_group_size)*CAT(prefix, _Y_PITCH) + ((i) % (sub_group_size)) + ((i) / (sub_group_size))*(sub_group_size)*CAT(prefix, _IFM_PITCH) + ((o) / (sub_group_size))*CAT(prefix, _OFM_PITCH) )
+inline uint get_g_os_zyx_is_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint g_size, uint o_size, uint i_size, uint z_size, uint y_size, uint x_size,
+ uint osv, uint isv) {
+ uint is_size = (i_size + isv - 1) / isv;
+ uint os_size = (o_size + osv - 1) / osv;
+ uint isv_index = i % isv;
+ uint osv_index = o % osv;
+ uint is_index = i / isv;
+ uint os_index = o / osv;
+ uint isv_pitch = 1;
+ uint osv_pitch = isv_pitch * isv;
+ uint is_pitch = osv_pitch * osv;
+ uint x_pitch = is_pitch * is_size;
+ uint y_pitch = x_pitch * x_size;
+ uint z_pitch = y_pitch * y_size;
+ uint os_pitch = z_pitch * z_size;
+ uint g_pitch = os_pitch * os_size;
+ uint index = 0;
+ index += isv_index * isv_pitch;
+ index += osv_index * osv_pitch;
+ index += is_index * is_pitch;
+ index += x * x_pitch;
+ index += y * y_pitch;
+ index += z * z_pitch;
+ index += os_index * os_pitch;
+ index += g * g_pitch;
+ return index;
 }
-#define GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, osv, isv) \
-    get_g_os_zyx_is_osv_isv_index(g,                                             \
-                                  o,                                             \
-                                  i,                                             \
-                                  z,                                             \
-                                  y,                                             \
-                                  x,                                             \
-                                  CAT(tensor, _GROUPS_NUM),                      \
-                                  CAT(tensor, _OFM_NUM),                         \
-                                  CAT(tensor, _IFM_NUM),                         \
-                                  CAT(tensor, _SIZE_Z),                          \
-                                  CAT(tensor, _SIZE_Y),                          \
-                                  CAT(tensor, _SIZE_X),                          \
-                                  osv,                                           \
-                                  isv)
-#define GET_FILTER_G_OS_ZYX_IS_OSV16_ISV4_INDEX(tensor, g, o, i, z, y, x)  GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 16, 4)
+#define GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, osv, isv) get_g_os_zyx_is_osv_isv_index( g, o, i, z, y, x, CAT(tensor, _GROUPS_NUM), CAT(tensor, _OFM_NUM), CAT(tensor, _IFM_NUM), CAT(tensor, _SIZE_Z), CAT(tensor, _SIZE_Y), CAT(tensor, _SIZE_X), osv, isv)
+#define GET_FILTER_G_OS_ZYX_IS_OSV16_ISV4_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 16, 4)
 #define GET_FILTER_G_OS_ZYX_IS_OSV16_ISV16_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 16, 16)
 #define GET_FILTER_G_OS_ZYX_IS_OSV16_ISV32_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 16, 32)
-#define GET_FILTER_G_OS_ZYX_IS_OSV32_ISV4_INDEX(tensor, g, o, i, z, y, x)  GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 32, 4)
+#define GET_FILTER_G_OS_ZYX_IS_OSV32_ISV4_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 32, 4)
 #define GET_FILTER_G_OS_ZYX_IS_OSV32_ISV16_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 32, 16)
 #define GET_FILTER_G_OS_ZYX_IS_OSV32_ISV32_INDEX(tensor, g, o, i, z, y, x) GET_FILTER_G_OS_ZYX_IS_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, 32, 32)
-inline uint get_g_os_y_is_x_osv_isv_index(uint g, uint o, uint i, uint y, uint x, uint x_size, uint y_size, uint i_size, uint o_size, uint osv_size, uint isv_size) {
-    const uint isv = i % isv_size;
-    const uint osv = o % osv_size;
-    const uint is = i / isv_size;
-    const uint os = o / osv_size;
-    const uint x_pitch = osv_size * isv_size;
-    const uint is_pitch = x_pitch * x_size;
-    const uint y_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
-    const uint os_pitch = y_pitch * y_size;
-    const uint g_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
-    const uint output_offset = isv + osv * isv_size + x * x_pitch + is * is_pitch + y * y_pitch + os * os_pitch + g * g_pitch;
-    return output_offset;
+inline uint get_g_os_y_is_x_osv_isv_index(uint g, uint o, uint i, uint y, uint x,
+ uint x_size, uint y_size, uint i_size, uint o_size, uint osv_size, uint isv_size)
+{
+ const uint isv = i % isv_size;
+ const uint osv = o % osv_size;
+ const uint is = i / isv_size;
+ const uint os = o / osv_size;
+ const uint x_pitch = osv_size * isv_size;
+ const uint is_pitch = x_pitch * x_size;
+ const uint y_pitch = is_pitch * ((i_size + isv_size - 1) / isv_size);
+ const uint os_pitch = y_pitch * y_size;
+ const uint g_pitch = os_pitch * ((o_size + osv_size - 1) / osv_size);
+ const uint output_offset =
+ isv +
+ osv * isv_size +
+ x * x_pitch +
+ is * is_pitch +
+ y * y_pitch +
+ os * os_pitch +
+ g * g_pitch;
+ return output_offset;
 }
-#define GET_FILTER_G_OS_Y_IS_X_OSV_ISV_INDEX(tensor, g, o, i, y, x, osv, isv) \
-    get_g_os_y_is_x_osv_isv_index(g, o, i, y, x, CAT(tensor, _SIZE_X), CAT(tensor, _SIZE_Y), CAT(tensor, _IFM_NUM), CAT(tensor, _OFM_NUM), osv, isv)
-inline uint get_g_os_zy_is_x_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x, uint o_size, uint i_size, uint z_size, uint y_size, uint x_size, uint osv, uint isv) {
-    uint is_size = (i_size + isv - 1) / isv;
-    uint os_size = (o_size + osv - 1) / osv;
-    uint isv_index = i % isv;
-    uint osv_index = o % osv;
-    uint is_index = i / isv;
-    uint os_index = o / osv;
-    uint isv_pitch = 1;
-    uint osv_pitch = isv_pitch * isv;
-    uint x_pitch = osv_pitch * osv;
-    uint is_pitch = x_pitch * x_size;
-    uint y_pitch = is_pitch * is_size;
-    uint z_pitch = y_pitch * y_size;
-    uint os_pitch = z_pitch * z_size;
-    uint g_pitch = os_pitch * os_size;
-    uint index = 0;
-    index += isv_index * isv_pitch;
-    index += osv_index * osv_pitch;
-    index += is_index * is_pitch;
-    index += x * x_pitch;
-    index += y * y_pitch;
-    index += z * z_pitch;
-    index += os_index * os_pitch;
-    index += g * g_pitch;
-    return index;
+#define GET_FILTER_G_OS_Y_IS_X_OSV_ISV_INDEX(tensor, g, o, i, y, x, osv, isv) get_g_os_y_is_x_osv_isv_index( g, o, i, y, x, CAT(tensor, _SIZE_X), CAT(tensor, _SIZE_Y), CAT(tensor, _IFM_NUM), CAT(tensor, _OFM_NUM), osv, isv)
+inline uint get_g_os_zy_is_x_osv_isv_index(uint g, uint o, uint i, uint z, uint y, uint x,
+ uint o_size, uint i_size, uint z_size, uint y_size, uint x_size,
+ uint osv, uint isv) {
+ uint is_size = (i_size + isv - 1) / isv;
+ uint os_size = (o_size + osv - 1) / osv;
+ uint isv_index = i % isv;
+ uint osv_index = o % osv;
+ uint is_index = i / isv;
+ uint os_index = o / osv;
+ uint isv_pitch = 1;
+ uint osv_pitch = isv_pitch * isv;
+ uint x_pitch = osv_pitch * osv;
+ uint is_pitch = x_pitch * x_size;
+ uint y_pitch = is_pitch * is_size;
+ uint z_pitch = y_pitch * y_size;
+ uint os_pitch = z_pitch * z_size;
+ uint g_pitch = os_pitch * os_size;
+ uint index = 0;
+ index += isv_index * isv_pitch;
+ index += osv_index * osv_pitch;
+ index += is_index * is_pitch;
+ index += x * x_pitch;
+ index += y * y_pitch;
+ index += z * z_pitch;
+ index += os_index * os_pitch;
+ index += g * g_pitch;
+ return index;
 }
-#define GET_FILTER_G_OS_ZY_IS_X_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, osv, isv) \
-    get_g_os_zy_is_x_osv_isv_index(g, o, i, z, y, x, CAT(tensor, _OFM_NUM), CAT(tensor, _IFM_NUM), CAT(tensor, _SIZE_Z), CAT(tensor, _SIZE_Y), CAT(tensor, _SIZE_X), osv, isv)
+#define GET_FILTER_G_OS_ZY_IS_X_OSV_ISV_INDEX(tensor, g, o, i, z, y, x, osv, isv) get_g_os_zy_is_x_osv_isv_index( g, o, i, z, y, x, CAT(tensor, _OFM_NUM), CAT(tensor, _IFM_NUM), CAT(tensor, _SIZE_Z), CAT(tensor, _SIZE_Y), CAT(tensor, _SIZE_X), osv, isv)
 
 inline int imad_SW(int acc, uchar4 input, char4 weight) __attribute__((overloadable)) {
-    acc += input[0] * weight[0];
-    acc += input[1] * weight[1];
-    acc += input[2] * weight[2];
-    acc += input[3] * weight[3];
-    return acc;
+ acc += input[0] * weight[0];
+ acc += input[1] * weight[1];
+ acc += input[2] * weight[2];
+ acc += input[3] * weight[3];
+ return acc;
 }
 inline int imad_SW(int acc, char4 input, char4 weight) __attribute__((overloadable)) {
-    acc += input[0] * weight[0];
-    acc += input[1] * weight[1];
-    acc += input[2] * weight[2];
-    acc += input[3] * weight[3];
-    return acc;
+ acc += input[0] * weight[0];
+ acc += input[1] * weight[1];
+ acc += input[2] * weight[2];
+ acc += input[3] * weight[3];
+ return acc;
 }
 inline int imad_SW(int acc, char4 input, uchar4 weight) __attribute__((overloadable)) {
-    acc += input[0] * weight[0];
-    acc += input[1] * weight[1];
-    acc += input[2] * weight[2];
-    acc += input[3] * weight[3];
-    return acc;
+ acc += input[0] * weight[0];
+ acc += input[1] * weight[1];
+ acc += input[2] * weight[2];
+ acc += input[3] * weight[3];
+ return acc;
 }
 inline int imad_SW(int acc, uchar4 input, uchar4 weight) __attribute__((overloadable)) {
-    acc += input[0] * weight[0];
-    acc += input[1] * weight[1];
-    acc += input[2] * weight[2];
-    acc += input[3] * weight[3];
-    return acc;
+ acc += input[0] * weight[0];
+ acc += input[1] * weight[1];
+ acc += input[2] * weight[2];
+ acc += input[3] * weight[3];
+ return acc;
 }
 #define IMAD(_O, _I, _W) imad_SW(_O, _I, _W)
 
-typedef struct __attribute__((packed)) int4x2_t {
-    char s0;
-} int4x2_t;
-typedef struct __attribute__((packed)) int4x4_t {
-    int4x2_t s0;
-    int4x2_t s1;
-} int4x4_t;
-typedef struct __attribute__((packed)) int4x8_t {
-    int4x2_t s0;
-    int4x2_t s1;
-    int4x2_t s2;
-    int4x2_t s3;
-} int4x8_t;
-typedef struct __attribute__((packed)) int4x16_t {
-    int4x2_t s0;
-    int4x2_t s1;
-    int4x2_t s2;
-    int4x2_t s3;
-    int4x2_t s4;
-    int4x2_t s5;
-    int4x2_t s6;
-    int4x2_t s7;
-} int4x16_t;
-typedef struct __attribute__((packed)) uint4x2_t {
-    uchar s0;
-} uint4x2_t;
-typedef struct __attribute__((packed)) uint4x4_t {
-    uint4x2_t s0;
-    uint4x2_t s1;
-} uint4x4_t;
-typedef struct __attribute__((packed)) uint4x8_t {
-    uint4x2_t s0;
-    uint4x2_t s1;
-    uint4x2_t s2;
-    uint4x2_t s3;
-} uint4x8_t;
-typedef struct __attribute__((packed)) uint4x16_t {
-    uint4x2_t s0;
-    uint4x2_t s1;
-    uint4x2_t s2;
-    uint4x2_t s3;
-    uint4x2_t s4;
-    uint4x2_t s5;
-    uint4x2_t s6;
-    uint4x2_t s7;
-} uint4x16_t;
+typedef struct __attribute__ ((packed)) int4x2_t { char s0; } int4x2_t;
+typedef struct __attribute__ ((packed)) int4x4_t { int4x2_t s0; int4x2_t s1; } int4x4_t;
+typedef struct __attribute__ ((packed)) int4x8_t { int4x2_t s0; int4x2_t s1; int4x2_t s2; int4x2_t s3; } int4x8_t;
+typedef struct __attribute__ ((packed)) int4x16_t { int4x2_t s0; int4x2_t s1; int4x2_t s2; int4x2_t s3; int4x2_t s4; int4x2_t s5; int4x2_t s6; int4x2_t s7; } int4x16_t;
+typedef struct __attribute__ ((packed)) uint4x2_t { uchar s0; } uint4x2_t;
+typedef struct __attribute__ ((packed)) uint4x4_t { uint4x2_t s0; uint4x2_t s1; } uint4x4_t;
+typedef struct __attribute__ ((packed)) uint4x8_t { uint4x2_t s0; uint4x2_t s1; uint4x2_t s2; uint4x2_t s3; } uint4x8_t;
+typedef struct __attribute__ ((packed)) uint4x16_t { uint4x2_t s0; uint4x2_t s1; uint4x2_t s2; uint4x2_t s3; uint4x2_t s4; uint4x2_t s5; uint4x2_t s6; uint4x2_t s7; } uint4x16_t;
 inline uchar2 cvt_uint4x2_to_uint8x2(uint4x2_t v) __attribute__((overloadable)) {
-    const uchar v0 = v.s0 & 0x0F;
-    const uchar v1 = (v.s0 & 0xF0) >> 4;
-    return (uchar2)(v0, v1);
+ const uchar v0 = v.s0 & 0x0F;
+ const uchar v1 = (v.s0 & 0xF0) >> 4;
+ return (uchar2)(v0, v1);
 }
 inline char2 cvt_uint4x2_to_int8x2(uint4x2_t v) __attribute__((overloadable)) {
-    const char v0 = convert_char(v.s0 & 0x0F);
-    const char v1 = convert_char((v.s0 & 0xF0) >> 4);
-    return (char2)(v0, v1);
+ const char v0 = convert_char(v.s0 & 0x0F);
+ const char v1 = convert_char((v.s0 & 0xF0) >> 4);
+ return (char2)(v0, v1);
 }
 inline char2 cvt_int4x2_to_int8x2(int4x2_t v) __attribute__((overloadable)) {
-    const char s_bit = (v.s0 & convert_char(0x08));
-    const char mask = s_bit > 0 ? convert_char(0xF0) : convert_char(0x00);
-    const char v0 = (v.s0 & convert_char(0x0F)) | mask;
-    const char v1 = v.s0 >> 4;
-    return (char2)(v0, v1);
+ const char s_bit = (v.s0 & convert_char(0x08));
+ const char mask = s_bit > 0 ? convert_char(0xF0) : convert_char(0x00);
+ const char v0 = (v.s0 & convert_char(0x0F)) | mask;
+ const char v1 = v.s0 >> 4;
+ return (char2)(v0, v1);
 }
 inline uchar2 unpack_to_uchar(uint4x2_t v) __attribute__((overloadable)) {
-    return cvt_uint4x2_to_uint8x2(v);
+ return cvt_uint4x2_to_uint8x2(v);
 }
 inline char2 unpack_to_char(int4x2_t v) __attribute__((overloadable)) {
-    return cvt_int4x2_to_int8x2(v);
+ return cvt_int4x2_to_int8x2(v);
 }
 inline char2 unpack_to_char(uint4x2_t v) __attribute__((overloadable)) {
-    return convert_char2(cvt_uint4x2_to_uint8x2(v));
+ return convert_char2(cvt_uint4x2_to_uint8x2(v));
 }
 inline char4 unpack_to_char(int4x4_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    return (char4)(v0.s0, v0.s1, v1.s0, v1.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ return (char4)(v0.s0, v0.s1, v1.s0, v1.s1);
 }
 inline char4 unpack_to_char(uint4x4_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    return (char4)(v0.s0, v0.s1, v1.s0, v1.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ return (char4)(v0.s0, v0.s1, v1.s0, v1.s1);
+}
+inline uchar4 unpack_to_uchar(uint4x4_t v) __attribute__((overloadable)) {
+ uchar2 v0 = unpack_to_uchar(v.s0);
+ uchar2 v1 = unpack_to_uchar(v.s1);
+ return (uchar4)(v0.s0, v0.s1, v1.s0, v1.s1);
 }
 inline char4 unpack_transposed_to_char(int4x4_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    return (char4)(v0.s0, v1.s0, v0.s1, v1.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ return (char4)(v0.s0, v1.s0, v0.s1, v1.s1);
 }
 inline char4 unpack_transposed_to_char(uint4x4_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    return (char4)(v0.s0, v1.s0, v0.s1, v1.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ return (char4)(v0.s0, v1.s0, v0.s1, v1.s1);
 }
 inline uchar4 unpack_transposed_to_uchar(uint4x4_t v) __attribute__((overloadable)) {
-    uchar2 v0 = unpack_to_uchar(v.s0);
-    uchar2 v1 = unpack_to_uchar(v.s1);
-    return (uchar4)(v0.s0, v1.s0, v0.s1, v1.s1);
+ uchar2 v0 = unpack_to_uchar(v.s0);
+ uchar2 v1 = unpack_to_uchar(v.s1);
+ return (uchar4)(v0.s0, v1.s0, v0.s1, v1.s1);
 }
 inline uchar8 unpack_to_uchar(uint4x8_t v) __attribute__((overloadable)) {
-    uchar2 v0 = unpack_to_uchar(v.s0);
-    uchar2 v1 = unpack_to_uchar(v.s1);
-    uchar2 v2 = unpack_to_uchar(v.s2);
-    uchar2 v3 = unpack_to_uchar(v.s3);
-    return (uchar8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ uchar2 v0 = unpack_to_uchar(v.s0);
+ uchar2 v1 = unpack_to_uchar(v.s1);
+ uchar2 v2 = unpack_to_uchar(v.s2);
+ uchar2 v3 = unpack_to_uchar(v.s3);
+ return (uchar8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 inline char8 unpack_to_char(int4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    char2 v2 = unpack_to_char(v.s2);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ char2 v2 = unpack_to_char(v.s2);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 inline char8 unpack_to_char(uint4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    char2 v2 = unpack_to_char(v.s2);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ char2 v2 = unpack_to_char(v.s2);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 inline char8 unpack_transposed_to_char(int4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    char2 v2 = unpack_to_char(v.s2);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ char2 v2 = unpack_to_char(v.s2);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
 }
 inline char8 unpack_transposed_to_char(uint4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s1);
-    char2 v2 = unpack_to_char(v.s2);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s1);
+ char2 v2 = unpack_to_char(v.s2);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
 }
 inline uchar8 unpack_transposed_to_uchar(uint4x8_t v) __attribute__((overloadable)) {
-    uchar2 v0 = unpack_to_uchar(v.s0);
-    uchar2 v1 = unpack_to_uchar(v.s1);
-    uchar2 v2 = unpack_to_uchar(v.s2);
-    uchar2 v3 = unpack_to_uchar(v.s3);
-    return (uchar8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
+ uchar2 v0 = unpack_to_uchar(v.s0);
+ uchar2 v1 = unpack_to_uchar(v.s1);
+ uchar2 v2 = unpack_to_uchar(v.s2);
+ uchar2 v3 = unpack_to_uchar(v.s3);
+ return (uchar8)(v0.s0, v1.s0, v2.s0, v3.s0, v0.s1, v1.s1, v2.s1, v3.s1);
 }
 inline float2 unpack_to_float(uint4x2_t v) __attribute__((overloadable)) {
-    return convert_float2(cvt_uint4x2_to_uint8x2(v));
+ return convert_float2(cvt_uint4x2_to_uint8x2(v));
 }
 inline float2 unpack_to_float(int4x2_t v) __attribute__((overloadable)) {
-    return convert_float2(cvt_int4x2_to_int8x2(v));
+ return convert_float2(cvt_int4x2_to_int8x2(v));
 }
 inline float4 unpack_to_float(uint4x4_t v) __attribute__((overloadable)) {
-    float2 f0 = unpack_to_float(v.s0);
-    float2 f1 = unpack_to_float(v.s1);
-    return (float4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ float2 f0 = unpack_to_float(v.s0);
+ float2 f1 = unpack_to_float(v.s1);
+ return (float4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
 inline float4 unpack_to_float(int4x4_t v) __attribute__((overloadable)) {
-    float2 f0 = unpack_to_float(v.s0);
-    float2 f1 = unpack_to_float(v.s1);
-    return (float4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ float2 f0 = unpack_to_float(v.s0);
+ float2 f1 = unpack_to_float(v.s1);
+ return (float4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
 inline float8 unpack_to_float(uint4x8_t v) __attribute__((overloadable)) {
-    float2 f0 = unpack_to_float(v.s0);
-    float2 f1 = unpack_to_float(v.s1);
-    float2 f2 = unpack_to_float(v.s2);
-    float2 f3 = unpack_to_float(v.s3);
-    return (float8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ float2 f0 = unpack_to_float(v.s0);
+ float2 f1 = unpack_to_float(v.s1);
+ float2 f2 = unpack_to_float(v.s2);
+ float2 f3 = unpack_to_float(v.s3);
+ return (float8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 inline float8 unpack_to_float(int4x8_t v) __attribute__((overloadable)) {
-    float2 f0 = unpack_to_float(v.s0);
-    float2 f1 = unpack_to_float(v.s1);
-    float2 f2 = unpack_to_float(v.s2);
-    float2 f3 = unpack_to_float(v.s3);
-    return (float8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ float2 f0 = unpack_to_float(v.s0);
+ float2 f1 = unpack_to_float(v.s1);
+ float2 f2 = unpack_to_float(v.s2);
+ float2 f3 = unpack_to_float(v.s3);
+ return (float8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 #if defined(cl_khr_fp16)
 inline half2 unpack_to_half(uint4x2_t v) __attribute__((overloadable)) {
-    return convert_half2(cvt_uint4x2_to_uint8x2(v));
+ return convert_half2(cvt_uint4x2_to_uint8x2(v));
 }
 inline half2 unpack_to_half(int4x2_t v) __attribute__((overloadable)) {
-    return convert_half2(cvt_int4x2_to_int8x2(v));
+ return convert_half2(cvt_int4x2_to_int8x2(v));
 }
 inline half4 unpack_to_half(uint4x4_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
 inline half4 unpack_to_half_osv32_isv2(uint4x4_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
 inline half4 unpack_to_half(int4x4_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
+
 inline half4 unpack_to_half_osv32_isv2(int4x4_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ return (half4)(f0.s0, f0.s1, f1.s0, f1.s1);
 }
 inline half8 unpack_to_half(uint4x8_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    half2 f2 = unpack_to_half(v.s2);
-    half2 f3 = unpack_to_half(v.s3);
-    return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ half2 f2 = unpack_to_half(v.s2);
+ half2 f3 = unpack_to_half(v.s3);
+ return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 inline half8 unpack_to_half_osv32_isv2(uint4x8_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s2);
-    half2 f2 = unpack_to_half(v.s1);
-    half2 f3 = unpack_to_half(v.s3);
-    return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s2);
+ half2 f2 = unpack_to_half(v.s1);
+ half2 f3 = unpack_to_half(v.s3);
+ return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 inline half8 unpack_to_half(int4x8_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s1);
-    half2 f2 = unpack_to_half(v.s2);
-    half2 f3 = unpack_to_half(v.s3);
-    return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s1);
+ half2 f2 = unpack_to_half(v.s2);
+ half2 f3 = unpack_to_half(v.s3);
+ return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 inline half8 unpack_to_half_osv32_isv2(int4x8_t v) __attribute__((overloadable)) {
-    half2 f0 = unpack_to_half(v.s0);
-    half2 f1 = unpack_to_half(v.s2);
-    half2 f2 = unpack_to_half(v.s1);
-    half2 f3 = unpack_to_half(v.s3);
-    return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
+ half2 f0 = unpack_to_half(v.s0);
+ half2 f1 = unpack_to_half(v.s2);
+ half2 f2 = unpack_to_half(v.s1);
+ half2 f3 = unpack_to_half(v.s3);
+ return (half8)(f0.s0, f0.s1, f1.s0, f1.s1, f2.s0, f2.s1, f3.s0, f3.s1);
 }
 inline char8 unpack_to_char_osv32_isv2(int4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s2);
-    char2 v2 = unpack_to_char(v.s1);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s2);
+ char2 v2 = unpack_to_char(v.s1);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 inline char8 unpack_to_char_osv32_isv2(uint4x8_t v) __attribute__((overloadable)) {
-    char2 v0 = unpack_to_char(v.s0);
-    char2 v1 = unpack_to_char(v.s2);
-    char2 v2 = unpack_to_char(v.s1);
-    char2 v3 = unpack_to_char(v.s3);
-    return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ char2 v0 = unpack_to_char(v.s0);
+ char2 v1 = unpack_to_char(v.s2);
+ char2 v2 = unpack_to_char(v.s1);
+ char2 v3 = unpack_to_char(v.s3);
+ return (char8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 inline uchar8 unpack_to_uchar_osv32_isv2(uint4x8_t v) __attribute__((overloadable)) {
-    uchar2 v0 = unpack_to_uchar(v.s0);
-    uchar2 v1 = unpack_to_uchar(v.s2);
-    uchar2 v2 = unpack_to_uchar(v.s1);
-    uchar2 v3 = unpack_to_uchar(v.s3);
-    return (uchar8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
+ uchar2 v0 = unpack_to_uchar(v.s0);
+ uchar2 v1 = unpack_to_uchar(v.s2);
+ uchar2 v2 = unpack_to_uchar(v.s1);
+ uchar2 v3 = unpack_to_uchar(v.s3);
+ return (uchar8)(v0.s0, v0.s1, v1.s0, v1.s1, v2.s0, v2.s1, v3.s0, v3.s1);
 }
 #endif
-#define UNPACK_INT4x2(target_type, value)            CAT(unpack_to_, target_type)(value)
+#define UNPACK_INT4x2(target_type, value) CAT(unpack_to_, target_type)(value)
 #define UNPACK_INT4x2_OSV32_ISV2(target_type, value) CAT(CAT(unpack_to_, target_type), _osv32_isv2)(value)
 #define UNPACK_INT4x4_OSV32_ISV2(target_type, value) CAT(CAT(unpack_to_, target_type), _osv32_isv2)(value)
 #define UNPACK_TRANSPOSED_INT4x2(target_type, value) CAT(unpack_transposed_to_, target_type)(value)
 
-#define BLOCK_READ_TYPE_size1                                            uchar
-#define BLOCK_READ_TYPE_size2                                            ushort
-#define BLOCK_READ_TYPE_size4                                            uint
-#define BLOCK_READ_TYPE_size8                                            ulong
-#define BLOCK_READ_TYPE(type_size)                                       CAT(BLOCK_READ_TYPE_size, type_size)
-#define BLOCK_READ_FUNC_size1                                            _sub_group_block_read_uc
-#define BLOCK_READ_FUNC_size2                                            _sub_group_block_read_us
-#define BLOCK_READ_FUNC_size4                                            _sub_group_block_read
-#define BLOCK_READ_FUNC_size8                                            _sub_group_block_read_ul
-#define BLOCK_READ_FUNC(type_size)                                       CAT(BLOCK_READ_FUNC_size, type_size)
-#define BLOCK_READN_FUNC_SIZE_DEF(type_size, vector_size)                MAKE_VECTOR_TYPE(BLOCK_READ_FUNC(type_size), vector_size)
-#define BLOCK_READN_FUNC_size1(vector_size)                              BLOCK_READN_FUNC_SIZE_DEF(1, vector_size)
-#define BLOCK_READN_FUNC_size2(vector_size)                              BLOCK_READN_FUNC_SIZE_DEF(2, vector_size)
-#define BLOCK_READN_FUNC_size4(vector_size)                              BLOCK_READN_FUNC_SIZE_DEF(4, vector_size)
-#define BLOCK_READN_FUNC_size8(vector_size)                              BLOCK_READN_FUNC_SIZE_DEF(8, vector_size)
-#define BLOCK_READN_FUNC(type_size, vector_size)                         CAT(BLOCK_READN_FUNC_size, type_size)(vector_size)
+#define BLOCK_READ_TYPE_size1 uchar
+#define BLOCK_READ_TYPE_size2 ushort
+#define BLOCK_READ_TYPE_size4 uint
+#define BLOCK_READ_TYPE_size8 ulong
+#define BLOCK_READ_TYPE(type_size) CAT(BLOCK_READ_TYPE_size, type_size)
+#define BLOCK_READ_FUNC_size1 _sub_group_block_read_uc
+#define BLOCK_READ_FUNC_size2 _sub_group_block_read_us
+#define BLOCK_READ_FUNC_size4 _sub_group_block_read
+#define BLOCK_READ_FUNC_size8 _sub_group_block_read_ul
+#define BLOCK_READ_FUNC(type_size) CAT(BLOCK_READ_FUNC_size, type_size)
+#define BLOCK_READN_FUNC_SIZE_DEF(type_size, vector_size) MAKE_VECTOR_TYPE(BLOCK_READ_FUNC(type_size), vector_size)
+#define BLOCK_READN_FUNC_size1(vector_size) BLOCK_READN_FUNC_SIZE_DEF(1, vector_size)
+#define BLOCK_READN_FUNC_size2(vector_size) BLOCK_READN_FUNC_SIZE_DEF(2, vector_size)
+#define BLOCK_READN_FUNC_size4(vector_size) BLOCK_READN_FUNC_SIZE_DEF(4, vector_size)
+#define BLOCK_READN_FUNC_size8(vector_size) BLOCK_READN_FUNC_SIZE_DEF(8, vector_size)
+#define BLOCK_READN_FUNC(type_size, vector_size) CAT(BLOCK_READN_FUNC_size, type_size)(vector_size)
 #define BLOCK_READN_RAW(type_size, vector_size, addr_space, ptr, offset) BLOCK_READN_FUNC(type_size, vector_size)((const addr_space BLOCK_READ_TYPE(type_size)*)(ptr) + (offset))
-#define BLOCK_READN(type, vector_size, ptr, offset)                      AS_TYPE(MAKE_VECTOR_TYPE(type, vector_size), BLOCK_READN_RAW(TYPE_SIZE(type), vector_size, __global, ptr, offset))
-#define BLOCK_READN_SLM(type, vector_size, ptr, offset)                  AS_TYPE(MAKE_VECTOR_TYPE(type, vector_size), BLOCK_READN_RAW(TYPE_SIZE(type), vector_size, __local, ptr, offset))
-#define DT_INPUT_BLOCK_READ(ptr, offset)                                 BLOCK_READN(INPUT0_TYPE, 1, ptr, offset)
-#define DT_INPUT_BLOCK_READ2(ptr, offset)                                BLOCK_READN(INPUT0_TYPE, 2, ptr, offset)
-#define DT_INPUT_BLOCK_READ4(ptr, offset)                                BLOCK_READN(INPUT0_TYPE, 4, ptr, offset)
-#define DT_INPUT_BLOCK_READ8(ptr, offset)                                BLOCK_READN(INPUT0_TYPE, 8, ptr, offset)
-#define DT_INPUT_BLOCK_READ16(ptr, offset)                               BLOCK_READN(INPUT0_TYPE, 16, ptr, offset)
-#define DT_BIAS_BLOCK_READ(ptr, offset)                                  BLOCK_READN(BIAS_TYPE, 1, ptr, offset)
-#define DT_BIAS_BLOCK_READ2(ptr, offset)                                 BLOCK_READN(BIAS_TYPE, 2, ptr, offset)
-#define DT_BIAS_BLOCK_READ4(ptr, offset)                                 BLOCK_READN(BIAS_TYPE, 4, ptr, offset)
-#define DT_BIAS_BLOCK_READ8(ptr, offset)                                 BLOCK_READN(BIAS_TYPE, 8, ptr, offset)
-#define DT_BIAS_BLOCK_READ16(ptr, offset)                                BLOCK_READN(BIAS_TYPE, 16, ptr, offset)
-#define DT_FILTER_BLOCK_READ(ptr, offset)                                BLOCK_READN(FILTER_TYPE, 1, ptr, offset)
-#define DT_FILTER_BLOCK_READ2(ptr, offset)                               BLOCK_READN(FILTER_TYPE, 2, ptr, offset)
-#define DT_FILTER_BLOCK_READ4(ptr, offset)                               BLOCK_READN(FILTER_TYPE, 4, ptr, offset)
-#define DT_FILTER_BLOCK_READ8(ptr, offset)                               BLOCK_READN(FILTER_TYPE, 8, ptr, offset)
-#define DT_FILTER_BLOCK_READ16(ptr, offset)                              BLOCK_READN(FILTER_TYPE, 16, ptr, offset)
-#define BLOCK_READ_IMPL_1                                                ret = ptr[idx];
-#define BLOCK_READ_IMPL_2            \
-    ret.s0 = ptr[idx];               \
-    idx += get_max_sub_group_size(); \
-    ret.s1 = ptr[idx];               \
-    idx += get_max_sub_group_size();
-#define BLOCK_READ_IMPL_4                \
-    BLOCK_READ_IMPL_2 ret.s2 = ptr[idx]; \
-    idx += get_max_sub_group_size();     \
-    ret.s3 = ptr[idx];                   \
-    idx += get_max_sub_group_size();
-#define BLOCK_READ_IMPL_8                \
-    BLOCK_READ_IMPL_4 ret.s4 = ptr[idx]; \
-    idx += get_max_sub_group_size();     \
-    ret.s5 = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.s6 = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.s7 = ptr[idx];                   \
-    idx += get_max_sub_group_size();
-#define BLOCK_READ_IMPL_16               \
-    BLOCK_READ_IMPL_8 ret.s8 = ptr[idx]; \
-    idx += get_max_sub_group_size();     \
-    ret.s9 = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.sa = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.sb = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.sc = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.sd = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.se = ptr[idx];                   \
-    idx += get_max_sub_group_size();     \
-    ret.sf = ptr[idx];                   \
-    idx += get_max_sub_group_size();
-#define BLOCK_READ_IMPL(vec_size)                 CAT(BLOCK_READ_IMPL_, vec_size)
+#define BLOCK_READN(type, vector_size, ptr, offset) AS_TYPE(MAKE_VECTOR_TYPE(type, vector_size), BLOCK_READN_RAW(TYPE_SIZE(type), vector_size, __global, ptr, offset))
+#define BLOCK_READN_SLM(type, vector_size, ptr, offset) AS_TYPE(MAKE_VECTOR_TYPE(type, vector_size), BLOCK_READN_RAW(TYPE_SIZE(type), vector_size, __local, ptr, offset))
+#define DT_INPUT_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT0_TYPE, 1, ptr, offset)
+#define DT_INPUT_BLOCK_READ2(ptr, offset) BLOCK_READN(INPUT0_TYPE, 2, ptr, offset)
+#define DT_INPUT_BLOCK_READ4(ptr, offset) BLOCK_READN(INPUT0_TYPE, 4, ptr, offset)
+#define DT_INPUT_BLOCK_READ8(ptr, offset) BLOCK_READN(INPUT0_TYPE, 8, ptr, offset)
+#define DT_INPUT_BLOCK_READ16(ptr, offset) BLOCK_READN(INPUT0_TYPE, 16, ptr, offset)
+#define DT_BIAS_BLOCK_READ(ptr, offset) BLOCK_READN(BIAS_TYPE, 1, ptr, offset)
+#define DT_BIAS_BLOCK_READ2(ptr, offset) BLOCK_READN(BIAS_TYPE, 2, ptr, offset)
+#define DT_BIAS_BLOCK_READ4(ptr, offset) BLOCK_READN(BIAS_TYPE, 4, ptr, offset)
+#define DT_BIAS_BLOCK_READ8(ptr, offset) BLOCK_READN(BIAS_TYPE, 8, ptr, offset)
+#define DT_BIAS_BLOCK_READ16(ptr, offset) BLOCK_READN(BIAS_TYPE, 16, ptr, offset)
+#define DT_FILTER_BLOCK_READ(ptr, offset) BLOCK_READN(FILTER_TYPE, 1, ptr, offset)
+#define DT_FILTER_BLOCK_READ2(ptr, offset) BLOCK_READN(FILTER_TYPE, 2, ptr, offset)
+#define DT_FILTER_BLOCK_READ4(ptr, offset) BLOCK_READN(FILTER_TYPE, 4, ptr, offset)
+#define DT_FILTER_BLOCK_READ8(ptr, offset) BLOCK_READN(FILTER_TYPE, 8, ptr, offset)
+#define DT_FILTER_BLOCK_READ16(ptr, offset) BLOCK_READN(FILTER_TYPE, 16, ptr, offset)
+#define BLOCK_READ_IMPL_1 ret = ptr[idx];
+#define BLOCK_READ_IMPL_2 ret.s0 = ptr[idx]; idx += get_max_sub_group_size(); ret.s1 = ptr[idx]; idx += get_max_sub_group_size();
+#define BLOCK_READ_IMPL_4 BLOCK_READ_IMPL_2 ret.s2 = ptr[idx]; idx += get_max_sub_group_size(); ret.s3 = ptr[idx]; idx += get_max_sub_group_size();
+#define BLOCK_READ_IMPL_8 BLOCK_READ_IMPL_4 ret.s4 = ptr[idx]; idx += get_max_sub_group_size(); ret.s5 = ptr[idx]; idx += get_max_sub_group_size(); ret.s6 = ptr[idx]; idx += get_max_sub_group_size(); ret.s7 = ptr[idx]; idx += get_max_sub_group_size();
+#define BLOCK_READ_IMPL_16 BLOCK_READ_IMPL_8 ret.s8 = ptr[idx]; idx += get_max_sub_group_size(); ret.s9 = ptr[idx]; idx += get_max_sub_group_size(); ret.sa = ptr[idx]; idx += get_max_sub_group_size(); ret.sb = ptr[idx]; idx += get_max_sub_group_size(); ret.sc = ptr[idx]; idx += get_max_sub_group_size(); ret.sd = ptr[idx]; idx += get_max_sub_group_size(); ret.se = ptr[idx]; idx += get_max_sub_group_size(); ret.sf = ptr[idx]; idx += get_max_sub_group_size();
+#define BLOCK_READ_IMPL(vec_size) CAT(BLOCK_READ_IMPL_, vec_size)
 #define BLOCK_READ_FUNC_NAME(type_size, vec_size) MAKE_VECTOR_TYPE(BLOCK_READ_FUNC(type_size), vec_size)
-#define DECLARE_BLOCK_READ_EMULATION(type_size, vec_size)                                                                                                      \
-    inline MAKE_VECTOR_TYPE(BLOCK_READ_TYPE(type_size), vec_size) BLOCK_READ_FUNC_NAME(type_size, vec_size)(const __global BLOCK_READ_TYPE(type_size) * ptr) { \
-        uint idx = get_sub_group_local_id();                                                                                                                   \
-        MAKE_VECTOR_TYPE(BLOCK_READ_TYPE(type_size), vec_size) ret;                                                                                            \
-        BLOCK_READ_IMPL(vec_size) return ret;                                                                                                                  \
-    }
+#define DECLARE_BLOCK_READ_EMULATION(type_size, vec_size) inline MAKE_VECTOR_TYPE(BLOCK_READ_TYPE(type_size), vec_size) BLOCK_READ_FUNC_NAME(type_size, vec_size)(const __global BLOCK_READ_TYPE(type_size)* ptr) { uint idx = get_sub_group_local_id(); MAKE_VECTOR_TYPE(BLOCK_READ_TYPE(type_size), vec_size) ret; BLOCK_READ_IMPL(vec_size) return ret; }
 #if defined(cl_intel_subgroups)
-#    define _sub_group_block_read(ptr)  intel_sub_group_block_read(ptr)
-#    define _sub_group_block_read2(ptr) intel_sub_group_block_read2(ptr)
-#    define _sub_group_block_read4(ptr) intel_sub_group_block_read4(ptr)
-#    define _sub_group_block_read8(ptr) intel_sub_group_block_read8(ptr)
+ #define _sub_group_block_read(ptr) intel_sub_group_block_read(ptr)
+ #define _sub_group_block_read2(ptr) intel_sub_group_block_read2(ptr)
+ #define _sub_group_block_read4(ptr) intel_sub_group_block_read4(ptr)
+ #define _sub_group_block_read8(ptr) intel_sub_group_block_read8(ptr)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_READ_EMULATION(4, 1)
-DECLARE_BLOCK_READ_EMULATION(4, 2)
-DECLARE_BLOCK_READ_EMULATION(4, 4)
-DECLARE_BLOCK_READ_EMULATION(4, 8)
+ DECLARE_BLOCK_READ_EMULATION(4, 1)
+ DECLARE_BLOCK_READ_EMULATION(4, 2)
+ DECLARE_BLOCK_READ_EMULATION(4, 4)
+ DECLARE_BLOCK_READ_EMULATION(4, 8)
 #endif
 #if defined(cl_intel_subgroups_short)
-#    define _sub_group_block_read_us(ptr)  intel_sub_group_block_read_us(ptr)
-#    define _sub_group_block_read_us2(ptr) intel_sub_group_block_read_us2(ptr)
-#    define _sub_group_block_read_us4(ptr) intel_sub_group_block_read_us4(ptr)
-#    define _sub_group_block_read_us8(ptr) intel_sub_group_block_read_us8(ptr)
+ #define _sub_group_block_read_us(ptr) intel_sub_group_block_read_us(ptr)
+ #define _sub_group_block_read_us2(ptr) intel_sub_group_block_read_us2(ptr)
+ #define _sub_group_block_read_us4(ptr) intel_sub_group_block_read_us4(ptr)
+ #define _sub_group_block_read_us8(ptr) intel_sub_group_block_read_us8(ptr)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_READ_EMULATION(2, 1)
-DECLARE_BLOCK_READ_EMULATION(2, 2)
-DECLARE_BLOCK_READ_EMULATION(2, 4)
-DECLARE_BLOCK_READ_EMULATION(2, 8)
+ DECLARE_BLOCK_READ_EMULATION(2, 1)
+ DECLARE_BLOCK_READ_EMULATION(2, 2)
+ DECLARE_BLOCK_READ_EMULATION(2, 4)
+ DECLARE_BLOCK_READ_EMULATION(2, 8)
 #endif
 #if defined(cl_intel_subgroups_char)
-#    define _sub_group_block_read_uc(ptr)   intel_sub_group_block_read_uc(ptr)
-#    define _sub_group_block_read_uc2(ptr)  intel_sub_group_block_read_uc2(ptr)
-#    define _sub_group_block_read_uc4(ptr)  intel_sub_group_block_read_uc4(ptr)
-#    define _sub_group_block_read_uc8(ptr)  intel_sub_group_block_read_uc8(ptr)
-#    define _sub_group_block_read_uc16(ptr) intel_sub_group_block_read_uc16(ptr)
+ #define _sub_group_block_read_uc(ptr) intel_sub_group_block_read_uc(ptr)
+ #define _sub_group_block_read_uc2(ptr) intel_sub_group_block_read_uc2(ptr)
+ #define _sub_group_block_read_uc4(ptr) intel_sub_group_block_read_uc4(ptr)
+ #define _sub_group_block_read_uc8(ptr) intel_sub_group_block_read_uc8(ptr)
+ #define _sub_group_block_read_uc16(ptr) intel_sub_group_block_read_uc16(ptr)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_READ_EMULATION(1, 1)
-DECLARE_BLOCK_READ_EMULATION(1, 2)
-DECLARE_BLOCK_READ_EMULATION(1, 4)
-DECLARE_BLOCK_READ_EMULATION(1, 8)
-DECLARE_BLOCK_READ_EMULATION(1, 16)
+ DECLARE_BLOCK_READ_EMULATION(1, 1)
+ DECLARE_BLOCK_READ_EMULATION(1, 2)
+ DECLARE_BLOCK_READ_EMULATION(1, 4)
+ DECLARE_BLOCK_READ_EMULATION(1, 8)
+ DECLARE_BLOCK_READ_EMULATION(1, 16)
 #endif
 #if defined(cl_intel_subgroups_long)
-#    define _sub_group_block_read_ul(ptr)  intel_sub_group_block_read_ul(ptr)
-#    define _sub_group_block_read_ul2(ptr) intel_sub_group_block_read_ul2(ptr)
-#    define _sub_group_block_read_ul4(ptr) intel_sub_group_block_read_ul4(ptr)
-#    define _sub_group_block_read_ul8(ptr) intel_sub_group_block_read_ul8(ptr)
+ #define _sub_group_block_read_ul(ptr) intel_sub_group_block_read_ul(ptr)
+ #define _sub_group_block_read_ul2(ptr) intel_sub_group_block_read_ul2(ptr)
+ #define _sub_group_block_read_ul4(ptr) intel_sub_group_block_read_ul4(ptr)
+ #define _sub_group_block_read_ul8(ptr) intel_sub_group_block_read_ul8(ptr)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_READ_EMULATION(8, 1)
-DECLARE_BLOCK_READ_EMULATION(8, 2)
-DECLARE_BLOCK_READ_EMULATION(8, 4)
-DECLARE_BLOCK_READ_EMULATION(8, 8)
+ DECLARE_BLOCK_READ_EMULATION(8, 1)
+ DECLARE_BLOCK_READ_EMULATION(8, 2)
+ DECLARE_BLOCK_READ_EMULATION(8, 4)
+ DECLARE_BLOCK_READ_EMULATION(8, 8)
 #endif
 
-#define BLOCK_WRITE_TYPE_size1                             uchar
-#define BLOCK_WRITE_TYPE_size2                             ushort
-#define BLOCK_WRITE_TYPE_size4                             uint
-#define BLOCK_WRITE_TYPE_size8                             ulong
-#define BLOCK_WRITE_TYPE(type_size)                        CAT(BLOCK_WRITE_TYPE_size, type_size)
-#define BLOCK_WRITE_FUNC_size1                             _sub_group_block_write_uc
-#define BLOCK_WRITE_FUNC_size2                             _sub_group_block_write_us
-#define BLOCK_WRITE_FUNC_size4                             _sub_group_block_write
-#define BLOCK_WRITE_FUNC_size8                             _sub_group_block_write_ul
-#define BLOCK_WRITE_FUNC(type_size)                        CAT(BLOCK_WRITE_FUNC_size, type_size)
+#define BLOCK_WRITE_TYPE_size1 uchar
+#define BLOCK_WRITE_TYPE_size2 ushort
+#define BLOCK_WRITE_TYPE_size4 uint
+#define BLOCK_WRITE_TYPE_size8 ulong
+#define BLOCK_WRITE_TYPE(type_size) CAT(BLOCK_WRITE_TYPE_size, type_size)
+#define BLOCK_WRITE_FUNC_size1 _sub_group_block_write_uc
+#define BLOCK_WRITE_FUNC_size2 _sub_group_block_write_us
+#define BLOCK_WRITE_FUNC_size4 _sub_group_block_write
+#define BLOCK_WRITE_FUNC_size8 _sub_group_block_write_ul
+#define BLOCK_WRITE_FUNC(type_size) CAT(BLOCK_WRITE_FUNC_size, type_size)
 #define BLOCK_WRITEN_FUNC_SIZE_DEF(type_size, vector_size) MAKE_VECTOR_TYPE(BLOCK_WRITE_FUNC(type_size), vector_size)
-#define BLOCK_WRITEN_FUNC_size1(vector_size)               BLOCK_WRITEN_FUNC_SIZE_DEF(1, vector_size)
-#define BLOCK_WRITEN_FUNC_size2(vector_size)               BLOCK_WRITEN_FUNC_SIZE_DEF(2, vector_size)
-#define BLOCK_WRITEN_FUNC_size4(vector_size)               BLOCK_WRITEN_FUNC_SIZE_DEF(4, vector_size)
-#define BLOCK_WRITEN_FUNC_size8(vector_size)               BLOCK_WRITEN_FUNC_SIZE_DEF(8, vector_size)
-#define BLOCK_WRITEN_FUNC(type_size, vector_size)          CAT(BLOCK_WRITEN_FUNC_size, type_size)(vector_size)
-#define BLOCK_WRITEN_RAW(type_size, vector_size, addr_space, ptr, offset, val) \
-    BLOCK_WRITEN_FUNC(type_size, vector_size)((addr_space BLOCK_WRITE_TYPE(type_size)*)(ptr) + (offset), AS_TYPE(MAKE_VECTOR_TYPE(BLOCK_WRITE_TYPE(type_size), vector_size), val))
-#define BLOCK_WRITEN(type, vector_size, ptr, offset, val)     BLOCK_WRITEN_RAW(TYPE_SIZE(type), vector_size, __global, ptr, offset, val)
+#define BLOCK_WRITEN_FUNC_size1(vector_size) BLOCK_WRITEN_FUNC_SIZE_DEF(1, vector_size)
+#define BLOCK_WRITEN_FUNC_size2(vector_size) BLOCK_WRITEN_FUNC_SIZE_DEF(2, vector_size)
+#define BLOCK_WRITEN_FUNC_size4(vector_size) BLOCK_WRITEN_FUNC_SIZE_DEF(4, vector_size)
+#define BLOCK_WRITEN_FUNC_size8(vector_size) BLOCK_WRITEN_FUNC_SIZE_DEF(8, vector_size)
+#define BLOCK_WRITEN_FUNC(type_size, vector_size) CAT(BLOCK_WRITEN_FUNC_size, type_size)(vector_size)
+#define BLOCK_WRITEN_RAW(type_size, vector_size, addr_space, ptr, offset, val) BLOCK_WRITEN_FUNC(type_size, vector_size)( (addr_space BLOCK_WRITE_TYPE(type_size)*)(ptr) + (offset), AS_TYPE(MAKE_VECTOR_TYPE(BLOCK_WRITE_TYPE(type_size), vector_size), val))
+#define BLOCK_WRITEN(type, vector_size, ptr, offset, val) BLOCK_WRITEN_RAW(TYPE_SIZE(type), vector_size, __global, ptr, offset, val)
 #define BLOCK_WRITEN_SLM(type, vector_size, ptr, offset, val) BLOCK_WRITEN_RAW(TYPE_SIZE(type), vector_size, __local, ptr, offset, val)
-#define DT_OUTPUT_BLOCK_WRITE(ptr, offset, val)               BLOCK_WRITEN(OUTPUT_TYPE, 1, ptr, offset, val)
-#define DT_OUTPUT_BLOCK_WRITE2(ptr, offset, val)              BLOCK_WRITEN(OUTPUT_TYPE, 2, ptr, offset, val)
-#define DT_OUTPUT_BLOCK_WRITE4(ptr, offset, val)              BLOCK_WRITEN(OUTPUT_TYPE, 4, ptr, offset, val)
-#define DT_OUTPUT_BLOCK_WRITE8(ptr, offset, val)              BLOCK_WRITEN(OUTPUT_TYPE, 8, ptr, offset, val)
-#define DT_OUTPUT_BLOCK_WRITE16(ptr, offset, val)             BLOCK_WRITEN(OUTPUT_TYPE, 16, ptr, offset, val)
-#define BLOCK_WRITE_IMPL_1                                    out_ptr[idx] = v;
-#define BLOCK_WRITE_IMPL_2           \
-    out_ptr[idx] = v.s0;             \
-    idx += get_max_sub_group_size(); \
-    out_ptr[idx] = v.s1;             \
-    idx += get_max_sub_group_size();
-#define BLOCK_WRITE_IMPL_4                  \
-    BLOCK_WRITE_IMPL_2 out_ptr[idx] = v.s2; \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.s3;                    \
-    idx += get_max_sub_group_size();
-#define BLOCK_WRITE_IMPL_8                  \
-    BLOCK_WRITE_IMPL_4 out_ptr[idx] = v.s4; \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.s5;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.s6;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.s7;                    \
-    idx += get_max_sub_group_size();
-#define BLOCK_WRITE_IMPL_16                 \
-    BLOCK_WRITE_IMPL_8 out_ptr[idx] = v.s8; \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.s9;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.sa;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.sb;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.sc;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.sd;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.se;                    \
-    idx += get_max_sub_group_size();        \
-    out_ptr[idx] = v.sf;                    \
-    idx += get_max_sub_group_size();
-#define BLOCK_WRITE_IMPL(vec_size)                 CAT(BLOCK_WRITE_IMPL_, vec_size)
+#define DT_OUTPUT_BLOCK_WRITE(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 1, ptr, offset, val)
+#define DT_OUTPUT_BLOCK_WRITE2(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 2, ptr, offset, val)
+#define DT_OUTPUT_BLOCK_WRITE4(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 4, ptr, offset, val)
+#define DT_OUTPUT_BLOCK_WRITE8(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 8, ptr, offset, val)
+#define DT_OUTPUT_BLOCK_WRITE16(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 16, ptr, offset, val)
+#define BLOCK_WRITE_IMPL_1 out_ptr[idx] = v;
+#define BLOCK_WRITE_IMPL_2 out_ptr[idx] = v.s0; idx += get_max_sub_group_size(); out_ptr[idx] = v.s1; idx += get_max_sub_group_size();
+#define BLOCK_WRITE_IMPL_4 BLOCK_WRITE_IMPL_2 out_ptr[idx] = v.s2; idx += get_max_sub_group_size(); out_ptr[idx] = v.s3; idx += get_max_sub_group_size();
+#define BLOCK_WRITE_IMPL_8 BLOCK_WRITE_IMPL_4 out_ptr[idx] = v.s4; idx += get_max_sub_group_size(); out_ptr[idx] = v.s5; idx += get_max_sub_group_size(); out_ptr[idx] = v.s6; idx += get_max_sub_group_size(); out_ptr[idx] = v.s7; idx += get_max_sub_group_size();
+#define BLOCK_WRITE_IMPL_16 BLOCK_WRITE_IMPL_8 out_ptr[idx] = v.s8; idx += get_max_sub_group_size(); out_ptr[idx] = v.s9; idx += get_max_sub_group_size(); out_ptr[idx] = v.sa; idx += get_max_sub_group_size(); out_ptr[idx] = v.sb; idx += get_max_sub_group_size(); out_ptr[idx] = v.sc; idx += get_max_sub_group_size(); out_ptr[idx] = v.sd; idx += get_max_sub_group_size(); out_ptr[idx] = v.se; idx += get_max_sub_group_size(); out_ptr[idx] = v.sf; idx += get_max_sub_group_size();
+#define BLOCK_WRITE_IMPL(vec_size) CAT(BLOCK_WRITE_IMPL_, vec_size)
 #define BLOCK_WRITE_FUNC_NAME(type_size, vec_size) MAKE_VECTOR_TYPE(BLOCK_WRITE_FUNC(type_size), vec_size)
-#define DECLARE_BLOCK_WRITE_EMULATION(type_size, vec_size)                                                                                                              \
-    inline void BLOCK_WRITE_FUNC_NAME(type_size, vec_size)(__global BLOCK_WRITE_TYPE(type_size) * out_ptr, MAKE_VECTOR_TYPE(BLOCK_WRITE_TYPE(type_size), vec_size) v) { \
-        uint idx = get_sub_group_local_id();                                                                                                                            \
-        BLOCK_WRITE_IMPL(vec_size)                                                                                                                                      \
-    }
+#define DECLARE_BLOCK_WRITE_EMULATION(type_size, vec_size) inline void BLOCK_WRITE_FUNC_NAME(type_size, vec_size)(__global BLOCK_WRITE_TYPE(type_size)* out_ptr, MAKE_VECTOR_TYPE(BLOCK_WRITE_TYPE(type_size), vec_size) v) { uint idx = get_sub_group_local_id(); BLOCK_WRITE_IMPL(vec_size) }
 #if defined(cl_intel_subgroups)
-#    define _sub_group_block_write(ptr, v)  intel_sub_group_block_write(ptr, v)
-#    define _sub_group_block_write2(ptr, v) intel_sub_group_block_write2(ptr, v)
-#    define _sub_group_block_write4(ptr, v) intel_sub_group_block_write4(ptr, v)
-#    define _sub_group_block_write8(ptr, v) intel_sub_group_block_write8(ptr, v)
+ #define _sub_group_block_write(ptr, v) intel_sub_group_block_write(ptr, v)
+ #define _sub_group_block_write2(ptr, v) intel_sub_group_block_write2(ptr, v)
+ #define _sub_group_block_write4(ptr, v) intel_sub_group_block_write4(ptr, v)
+ #define _sub_group_block_write8(ptr, v) intel_sub_group_block_write8(ptr, v)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_WRITE_EMULATION(4, 1)
-DECLARE_BLOCK_WRITE_EMULATION(4, 2)
-DECLARE_BLOCK_WRITE_EMULATION(4, 4)
-DECLARE_BLOCK_WRITE_EMULATION(4, 8)
+ DECLARE_BLOCK_WRITE_EMULATION(4, 1)
+ DECLARE_BLOCK_WRITE_EMULATION(4, 2)
+ DECLARE_BLOCK_WRITE_EMULATION(4, 4)
+ DECLARE_BLOCK_WRITE_EMULATION(4, 8)
 #endif
 #if defined(cl_intel_subgroups_short)
-#    define _sub_group_block_write_us(ptr, v)  intel_sub_group_block_write_us(ptr, v)
-#    define _sub_group_block_write_us2(ptr, v) intel_sub_group_block_write_us2(ptr, v)
-#    define _sub_group_block_write_us4(ptr, v) intel_sub_group_block_write_us4(ptr, v)
-#    define _sub_group_block_write_us8(ptr, v) intel_sub_group_block_write_us8(ptr, v)
+ #define _sub_group_block_write_us(ptr, v) intel_sub_group_block_write_us(ptr, v)
+ #define _sub_group_block_write_us2(ptr, v) intel_sub_group_block_write_us2(ptr, v)
+ #define _sub_group_block_write_us4(ptr, v) intel_sub_group_block_write_us4(ptr, v)
+ #define _sub_group_block_write_us8(ptr, v) intel_sub_group_block_write_us8(ptr, v)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_WRITE_EMULATION(2, 1)
-DECLARE_BLOCK_WRITE_EMULATION(2, 2)
-DECLARE_BLOCK_WRITE_EMULATION(2, 4)
-DECLARE_BLOCK_WRITE_EMULATION(2, 8)
+ DECLARE_BLOCK_WRITE_EMULATION(2, 1)
+ DECLARE_BLOCK_WRITE_EMULATION(2, 2)
+ DECLARE_BLOCK_WRITE_EMULATION(2, 4)
+ DECLARE_BLOCK_WRITE_EMULATION(2, 8)
 #endif
 #if defined(cl_intel_subgroups_char)
-#    define _sub_group_block_write_uc(ptr, v)   intel_sub_group_block_write_uc(ptr, v)
-#    define _sub_group_block_write_uc2(ptr, v)  intel_sub_group_block_write_uc2(ptr, v)
-#    define _sub_group_block_write_uc4(ptr, v)  intel_sub_group_block_write_uc4(ptr, v)
-#    define _sub_group_block_write_uc8(ptr, v)  intel_sub_group_block_write_uc8(ptr, v)
-#    define _sub_group_block_write_uc16(ptr, v) intel_sub_group_block_write_uc16(ptr, v)
+ #define _sub_group_block_write_uc(ptr, v) intel_sub_group_block_write_uc(ptr, v)
+ #define _sub_group_block_write_uc2(ptr, v) intel_sub_group_block_write_uc2(ptr, v)
+ #define _sub_group_block_write_uc4(ptr, v) intel_sub_group_block_write_uc4(ptr, v)
+ #define _sub_group_block_write_uc8(ptr, v) intel_sub_group_block_write_uc8(ptr, v)
+ #define _sub_group_block_write_uc16(ptr, v) intel_sub_group_block_write_uc16(ptr, v)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_WRITE_EMULATION(1, 1)
-DECLARE_BLOCK_WRITE_EMULATION(1, 2)
-DECLARE_BLOCK_WRITE_EMULATION(1, 4)
-DECLARE_BLOCK_WRITE_EMULATION(1, 8)
-DECLARE_BLOCK_WRITE_EMULATION(1, 16)
+ DECLARE_BLOCK_WRITE_EMULATION(1, 1)
+ DECLARE_BLOCK_WRITE_EMULATION(1, 2)
+ DECLARE_BLOCK_WRITE_EMULATION(1, 4)
+ DECLARE_BLOCK_WRITE_EMULATION(1, 8)
+ DECLARE_BLOCK_WRITE_EMULATION(1, 16)
 #endif
 #if defined(cl_intel_subgroups_long)
-#    define _sub_group_block_write_ul(ptr, v)  intel_sub_group_block_write_ul(ptr, v)
-#    define _sub_group_block_write_ul2(ptr, v) intel_sub_group_block_write_ul2(ptr, v)
-#    define _sub_group_block_write_ul4(ptr, v) intel_sub_group_block_write_ul4(ptr, v)
-#    define _sub_group_block_write_ul8(ptr, v) intel_sub_group_block_write_ul8(ptr, v)
+ #define _sub_group_block_write_ul(ptr, v) intel_sub_group_block_write_ul(ptr, v)
+ #define _sub_group_block_write_ul2(ptr, v) intel_sub_group_block_write_ul2(ptr, v)
+ #define _sub_group_block_write_ul4(ptr, v) intel_sub_group_block_write_ul4(ptr, v)
+ #define _sub_group_block_write_ul8(ptr, v) intel_sub_group_block_write_ul8(ptr, v)
 #elif (__OPENCL_C_VERSION__ >= 200)
-DECLARE_BLOCK_WRITE_EMULATION(8, 1)
-DECLARE_BLOCK_WRITE_EMULATION(8, 2)
-DECLARE_BLOCK_WRITE_EMULATION(8, 4)
-DECLARE_BLOCK_WRITE_EMULATION(8, 8)
+ DECLARE_BLOCK_WRITE_EMULATION(8, 1)
+ DECLARE_BLOCK_WRITE_EMULATION(8, 2)
+ DECLARE_BLOCK_WRITE_EMULATION(8, 4)
+ DECLARE_BLOCK_WRITE_EMULATION(8, 8)
 #endif
 
 #ifdef cl_intel_subgroups
-#    define _sub_group_shuffle(v, c)         intel_sub_group_shuffle(v, c)
-#    define _sub_group_shuffle_up(c, n, d)   intel_sub_group_shuffle_up(c, n, d)
-#    define _sub_group_shuffle_down(c, n, d) intel_sub_group_shuffle_down(c, n, d)
+#define _sub_group_shuffle(v, c) intel_sub_group_shuffle(v, c)
+#define _sub_group_shuffle_up(c, n, d) intel_sub_group_shuffle_up(c, n, d)
+#define _sub_group_shuffle_down(c, n, d) intel_sub_group_shuffle_down(c, n, d)
 #elif (__OPENCL_C_VERSION__ >= 200)
-#    define DECLARE_SUB_GROUP_SHUFFLE1(type, cast_type)                                \
-        inline type _sub_group_shuffle(type v, uint c) __attribute__((overloadable)) { \
-            return AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v), c));       \
-        }
-#    define DECLARE_SUB_GROUP_SHUFFLE2(type, cast_type)                                                                                                              \
-        inline CAT(type, 2) _sub_group_shuffle(CAT(type, 2) v, uint c) __attribute__((overloadable)) {                                                               \
-            return (CAT(type, 2))(AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c))); \
-        }
-#    define DECLARE_SUB_GROUP_SHUFFLE4(type, cast_type)                                                \
-        inline CAT(type, 4) _sub_group_shuffle(CAT(type, 4) v, uint c) __attribute__((overloadable)) { \
-            return (CAT(type, 4))(AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c)));    \
-        }
-#    define DECLARE_SUB_GROUP_SHUFFLE8(type, cast_type)                                                \
-        inline CAT(type, 8) _sub_group_shuffle(CAT(type, 8) v, uint c) __attribute__((overloadable)) { \
-            return (CAT(type, 8))(AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s4), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s5), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s6), c)),     \
-                                  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s7), c)));    \
-        }
-#    define DECLARE_SUB_GROUP_SHUFFLE16(type, cast_type)                                                 \
-        inline CAT(type, 16) _sub_group_shuffle(CAT(type, 16) v, uint c) __attribute__((overloadable)) { \
-            return (CAT(type, 16))(AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s4), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s5), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s6), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s7), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s8), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s9), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sa), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sb), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sc), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sd), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.se), c)),      \
-                                   AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sf), c)));     \
-        }
-#    define DECLARE_SUB_GROUP_SHUFFLE(type)    \
-        DECLARE_SUB_GROUP_SHUFFLE1(type, type) \
-        DECLARE_SUB_GROUP_SHUFFLE2(type, type) DECLARE_SUB_GROUP_SHUFFLE4(type, type) DECLARE_SUB_GROUP_SHUFFLE8(type, type) DECLARE_SUB_GROUP_SHUFFLE16(type, type)
-#    define DECLARE_SUB_GROUP_SHUFFLE_CASTED(type, cast_type)                                                                               \
-        DECLARE_SUB_GROUP_SHUFFLE1(type, cast_type)                                                                                         \
-        DECLARE_SUB_GROUP_SHUFFLE2(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE4(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE8(type, cast_type) \
-            DECLARE_SUB_GROUP_SHUFFLE16(type, cast_type)
+#define DECLARE_SUB_GROUP_SHUFFLE1(type, cast_type) inline type _sub_group_shuffle(type v, uint c) __attribute__((overloadable)) { return AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v), c)); }
+#define DECLARE_SUB_GROUP_SHUFFLE2(type, cast_type) inline CAT(type, 2) _sub_group_shuffle(CAT(type, 2) v, uint c) __attribute__((overloadable)) { return (CAT(type, 2))( AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c))); }
+#define DECLARE_SUB_GROUP_SHUFFLE4(type, cast_type) inline CAT(type, 4) _sub_group_shuffle(CAT(type, 4) v, uint c) __attribute__((overloadable)) { return (CAT(type, 4))( AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c))); }
+#define DECLARE_SUB_GROUP_SHUFFLE8(type, cast_type) inline CAT(type, 8) _sub_group_shuffle(CAT(type, 8) v, uint c) __attribute__((overloadable)) { return (CAT(type, 8))( AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s4), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s5), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s6), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s7), c))); }
+#define DECLARE_SUB_GROUP_SHUFFLE16(type, cast_type) inline CAT(type, 16) _sub_group_shuffle(CAT(type, 16) v, uint c) __attribute__((overloadable)) { return (CAT(type, 16))( AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s0), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s1), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s2), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s3), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s4), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s5), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s6), c)),  AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s7), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s8), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.s9), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sa), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sb), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sc), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sd), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.se), c)), AS_TYPE(type, sub_group_broadcast(AS_TYPE(cast_type, v.sf), c))); }
+#define DECLARE_SUB_GROUP_SHUFFLE(type) DECLARE_SUB_GROUP_SHUFFLE1(type, type) DECLARE_SUB_GROUP_SHUFFLE2(type, type) DECLARE_SUB_GROUP_SHUFFLE4(type, type) DECLARE_SUB_GROUP_SHUFFLE8(type, type) DECLARE_SUB_GROUP_SHUFFLE16(type, type)
+#define DECLARE_SUB_GROUP_SHUFFLE_CASTED(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE1(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE2(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE4(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE8(type, cast_type) DECLARE_SUB_GROUP_SHUFFLE16(type, cast_type)
 DECLARE_SUB_GROUP_SHUFFLE(int)
 DECLARE_SUB_GROUP_SHUFFLE(uint)
 DECLARE_SUB_GROUP_SHUFFLE(float)
-#    if defined(cl_khr_fp16)
-DECLARE_SUB_GROUP_SHUFFLE(half)
-DECLARE_SUB_GROUP_SHUFFLE_CASTED(short, half)
-DECLARE_SUB_GROUP_SHUFFLE_CASTED(ushort, half)
-#    endif
+#if defined(cl_khr_fp16)
+ DECLARE_SUB_GROUP_SHUFFLE(half)
+ DECLARE_SUB_GROUP_SHUFFLE_CASTED(short, half)
+ DECLARE_SUB_GROUP_SHUFFLE_CASTED(ushort, half)
+#endif
 #endif
 
-typedef struct half5 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-} half5;
-typedef struct half6 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-} half6;
-typedef struct half7 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-} half7;
-typedef struct half9 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-} half9;
-typedef struct half10 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-} half10;
-typedef struct half11 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-    half sa;
-} half11;
-typedef struct half12 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-    half sa;
-    half sb;
-} half12;
-typedef struct half13 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-    half sa;
-    half sb;
-    half sc;
-} half13;
-typedef struct half14 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-    half sa;
-    half sb;
-    half sc;
-    half se;
-} half14;
-typedef struct half15 {
-    half s0;
-    half s1;
-    half s2;
-    half s3;
-    half s4;
-    half s5;
-    half s6;
-    half s7;
-    half s8;
-    half s9;
-    half sa;
-    half sb;
-    half sc;
-    half se;
-    half sf;
-} half15;
-typedef struct half0 {
-    half s0;
-} half0;
-typedef struct float5 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-} float5;
-typedef struct float6 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-} float6;
-typedef struct float7 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-} float7;
-typedef struct float9 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-} float9;
-typedef struct float10 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-} float10;
-typedef struct float11 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-    float sa;
-} float11;
-typedef struct float12 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-    float sa;
-    float sb;
-} float12;
-typedef struct float13 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-    float sa;
-    float sb;
-    float sc;
-} float13;
-typedef struct float14 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-    float sa;
-    float sb;
-    float sc;
-    float sd;
-} float14;
-typedef struct float15 {
-    float s0;
-    float s1;
-    float s2;
-    float s3;
-    float s4;
-    float s5;
-    float s6;
-    float s7;
-    float s8;
-    float s9;
-    float sa;
-    float sb;
-    float sc;
-    float sd;
-    float se;
-} float15;
-typedef struct float0 {
-    float s0;
-} float0;
-
+typedef struct half5 { half s0; half s1; half s2; half s3; half s4; } half5;
+typedef struct half6 { half s0; half s1; half s2; half s3; half s4; half s5; } half6;
+typedef struct half7 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; } half7;
+typedef struct half9 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; } half9;
+typedef struct half10 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; } half10;
+typedef struct half11 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; half sa; } half11;
+typedef struct half12 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; half sa; half sb;} half12;
+typedef struct half13 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; half sa; half sb; half sc;} half13;
+typedef struct half14 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; half sa; half sb; half sc; half se;} half14;
+typedef struct half15 { half s0; half s1; half s2; half s3; half s4; half s5; half s6; half s7;
+ half s8; half s9; half sa; half sb; half sc; half se; half sf;} half15;
+typedef struct half0 { half s0; } half0;
+typedef struct float5 { float s0; float s1; float s2; float s3; float s4; } float5;
+typedef struct float6 { float s0; float s1; float s2; float s3; float s4; float s5; } float6;
+typedef struct float7 { float s0; float s1; float s2; float s3; float s4; float s5; float s6; } float7;
+typedef struct float9 { float s0; float s1; float s2; float s3; float s4; float s5; float s6; float s7; float s8; } float9;
+typedef struct float10 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9;} float10;
+typedef struct float11 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9; float sa;} float11;
+typedef struct float12 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9; float sa; float sb; } float12;
+typedef struct float13 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9; float sa; float sb; float sc;} float13;
+typedef struct float14 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9; float sa; float sb; float sc; float sd; } float14;
+typedef struct float15 { float s0; float s1; float s2; float s3; float s4; float s5;
+ float s6; float s7; float s8; float s9; float sa; float sb; float sc; float sd; float se; } float15;
+typedef struct float0 { float s0; } float0;
 
 //====================================================
-// Kernel template: sdpa_opt_multi_tokens
+// Kernel template: sdpa_opt_multi_tokens 
 // Kernel name: sdpa_opt_multi_tokens
-#define KERNEL(name)                      __kernel void sdpa_opt_multi_tokens
-#define KERNEL_ID                         sdpa_opt_multi_tokens
-#define FUNC(name)                        _##name##_sdpa_opt_multi_tokens
-#define FUNC_CALL(name)                   _##name##_sdpa_opt_multi_tokens
-#define CONST_ARRAY_DECL(name)            __constant size_t _##name##_sdpa_opt_multi_tokens[]
-#define CONST_ARRAY_REF(name)             _##name##_sdpa_opt_multi_tokens
+#define KERNEL(name) __kernel void sdpa_opt_multi_tokens
+#define KERNEL_ID sdpa_opt_multi_tokens
+#define FUNC(name)  _##name##_sdpa_opt_multi_tokens
+#define FUNC_CALL(name)  _##name##_sdpa_opt_multi_tokens
+#define CONST_ARRAY_DECL(name) __constant size_t  _##name##_sdpa_opt_multi_tokens []
+#define CONST_ARRAY_REF(name)  _##name##_sdpa_opt_multi_tokens
 #define FP64_SUPPORTED                    1
 #define FP16_SUPPORTED                    1
 #define FP16_UNIT_USED                    1
@@ -3392,7 +1600,7 @@ typedef struct float0 {
 #define ACTIVATION_PARAMS                 NL_M, NL_N
 #define ACTIVATION_FUNC(input, m, n)      input
 #define ACTIVATION(input, params)         ACTIVATION_FUNC(input, params)
-#define INPUT0_SIZE_X                     128
+#define INPUT0_SIZE_X                     HEAD_SIZE
 #define INPUT0_SIZE_Y                     (shape_info[6])
 #define INPUT0_SIZE_Z                     1
 #define INPUT0_SIZE_W                     1
@@ -3417,13 +1625,13 @@ typedef struct float0 {
 #define INPUT0_PAD_AFTER_FEATURE_NUM      0
 #define INPUT0_PAD_AFTER_BATCH_NUM        0
 #define INPUT0_X_PITCH                    1
-#define INPUT0_Y_PITCH                    128
-#define INPUT0_Z_PITCH                    (128 * (shape_info[6] + 0))
-#define INPUT0_W_PITCH                    (128 * (shape_info[6] + 0) * 1)
-#define INPUT0_U_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1)
-#define INPUT0_V_PITCH                    (128 * (shape_info[6] + 0) * 1 * 1 * 1)
-#define INPUT0_FEATURE_PITCH              (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
-#define INPUT0_BATCH_PITCH                (128 * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
+#define INPUT0_Y_PITCH                    HEAD_SIZE
+#define INPUT0_Z_PITCH                    (HEAD_SIZE * (shape_info[6] + 0))
+#define INPUT0_W_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1)
+#define INPUT0_U_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1)
+#define INPUT0_V_PITCH                    (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1)
+#define INPUT0_FEATURE_PITCH              (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1)
+#define INPUT0_BATCH_PITCH                (HEAD_SIZE * (shape_info[6] + 0) * 1 * 1 * 1 * 1 * 28)
 #define INPUT0_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT0, b, f, y, x)
 #define INPUT0_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT0, b, f, y, x)
@@ -3457,7 +1665,7 @@ typedef struct float0 {
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT1_SIZE_X                     128
+#define INPUT1_SIZE_X                     HEAD_SIZE
 #define INPUT1_SIZE_Y                     (shape_info[14])
 #define INPUT1_SIZE_Z                     1
 #define INPUT1_SIZE_W                     1
@@ -3482,13 +1690,13 @@ typedef struct float0 {
 #define INPUT1_PAD_AFTER_FEATURE_NUM      0
 #define INPUT1_PAD_AFTER_BATCH_NUM        0
 #define INPUT1_X_PITCH                    1
-#define INPUT1_Y_PITCH                    128
-#define INPUT1_Z_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])))
-#define INPUT1_W_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
-#define INPUT1_U_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
-#define INPUT1_V_PITCH                    (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
-#define INPUT1_FEATURE_PITCH              (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
-#define INPUT1_BATCH_PITCH                (128 * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT1_Y_PITCH                    HEAD_SIZE
+#define INPUT1_Z_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])))
+#define INPUT1_W_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1)
+#define INPUT1_U_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1)
+#define INPUT1_V_PITCH                    (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1)
+#define INPUT1_FEATURE_PITCH              (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1)
+#define INPUT1_BATCH_PITCH                (HEAD_SIZE * (shape_info[14] + (shape_info[16] + shape_info[17])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT1_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT1, b, f, y, x)
 #define INPUT1_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT1, b, f, y, x)
@@ -3522,7 +1730,7 @@ typedef struct float0 {
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define INPUT2_SIZE_X                     128
+#define INPUT2_SIZE_X                     HEAD_SIZE
 #define INPUT2_SIZE_Y                     (shape_info[24])
 #define INPUT2_SIZE_Z                     1
 #define INPUT2_SIZE_W                     1
@@ -3547,13 +1755,13 @@ typedef struct float0 {
 #define INPUT2_PAD_AFTER_FEATURE_NUM      0
 #define INPUT2_PAD_AFTER_BATCH_NUM        0
 #define INPUT2_X_PITCH                    1
-#define INPUT2_Y_PITCH                    128
-#define INPUT2_Z_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])))
-#define INPUT2_W_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
-#define INPUT2_U_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
-#define INPUT2_V_PITCH                    (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
-#define INPUT2_FEATURE_PITCH              (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
-#define INPUT2_BATCH_PITCH                (128 * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
+#define INPUT2_Y_PITCH                    HEAD_SIZE
+#define INPUT2_Z_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])))
+#define INPUT2_W_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1)
+#define INPUT2_U_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1)
+#define INPUT2_V_PITCH                    (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1)
+#define INPUT2_FEATURE_PITCH              (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1)
+#define INPUT2_BATCH_PITCH                (HEAD_SIZE * (shape_info[24] + (shape_info[26] + shape_info[27])) * 1 * 1 * 1 * 1 * 7)
 #define INPUT2_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(INPUT2, b, f, y, x)
 #define INPUT2_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(INPUT2, b, f, y, x)
@@ -3733,7 +1941,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     (size_t[]) {                   \
         0, 0, 0, 0, 0, 0, 0, 0, 0, \
     }
-#define OUTPUT_SIZE_X                     128
+#define OUTPUT_SIZE_X                     HEAD_SIZE
 #define OUTPUT_SIZE_Y                     (shape_info[42])
 #define OUTPUT_SIZE_Z                     1
 #define OUTPUT_SIZE_W                     1
@@ -3758,13 +1966,13 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define OUTPUT_PAD_AFTER_FEATURE_NUM      0
 #define OUTPUT_PAD_AFTER_BATCH_NUM        0
 #define OUTPUT_X_PITCH                    1
-#define OUTPUT_Y_PITCH                    128
-#define OUTPUT_Z_PITCH                    (128 * (shape_info[42] + 0))
-#define OUTPUT_W_PITCH                    (128 * (shape_info[42] + 0) * 1)
-#define OUTPUT_U_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1)
-#define OUTPUT_V_PITCH                    (128 * (shape_info[42] + 0) * 1 * 1 * 1)
-#define OUTPUT_FEATURE_PITCH              (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
-#define OUTPUT_BATCH_PITCH                (128 * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
+#define OUTPUT_Y_PITCH                    HEAD_SIZE
+#define OUTPUT_Z_PITCH                    (HEAD_SIZE * (shape_info[42] + 0))
+#define OUTPUT_W_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1)
+#define OUTPUT_U_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1)
+#define OUTPUT_V_PITCH                    (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1)
+#define OUTPUT_FEATURE_PITCH              (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1)
+#define OUTPUT_BATCH_PITCH                (HEAD_SIZE * (shape_info[42] + 0) * 1 * 1 * 1 * 1 * 28)
 #define OUTPUT_GET_INDEX_SAFE(b, f, y, x) GET_DATA_INDEX_SAFE(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX(b, f, y, x)      GET_DATA_INDEX(OUTPUT, b, f, y, x)
 #define OUTPUT_GET_INDEX_RAW(b, f, y, x)  GET_DATA_INDEX_RAW(OUTPUT, b, f, y, x)
@@ -3806,7 +2014,7 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
     sdpa
 #define BROADCAST_GROUP_SIZE               4
 #define DO_BROADCAST_KEY_VALUE             f /= 4;
-#define IS_CAUSAL                          0
+#define IS_CAUSAL                          1
 #define HAS_ATTN_MASK_INPUT                1
 #define HAS_SCALE_INPUT                    1
 #define INPUT0_DIMS_ORDER                  b, f, w, z, y, x
@@ -3830,27 +2038,40 @@ CONST_ARRAY_DECL(INPUT4_SIZES) = INPUT4_SIZES_DATA;
 #define SOFTMAX_ACCUMULATOR_TYPE_SIZE      4
 #define SOFTMAX_ACCUMULATOR_IS_FP          1
 #define SUBGROUP_SIZE                      16
-// #define HEAD_SIZE                          128
+// #define HEAD_SIZE                          HEAD_SIZE
 // #define SEQ_LEN_PARTITION_SIZE             (SG_SCALE_FACTOR * HEAD_SIZE)
 #define TARGET_SEQ_LEN_BLOCK_SIZE          16
 #define SDPA_STAGE_0                       1
 // #define SG_SCALE_FACTOR                    2
+#define STATIC_SCALE_VALUE_INV as_float(0x413504f3)/*1.131371e+01*/
+#define STATIC_SCALE_VALUE as_float(0x3db504f3)/*8.838835e-02*/
+#define LOAD_KEY_LEFTOVERS_IN_CALC_LOOP 1
+
+// query_input   [batch, heads_num, q_len, head_size]
+// key_input     [batch, kv_heads_num, kv_len, head_size]
+// value_input   [batch, kv_heads_num, kv_len, head_size]
+// attn_mask     [1, 1, q_len, kv_len]
+// output        [batch, heads_num, q_len, head_size]
+// exp_sums      [batch, heads_num, q_len, partition_idx]
+// max_logits    [batch, heads_num, q_len, partition_idx]
+// tmp_out       [batch, heads_num, q_len, partition_idx, head_size]
 
 inline uint FUNC(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #if INPUT0_SIMPLE
     return GET_DATA_INDEX_6D(INPUT0, b, f, w, z, y, x);
 #else
-#    if INPUT0_DIMS == 4
+#if INPUT0_DIMS == 4
     return INPUT0_GET_INDEX(b, f, y, x);
-#    elif INPUT0_DIMS == 5
+#elif INPUT0_DIMS == 5
     return INPUT0_GET_INDEX(b, f, z, y, x);
-#    elif INPUT0_DIMS == 6
+#elif INPUT0_DIMS == 6
     return INPUT0_GET_INDEX(b, f, w, z, y, x);
-#    else
-#        error sdpa_opt.cl : Unsupported input 0 format
-#    endif
+#else
+#   error sdpa_opt.cl : Unsupported input 0 format
+#endif
 #endif
 }
+
 inline uint FUNC(get_input0_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #ifdef INPUT0_DIMS_ORDER
     return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT0_DIMS_ORDER);
@@ -3858,6 +2079,7 @@ inline uint FUNC(get_input0_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint 
     return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
 #endif
 }
+
 inline uint FUNC(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #ifdef DO_BROADCAST_KEY_VALUE
     DO_BROADCAST_KEY_VALUE;
@@ -3865,17 +2087,18 @@ inline uint FUNC(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, ui
 #if INPUT1_SIMPLE
     return GET_DATA_INDEX_6D(INPUT1, b, f, w, z, y, x);
 #else
-#    if INPUT1_DIMS == 4
+#if INPUT1_DIMS == 4
     return INPUT1_GET_INDEX(b, f, y, x);
-#    elif INPUT1_DIMS == 5
+#elif INPUT1_DIMS == 5
     return INPUT1_GET_INDEX(b, f, z, y, x);
-#    elif INPUT1_DIMS == 6
+#elif INPUT1_DIMS == 6
     return INPUT1_GET_INDEX(b, f, w, z, y, x);
-#    else
-#        error sdpa_opt.cl : Unsupported input 1 format
-#    endif
+#else
+#   error sdpa_opt.cl : Unsupported input 1 format
+#endif
 #endif
 }
+
 inline uint FUNC(get_input1_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #ifdef INPUT1_DIMS_ORDER
     return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
@@ -3883,6 +2106,7 @@ inline uint FUNC(get_input1_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint 
     return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
 #endif
 }
+
 inline uint FUNC(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #ifdef DO_BROADCAST_KEY_VALUE
     DO_BROADCAST_KEY_VALUE;
@@ -3890,17 +2114,18 @@ inline uint FUNC(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, ui
 #if INPUT2_SIMPLE
     return GET_DATA_INDEX_6D_SAFE(INPUT2, b, f, w, z, y, x);
 #else
-#    if INPUT2_DIMS == 4
+#if INPUT2_DIMS == 4
     return INPUT2_GET_INDEX(b, f, y, x);
-#    elif INPUT2_DIMS == 5
+#elif INPUT2_DIMS == 5
     return INPUT2_GET_INDEX(b, f, z, y, x);
-#    elif INPUT2_DIMS == 6
+#elif INPUT2_DIMS == 6
     return INPUT2_GET_INDEX(b, f, w, z, y, x);
-#    else
-#        error sdpa_opt.cl : Unsupported input 1 format
-#    endif
+#else
+#   error sdpa_opt.cl : Unsupported input 1 format
+#endif
 #endif
 }
+
 inline uint FUNC(get_input2_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
 #ifdef INPUT2_DIMS_ORDER
     return FUNC_CALL(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
@@ -3909,55 +2134,100 @@ inline uint FUNC(get_input2_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint 
 #endif
 }
 
-#define OUTPUT_BLOCK_READ(ptr, offset)       BLOCK_READN(OUTPUT_TYPE, 1, ptr, offset)
+#ifdef BEAM_TABLE_TYPE
+inline uint FUNC(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#if BEAM_TABLE_SIMPLE
+    return GET_DATA_INDEX_6D_SAFE(BEAM_TABLE, b, f, w, z, y, x);
+#else
+#   error sdpa_opt.cl : Unsupported beam table format
+#endif
+}
+
+inline uint FUNC(get_bt_index_key)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
+}
+
+inline uint FUNC(get_bt_index_value)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
+}
+#endif
+
+#define OUTPUT_BLOCK_READ(ptr, offset) BLOCK_READN(OUTPUT_TYPE, 1, ptr, offset)
 #define OUTPUT_BLOCK_WRITE(ptr, offset, val) BLOCK_WRITEN(OUTPUT_TYPE, 1, ptr, offset, val)
-#define VALUE_BLOCK_READ(ptr, offset)        BLOCK_READN(INPUT2_TYPE, 1, ptr, offset)
-#define SUBGROUPS_PER_WG                     (HEAD_SIZE * SG_SCALE_FACTOR / SUBGROUP_SIZE)
-#ifdef SDPA_STAGE_0
-#    if TARGET_SEQ_LEN_BLOCK_SIZE == 1
-#    else
-#        if IS_PAGED_ATTENTION
-#            define SOURCE_SEQ_LEN \
-                (subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))] + 1] - subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))]])
-#            define TARGET_SEQ_LEN \
-                (subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))] + 1] - subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))]])
-#            define PA_BUFFERS , subsequence_begins, blocked_indexes_start, blocked_indexes_end, gws_seq_indexes_correspondence
-#            define PA_BUFFERS_ARGS                                                                                                                   \
-                , const __global INPUT3_TYPE *subsequence_begins, const __global int *blocked_indexes_start, const __global int *blocked_indexes_end, \
-                    const __global int *gws_seq_indexes_correspondence
-#        else
-#            define PA_BUFFERS
-#            define PA_BUFFERS_ARGS
-#        endif
-#        if HAS_ATTN_MASK_INPUT
-#            define ATTN_MASK_BUFFER     , attn_mask
-#            define ATTN_MASK_BUFFER_ARG , const __global INPUT3_TYPE* attn_mask
-#        else
-#            define ATTN_MASK_BUFFER
-#            define ATTN_MASK_BUFFER_ARG
-#        endif
-#        if HAS_SCALE_INPUT
-#            define ATTN_SCALE_BUFFER     , scale
-#            define ATTN_SCALE_BUFFER_ARG , const __global INPUT4_TYPE* scale
-#        else
-#            define ATTN_SCALE_BUFFER
-#            define ATTN_SCALE_BUFFER_ARG
-#        endif
-#        define MASK_VECTOR_TYPE MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
-inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx,
+#define VALUE_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT2_TYPE, 1, ptr, offset)
+#define SUBGROUPS_PER_WG (HEAD_SIZE * SG_SCALE_FACTOR / SUBGROUP_SIZE)
+
+#if IS_KV_COMPRESSED
+#if COMPRESSED_PER_HEAD
+    #define GET_COMPRESSION_INDEX(INPUT, b, f, y, x) GET_DATA_INDEX(INPUT, (b), (f), (y), (0));
+#else
+    #define GET_COMPRESSION_INDEX(INPUT, b, f, y, x) GET_DATA_INDEX(INPUT, (b), (0), (y), (0));
+#endif
+#endif
+
+/* This version is used for 1st token */
+
+#if IS_PAGED_ATTENTION
+    #define SOURCE_SEQ_LEN (subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))] + 1] - subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))]])
+
+    #define TARGET_SEQ_LEN (subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))] + 1] - subsequence_begins[gws_seq_indexes_correspondence[((uint)get_global_id(1))]])
+
+    #define PA_BUFFERS      , subsequence_begins,                                 \
+                              blocked_indexes_start,                              \
+                              blocked_indexes_end,                                \
+                              gws_seq_indexes_correspondence
+
+    #define PA_BUFFERS_ARGS , const __global INPUT3_TYPE* subsequence_begins,     \
+                              const __global int* blocked_indexes_start,          \
+                              const __global int* blocked_indexes_end,            \
+                              const __global int* gws_seq_indexes_correspondence
+#else
+    #define PA_BUFFERS
+    #define PA_BUFFERS_ARGS
+#endif
+#if HAS_ATTN_MASK_INPUT
+    #define ATTN_MASK_BUFFER , attn_mask
+    #define ATTN_MASK_BUFFER_ARG , const __global INPUT3_TYPE* attn_mask
+#else
+    #define ATTN_MASK_BUFFER
+    #define ATTN_MASK_BUFFER_ARG
+#endif
+
+#if HAS_SCALE_INPUT
+    #define ATTN_SCALE_BUFFER , scale
+    #define ATTN_SCALE_BUFFER_ARG , const __global INPUT4_TYPE* scale
+#else
+    #define ATTN_SCALE_BUFFER
+    #define ATTN_SCALE_BUFFER_ARG
+#endif
+
+// Applying scales to query input improves the accuracy, but leads to performance drop for FP16 KV-cache case,
+// so use it only for compressed version
+#if IS_KV_COMPRESSED
+#define APPLY_SCALES_TO_QUERY 1
+#endif
+
+#define MASK_VECTOR_TYPE MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
+
+inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG
+                                             uint b0_idx,
                                              uint b1_idx,
                                              uint target_seq_idx,
-                                             uint source_seq_idx ATTN_MASK_BUFFER_ARG ATTN_SCALE_BUFFER_ARG PA_BUFFERS_ARGS) {
+                                             uint source_seq_idx
+                                             ATTN_MASK_BUFFER_ARG
+                                             ATTN_SCALE_BUFFER_ARG
+                                             PA_BUFFERS_ARGS
+                                             ) {
     MASK_VECTOR_TYPE mask_vec = INPUT0_VAL_ZERO;
-#        if !IS_CAUSAL && HAS_ATTN_MASK_INPUT
+#if !IS_CAUSAL && HAS_ATTN_MASK_INPUT
     const uint attn_mask_offset = INPUT3_GET_INDEX_SAFE(b0_idx, b1_idx, target_seq_idx, source_seq_idx);
     if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
+        unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
             mask_vec[i] = NAN;
         }
     } else {
         if (source_seq_idx + SUBGROUP_SIZE <= (uint)SOURCE_SEQ_LEN) {
-            unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
+            unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
                 const INPUT3_TYPE mask_val = attn_mask[attn_mask_offset + i];
                 mask_vec[i] = mask_val;
             }
@@ -3969,10 +2239,11 @@ inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx
             }
         }
     }
-#        endif
-#        if !IS_CAUSAL && !HAS_ATTN_MASK_INPUT
+#endif
+
+#if !IS_CAUSAL && !HAS_ATTN_MASK_INPUT
     if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
+        unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
             mask_vec[i] = NAN;
         }
     } else {
@@ -3981,10 +2252,11 @@ inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx
             mask_vec[i] = source_seq_idx + i < max_mask_offset ? 0 : NAN;
         }
     }
-#        endif
-#        if IS_CAUSAL
+#endif
+
+#if IS_CAUSAL
     if (target_seq_idx >= (uint)TARGET_SEQ_LEN) {
-        unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
+        unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
             mask_vec[i] = NAN;
         }
     } else {
@@ -3993,240 +2265,465 @@ inline MASK_VECTOR_TYPE FUNC(load_attn_mask)(OPTIONAL_SHAPE_INFO_ARG uint b0_idx
                 mask_vec[i] = NAN;
         }
     }
-#        endif
-#        if HAS_SCALE_INPUT
+#endif
+
+#if HAS_SCALE_INPUT
     const OUTPUT_TYPE scale_val = OUTPUT_VAL_ONE / *scale;
-#        else
+#else
     const INPUT0_TYPE scale_val = TO_INPUT0_TYPE(STATIC_SCALE_VALUE_INV);
-#        endif
-#        if IS_CAUSAL || HAS_ATTN_MASK_INPUT
+#endif
+
+    // Apply scale to attn_mask
+#if IS_CAUSAL || HAS_ATTN_MASK_INPUT
     mask_vec *= scale_val;
-#        endif
+#endif
+
     return mask_vec;
 }
+
+#if IS_PAGED_ATTENTION && HAS_ALIBI
+#if HAS_SCALE_INPUT
+#define ALIBI_TYPE INPUT5_TYPE
+#else
+#define ALIBI_TYPE INPUT4_TYPE
+#endif
+#endif
+
 REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
-KERNEL(sdpa_opt)
-(OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* query_input,
- const __global INPUT1_TYPE* key_input,
- const __global INPUT2_TYPE* value_input,
-#        if HAS_ATTN_MASK_INPUT
- const __global INPUT3_TYPE* attn_mask,
-#        endif
-#        if HAS_SCALE_INPUT
- const __global INPUT4_TYPE* scale,
-#        endif
- __global OUTPUT_TYPE* output,
- __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums,
- __global SOFTMAX_ACCUMULATOR_TYPE* max_logits,
- __global OUTPUT_TYPE* tmp_out
-) {
-#        if TARGET_SEQ_LEN_BLOCK_SIZE != 16
-#            error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
-#        endif
-#        define batch_idx      ((uint)get_global_id(0))
-#        define num_heads_dim  ((uint)get_global_id(0))
-#        define b0_idx         (batch_idx / NUM_HEADS)
-#        define b1_idx         (batch_idx % NUM_HEADS)
-#        define target_seq_dim ((uint)get_global_id(1))
-#        define target_seq_idx ((uint)get_global_id(1) * TARGET_SEQ_LEN_BLOCK_SIZE)
-#        define head_size_idx  ((uint)get_local_id(2) % HEAD_SIZE)
-#        define sglid          (uint) get_sub_group_local_id()
-#        define sgid           (uint) get_sub_group_id()
+KERNEL(sdpa_opt)(
+    OPTIONAL_SHAPE_INFO_ARG
+    const __global INPUT0_TYPE* query_input,
+    const __global INPUT1_TYPE* key_input,
+    const __global INPUT2_TYPE* value_input,
+#if IS_PAGED_ATTENTION
+    const __global INPUT3_TYPE* subsequence_begins,
+#endif
+#if HAS_ATTN_MASK_INPUT
+    const __global INPUT3_TYPE* attn_mask,
+#endif
+#if HAS_SCALE_INPUT
+    const __global INPUT4_TYPE* scale,
+#endif
+#if IS_PAGED_ATTENTION && HAS_ALIBI
+    const __global ALIBI_TYPE* alibi_slopes,
+#endif
+    __global OUTPUT_TYPE* output,
+#if IS_KV_COMPRESSED
+    const __global KEY_COMPRESSION_SCALE_TYPE* key_scale,
+    const __global VALUE_COMPRESSION_SCALE_TYPE* val_scale,
+#endif
+#ifdef BEAM_TABLE_TYPE
+    const __global BEAM_TABLE_TYPE* beam_table,
+#endif
+#if IS_PAGED_ATTENTION
+    const __global int* blocked_indexes_start,
+    const __global int* blocked_indexes_end,
+    const __global int* gws_seq_indexes_correspondence
+#if PAGED_ATTENTION_SCORES_OUTPUT
+    , __global SOFTMAX_ACCUMULATOR_TYPE* softmax_results
+    , const __global int* subsequence_offsets
+    , __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums
+    , __global SOFTMAX_ACCUMULATOR_TYPE* max_logits
+    , __global OUTPUT_TYPE* tmp_out
+    , const uint aligned_max_context_len
+#endif
+#else
+    __global SOFTMAX_ACCUMULATOR_TYPE* exp_sums,
+    __global SOFTMAX_ACCUMULATOR_TYPE* max_logits,
+    __global OUTPUT_TYPE* tmp_out
+#endif
+)
+{
+#if TARGET_SEQ_LEN_BLOCK_SIZE != 16
+    #error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
+#endif
+
+    // Define indexes variables using macro declarations to avoid register spills
+    #define batch_idx ((uint)get_global_id(0))
+    #define num_heads_dim ((uint)get_global_id(0))
+    #define b0_idx (batch_idx / NUM_HEADS)
+    #define b1_idx (batch_idx % NUM_HEADS)
+    #define target_seq_dim ((uint)get_global_id(1))
+    #define target_seq_idx ((uint)get_global_id(1) * TARGET_SEQ_LEN_BLOCK_SIZE)
+    #define head_size_idx ((uint)get_local_id(2) % HEAD_SIZE)
+    #define sglid (uint)get_sub_group_local_id()
+    #define sgid (uint)get_sub_group_id()
+
+    // SLM buffer for query inputs
     __local INPUT0_TYPE slm_query[HEAD_SIZE * TARGET_SEQ_LEN_BLOCK_SIZE];
+
+    // SLM buffer for intermediate QK results
     __local OUTPUT_TYPE slm_qk_vals[TARGET_SEQ_LEN_BLOCK_SIZE][SEQ_LEN_PARTITION_SIZE];
+
+    // SLM buffers for SoftMax calculation and qk_max/qk_sums results aggregation across all WGs
     __local SOFTMAX_ACCUMULATOR_TYPE slm_qk_max_vals[TARGET_SEQ_LEN_BLOCK_SIZE][SUBGROUPS_PER_WG];
+
+    // SLM buffers for SoftMax recalculation for current iteration based on the previous results
     __local SOFTMAX_ACCUMULATOR_TYPE slm_exp_sum_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_max_val_prev[TARGET_SEQ_LEN_BLOCK_SIZE];
     __local SOFTMAX_ACCUMULATOR_TYPE slm_update_factor[TARGET_SEQ_LEN_BLOCK_SIZE];
 
-    const uint query_len = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
-
+#if IS_PAGED_ATTENTION
+    const uint block_start_pos = blocked_indexes_start[target_seq_dim];
+    const uint block_end_pos = blocked_indexes_end[target_seq_dim];
+    const uint seq_idx_end = block_end_pos - block_start_pos;
+#else
+    const uint seq_idx_end = min(TARGET_SEQ_LEN - target_seq_idx, (uint)TARGET_SEQ_LEN_BLOCK_SIZE);
+#endif
     {
-#            ifdef INPUT0_DIMS_ORDER
+        // Load Q input to SLM and transpose it
+#if IS_PAGED_ATTENTION
+        uint query_offset = INPUT0_OFFSET +
+                            block_start_pos * (HEAD_SIZE * NUM_HEADS + INPUT0_PAD_BEFORE_FEATURE_NUM + INPUT0_PAD_AFTER_FEATURE_NUM) +
+                            num_heads_dim * HEAD_SIZE + head_size_idx;
+        const uint query_pitch = (HEAD_SIZE * NUM_HEADS + INPUT0_PAD_BEFORE_FEATURE_NUM + INPUT0_PAD_AFTER_FEATURE_NUM);
+#else
+#ifdef INPUT0_DIMS_ORDER
         uint query_offset = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx, (head_size_idx));
         uint query_offset_next_seq = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, target_seq_idx + 1, (head_size_idx));
         const uint query_pitch = query_offset_next_seq - query_offset;
-#            else
+#else
         uint query_offset = INPUT0_GET_INDEX(b0_idx, b1_idx, target_seq_idx, (head_size_idx));
         const uint query_pitch = HEAD_SIZE;
-#            endif
-
+#endif
+#endif
         uint query_local_offset = head_size_idx * TARGET_SEQ_LEN_BLOCK_SIZE;
-        if (query_len != TARGET_SEQ_LEN_BLOCK_SIZE) { // tailing
+
+#if APPLY_SCALES_TO_QUERY
+#if HAS_SCALE_INPUT
+        const INPUT0_TYPE scale_val = *scale;
+#else
+        const INPUT0_TYPE scale_val = TO_INPUT0_TYPE(STATIC_SCALE_VALUE);
+#endif
+#else
+        const INPUT0_TYPE scale_val = INPUT0_VAL_ONE;
+#endif
+
+        if (seq_idx_end != TARGET_SEQ_LEN_BLOCK_SIZE) {
             if (sgid * SUBGROUP_SIZE < HEAD_SIZE) {
-                for (uint seq_idx = 0; seq_idx < query_len; seq_idx++) {
+                for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                     INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
-                    slm_query[query_local_offset] = val;
+
+                    slm_query[query_local_offset] = val * scale_val;
                     query_offset += query_pitch;
                     query_local_offset++;
                 }
             }
         } else {
-#        if SG_SCALE_FACTOR == 2
-            if ((sgid < (SUBGROUPS_PER_WG / SG_SCALE_FACTOR))) {
-                unroll_for(uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
+            #if SG_SCALE_FACTOR == 2
+                if ((sgid < (SUBGROUPS_PER_WG / SG_SCALE_FACTOR))) {
+                    unroll_for (uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
+                        INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
+
+                        slm_query[query_local_offset] = val * scale_val;
+                        query_offset += query_pitch;
+                        query_local_offset++;
+                    }
+                } else {
+                    query_local_offset += (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
+                    query_offset += query_pitch * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
+                    unroll_for (uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
+                        INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
+
+                        slm_query[query_local_offset] = val * scale_val;
+                        query_offset += query_pitch;
+                        query_local_offset++;
+                    }
+                }
+            #elif SG_SCALE_FACTOR == 4
+                query_local_offset += (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
+                query_offset += query_pitch * (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
+                unroll_for (uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
                     INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
-                    slm_query[query_local_offset] = val;
+
+                    slm_query[query_local_offset] = val * scale_val;
                     query_offset += query_pitch;
                     query_local_offset++;
                 }
-            } else {
-                query_local_offset += (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
-                query_offset += query_pitch * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
-                unroll_for(uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
+            #else
+                unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                     INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
-                    slm_query[query_local_offset] = val;
+
+                    slm_query[query_local_offset] = val * scale_val;
                     query_offset += query_pitch;
                     query_local_offset++;
                 }
-            }
-#        elif SG_SCALE_FACTOR == 4
-            query_local_offset += (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
-            query_offset += query_pitch * (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR);
-            unroll_for(uint seq_idx = 0; seq_idx < (TARGET_SEQ_LEN_BLOCK_SIZE / SG_SCALE_FACTOR); seq_idx++) {
-                INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
-                slm_query[query_local_offset] = val;
-                query_offset += query_pitch;
-                query_local_offset++;
-            }
-#        else
-            unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                INPUT0_TYPE val = BLOCK_READN(INPUT0_TYPE, 1, query_input, query_offset);
-                slm_query[query_local_offset] = val;
-                query_offset += query_pitch;
-                query_local_offset++;
-            }
-#        endif
+            #endif
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
+
     {
-#        if TARGET_SEQ_LEN_BLOCK_SIZE <= SUBGROUP_SIZE
-        if (sgid == 0 && sglid < TARGET_SEQ_LEN_BLOCK_SIZE) {
-            slm_max_val_prev[sglid] = SOFTMAX_ACCUMULATOR_VAL_MIN;
-            slm_exp_sum_prev[sglid] = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-        }
-#        else
-#            error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
-#        endif
+        #if TARGET_SEQ_LEN_BLOCK_SIZE <= SUBGROUP_SIZE
+            // Initialize slm buffers with MIN and ZERO values
+            if (sgid == 0 && sglid < TARGET_SEQ_LEN_BLOCK_SIZE) {
+                slm_max_val_prev[sglid] = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                slm_exp_sum_prev[sglid] = SOFTMAX_ACCUMULATOR_VAL_ZERO;
+            }
+        #else
+            #error sdpa_opt.cl: unsupported TARGET_SEQ_LEN_BLOCK_SIZE
+        #endif
     }
+
+    // Q*K calculation loop
     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) output_acc = OUTPUT_VAL_ZERO;
-    __attribute__((opencl_unroll_hint(1))) for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
+
+    __attribute__((opencl_unroll_hint(1)))
+    for (uint start_partition_idx = 0; start_partition_idx < SOURCE_SEQ_LEN; start_partition_idx += SEQ_LEN_PARTITION_SIZE) {
         const uint seq_len = start_partition_idx + sgid * SUBGROUP_SIZE;
         const uint partition_seq_len = min((uint)SOURCE_SEQ_LEN - start_partition_idx, (uint)SEQ_LEN_PARTITION_SIZE);
-#                ifdef INPUT1_DIMS_ORDER
-        uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len, 0);
-        uint key_offset_next_seq = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + 1, 0);
-        const uint key_pitch = key_offset_next_seq - key_offset;
-#                else
-        uint key_offset = INPUT1_GET_INDEX(b0_idx, b1_idx, seq_len, 0);
-        const uint key_pitch = HEAD_SIZE;
-#                endif
-        int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);
-        MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc;
-        qk_acc = FUNC_CALL(load_attn_mask)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx,
-                                           b1_idx,
-                                           target_seq_idx + sglid,
-                                           seq_len ATTN_MASK_BUFFER ATTN_SCALE_BUFFER PA_BUFFERS);
-        if (seq_len_calc_size >= SUBGROUP_SIZE) {
-            __attribute__((opencl_unroll_hint(1))) for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
-#        define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset);
-#        define QUERY_VEC                   MAKE_VECTOR_TYPE(INPUT1_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
-                QUERY_VEC queries_vec;
-                uint query_local_offset = (head_idx_index * TARGET_SEQ_LEN_BLOCK_SIZE) + sglid;
-                unroll_for(uint q_row_idx = 0; q_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; q_row_idx++) {
-                    queries_vec[q_row_idx] = slm_query[query_local_offset];
-                    query_local_offset += TARGET_SEQ_LEN_BLOCK_SIZE;
+
+#if IS_PAGED_ATTENTION
+#ifdef BROADCAST_GROUP_SIZE
+        const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
+#else
+        const uint heads_dim = num_heads_dim;
+#endif
+        #define KEY_SEQ_OFFSET subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]]
+        const uint key_pitch = (HEAD_SIZE * NUM_KV_HEADS + INPUT1_PAD_BEFORE_FEATURE_NUM + INPUT1_PAD_AFTER_FEATURE_NUM);
+        uint key_offset = INPUT1_OFFSET +
+                          KEY_SEQ_OFFSET * key_pitch +
+                          heads_dim * HEAD_SIZE +
+                          seq_len * key_pitch;
+#else
+#ifdef BEAM_TABLE_TYPE
+            const uint b_idx = beam_table[FUNC_CALL(get_bt_index_key)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + sglid, 0)];
+            const uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, seq_len + sglid, 0);
+#else
+            const uint b_idx = b0_idx;
+    #ifdef INPUT1_DIMS_ORDER
+            uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len, 0);
+            uint key_offset_next_seq = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, seq_len + 1, 0);
+            const uint key_pitch = key_offset_next_seq - key_offset;
+    #else
+            uint key_offset = INPUT1_GET_INDEX(b0_idx, b1_idx, seq_len, 0);
+            const uint key_pitch = HEAD_SIZE;
+    #endif
+#endif
+#endif
+
+            int seq_len_calc_size = min((int)(SOURCE_SEQ_LEN) - (int)seq_len, (int)SUBGROUP_SIZE);
+            MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_acc;
+
+            qk_acc = FUNC_CALL(load_attn_mask)(OPTIONAL_SHAPE_INFO_TENSOR
+                            b0_idx,
+                            b1_idx,
+#if IS_PAGED_ATTENTION
+                            block_start_pos - subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]] + sglid,
+#else
+                            target_seq_idx + sglid,
+#endif
+                            // TODO: pass seq_len_calc_size here
+                            seq_len
+                            ATTN_MASK_BUFFER
+                            ATTN_SCALE_BUFFER
+                            PA_BUFFERS);
+
+            if (seq_len_calc_size >= SUBGROUP_SIZE) {
+#if IS_KV_COMPRESSED
+                const uint comp_offset = GET_COMPRESSION_INDEX(KEY_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, seq_len + sglid, 0);
+                KEY_COMPRESSION_SCALE_TYPE comp_scale = key_scale[comp_offset];
+#if USE_ASYMMETRIC_QUANTIZATION
+                KEY_COMPRESSION_SCALE_TYPE comp_zp = key_scale[comp_offset + 1];
+#endif
+#endif
+                __attribute__((opencl_unroll_hint(1)))
+                for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
+                    #define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset);
+                    #define QUERY_VEC MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
+
+                    QUERY_VEC queries_vec;
+                    uint query_local_offset = (head_idx_index * TARGET_SEQ_LEN_BLOCK_SIZE) + sglid;
+                    unroll_for (uint q_row_idx = 0; q_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; q_row_idx++) {
+                        queries_vec[q_row_idx] = slm_query[query_local_offset];
+                        query_local_offset += TARGET_SEQ_LEN_BLOCK_SIZE;
+                    }
+
+                    unroll_for (uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
+#ifdef BEAM_TABLE_TYPE
+                        const INPUT1_TYPE key_packed = KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index);
+#else
+                        const INPUT1_TYPE key_packed = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
+#endif
+
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                        KEY_COMPRESSION_SCALE_TYPE key_vals = (TO_KEY_COMPRESSION_SCALE_TYPE(key_packed) - sub_group_broadcast(comp_zp, key_row_idx)) * sub_group_broadcast(comp_scale, key_row_idx);
+#elif IS_KV_COMPRESSED
+                        KEY_COMPRESSION_SCALE_TYPE key_vals = (TO_KEY_COMPRESSION_SCALE_TYPE(key_packed) * sub_group_broadcast(comp_scale, key_row_idx));
+#else
+                        INPUT1_TYPE key_vals = key_packed;
+#endif
+
+                        unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
+                            qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
+                        }
+                    }
                 }
-                unroll_for(uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
-                    INPUT1_TYPE key_vals = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-                    unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-                        qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
+            } else if (seq_len_calc_size > 0) {
+#if IS_KV_COMPRESSED
+                const uint comp_offset = GET_COMPRESSION_INDEX(KEY_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, seq_len + min(sglid, (uint)seq_len_calc_size - 1), 0);
+                // const uint comp_offset = GET_COMPRESSION_INDEX(KEY_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, seq_len + sglid, 0);
+                KEY_COMPRESSION_SCALE_TYPE comp_scale = key_scale[comp_offset];
+#if USE_ASYMMETRIC_QUANTIZATION
+                KEY_COMPRESSION_SCALE_TYPE comp_zp = key_scale[comp_offset + 1];
+#endif
+#endif
+                __attribute__((opencl_unroll_hint(1)))
+                for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
+                    #define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset)
+                    #define QUERY_VEC_TYPE MAKE_VECTOR_TYPE(INPUT0_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
+#if IS_KV_COMPRESSED
+                    #define KEY_UNPACKED_TYPE KEY_COMPRESSION_SCALE_TYPE
+                    #define KEY_UNPACKED_VEC_TYPE MAKE_VECTOR_TYPE(KEY_COMPRESSION_SCALE_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
+                    #define TO_KEY_UNPACKED_TYPE(val) TO_KEY_COMPRESSION_SCALE_TYPE(val)
+#else
+                    #define KEY_UNPACKED_TYPE INPUT1_TYPE
+                    #define KEY_UNPACKED_VEC_TYPE MAKE_VECTOR_TYPE(INPUT1_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
+                    #define TO_KEY_UNPACKED_TYPE(val) TO_INPUT1_TYPE(val)
+#endif
+
+                    QUERY_VEC_TYPE queries_vec;
+                    uint query_local_offset = (head_idx_index * TARGET_SEQ_LEN_BLOCK_SIZE) + sglid;
+                    unroll_for (uint q_row_idx = 0; q_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; q_row_idx++) {
+                        queries_vec[q_row_idx] = slm_query[query_local_offset];
+                        query_local_offset += TARGET_SEQ_LEN_BLOCK_SIZE;
+                    }
+
+#ifndef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
+                    KEY_UNPACKED_VEC_TYPE key_vec = 0;
+                    unroll_for (uint key_row_idx = 0; key_row_idx < seq_len_calc_size; key_row_idx++) {
+#ifdef BEAM_TABLE_TYPE
+                        key_vec[key_row_idx] = TO_KEY_UNPACKED_TYPE(KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index));
+#else
+                        key_vec[key_row_idx] = TO_KEY_UNPACKED_TYPE(KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index));
+#endif
+
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                        key_vec[key_row_idx] = (key_vec[key_row_idx] - sub_group_broadcast(comp_zp, key_row_idx)) * sub_group_broadcast(comp_scale, key_row_idx);
+#elif IS_KV_COMPRESSED
+                        key_vec[key_row_idx] *= sub_group_broadcast(comp_scale, key_row_idx);
+#endif
+                    }
+#endif
+
+                    unroll_for (uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
+#ifdef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
+                        KEY_UNPACKED_TYPE key_vals = 0;
+                        if (key_row_idx < seq_len_calc_size) {
+#ifdef BEAM_TABLE_TYPE
+                            key_vals = TO_KEY_UNPACKED_TYPE(KEY_BLOCK_READ(key_input, sub_group_broadcast(key_offset, key_row_idx) + head_idx_index));
+#else
+                            key_vals = TO_KEY_UNPACKED_TYPE(KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index));
+#endif
+                        }
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                            key_vals = (key_vals - sub_group_broadcast(comp_zp, key_row_idx)) * sub_group_broadcast(comp_scale, key_row_idx);
+#elif IS_KV_COMPRESSED
+                            key_vals *= sub_group_broadcast(comp_scale, key_row_idx);
+#endif
+#else
+    #define key_vals key_vec[key_row_idx]
+#endif
+                        unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
+                            qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
+                        }
                     }
                 }
             }
-        } else if (seq_len_calc_size > 0) {
-            __attribute__((opencl_unroll_hint(1))) for (uint head_idx_index = 0; head_idx_index < HEAD_SIZE; head_idx_index += SUBGROUP_SIZE) {
-#        define KEY_BLOCK_READ(ptr, offset) BLOCK_READN(INPUT1_TYPE, 1, ptr, offset);
-#        define QUERY_VEC                   MAKE_VECTOR_TYPE(INPUT1_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE)
-                QUERY_VEC queries_vec;
-                uint query_local_offset = (head_idx_index * TARGET_SEQ_LEN_BLOCK_SIZE) + sglid;
-                unroll_for(uint q_row_idx = 0; q_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; q_row_idx++) {
-                    queries_vec[q_row_idx] = slm_query[query_local_offset];
-                    query_local_offset += TARGET_SEQ_LEN_BLOCK_SIZE;
-                }
-#        ifndef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
-                QUERY_VEC key_vec = 0;
-                unroll_for(uint key_row_idx = 0; key_row_idx < seq_len_calc_size; key_row_idx++) {
-                    key_vec[key_row_idx] = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-                }
-#        endif
-                unroll_for(uint key_row_idx = 0; key_row_idx < TARGET_SEQ_LEN_BLOCK_SIZE; key_row_idx++) {
-#        ifdef LOAD_KEY_LEFTOVERS_IN_CALC_LOOP
-                    INPUT1_TYPE key_vals = 0;
-                    if (key_row_idx < seq_len_calc_size)
-                        key_vals = KEY_BLOCK_READ(key_input, key_offset + key_row_idx * key_pitch + head_idx_index);
-#        else
-#            define key_vals key_vec[key_row_idx]
-#        endif
-                    unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-                        qk_acc[key_row_idx] = mad(sub_group_broadcast(key_vals, i), queries_vec[i], qk_acc[key_row_idx]);
-                    }
-                }
-            }
-        }
-        {
-            SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
-            unroll_for(uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
-#        if HAS_SCALE_INPUT
-                const OUTPUT_TYPE scale_val = *scale;
-#        else
-                const OUTPUT_TYPE scale_val = TO_OUTPUT_TYPE(STATIC_SCALE_VALUE);
-#        endif
-                qk_acc[i] *= scale_val;
-#        ifdef HAS_ALIBI
-                const int alibi_val = (1 - SOURCE_SEQ_LEN) + seq_len + i;
-                qk_acc[i] += alibi_slopes[num_heads_dim] * alibi_val;
-#        endif
-                qk_acc[i] = INPUT0_MIN_FUNC(INPUT0_MAX_FUNC(qk_acc[i], INPUT0_VAL_MIN), INPUT0_VAL_MAX);
-                qk_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max, TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]));
 
-                slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = qk_acc[i];
+            {
+                SOFTMAX_ACCUMULATOR_TYPE qk_max = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                unroll_for (uint i = 0; i < TARGET_SEQ_LEN_BLOCK_SIZE; i++) {
+#if !APPLY_SCALES_TO_QUERY
+#if HAS_SCALE_INPUT
+                    const OUTPUT_TYPE scale_val = *scale;
+#else
+                    const OUTPUT_TYPE scale_val = TO_OUTPUT_TYPE(STATIC_SCALE_VALUE);
+#endif
+                    qk_acc[i] *= scale_val;
+#endif
+
+#ifdef HAS_ALIBI
+                    const int alibi_val = (1 - SOURCE_SEQ_LEN) + seq_len + i;
+                    qk_acc[i] += alibi_slopes[num_heads_dim] * alibi_val;
+#endif
+
+                    qk_acc[i] = INPUT0_MIN_FUNC(INPUT0_MAX_FUNC(qk_acc[i], INPUT0_VAL_MIN), INPUT0_VAL_MAX);
+
+                    qk_max = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max, TO_SOFTMAX_ACCUMULATOR_TYPE(qk_acc[i]));
+                    slm_qk_vals[sglid][sgid * TARGET_SEQ_LEN_BLOCK_SIZE + i] = qk_acc[i];
+                }
+                slm_qk_max_vals[sglid][sgid] = qk_max;
             }
 
-            slm_qk_max_vals[sglid][sgid] = qk_max;
-        }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        // each sg will compute a whole row of query
         {
-            const int key_len_in_kv_block = SEQ_LEN_PARTITION_SIZE;
-            for (uint m = sgid; m < query_len; m += SUBGROUPS_PER_WG) {
+            // SoftMax calculation
+            // each sg will compute a whole row of query
+            uint aligned_width = ((SUBGROUPS_PER_WG + (SUBGROUP_SIZE-1)) & ~(SUBGROUP_SIZE-1));
+            for (uint m = sgid; m < seq_idx_end; m += SUBGROUPS_PER_WG) {
                 // rowmax
-                SOFTMAX_ACCUMULATOR_TYPE qk_max_new;
-                if (sglid < SUBGROUPS_PER_WG) { // TODO: if SUBGROUPS_PER_WG > 16?
-                    qk_max_new = slm_qk_max_vals[m][sglid];
-                } else {
-                    qk_max_new = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                SOFTMAX_ACCUMULATOR_TYPE qk_max_new, qk_max_cur = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                for (uint k = sglid; k <  aligned_width; k += SUBGROUP_SIZE) {
+                    if (k < SUBGROUPS_PER_WG) {
+                        qk_max_new = slm_qk_max_vals[m][k];
+                    } else {
+                        qk_max_new = SOFTMAX_ACCUMULATOR_VAL_MIN;
+                    }
+                    qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(sub_group_reduce_max(qk_max_new), qk_max_cur);
+                    qk_max_cur = qk_max_new;
                 }
-                qk_max_new = sub_group_reduce_max(qk_max_new);
+
                 SOFTMAX_ACCUMULATOR_TYPE max_val_prev = slm_max_val_prev[m];
-                qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(qk_max_new, max_val_prev);
+                qk_max_new = SOFTMAX_ACCUMULATOR_MAX_FUNC(sub_group_reduce_max(qk_max_cur), max_val_prev);
 
                 // softmax
                 SOFTMAX_ACCUMULATOR_TYPE exp_sum_new = SOFTMAX_ACCUMULATOR_VAL_ZERO;
-                for (uint k = sglid; k < key_len_in_kv_block; k += SUBGROUP_SIZE) { // FIXME key_len_in_kv_block
+                for (uint k = sglid; k < partition_seq_len; k += SUBGROUP_SIZE) {
                     SOFTMAX_ACCUMULATOR_TYPE a = native_exp(TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][k]) - qk_max_new);
-                    slm_qk_vals[m][k] = convert_half(a);
+                    slm_qk_vals[m][k] = TO_OUTPUT_TYPE(a);
                     exp_sum_new += a;
                 }
                 exp_sum_new = sub_group_reduce_add(exp_sum_new);
 
+#if PAGED_ATTENTION_SCORES_OUTPUT
+                const uint subsequence_idx = gws_seq_indexes_correspondence[target_seq_dim];
+                const uint subsequence_end_pos = subsequence_begins[subsequence_idx + 1];
+
+                // PagedAttention is supposed to save only last "row" of the QK matrix multiplication,
+                // so save SEQ_LEN_PARTITION_SIZE elements for each partition
+                if (subsequence_end_pos == block_end_pos) {
+                    const uint last_row_idx = block_end_pos - block_start_pos - 1;
+                    if (m == last_row_idx) {
+                        const uint partition_idx = start_partition_idx / SEQ_LEN_PARTITION_SIZE;
+
+                        SOFTMAX_ACCUMULATOR_TYPE correction_factor = native_exp(qk_max_new - qk_max_cur);
+
+                        if (sglid == 0) {
+                            const uint max_partitions_num = aligned_max_context_len / SEQ_LEN_PARTITION_SIZE;
+                            const uint exp_sums_output_offset = subsequence_idx * NUM_HEADS * max_partitions_num +
+                                                                num_heads_dim * max_partitions_num +
+                                                                partition_idx;
+                            exp_sums[exp_sums_output_offset] = exp_sum_new * correction_factor;
+                            max_logits[exp_sums_output_offset] = qk_max_cur;
+                        }
+
+                        const uint output_offset = subsequence_idx * NUM_HEADS * aligned_max_context_len +
+                                                num_heads_dim * aligned_max_context_len +
+                                                partition_idx * SEQ_LEN_PARTITION_SIZE;
+                        for (uint i = sglid; i < partition_seq_len; i += SUBGROUP_SIZE) {
+                            softmax_results[output_offset + i] = TO_SOFTMAX_ACCUMULATOR_TYPE(slm_qk_vals[m][i]) / exp_sum_new;
+                        }
+                    }
+                }
+#endif
+
                 // update
                 if (sglid == 0) {
-                    float pre_exp_sum = slm_exp_sum_prev[m];
-                    float correction_factor = native_exp(max_val_prev - qk_max_new);
-                    float pre_exp_sum_fixed = pre_exp_sum * correction_factor;
+                    SOFTMAX_ACCUMULATOR_TYPE pre_exp_sum = slm_exp_sum_prev[m];
+                    SOFTMAX_ACCUMULATOR_TYPE correction_factor = native_exp(max_val_prev - qk_max_new);
+                    SOFTMAX_ACCUMULATOR_TYPE pre_exp_sum_fixed = pre_exp_sum * correction_factor;
                     exp_sum_new += pre_exp_sum_fixed;
 
                     slm_update_factor[m] = correction_factor;
@@ -4234,91 +2731,232 @@ KERNEL(sdpa_opt)
                     slm_exp_sum_prev[m] = exp_sum_new;
                 }
             }
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
 
-        // w * v
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+
         {
+            // QK*V calculation
             MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) acc_output_res = OUTPUT_VAL_ZERO;
-#            ifdef INPUT2_DIMS_ORDER
+#if IS_PAGED_ATTENTION
+            const uint value_pitch = (HEAD_SIZE * NUM_KV_HEADS + INPUT2_PAD_BEFORE_FEATURE_NUM + INPUT2_PAD_AFTER_FEATURE_NUM);
+#else
+#ifdef INPUT2_DIMS_ORDER
             uint value_offset_base = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 0, 0);
             uint value_offset_next_seq = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, 1, 0);
             const uint value_pitch = value_offset_next_seq - value_offset_base;
-#            else
+#else
             const uint value_pitch = HEAD_SIZE;
-#            endif
+#endif
+#endif
+
             if (partition_seq_len == SEQ_LEN_PARTITION_SIZE) {
                 uint seq_len_start = (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR);
                 for (uint seq_len = seq_len_start; seq_len < seq_len_start + (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR); seq_len += SUBGROUP_SIZE) {
-#                ifdef INPUT2_DIMS_ORDER
+#if IS_PAGED_ATTENTION
+#ifdef BROADCAST_GROUP_SIZE
+                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
+#else
+                    const uint heads_dim = num_heads_dim;
+#endif
+                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
+                    uint value_offset = INPUT2_OFFSET +
+                                        value_seq_offset * value_pitch +
+                                        heads_dim * HEAD_SIZE +
+                                        (start_partition_idx + (seq_len)) * value_pitch + head_size_idx;
+#else
+#ifdef BEAM_TABLE_TYPE
+                    const uint b_idx = beam_table[FUNC_CALL(get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len) + sglid, sgid * SUBGROUP_SIZE)];
+                    const uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + (seq_len) + sglid, sgid * SUBGROUP_SIZE);
+#else
+                    const uint b_idx = b0_idx;
+    #ifdef INPUT2_DIMS_ORDER
                     uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len), head_size_idx);
-#                else
+    #else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + (seq_len), head_size_idx);
-#                endif
+    #endif
+#endif
+#endif
+
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
-                    unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+                    unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len + sglid];
                     }
-                    unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
-                        unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+
+#if IS_KV_COMPRESSED
+                    const uint comp_offset = GET_COMPRESSION_INDEX(VALUE_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, start_partition_idx + seq_len + sglid, 0);
+                    VALUE_COMPRESSION_SCALE_TYPE comp_scale = val_scale[comp_offset];
+#if USE_ASYMMETRIC_QUANTIZATION
+                    VALUE_COMPRESSION_SCALE_TYPE comp_zp = val_scale[comp_offset + 1];
+#endif
+#endif
+                    unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
+#ifdef BEAM_TABLE_TYPE
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, i));
+#else
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, value_offset);
+#endif
+
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed - sub_group_broadcast(comp_zp, i)) * sub_group_broadcast(comp_scale, i);
+#elif IS_KV_COMPRESSED
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed * sub_group_broadcast(comp_scale, i));
+#else
+                        INPUT2_TYPE value_val = value_packed;
+#endif
+
+                        unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
                         }
+
+#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
+#endif
                     }
                 }
             } else {
                 const uint seq_len_start = (sgid / (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) * (SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR);
                 uint seq_len_end = 0;
                 if (seq_len_start < partition_seq_len)
-                    seq_len_end = seq_len_start + min(partition_seq_len - seq_len_start, (uint)(SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR));
-                ;
+                    seq_len_end = seq_len_start + min(partition_seq_len - seq_len_start, (uint)(SEQ_LEN_PARTITION_SIZE / SG_SCALE_FACTOR));;
+
                 for (uint seq_len = seq_len_start / SUBGROUP_SIZE; seq_len < seq_len_end / SUBGROUP_SIZE; seq_len++) {
-#                ifdef INPUT2_DIMS_ORDER
-                    uint value_offset =
-                        FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
-#                else
+#if IS_PAGED_ATTENTION
+#ifdef BROADCAST_GROUP_SIZE
+                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
+#else
+                    const uint heads_dim = num_heads_dim;
+#endif
+                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
+                    uint value_offset = INPUT2_OFFSET +
+                                        value_seq_offset * value_pitch +
+                                        heads_dim * HEAD_SIZE +
+                                        (start_partition_idx + (seq_len * SUBGROUP_SIZE)) * value_pitch + head_size_idx;
+#else
+#ifdef BEAM_TABLE_TYPE
+                    const uint b_idx = beam_table[FUNC_CALL(get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE) + sglid, sgid * SUBGROUP_SIZE)];
+                    uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE) + sglid, sgid * SUBGROUP_SIZE);
+#else
+                    const uint b_idx = b0_idx;
+    #ifdef INPUT2_DIMS_ORDER
+                    uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
+    #else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + (seq_len * SUBGROUP_SIZE), head_size_idx);
-#                endif
+    #endif
+#endif
+#endif
+
+#if IS_KV_COMPRESSED
+                    const uint comp_offset = GET_COMPRESSION_INDEX(VALUE_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, start_partition_idx + (seq_len * SUBGROUP_SIZE) + sglid, 0);
+                    VALUE_COMPRESSION_SCALE_TYPE comp_scale = val_scale[comp_offset];
+#if USE_ASYMMETRIC_QUANTIZATION
+                    VALUE_COMPRESSION_SCALE_TYPE comp_zp = val_scale[comp_offset + 1];
+#endif
+#endif
+
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
-                    unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-                        // qk_val[seq_idx] = slm_qk_vals[seq_idx * SEQ_LEN_PARTITION_SIZE + seq_len * SUBGROUP_SIZE + sglid];
+                    unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len * SUBGROUP_SIZE + sglid];
-                        // qk_val[seq_idx] = as_half(intel_sub_group_block_read_us((const __local ushort*)slm_qk_vals + seq_idx * SEQ_LEN_PARTITION_SIZE + seq_len * SUBGROUP_SIZE));
                     }
-                    unroll_for(uint i = 0; i < SUBGROUP_SIZE; i++) {
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
-                        unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+
+                    unroll_for (uint i = 0; i < SUBGROUP_SIZE; i++) {
+#ifdef BEAM_TABLE_TYPE
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, i));
+#else
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, value_offset);
+#endif
+
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed - sub_group_broadcast(comp_zp, i)) * sub_group_broadcast(comp_scale, i);
+#elif IS_KV_COMPRESSED
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed * sub_group_broadcast(comp_scale, i));
+#else
+                        INPUT2_TYPE value_val = value_packed;
+#endif
+                        unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], i), value_val, acc_output_res[seq_idx]);
                         }
+
+#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
+#endif
                     }
                 }
-                // tail, less within a subgroup
+
+                // QK*V leftovers processing
                 const uint seq_len_leftovers_start = ((seq_len_end / SUBGROUP_SIZE) * SUBGROUP_SIZE);
                 if (seq_len_leftovers_start != seq_len_end) {
-                    // uint qk_offset = min(seq_len_leftovers_start + sglid, seq_len_end - 1);
                     MAKE_VECTOR_TYPE(OUTPUT_TYPE, TARGET_SEQ_LEN_BLOCK_SIZE) qk_val;
-                    unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+                    unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                         qk_val[seq_idx] = slm_qk_vals[seq_idx][seq_len_leftovers_start+sglid];
-                        // qk_offset += SEQ_LEN_PARTITION_SIZE;
                     }
-#                ifdef INPUT2_DIMS_ORDER
+#if IS_PAGED_ATTENTION
+#ifdef BROADCAST_GROUP_SIZE
+                    const uint heads_dim = num_heads_dim / BROADCAST_GROUP_SIZE;
+#else
+                    const uint heads_dim = num_heads_dim;
+#endif
+                    const uint value_seq_offset = subsequence_begins[gws_seq_indexes_correspondence[target_seq_dim]];
+                    uint value_offset = INPUT2_OFFSET +
+                                        value_seq_offset * value_pitch +
+                                        heads_dim * HEAD_SIZE +
+                                        (start_partition_idx + seq_len_leftovers_start) * value_pitch + head_size_idx;
+#else
+#ifdef BEAM_TABLE_TYPE
+                    const uint b_idx = beam_table[FUNC_CALL(get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start + sglid, sgid * SUBGROUP_SIZE)];
+                    const uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start + sglid, sgid * SUBGROUP_SIZE);
+#else
+                    const uint b_idx = b0_idx;
+    #ifdef INPUT2_DIMS_ORDER
                     uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b0_idx, b1_idx, 0, 0, start_partition_idx + seq_len_leftovers_start, head_size_idx);
-#                else
+    #else
                     uint value_offset = INPUT2_GET_INDEX(b0_idx, b1_idx, start_partition_idx + seq_len_leftovers_start, head_size_idx);
-#                endif
+    #endif
+#endif
+#endif
+
+#if IS_KV_COMPRESSED
+                    const uint comp_offset = GET_COMPRESSION_INDEX(VALUE_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, start_partition_idx + min(seq_len_leftovers_start + sglid, seq_len_end - 1), 0);
+                    // const uint comp_offset = GET_COMPRESSION_INDEX(VALUE_COMPRESSION_SCALE, b_idx, b1_idx / BROADCAST_GROUP_SIZE, start_partition_idx + seq_len_leftovers_start + sglid, 0);
+                    VALUE_COMPRESSION_SCALE_TYPE comp_scale = val_scale[comp_offset];
+#if USE_ASYMMETRIC_QUANTIZATION
+                    VALUE_COMPRESSION_SCALE_TYPE comp_zp = val_scale[comp_offset + 1];
+#endif
+#endif
+
                     for (uint seq_len_idx = 0; seq_len_idx < partition_seq_len - seq_len_leftovers_start; seq_len_idx++) {
-                        INPUT2_TYPE value_val = VALUE_BLOCK_READ(value_input, value_offset);
+#ifdef BEAM_TABLE_TYPE
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, sub_group_broadcast(value_offset, seq_len_idx));
+#else
+                        const INPUT2_TYPE value_packed = VALUE_BLOCK_READ(value_input, value_offset);
+#endif
+
+#if IS_KV_COMPRESSED && USE_ASYMMETRIC_QUANTIZATION
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed - sub_group_broadcast(comp_zp, seq_len_idx)) * sub_group_broadcast(comp_scale, seq_len_idx);
+#elif IS_KV_COMPRESSED
+                        VALUE_COMPRESSION_SCALE_TYPE value_val = (value_packed * sub_group_broadcast(comp_scale, seq_len_idx));
+#else
+                        INPUT2_TYPE value_val = value_packed;
+#endif
+
                         for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                             acc_output_res[seq_idx] = mad(sub_group_broadcast(qk_val[seq_idx], seq_len_idx), value_val, acc_output_res[seq_idx]);
                         }
+
+#ifndef BEAM_TABLE_TYPE
                         value_offset += value_pitch;
+#endif
                     }
                 }
+
             }
+
+            // protect slm_qk_vals as it is read in w*v stage and write in next round q*k stage.
+            barrier(CLK_LOCAL_MEM_FENCE);
+
             {
-                for (uint seq_idx = 0; seq_idx < query_len; seq_idx++) {
+                // Rescale acc_output_res values and save current iter results to global accumulator
+                for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                     if (start_partition_idx > 0) {
                         OUTPUT_TYPE updated_prev_res = TO_SOFTMAX_ACCUMULATOR_TYPE(output_acc[seq_idx]) * slm_update_factor[seq_idx];
                         acc_output_res[seq_idx] += updated_prev_res;
@@ -4326,31 +2964,42 @@ KERNEL(sdpa_opt)
                     output_acc[seq_idx] = acc_output_res[seq_idx];
                 }
             }
-        } // w*v
-    } // end of loop in kv_len
-    if (sgid >= (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) { // head_size/subgroup_size=128/16=8
-        unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+        }
+    }
+
+    // Combine results from multiple SGs and store to output buffer
+
+    if (sgid >= (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) {
+        unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
             slm_qk_vals[seq_idx][(uint)get_local_id(2)] = output_acc[seq_idx];
         }
     }
+
     barrier(CLK_LOCAL_MEM_FENCE);
-    // output
+
     if (sgid < (SUBGROUPS_PER_WG / SG_SCALE_FACTOR)) {
-        unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
-            unroll_for(uint i = 1; i < SG_SCALE_FACTOR; i++) {
+        unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+            unroll_for (uint i = 1; i < SG_SCALE_FACTOR; i++) {
                 output_acc[seq_idx] += slm_qk_vals[seq_idx][(i * HEAD_SIZE) + head_size_idx];
             }
         }
+
+#if IS_PAGED_ATTENTION
+        uint output_offset = block_start_pos * HEAD_SIZE * NUM_HEADS + num_heads_dim * HEAD_SIZE + sgid * SUBGROUP_SIZE;
+        const uint output_pitch = HEAD_SIZE * NUM_HEADS;
+#else
         uint output_offset = OUTPUT_GET_INDEX(b0_idx, b1_idx, target_seq_idx, sgid * SUBGROUP_SIZE);
         const uint output_pitch = HEAD_SIZE;
-        if (TARGET_SEQ_LEN_BLOCK_SIZE > query_len) {
-            for (uint seq_idx = 0; seq_idx < query_len; seq_idx++) {
+#endif
+
+        if (TARGET_SEQ_LEN_BLOCK_SIZE > seq_idx_end) {
+            for (uint seq_idx = 0; seq_idx < seq_idx_end; seq_idx++) {
                 output_acc[seq_idx] /= slm_exp_sum_prev[seq_idx];
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
                 output_offset += output_pitch;
             }
         } else {
-            unroll_for(uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
+            unroll_for (uint seq_idx = 0; seq_idx < TARGET_SEQ_LEN_BLOCK_SIZE; seq_idx++) {
                 output_acc[seq_idx] /= slm_exp_sum_prev[seq_idx];
                 OUTPUT_BLOCK_WRITE(output, output_offset, output_acc[seq_idx]);
                 output_offset += output_pitch;
@@ -4358,1436 +3007,3 @@ KERNEL(sdpa_opt)
         }
     }
 }
-#    endif
-#endif
-#ifdef SDPA_STAGE_1
-#endif
-#ifdef OUTPUT_BLOCK_READ
-#    undef OUTPUT_BLOCK_READ
-#endif
-#ifdef OUTPUT_BLOCK_WRITE
-#    undef OUTPUT_BLOCK_WRITE
-#endif
-#ifdef VALUE_BLOCK_READ
-#    undef VALUE_BLOCK_READ
-#endif
-#ifdef SUBGROUPS_PER_WG
-#    undef SUBGROUPS_PER_WG
-#endif
-#ifdef QUERY_STEP_LOCAL
-#    undef QUERY_STEP_LOCAL
-#endif
-#ifdef QUERY_BLOCK_SIZE
-#    undef QUERY_BLOCK_SIZE
-#endif
-#ifdef KEY_BLOCK_SIZE
-#    undef KEY_BLOCK_SIZE
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef KEY_BLOCK
-#    undef KEY_BLOCK
-#endif
-#ifdef QUERY_BLOCK
-#    undef QUERY_BLOCK
-#endif
-#ifdef KEY_BLOCK_SIZE
-#    undef KEY_BLOCK_SIZE
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef KEY_BLOCK
-#    undef KEY_BLOCK
-#endif
-#ifdef QUERY_BLOCK
-#    undef QUERY_BLOCK
-#endif
-#ifdef KEY_BLOCK_SIZE
-#    undef KEY_BLOCK_SIZE
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef KEY_BLOCK
-#    undef KEY_BLOCK
-#endif
-#ifdef QUERY_BLOCK
-#    undef QUERY_BLOCK
-#endif
-#ifdef KEY_BLOCK_SIZE
-#    undef KEY_BLOCK_SIZE
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef KEY_BLOCK
-#    undef KEY_BLOCK
-#endif
-#ifdef QUERY_BLOCK
-#    undef QUERY_BLOCK
-#endif
-#ifdef SOURCE_SEQ_LEN
-#    undef SOURCE_SEQ_LEN
-#endif
-#ifdef TARGET_SEQ_LEN
-#    undef TARGET_SEQ_LEN
-#endif
-#ifdef PA_BUFFERS
-#    undef PA_BUFFERS
-#endif
-#ifdef PA_BUFFERS_ARGS
-#    undef PA_BUFFERS_ARGS
-#endif
-#ifdef PA_BUFFERS
-#    undef PA_BUFFERS
-#endif
-#ifdef PA_BUFFERS_ARGS
-#    undef PA_BUFFERS_ARGS
-#endif
-#ifdef ATTN_MASK_BUFFER
-#    undef ATTN_MASK_BUFFER
-#endif
-#ifdef ATTN_MASK_BUFFER_ARG
-#    undef ATTN_MASK_BUFFER_ARG
-#endif
-#ifdef ATTN_MASK_BUFFER
-#    undef ATTN_MASK_BUFFER
-#endif
-#ifdef ATTN_MASK_BUFFER_ARG
-#    undef ATTN_MASK_BUFFER_ARG
-#endif
-#ifdef ATTN_SCALE_BUFFER
-#    undef ATTN_SCALE_BUFFER
-#endif
-#ifdef ATTN_SCALE_BUFFER_ARG
-#    undef ATTN_SCALE_BUFFER_ARG
-#endif
-#ifdef ATTN_SCALE_BUFFER
-#    undef ATTN_SCALE_BUFFER
-#endif
-#ifdef ATTN_SCALE_BUFFER_ARG
-#    undef ATTN_SCALE_BUFFER_ARG
-#endif
-#ifdef MASK_VECTOR_TYPE
-#    undef MASK_VECTOR_TYPE
-#endif
-#ifdef batch_idx
-#    undef batch_idx
-#endif
-#ifdef num_heads_dim
-#    undef num_heads_dim
-#endif
-#ifdef b0_idx
-#    undef b0_idx
-#endif
-#ifdef b1_idx
-#    undef b1_idx
-#endif
-#ifdef target_seq_dim
-#    undef target_seq_dim
-#endif
-#ifdef target_seq_idx
-#    undef target_seq_idx
-#endif
-#ifdef head_size_idx
-#    undef head_size_idx
-#endif
-#ifdef sglid
-#    undef sglid
-#endif
-#ifdef sgid
-#    undef sgid
-#endif
-#ifdef KEY_SEQ_OFFSET
-#    undef KEY_SEQ_OFFSET
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef QUERY_VEC
-#    undef QUERY_VEC
-#endif
-#ifdef KEY_BLOCK_READ
-#    undef KEY_BLOCK_READ
-#endif
-#ifdef QUERY_VEC
-#    undef QUERY_VEC
-#endif
-#ifdef key_vals
-#    undef key_vals
-#endif
-#ifdef REG_VERSION_MAX_VALUES_PER_WI
-#    undef REG_VERSION_MAX_VALUES_PER_WI
-#endif
-#ifdef REG_VERSION_MAX_VALUES_PER_WI_LOWER
-#    undef REG_VERSION_MAX_VALUES_PER_WI_LOWER
-#endif
-#ifdef REG_VERSION_MAX_VALUES_PER_WI
-#    undef REG_VERSION_MAX_VALUES_PER_WI
-#endif
-#ifdef REG_VERSION_MAX_VALUES_PER_WI_LOWER
-#    undef REG_VERSION_MAX_VALUES_PER_WI_LOWER
-#endif
-#undef KERNEL
-#undef KERNEL_ID
-#undef FUNC
-#undef FUNC_CALL
-#undef CONST_ARRAY_DECL
-#undef CONST_ARRAY_REF
-#ifdef FP64_SUPPORTED
-#    undef FP64_SUPPORTED
-#endif
-#ifdef FP16_SUPPORTED
-#    undef FP16_SUPPORTED
-#endif
-#ifdef FP16_UNIT_USED
-#    undef FP16_UNIT_USED
-#endif
-#ifdef INT8_UNIT_USED
-#    undef INT8_UNIT_USED
-#endif
-#ifdef INT32_UNIT_USED
-#    undef INT32_UNIT_USED
-#endif
-#ifdef INT64_UNIT_USED
-#    undef INT64_UNIT_USED
-#endif
-#ifdef UINT8_UNIT_USED
-#    undef UINT8_UNIT_USED
-#endif
-#ifdef UINT32_UNIT_USED
-#    undef UINT32_UNIT_USED
-#endif
-#ifdef UNIT_TYPE
-#    undef UNIT_TYPE
-#endif
-#ifdef UNIT_VAL_MAX
-#    undef UNIT_VAL_MAX
-#endif
-#ifdef UNIT_VAL_MIN
-#    undef UNIT_VAL_MIN
-#endif
-#ifdef UNIT_VAL_ONE
-#    undef UNIT_VAL_ONE
-#endif
-#ifdef UNIT_VAL_ZERO
-#    undef UNIT_VAL_ZERO
-#endif
-#ifdef TO_UNIT_TYPE
-#    undef TO_UNIT_TYPE
-#endif
-#ifdef TO_UNIT_TYPE_SAT
-#    undef TO_UNIT_TYPE_SAT
-#endif
-#ifdef AS_UNIT_TYPE
-#    undef AS_UNIT_TYPE
-#endif
-#ifdef UNIT_MAX_FUNC
-#    undef UNIT_MAX_FUNC
-#endif
-#ifdef UNIT_MIN_FUNC
-#    undef UNIT_MIN_FUNC
-#endif
-#ifdef UNIT_ABS_FUNC
-#    undef UNIT_ABS_FUNC
-#endif
-#ifdef UNIT_TYPE_SIZE
-#    undef UNIT_TYPE_SIZE
-#endif
-#ifdef UNIT_IS_FP
-#    undef UNIT_IS_FP
-#endif
-#ifdef NL_M
-#    undef NL_M
-#endif
-#ifdef NL_N
-#    undef NL_N
-#endif
-#ifdef ACTIVATION_FUNC_TYPE
-#    undef ACTIVATION_FUNC_TYPE
-#endif
-#ifdef ACTIVATION_FUNC_VAL_MAX
-#    undef ACTIVATION_FUNC_VAL_MAX
-#endif
-#ifdef ACTIVATION_FUNC_VAL_MIN
-#    undef ACTIVATION_FUNC_VAL_MIN
-#endif
-#ifdef ACTIVATION_FUNC_VAL_ONE
-#    undef ACTIVATION_FUNC_VAL_ONE
-#endif
-#ifdef ACTIVATION_FUNC_VAL_ZERO
-#    undef ACTIVATION_FUNC_VAL_ZERO
-#endif
-#ifdef TO_ACTIVATION_FUNC_TYPE
-#    undef TO_ACTIVATION_FUNC_TYPE
-#endif
-#ifdef TO_ACTIVATION_FUNC_TYPE_SAT
-#    undef TO_ACTIVATION_FUNC_TYPE_SAT
-#endif
-#ifdef AS_ACTIVATION_FUNC_TYPE
-#    undef AS_ACTIVATION_FUNC_TYPE
-#endif
-#ifdef ACTIVATION_FUNC_MAX_FUNC
-#    undef ACTIVATION_FUNC_MAX_FUNC
-#endif
-#ifdef ACTIVATION_FUNC_MIN_FUNC
-#    undef ACTIVATION_FUNC_MIN_FUNC
-#endif
-#ifdef ACTIVATION_FUNC_ABS_FUNC
-#    undef ACTIVATION_FUNC_ABS_FUNC
-#endif
-#ifdef ACTIVATION_FUNC_TYPE_SIZE
-#    undef ACTIVATION_FUNC_TYPE_SIZE
-#endif
-#ifdef ACTIVATION_FUNC_IS_FP
-#    undef ACTIVATION_FUNC_IS_FP
-#endif
-#ifdef ACTIVATION_PARAMS
-#    undef ACTIVATION_PARAMS
-#endif
-#ifdef ACTIVATION_FUNC
-#    undef ACTIVATION_FUNC
-#endif
-#ifdef ACTIVATION
-#    undef ACTIVATION
-#endif
-#ifdef INPUT0_SIZE_X
-#    undef INPUT0_SIZE_X
-#endif
-#ifdef INPUT0_SIZE_Y
-#    undef INPUT0_SIZE_Y
-#endif
-#ifdef INPUT0_SIZE_Z
-#    undef INPUT0_SIZE_Z
-#endif
-#ifdef INPUT0_SIZE_W
-#    undef INPUT0_SIZE_W
-#endif
-#ifdef INPUT0_SIZE_U
-#    undef INPUT0_SIZE_U
-#endif
-#ifdef INPUT0_SIZE_V
-#    undef INPUT0_SIZE_V
-#endif
-#ifdef INPUT0_FEATURE_NUM
-#    undef INPUT0_FEATURE_NUM
-#endif
-#ifdef INPUT0_BATCH_NUM
-#    undef INPUT0_BATCH_NUM
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_X
-#    undef INPUT0_PAD_BEFORE_SIZE_X
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_Y
-#    undef INPUT0_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_Z
-#    undef INPUT0_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_W
-#    undef INPUT0_PAD_BEFORE_SIZE_W
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_U
-#    undef INPUT0_PAD_BEFORE_SIZE_U
-#endif
-#ifdef INPUT0_PAD_BEFORE_SIZE_V
-#    undef INPUT0_PAD_BEFORE_SIZE_V
-#endif
-#ifdef INPUT0_PAD_BEFORE_FEATURE_NUM
-#    undef INPUT0_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef INPUT0_PAD_BEFORE_BATCH_NUM
-#    undef INPUT0_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_X
-#    undef INPUT0_PAD_AFTER_SIZE_X
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_Y
-#    undef INPUT0_PAD_AFTER_SIZE_Y
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_Z
-#    undef INPUT0_PAD_AFTER_SIZE_Z
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_W
-#    undef INPUT0_PAD_AFTER_SIZE_W
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_U
-#    undef INPUT0_PAD_AFTER_SIZE_U
-#endif
-#ifdef INPUT0_PAD_AFTER_SIZE_V
-#    undef INPUT0_PAD_AFTER_SIZE_V
-#endif
-#ifdef INPUT0_PAD_AFTER_FEATURE_NUM
-#    undef INPUT0_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef INPUT0_PAD_AFTER_BATCH_NUM
-#    undef INPUT0_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef INPUT0_X_PITCH
-#    undef INPUT0_X_PITCH
-#endif
-#ifdef INPUT0_Y_PITCH
-#    undef INPUT0_Y_PITCH
-#endif
-#ifdef INPUT0_Z_PITCH
-#    undef INPUT0_Z_PITCH
-#endif
-#ifdef INPUT0_W_PITCH
-#    undef INPUT0_W_PITCH
-#endif
-#ifdef INPUT0_U_PITCH
-#    undef INPUT0_U_PITCH
-#endif
-#ifdef INPUT0_V_PITCH
-#    undef INPUT0_V_PITCH
-#endif
-#ifdef INPUT0_FEATURE_PITCH
-#    undef INPUT0_FEATURE_PITCH
-#endif
-#ifdef INPUT0_BATCH_PITCH
-#    undef INPUT0_BATCH_PITCH
-#endif
-#ifdef INPUT0_GET_INDEX_SAFE
-#    undef INPUT0_GET_INDEX_SAFE
-#endif
-#ifdef INPUT0_GET_INDEX
-#    undef INPUT0_GET_INDEX
-#endif
-#ifdef INPUT0_GET_INDEX_RAW
-#    undef INPUT0_GET_INDEX_RAW
-#endif
-#ifdef INPUT0_VIEW_OFFSET
-#    undef INPUT0_VIEW_OFFSET
-#endif
-#ifdef INPUT0_LENGTH
-#    undef INPUT0_LENGTH
-#endif
-#ifdef INPUT0_DIMS
-#    undef INPUT0_DIMS
-#endif
-#ifdef INPUT0_SIMPLE
-#    undef INPUT0_SIMPLE
-#endif
-#ifdef INPUT0_GROUPED
-#    undef INPUT0_GROUPED
-#endif
-#ifdef INPUT0_LAYOUT_BFYX
-#    undef INPUT0_LAYOUT_BFYX
-#endif
-#ifdef INPUT0_TYPE
-#    undef INPUT0_TYPE
-#endif
-#ifdef INPUT0_VAL_MAX
-#    undef INPUT0_VAL_MAX
-#endif
-#ifdef INPUT0_VAL_MIN
-#    undef INPUT0_VAL_MIN
-#endif
-#ifdef INPUT0_VAL_ONE
-#    undef INPUT0_VAL_ONE
-#endif
-#ifdef INPUT0_VAL_ZERO
-#    undef INPUT0_VAL_ZERO
-#endif
-#ifdef TO_INPUT0_TYPE
-#    undef TO_INPUT0_TYPE
-#endif
-#ifdef TO_INPUT0_TYPE_SAT
-#    undef TO_INPUT0_TYPE_SAT
-#endif
-#ifdef AS_INPUT0_TYPE
-#    undef AS_INPUT0_TYPE
-#endif
-#ifdef INPUT0_MAX_FUNC
-#    undef INPUT0_MAX_FUNC
-#endif
-#ifdef INPUT0_MIN_FUNC
-#    undef INPUT0_MIN_FUNC
-#endif
-#ifdef INPUT0_ABS_FUNC
-#    undef INPUT0_ABS_FUNC
-#endif
-#ifdef INPUT0_TYPE_SIZE
-#    undef INPUT0_TYPE_SIZE
-#endif
-#ifdef INPUT0_IS_FP
-#    undef INPUT0_IS_FP
-#endif
-#ifdef INPUT0_OFFSET
-#    undef INPUT0_OFFSET
-#endif
-#ifdef INPUT0_PAD_BEFORE
-#    undef INPUT0_PAD_BEFORE
-#endif
-#ifdef INPUT0_PAD_AFTER
-#    undef INPUT0_PAD_AFTER
-#endif
-#ifdef INPUT1_SIZE_X
-#    undef INPUT1_SIZE_X
-#endif
-#ifdef INPUT1_SIZE_Y
-#    undef INPUT1_SIZE_Y
-#endif
-#ifdef INPUT1_SIZE_Z
-#    undef INPUT1_SIZE_Z
-#endif
-#ifdef INPUT1_SIZE_W
-#    undef INPUT1_SIZE_W
-#endif
-#ifdef INPUT1_SIZE_U
-#    undef INPUT1_SIZE_U
-#endif
-#ifdef INPUT1_SIZE_V
-#    undef INPUT1_SIZE_V
-#endif
-#ifdef INPUT1_FEATURE_NUM
-#    undef INPUT1_FEATURE_NUM
-#endif
-#ifdef INPUT1_BATCH_NUM
-#    undef INPUT1_BATCH_NUM
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_X
-#    undef INPUT1_PAD_BEFORE_SIZE_X
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_Y
-#    undef INPUT1_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_Z
-#    undef INPUT1_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_W
-#    undef INPUT1_PAD_BEFORE_SIZE_W
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_U
-#    undef INPUT1_PAD_BEFORE_SIZE_U
-#endif
-#ifdef INPUT1_PAD_BEFORE_SIZE_V
-#    undef INPUT1_PAD_BEFORE_SIZE_V
-#endif
-#ifdef INPUT1_PAD_BEFORE_FEATURE_NUM
-#    undef INPUT1_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef INPUT1_PAD_BEFORE_BATCH_NUM
-#    undef INPUT1_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_X
-#    undef INPUT1_PAD_AFTER_SIZE_X
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_Y
-#    undef INPUT1_PAD_AFTER_SIZE_Y
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_Z
-#    undef INPUT1_PAD_AFTER_SIZE_Z
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_W
-#    undef INPUT1_PAD_AFTER_SIZE_W
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_U
-#    undef INPUT1_PAD_AFTER_SIZE_U
-#endif
-#ifdef INPUT1_PAD_AFTER_SIZE_V
-#    undef INPUT1_PAD_AFTER_SIZE_V
-#endif
-#ifdef INPUT1_PAD_AFTER_FEATURE_NUM
-#    undef INPUT1_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef INPUT1_PAD_AFTER_BATCH_NUM
-#    undef INPUT1_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef INPUT1_X_PITCH
-#    undef INPUT1_X_PITCH
-#endif
-#ifdef INPUT1_Y_PITCH
-#    undef INPUT1_Y_PITCH
-#endif
-#ifdef INPUT1_Z_PITCH
-#    undef INPUT1_Z_PITCH
-#endif
-#ifdef INPUT1_W_PITCH
-#    undef INPUT1_W_PITCH
-#endif
-#ifdef INPUT1_U_PITCH
-#    undef INPUT1_U_PITCH
-#endif
-#ifdef INPUT1_V_PITCH
-#    undef INPUT1_V_PITCH
-#endif
-#ifdef INPUT1_FEATURE_PITCH
-#    undef INPUT1_FEATURE_PITCH
-#endif
-#ifdef INPUT1_BATCH_PITCH
-#    undef INPUT1_BATCH_PITCH
-#endif
-#ifdef INPUT1_GET_INDEX_SAFE
-#    undef INPUT1_GET_INDEX_SAFE
-#endif
-#ifdef INPUT1_GET_INDEX
-#    undef INPUT1_GET_INDEX
-#endif
-#ifdef INPUT1_GET_INDEX_RAW
-#    undef INPUT1_GET_INDEX_RAW
-#endif
-#ifdef INPUT1_VIEW_OFFSET
-#    undef INPUT1_VIEW_OFFSET
-#endif
-#ifdef INPUT1_LENGTH
-#    undef INPUT1_LENGTH
-#endif
-#ifdef INPUT1_DIMS
-#    undef INPUT1_DIMS
-#endif
-#ifdef INPUT1_SIMPLE
-#    undef INPUT1_SIMPLE
-#endif
-#ifdef INPUT1_GROUPED
-#    undef INPUT1_GROUPED
-#endif
-#ifdef INPUT1_LAYOUT_BFYX
-#    undef INPUT1_LAYOUT_BFYX
-#endif
-#ifdef INPUT1_TYPE
-#    undef INPUT1_TYPE
-#endif
-#ifdef INPUT1_VAL_MAX
-#    undef INPUT1_VAL_MAX
-#endif
-#ifdef INPUT1_VAL_MIN
-#    undef INPUT1_VAL_MIN
-#endif
-#ifdef INPUT1_VAL_ONE
-#    undef INPUT1_VAL_ONE
-#endif
-#ifdef INPUT1_VAL_ZERO
-#    undef INPUT1_VAL_ZERO
-#endif
-#ifdef TO_INPUT1_TYPE
-#    undef TO_INPUT1_TYPE
-#endif
-#ifdef TO_INPUT1_TYPE_SAT
-#    undef TO_INPUT1_TYPE_SAT
-#endif
-#ifdef AS_INPUT1_TYPE
-#    undef AS_INPUT1_TYPE
-#endif
-#ifdef INPUT1_MAX_FUNC
-#    undef INPUT1_MAX_FUNC
-#endif
-#ifdef INPUT1_MIN_FUNC
-#    undef INPUT1_MIN_FUNC
-#endif
-#ifdef INPUT1_ABS_FUNC
-#    undef INPUT1_ABS_FUNC
-#endif
-#ifdef INPUT1_TYPE_SIZE
-#    undef INPUT1_TYPE_SIZE
-#endif
-#ifdef INPUT1_IS_FP
-#    undef INPUT1_IS_FP
-#endif
-#ifdef INPUT1_OFFSET
-#    undef INPUT1_OFFSET
-#endif
-#ifdef INPUT1_PAD_BEFORE
-#    undef INPUT1_PAD_BEFORE
-#endif
-#ifdef INPUT1_PAD_AFTER
-#    undef INPUT1_PAD_AFTER
-#endif
-#ifdef INPUT2_SIZE_X
-#    undef INPUT2_SIZE_X
-#endif
-#ifdef INPUT2_SIZE_Y
-#    undef INPUT2_SIZE_Y
-#endif
-#ifdef INPUT2_SIZE_Z
-#    undef INPUT2_SIZE_Z
-#endif
-#ifdef INPUT2_SIZE_W
-#    undef INPUT2_SIZE_W
-#endif
-#ifdef INPUT2_SIZE_U
-#    undef INPUT2_SIZE_U
-#endif
-#ifdef INPUT2_SIZE_V
-#    undef INPUT2_SIZE_V
-#endif
-#ifdef INPUT2_FEATURE_NUM
-#    undef INPUT2_FEATURE_NUM
-#endif
-#ifdef INPUT2_BATCH_NUM
-#    undef INPUT2_BATCH_NUM
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_X
-#    undef INPUT2_PAD_BEFORE_SIZE_X
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_Y
-#    undef INPUT2_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_Z
-#    undef INPUT2_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_W
-#    undef INPUT2_PAD_BEFORE_SIZE_W
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_U
-#    undef INPUT2_PAD_BEFORE_SIZE_U
-#endif
-#ifdef INPUT2_PAD_BEFORE_SIZE_V
-#    undef INPUT2_PAD_BEFORE_SIZE_V
-#endif
-#ifdef INPUT2_PAD_BEFORE_FEATURE_NUM
-#    undef INPUT2_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef INPUT2_PAD_BEFORE_BATCH_NUM
-#    undef INPUT2_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_X
-#    undef INPUT2_PAD_AFTER_SIZE_X
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_Y
-#    undef INPUT2_PAD_AFTER_SIZE_Y
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_Z
-#    undef INPUT2_PAD_AFTER_SIZE_Z
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_W
-#    undef INPUT2_PAD_AFTER_SIZE_W
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_U
-#    undef INPUT2_PAD_AFTER_SIZE_U
-#endif
-#ifdef INPUT2_PAD_AFTER_SIZE_V
-#    undef INPUT2_PAD_AFTER_SIZE_V
-#endif
-#ifdef INPUT2_PAD_AFTER_FEATURE_NUM
-#    undef INPUT2_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef INPUT2_PAD_AFTER_BATCH_NUM
-#    undef INPUT2_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef INPUT2_X_PITCH
-#    undef INPUT2_X_PITCH
-#endif
-#ifdef INPUT2_Y_PITCH
-#    undef INPUT2_Y_PITCH
-#endif
-#ifdef INPUT2_Z_PITCH
-#    undef INPUT2_Z_PITCH
-#endif
-#ifdef INPUT2_W_PITCH
-#    undef INPUT2_W_PITCH
-#endif
-#ifdef INPUT2_U_PITCH
-#    undef INPUT2_U_PITCH
-#endif
-#ifdef INPUT2_V_PITCH
-#    undef INPUT2_V_PITCH
-#endif
-#ifdef INPUT2_FEATURE_PITCH
-#    undef INPUT2_FEATURE_PITCH
-#endif
-#ifdef INPUT2_BATCH_PITCH
-#    undef INPUT2_BATCH_PITCH
-#endif
-#ifdef INPUT2_GET_INDEX_SAFE
-#    undef INPUT2_GET_INDEX_SAFE
-#endif
-#ifdef INPUT2_GET_INDEX
-#    undef INPUT2_GET_INDEX
-#endif
-#ifdef INPUT2_GET_INDEX_RAW
-#    undef INPUT2_GET_INDEX_RAW
-#endif
-#ifdef INPUT2_VIEW_OFFSET
-#    undef INPUT2_VIEW_OFFSET
-#endif
-#ifdef INPUT2_LENGTH
-#    undef INPUT2_LENGTH
-#endif
-#ifdef INPUT2_DIMS
-#    undef INPUT2_DIMS
-#endif
-#ifdef INPUT2_SIMPLE
-#    undef INPUT2_SIMPLE
-#endif
-#ifdef INPUT2_GROUPED
-#    undef INPUT2_GROUPED
-#endif
-#ifdef INPUT2_LAYOUT_BFYX
-#    undef INPUT2_LAYOUT_BFYX
-#endif
-#ifdef INPUT2_TYPE
-#    undef INPUT2_TYPE
-#endif
-#ifdef INPUT2_VAL_MAX
-#    undef INPUT2_VAL_MAX
-#endif
-#ifdef INPUT2_VAL_MIN
-#    undef INPUT2_VAL_MIN
-#endif
-#ifdef INPUT2_VAL_ONE
-#    undef INPUT2_VAL_ONE
-#endif
-#ifdef INPUT2_VAL_ZERO
-#    undef INPUT2_VAL_ZERO
-#endif
-#ifdef TO_INPUT2_TYPE
-#    undef TO_INPUT2_TYPE
-#endif
-#ifdef TO_INPUT2_TYPE_SAT
-#    undef TO_INPUT2_TYPE_SAT
-#endif
-#ifdef AS_INPUT2_TYPE
-#    undef AS_INPUT2_TYPE
-#endif
-#ifdef INPUT2_MAX_FUNC
-#    undef INPUT2_MAX_FUNC
-#endif
-#ifdef INPUT2_MIN_FUNC
-#    undef INPUT2_MIN_FUNC
-#endif
-#ifdef INPUT2_ABS_FUNC
-#    undef INPUT2_ABS_FUNC
-#endif
-#ifdef INPUT2_TYPE_SIZE
-#    undef INPUT2_TYPE_SIZE
-#endif
-#ifdef INPUT2_IS_FP
-#    undef INPUT2_IS_FP
-#endif
-#ifdef INPUT2_OFFSET
-#    undef INPUT2_OFFSET
-#endif
-#ifdef INPUT2_PAD_BEFORE
-#    undef INPUT2_PAD_BEFORE
-#endif
-#ifdef INPUT2_PAD_AFTER
-#    undef INPUT2_PAD_AFTER
-#endif
-#ifdef INPUT3_SIZE_X
-#    undef INPUT3_SIZE_X
-#endif
-#ifdef INPUT3_SIZE_Y
-#    undef INPUT3_SIZE_Y
-#endif
-#ifdef INPUT3_SIZE_Z
-#    undef INPUT3_SIZE_Z
-#endif
-#ifdef INPUT3_SIZE_W
-#    undef INPUT3_SIZE_W
-#endif
-#ifdef INPUT3_SIZE_U
-#    undef INPUT3_SIZE_U
-#endif
-#ifdef INPUT3_SIZE_V
-#    undef INPUT3_SIZE_V
-#endif
-#ifdef INPUT3_FEATURE_NUM
-#    undef INPUT3_FEATURE_NUM
-#endif
-#ifdef INPUT3_BATCH_NUM
-#    undef INPUT3_BATCH_NUM
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_X
-#    undef INPUT3_PAD_BEFORE_SIZE_X
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_Y
-#    undef INPUT3_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_Z
-#    undef INPUT3_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_W
-#    undef INPUT3_PAD_BEFORE_SIZE_W
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_U
-#    undef INPUT3_PAD_BEFORE_SIZE_U
-#endif
-#ifdef INPUT3_PAD_BEFORE_SIZE_V
-#    undef INPUT3_PAD_BEFORE_SIZE_V
-#endif
-#ifdef INPUT3_PAD_BEFORE_FEATURE_NUM
-#    undef INPUT3_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef INPUT3_PAD_BEFORE_BATCH_NUM
-#    undef INPUT3_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_X
-#    undef INPUT3_PAD_AFTER_SIZE_X
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_Y
-#    undef INPUT3_PAD_AFTER_SIZE_Y
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_Z
-#    undef INPUT3_PAD_AFTER_SIZE_Z
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_W
-#    undef INPUT3_PAD_AFTER_SIZE_W
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_U
-#    undef INPUT3_PAD_AFTER_SIZE_U
-#endif
-#ifdef INPUT3_PAD_AFTER_SIZE_V
-#    undef INPUT3_PAD_AFTER_SIZE_V
-#endif
-#ifdef INPUT3_PAD_AFTER_FEATURE_NUM
-#    undef INPUT3_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef INPUT3_PAD_AFTER_BATCH_NUM
-#    undef INPUT3_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef INPUT3_X_PITCH
-#    undef INPUT3_X_PITCH
-#endif
-#ifdef INPUT3_Y_PITCH
-#    undef INPUT3_Y_PITCH
-#endif
-#ifdef INPUT3_Z_PITCH
-#    undef INPUT3_Z_PITCH
-#endif
-#ifdef INPUT3_W_PITCH
-#    undef INPUT3_W_PITCH
-#endif
-#ifdef INPUT3_U_PITCH
-#    undef INPUT3_U_PITCH
-#endif
-#ifdef INPUT3_V_PITCH
-#    undef INPUT3_V_PITCH
-#endif
-#ifdef INPUT3_FEATURE_PITCH
-#    undef INPUT3_FEATURE_PITCH
-#endif
-#ifdef INPUT3_BATCH_PITCH
-#    undef INPUT3_BATCH_PITCH
-#endif
-#ifdef INPUT3_GET_INDEX_SAFE
-#    undef INPUT3_GET_INDEX_SAFE
-#endif
-#ifdef INPUT3_GET_INDEX
-#    undef INPUT3_GET_INDEX
-#endif
-#ifdef INPUT3_GET_INDEX_RAW
-#    undef INPUT3_GET_INDEX_RAW
-#endif
-#ifdef INPUT3_VIEW_OFFSET
-#    undef INPUT3_VIEW_OFFSET
-#endif
-#ifdef INPUT3_LENGTH
-#    undef INPUT3_LENGTH
-#endif
-#ifdef INPUT3_DIMS
-#    undef INPUT3_DIMS
-#endif
-#ifdef INPUT3_SIMPLE
-#    undef INPUT3_SIMPLE
-#endif
-#ifdef INPUT3_GROUPED
-#    undef INPUT3_GROUPED
-#endif
-#ifdef INPUT3_LAYOUT_BFYX
-#    undef INPUT3_LAYOUT_BFYX
-#endif
-#ifdef INPUT3_TYPE
-#    undef INPUT3_TYPE
-#endif
-#ifdef INPUT3_VAL_MAX
-#    undef INPUT3_VAL_MAX
-#endif
-#ifdef INPUT3_VAL_MIN
-#    undef INPUT3_VAL_MIN
-#endif
-#ifdef INPUT3_VAL_ONE
-#    undef INPUT3_VAL_ONE
-#endif
-#ifdef INPUT3_VAL_ZERO
-#    undef INPUT3_VAL_ZERO
-#endif
-#ifdef TO_INPUT3_TYPE
-#    undef TO_INPUT3_TYPE
-#endif
-#ifdef TO_INPUT3_TYPE_SAT
-#    undef TO_INPUT3_TYPE_SAT
-#endif
-#ifdef AS_INPUT3_TYPE
-#    undef AS_INPUT3_TYPE
-#endif
-#ifdef INPUT3_MAX_FUNC
-#    undef INPUT3_MAX_FUNC
-#endif
-#ifdef INPUT3_MIN_FUNC
-#    undef INPUT3_MIN_FUNC
-#endif
-#ifdef INPUT3_ABS_FUNC
-#    undef INPUT3_ABS_FUNC
-#endif
-#ifdef INPUT3_TYPE_SIZE
-#    undef INPUT3_TYPE_SIZE
-#endif
-#ifdef INPUT3_IS_FP
-#    undef INPUT3_IS_FP
-#endif
-#ifdef INPUT3_OFFSET
-#    undef INPUT3_OFFSET
-#endif
-#ifdef INPUT3_PAD_BEFORE
-#    undef INPUT3_PAD_BEFORE
-#endif
-#ifdef INPUT3_PAD_AFTER
-#    undef INPUT3_PAD_AFTER
-#endif
-#ifdef INPUT4_SIZE_X
-#    undef INPUT4_SIZE_X
-#endif
-#ifdef INPUT4_SIZE_Y
-#    undef INPUT4_SIZE_Y
-#endif
-#ifdef INPUT4_SIZE_Z
-#    undef INPUT4_SIZE_Z
-#endif
-#ifdef INPUT4_SIZE_W
-#    undef INPUT4_SIZE_W
-#endif
-#ifdef INPUT4_SIZE_U
-#    undef INPUT4_SIZE_U
-#endif
-#ifdef INPUT4_SIZE_V
-#    undef INPUT4_SIZE_V
-#endif
-#ifdef INPUT4_FEATURE_NUM
-#    undef INPUT4_FEATURE_NUM
-#endif
-#ifdef INPUT4_BATCH_NUM
-#    undef INPUT4_BATCH_NUM
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_X
-#    undef INPUT4_PAD_BEFORE_SIZE_X
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_Y
-#    undef INPUT4_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_Z
-#    undef INPUT4_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_W
-#    undef INPUT4_PAD_BEFORE_SIZE_W
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_U
-#    undef INPUT4_PAD_BEFORE_SIZE_U
-#endif
-#ifdef INPUT4_PAD_BEFORE_SIZE_V
-#    undef INPUT4_PAD_BEFORE_SIZE_V
-#endif
-#ifdef INPUT4_PAD_BEFORE_FEATURE_NUM
-#    undef INPUT4_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef INPUT4_PAD_BEFORE_BATCH_NUM
-#    undef INPUT4_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_X
-#    undef INPUT4_PAD_AFTER_SIZE_X
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_Y
-#    undef INPUT4_PAD_AFTER_SIZE_Y
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_Z
-#    undef INPUT4_PAD_AFTER_SIZE_Z
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_W
-#    undef INPUT4_PAD_AFTER_SIZE_W
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_U
-#    undef INPUT4_PAD_AFTER_SIZE_U
-#endif
-#ifdef INPUT4_PAD_AFTER_SIZE_V
-#    undef INPUT4_PAD_AFTER_SIZE_V
-#endif
-#ifdef INPUT4_PAD_AFTER_FEATURE_NUM
-#    undef INPUT4_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef INPUT4_PAD_AFTER_BATCH_NUM
-#    undef INPUT4_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef INPUT4_X_PITCH
-#    undef INPUT4_X_PITCH
-#endif
-#ifdef INPUT4_Y_PITCH
-#    undef INPUT4_Y_PITCH
-#endif
-#ifdef INPUT4_Z_PITCH
-#    undef INPUT4_Z_PITCH
-#endif
-#ifdef INPUT4_W_PITCH
-#    undef INPUT4_W_PITCH
-#endif
-#ifdef INPUT4_U_PITCH
-#    undef INPUT4_U_PITCH
-#endif
-#ifdef INPUT4_V_PITCH
-#    undef INPUT4_V_PITCH
-#endif
-#ifdef INPUT4_FEATURE_PITCH
-#    undef INPUT4_FEATURE_PITCH
-#endif
-#ifdef INPUT4_BATCH_PITCH
-#    undef INPUT4_BATCH_PITCH
-#endif
-#ifdef INPUT4_GET_INDEX_SAFE
-#    undef INPUT4_GET_INDEX_SAFE
-#endif
-#ifdef INPUT4_GET_INDEX
-#    undef INPUT4_GET_INDEX
-#endif
-#ifdef INPUT4_GET_INDEX_RAW
-#    undef INPUT4_GET_INDEX_RAW
-#endif
-#ifdef INPUT4_VIEW_OFFSET
-#    undef INPUT4_VIEW_OFFSET
-#endif
-#ifdef INPUT4_LENGTH
-#    undef INPUT4_LENGTH
-#endif
-#ifdef INPUT4_DIMS
-#    undef INPUT4_DIMS
-#endif
-#ifdef INPUT4_SIMPLE
-#    undef INPUT4_SIMPLE
-#endif
-#ifdef INPUT4_GROUPED
-#    undef INPUT4_GROUPED
-#endif
-#ifdef INPUT4_LAYOUT_BFYX
-#    undef INPUT4_LAYOUT_BFYX
-#endif
-#ifdef INPUT4_TYPE
-#    undef INPUT4_TYPE
-#endif
-#ifdef INPUT4_VAL_MAX
-#    undef INPUT4_VAL_MAX
-#endif
-#ifdef INPUT4_VAL_MIN
-#    undef INPUT4_VAL_MIN
-#endif
-#ifdef INPUT4_VAL_ONE
-#    undef INPUT4_VAL_ONE
-#endif
-#ifdef INPUT4_VAL_ZERO
-#    undef INPUT4_VAL_ZERO
-#endif
-#ifdef TO_INPUT4_TYPE
-#    undef TO_INPUT4_TYPE
-#endif
-#ifdef TO_INPUT4_TYPE_SAT
-#    undef TO_INPUT4_TYPE_SAT
-#endif
-#ifdef AS_INPUT4_TYPE
-#    undef AS_INPUT4_TYPE
-#endif
-#ifdef INPUT4_MAX_FUNC
-#    undef INPUT4_MAX_FUNC
-#endif
-#ifdef INPUT4_MIN_FUNC
-#    undef INPUT4_MIN_FUNC
-#endif
-#ifdef INPUT4_ABS_FUNC
-#    undef INPUT4_ABS_FUNC
-#endif
-#ifdef INPUT4_TYPE_SIZE
-#    undef INPUT4_TYPE_SIZE
-#endif
-#ifdef INPUT4_IS_FP
-#    undef INPUT4_IS_FP
-#endif
-#ifdef INPUT4_OFFSET
-#    undef INPUT4_OFFSET
-#endif
-#ifdef INPUT4_SIZES_DATA
-#    undef INPUT4_SIZES_DATA
-#endif
-#ifdef INPUT4_PITCHES
-#    undef INPUT4_PITCHES
-#endif
-#ifdef INPUT4_PAD_BEFORE
-#    undef INPUT4_PAD_BEFORE
-#endif
-#ifdef INPUT4_PAD_AFTER
-#    undef INPUT4_PAD_AFTER
-#endif
-#ifdef OUTPUT_SIZE_X
-#    undef OUTPUT_SIZE_X
-#endif
-#ifdef OUTPUT_SIZE_Y
-#    undef OUTPUT_SIZE_Y
-#endif
-#ifdef OUTPUT_SIZE_Z
-#    undef OUTPUT_SIZE_Z
-#endif
-#ifdef OUTPUT_SIZE_W
-#    undef OUTPUT_SIZE_W
-#endif
-#ifdef OUTPUT_SIZE_U
-#    undef OUTPUT_SIZE_U
-#endif
-#ifdef OUTPUT_SIZE_V
-#    undef OUTPUT_SIZE_V
-#endif
-#ifdef OUTPUT_FEATURE_NUM
-#    undef OUTPUT_FEATURE_NUM
-#endif
-#ifdef OUTPUT_BATCH_NUM
-#    undef OUTPUT_BATCH_NUM
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_X
-#    undef OUTPUT_PAD_BEFORE_SIZE_X
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_Y
-#    undef OUTPUT_PAD_BEFORE_SIZE_Y
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_Z
-#    undef OUTPUT_PAD_BEFORE_SIZE_Z
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_W
-#    undef OUTPUT_PAD_BEFORE_SIZE_W
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_U
-#    undef OUTPUT_PAD_BEFORE_SIZE_U
-#endif
-#ifdef OUTPUT_PAD_BEFORE_SIZE_V
-#    undef OUTPUT_PAD_BEFORE_SIZE_V
-#endif
-#ifdef OUTPUT_PAD_BEFORE_FEATURE_NUM
-#    undef OUTPUT_PAD_BEFORE_FEATURE_NUM
-#endif
-#ifdef OUTPUT_PAD_BEFORE_BATCH_NUM
-#    undef OUTPUT_PAD_BEFORE_BATCH_NUM
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_X
-#    undef OUTPUT_PAD_AFTER_SIZE_X
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_Y
-#    undef OUTPUT_PAD_AFTER_SIZE_Y
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_Z
-#    undef OUTPUT_PAD_AFTER_SIZE_Z
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_W
-#    undef OUTPUT_PAD_AFTER_SIZE_W
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_U
-#    undef OUTPUT_PAD_AFTER_SIZE_U
-#endif
-#ifdef OUTPUT_PAD_AFTER_SIZE_V
-#    undef OUTPUT_PAD_AFTER_SIZE_V
-#endif
-#ifdef OUTPUT_PAD_AFTER_FEATURE_NUM
-#    undef OUTPUT_PAD_AFTER_FEATURE_NUM
-#endif
-#ifdef OUTPUT_PAD_AFTER_BATCH_NUM
-#    undef OUTPUT_PAD_AFTER_BATCH_NUM
-#endif
-#ifdef OUTPUT_X_PITCH
-#    undef OUTPUT_X_PITCH
-#endif
-#ifdef OUTPUT_Y_PITCH
-#    undef OUTPUT_Y_PITCH
-#endif
-#ifdef OUTPUT_Z_PITCH
-#    undef OUTPUT_Z_PITCH
-#endif
-#ifdef OUTPUT_W_PITCH
-#    undef OUTPUT_W_PITCH
-#endif
-#ifdef OUTPUT_U_PITCH
-#    undef OUTPUT_U_PITCH
-#endif
-#ifdef OUTPUT_V_PITCH
-#    undef OUTPUT_V_PITCH
-#endif
-#ifdef OUTPUT_FEATURE_PITCH
-#    undef OUTPUT_FEATURE_PITCH
-#endif
-#ifdef OUTPUT_BATCH_PITCH
-#    undef OUTPUT_BATCH_PITCH
-#endif
-#ifdef OUTPUT_GET_INDEX_SAFE
-#    undef OUTPUT_GET_INDEX_SAFE
-#endif
-#ifdef OUTPUT_GET_INDEX
-#    undef OUTPUT_GET_INDEX
-#endif
-#ifdef OUTPUT_GET_INDEX_RAW
-#    undef OUTPUT_GET_INDEX_RAW
-#endif
-#ifdef OUTPUT_VIEW_OFFSET
-#    undef OUTPUT_VIEW_OFFSET
-#endif
-#ifdef OUTPUT_LENGTH
-#    undef OUTPUT_LENGTH
-#endif
-#ifdef OUTPUT_DIMS
-#    undef OUTPUT_DIMS
-#endif
-#ifdef OUTPUT_SIMPLE
-#    undef OUTPUT_SIMPLE
-#endif
-#ifdef OUTPUT_GROUPED
-#    undef OUTPUT_GROUPED
-#endif
-#ifdef OUTPUT_LAYOUT_BFYX
-#    undef OUTPUT_LAYOUT_BFYX
-#endif
-#ifdef OUTPUT_TYPE
-#    undef OUTPUT_TYPE
-#endif
-#ifdef OUTPUT_VAL_MAX
-#    undef OUTPUT_VAL_MAX
-#endif
-#ifdef OUTPUT_VAL_MIN
-#    undef OUTPUT_VAL_MIN
-#endif
-#ifdef OUTPUT_VAL_ONE
-#    undef OUTPUT_VAL_ONE
-#endif
-#ifdef OUTPUT_VAL_ZERO
-#    undef OUTPUT_VAL_ZERO
-#endif
-#ifdef TO_OUTPUT_TYPE
-#    undef TO_OUTPUT_TYPE
-#endif
-#ifdef TO_OUTPUT_TYPE_SAT
-#    undef TO_OUTPUT_TYPE_SAT
-#endif
-#ifdef AS_OUTPUT_TYPE
-#    undef AS_OUTPUT_TYPE
-#endif
-#ifdef OUTPUT_MAX_FUNC
-#    undef OUTPUT_MAX_FUNC
-#endif
-#ifdef OUTPUT_MIN_FUNC
-#    undef OUTPUT_MIN_FUNC
-#endif
-#ifdef OUTPUT_ABS_FUNC
-#    undef OUTPUT_ABS_FUNC
-#endif
-#ifdef OUTPUT_TYPE_SIZE
-#    undef OUTPUT_TYPE_SIZE
-#endif
-#ifdef OUTPUT_IS_FP
-#    undef OUTPUT_IS_FP
-#endif
-#ifdef OUTPUT_OFFSET
-#    undef OUTPUT_OFFSET
-#endif
-#ifdef OUTPUT_PAD_BEFORE
-#    undef OUTPUT_PAD_BEFORE
-#endif
-#ifdef OUTPUT_PAD_AFTER
-#    undef OUTPUT_PAD_AFTER
-#endif
-#ifdef IS_DYNAMIC
-#    undef IS_DYNAMIC
-#endif
-#ifdef OPTIONAL_SHAPE_INFO_ARG
-#    undef OPTIONAL_SHAPE_INFO_ARG
-#endif
-#ifdef OPTIONAL_SHAPE_INFO_TENSOR
-#    undef OPTIONAL_SHAPE_INFO_TENSOR
-#endif
-#ifdef LayerID
-#    undef LayerID
-#endif
-#ifdef BROADCAST_GROUP_SIZE
-#    undef BROADCAST_GROUP_SIZE
-#endif
-#ifdef DO_BROADCAST_KEY_VALUE
-#    undef DO_BROADCAST_KEY_VALUE
-#endif
-#ifdef IS_CAUSAL
-#    undef IS_CAUSAL
-#endif
-#ifdef HAS_ATTN_MASK_INPUT
-#    undef HAS_ATTN_MASK_INPUT
-#endif
-#ifdef HAS_SCALE_INPUT
-#    undef HAS_SCALE_INPUT
-#endif
-#ifdef INPUT0_DIMS_ORDER
-#    undef INPUT0_DIMS_ORDER
-#endif
-#ifdef INPUT1_DIMS_ORDER
-#    undef INPUT1_DIMS_ORDER
-#endif
-#ifdef INPUT2_DIMS_ORDER
-#    undef INPUT2_DIMS_ORDER
-#endif
-#ifdef TARGET_SEQ_LEN
-#    undef TARGET_SEQ_LEN
-#endif
-#ifdef NUM_HEADS
-#    undef NUM_HEADS
-#endif
-#ifdef NUM_KV_HEADS
-#    undef NUM_KV_HEADS
-#endif
-#ifdef SOURCE_SEQ_LEN
-#    undef SOURCE_SEQ_LEN
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_TYPE
-#    undef SOFTMAX_ACCUMULATOR_TYPE
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_VAL_MAX
-#    undef SOFTMAX_ACCUMULATOR_VAL_MAX
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_VAL_MIN
-#    undef SOFTMAX_ACCUMULATOR_VAL_MIN
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_VAL_ONE
-#    undef SOFTMAX_ACCUMULATOR_VAL_ONE
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_VAL_ZERO
-#    undef SOFTMAX_ACCUMULATOR_VAL_ZERO
-#endif
-#ifdef TO_SOFTMAX_ACCUMULATOR_TYPE
-#    undef TO_SOFTMAX_ACCUMULATOR_TYPE
-#endif
-#ifdef TO_SOFTMAX_ACCUMULATOR_TYPE_SAT
-#    undef TO_SOFTMAX_ACCUMULATOR_TYPE_SAT
-#endif
-#ifdef AS_SOFTMAX_ACCUMULATOR_TYPE
-#    undef AS_SOFTMAX_ACCUMULATOR_TYPE
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_MAX_FUNC
-#    undef SOFTMAX_ACCUMULATOR_MAX_FUNC
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_MIN_FUNC
-#    undef SOFTMAX_ACCUMULATOR_MIN_FUNC
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_ABS_FUNC
-#    undef SOFTMAX_ACCUMULATOR_ABS_FUNC
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_TYPE_SIZE
-#    undef SOFTMAX_ACCUMULATOR_TYPE_SIZE
-#endif
-#ifdef SOFTMAX_ACCUMULATOR_IS_FP
-#    undef SOFTMAX_ACCUMULATOR_IS_FP
-#endif
-#ifdef SUBGROUP_SIZE
-#    undef SUBGROUP_SIZE
-#endif
-#ifdef HEAD_SIZE
-#    undef HEAD_SIZE
-#endif
-#ifdef SEQ_LEN_PARTITION_SIZE
-#    undef SEQ_LEN_PARTITION_SIZE
-#endif
-#ifdef TARGET_SEQ_LEN_BLOCK_SIZE
-#    undef TARGET_SEQ_LEN_BLOCK_SIZE
-#endif
-#ifdef SDPA_STAGE_0
-#    undef SDPA_STAGE_0
-#endif
-#ifdef SG_SCALE_FACTOR
-#    undef SG_SCALE_FACTOR
-#endif
-
