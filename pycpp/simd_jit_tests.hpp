@@ -336,10 +336,97 @@ void ctrlflow_unit_tests() {
     test_if_else(20, 10, 10);
 }
 
-#include "../include/misc.hpp"
-
 extern "C" void test() {
     unit_tests();
     expr_tests();
     ctrlflow_unit_tests();
+}
+
+#include "simple_perf.hpp"
+
+extern "C" void tput(const char* op_name, const int UNROLL) {
+    LinuxPerf p({{"C", 0}, {"I", 0}});
+
+    auto get_tput_kernel = [](std::string op, const int UNROLL) {
+        auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
+        auto cnt = jit->get_arg(0);
+        auto idx = jit->get_sreg();
+
+        auto vr0 = jit->get_vreg();
+        auto vr1 = jit->get_vreg();
+        auto vr2 = jit->get_vreg();
+        auto vr3 = jit->get_vreg();
+
+        auto vr4 = jit->get_vreg();
+        auto vr5 = jit->get_vreg();
+        auto vr6 = jit->get_vreg();
+        auto vr7 = jit->get_vreg();
+
+        XbyakVReg v0 = vr0;
+        XbyakVReg v1 = vr1;
+        XbyakVReg v2 = vr2;
+        XbyakVReg v3 = vr3;
+        XbyakVReg v4 = vr4;
+        XbyakVReg v5 = vr5;
+        XbyakVReg v6 = vr6;
+        XbyakVReg v7 = vr7;
+
+        idx = 0;
+        jit->do_while_(idx < cnt, [&] {
+            for (int i = 0; i < UNROLL; i++) {
+                if (op == "fabs") {
+                    jit->fabs(v1.s4, v0.s4);
+                    jit->fabs(v3.s4, v2.s4);
+                    jit->fabs(v5.s4, v4.s4);
+                    jit->fabs(v7.s4, v6.s4);
+                }
+                if (op == "fmla") {
+                    jit->fmla(v1.s4, v0.s4, v0.s4);
+                    jit->fmla(v3.s4, v2.s4, v2.s4);
+                    jit->fmla(v5.s4, v4.s4, v4.s4);
+                    jit->fmla(v7.s4, v6.s4, v6.s4);
+                }
+                if (op == "fadd") {
+                    jit->fadd(v1.s4, v1.s4, v1.s4);
+                    jit->fadd(v2.s4, v2.s4, v2.s4);
+                    jit->fadd(v3.s4, v3.s4, v3.s4);
+                    jit->fadd(v4.s4, v4.s4, v4.s4);
+                }
+            }
+            idx++;
+        });
+        jit->return_();
+        jit->finalize();
+        return jit;
+    };
+
+    auto do_test = [&](std::string op, const int UNROLL) {
+        auto jit = get_tput_kernel(op, UNROLL);
+        // warm-up
+        (*jit)(1000);
+
+        p.start();
+        (*jit)(1000);
+        auto evs = p.stop();
+
+        auto loop_count = 1000 * UNROLL * 4;
+        auto cycles = (double)evs["C"] / loop_count;
+        auto instructions = (double)evs["I"] / loop_count;
+        printf("\e[0;36m %s %llu (ns) CPI : %.2f Instructions & Cycles: %.2f, %.2f (per iteration of %d loops) "
+               "\e[0m\n",
+               op.c_str(),
+               evs["ns"],
+               cycles / instructions,
+               instructions,
+               cycles,
+               loop_count);
+    };
+    std::string op(op_name);
+    if (op == "all") {
+        do_test("fabs", UNROLL);
+        do_test("fmla", UNROLL);
+        do_test("fadd", UNROLL);
+    } else {
+        do_test(op, UNROLL);
+    }
 }

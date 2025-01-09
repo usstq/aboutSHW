@@ -1545,17 +1545,13 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
             if (p->rhs->is_reg() && p->lhs->is_op() && (!p->is_op("-"))) {
                 // most likely optimization happens on lhs
                 std::swap(p->lhs, p->rhs);
-                std::cout << p->name() << ":" << __LINE__ << std::endl;
             }
             if (!p->rhs->rhs)
                 return true;
-            std::cout << p->name() << ":" << __LINE__ << std::endl;
             if (!p->rhs->lhs->is_reg() && !p->rhs->lhs->is_op())
                 return true;
-            std::cout << p->name() << ":" << __LINE__ << std::endl;
             if (!p->rhs->rhs->is_imm())
                 return true;
-            std::cout << p->name() << ":" << __LINE__ << std::endl;
             auto imm32 = p->rhs->rhs->as_imm32();
             if (imm32 < 0)
                 return true;
@@ -1573,7 +1569,6 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
             }
 
             if (p->rhs->is_op("*")) {
-                std::cout << p->name() << ":" << __LINE__ << std::endl;
                 p->shift_amount = 0;
                 while ((imm32 & 1) == 0) {
                     imm32 = imm32 >> 1;

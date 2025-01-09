@@ -2,9 +2,32 @@ import numpy as np
 import pycpp
 import sys
 import platform
+import argparse
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("fname")
+parser.add_argument("fargs", nargs='*')
+
+args = parser.parse_args()
+
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+fargs = []
+for a in args.fargs:
+    if is_number(a):
+        fargs.append(int(a))
+    elif isinstance(a, str):
+        fargs.append(a)
+    else:
+        raise Exception(f"unknown type args:{a}")
 
 extra_flags = ""
-
 if platform.machine() == "aarch64":
     extra_flags += "-L../thirdparty/xbyak_aarch64/lib/ -lxbyak_aarch64"
 
@@ -14,11 +37,10 @@ def mylib():
 // show predefined macro
 // echo | gcc -dM -E -march=native -
 #include "simd_jit_tests.hpp"
-
 '''
 
-
-mylib.test()
+func = getattr(mylib, args.fname)
+func(*fargs)
 sys.exit(0)
 
 np.random.seed(0)

@@ -94,7 +94,6 @@ code generation of register expression:
   
   so `||` will check if lhs or rhs is result of comparing OP, if not we simply report error (programer will change their writing style and insert comparing OP (for example `a != 0` will convert a into boolean) )
 
-
   Loss of short-circuiting: to be simpler, we ignore short-circuiting behaviour.
 
-
+# explore instruction tput
