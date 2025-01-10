@@ -6,7 +6,7 @@ cl_kernel_sources_ref = r'''
 // global_id [Hq, batch_size]
 __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
                     int batch_size,
-                    int L,                        // input seq-length
+                    int L,                            // input seq-length
                     __global half * param_output,      // [batch_size, L, Hq * head_size]
                     __global half * param_cache_k,     // [batch_size, Hk, max_kv_len, head_size]
                     __global half * param_cache_v,     // [batch_size, Hk, max_kv_len, head_size]
@@ -25,71 +25,91 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
 
     if (h >= Hq) return;
     if (b >= batch_size) return;
+    
+    int kv_h = h / head_group_size;
+    int H_qkv =  Hq + Hk + Hk;
 
-    int HQKV = Hq + Hk + Hk;
-    int hkv = h / head_group_size;
+    // [batch_size, Hk, max_kv_len, head_size]
+    size_t kv_cache_offset = ((b*Hk + kv_h) * max_kv_len + kv_seq_len0) * head_size;
+    __global half *k_cache_dest = param_cache_k + kv_cache_offset;
+    __global half *v_cache_dest = param_cache_v + kv_cache_offset;
+    
+     // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+    __global half *k_src = param_qkv + (b * L * H_qkv + Hq + kv_h) * head_size;
+    __global half *v_src = k_src + Hk * head_size;
+    
+    int qkv_L_stride = H_qkv * head_size;
 
-    __global half * cache_k = param_cache_k + (b * Hk + hkv)*max_kv_len*head_size;
-    __global half * cache_v = param_cache_v + (b * Hk + hkv)*max_kv_len*head_size;
-    __global float * attn_score = param_attn_score + (b * Hq + h)*max_kv_len;
-
-    // q: head_size
-    // k: head_size
-    // v: head_size
-
-    // concat k & v into cache
-    __global half * dst_k = cache_k + kv_seq_len0*head_size;
-    __global half * dst_v = cache_v + kv_seq_len0*head_size;
-
-    for(int l = 0; l < L; l++) {
-        __global half * cur_k = param_qkv + ((b * L + l) * HQKV + Hq + hkv) * head_size;
-        __global half * cur_v = cur_k + Hk*head_size;
-        for(int i = 0; i < head_size; i++) {
-            *dst_k++ = cur_k[i];
-            *dst_v++ = cur_v[i];
+    //concat kv cache
+    for (int l = 0; l < L; l++) {
+        for (int j = 0; j < head_size; j++) {
+            k_cache_dest[j] = k_src[j];
+            v_cache_dest[j] = v_src[j];
         }
+        k_src += qkv_L_stride;
+        v_src += qkv_L_stride;
+        k_cache_dest += head_size;
+        v_cache_dest += head_size;
     }
+    
+     // [batch_size, Hq, max_kv_len]
+    __global float * atten_score = param_attn_score + (b * Hq + h) * max_kv_len;
+    // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+    __global half * query =  param_qkv + (b * L * H_qkv  + h) * head_size;
+    
+     // [batch_size, Hk, max_kv_len, head_size]
+    __global half * key_start =  param_cache_k + (b * Hk + kv_h) * max_kv_len * head_size;
+    __global half * val_start =  param_cache_v + (b * Hk + kv_h) * max_kv_len * head_size;
+    
+    // [batch_size, L, Hq * head_size]
+    __global half * output =  param_output + (b * L * Hq + h) * head_size; 
 
-    __global half * q = param_qkv + ((b * L + 0) * HQKV + h) * head_size;
-    __global half * output = param_output + ((b * L + 0)*Hq + h)*head_size;
-
-    for(int ql = 0; ql < L; ql++, q += (HQKV * head_size), output += (Hq*head_size)) {
-        //////////// q * cache_k
-        __global half * pk = cache_k;
+    int m,n,k;
+    //loop per input sequence
+    for (m = 0; m < L; m++) {
+        __global half * key = key_start;
         float max_attn_score = -1e9f;
+        //loop past key
+        for (n = 0; n < (kv_seq_len0 + L); n++) {
+            float dot_product = 0.f;
+            //dot product 
+            for (k = 0; k < head_size; k++)
+                dot_product += query[k] * key[k];
 
-        // causal_mask & attn_mask is not applied explicitly
-        int kv_len = ql + kv_seq_len0;
-
-        for(int p = 0; p <= kv_len; p++, pk += head_size) {
-            float dot_prod = 0;
-            for(int i = 0; i < head_size; i++)
-                dot_prod += q[i] * pk[i];
-
-            dot_prod *= head_size_scaler;
-            attn_score[p] = dot_prod;
-            if (max_attn_score < dot_prod) max_attn_score = dot_prod;
+            dot_product *= head_size_scaler;
+            atten_score[n] = dot_product;
+            if (dot_product > max_attn_score)
+                max_attn_score = dot_product;
+            //update key to next sequence.
+            key += head_size;
         }
+        //update to next query sequence
+        query += qkv_L_stride;
 
-        //////////// softmax
-        float softmax_scale = 0;
-        for(int p = 0; p <= kv_len; p++) {
-            float a = exp(attn_score[p] - max_attn_score);
-            attn_score[p] = a;
-            softmax_scale += a;
+        //reduce sum
+        float sum = 0.f;
+        for (n = 0; n < (kv_seq_len0 + L); n++) {
+            float a = exp(atten_score[n] - max_attn_score);
+            atten_score[n] = a;
+            sum += atten_score[n];
         }
-        softmax_scale = 1.0f / softmax_scale;
+        //softmax
+        for (n = 0; n < (kv_seq_len0 + L); n++)
+            atten_score[n]= atten_score[n] / sum;
 
-        //////////// attn_score * cache_v
-        for(int i = 0; i < head_size; i++) {
-            __global half * pv = cache_v;
-            float sum = 0;
-            for(int p = 0; p <= kv_len; p++, pv += head_size) {
-                float scale = attn_score[p] * softmax_scale;
-                sum += scale * pv[i];
+        //atten_score * v
+        for (n = 0; n < head_size; n++) {
+            // [batch_size, Hk, max_kv_len, head_size]
+            __global half * val = val_start;
+            float output_val = 0.f;
+            for (k = 0; k < (kv_seq_len0 + L); k++) {
+                output_val += atten_score[k] * val[n];
+                val += head_size;
             }
-            output[i] = sum;
+            output[n]= output_val;
         }
+        //Update to next output.
+        output += Hq * head_size;
     }
 }
 '''
@@ -707,7 +727,6 @@ class MHA:
             self.cache_v = cl.tensor(kv_cache_size, np.dtype(np.float16))
 
         # print(self.head_size_scaler, L0, qkv.shape, self.head_cnt_q, self.head_cnt_k, self.S,  self.head_group_size, self.cache_k.shape, self.attn_score.shape)
-
         # attn_score is just a temp/scratch cl-buffer
         if self.use_ref:
             attn_score = cl.tensor([B, self.head_cnt_q, self.max_kv_len], np.dtype(np.float32))
@@ -791,7 +810,7 @@ if __name__ == "__main__":
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
     first_token = 512*2-4  #KV_BLOCK - 2
-    second_token_num = 80
+    second_token_num = 2
     KV_LEN = 0
     for idx in range(second_token_num):
         L0 = KV_LEN
@@ -801,8 +820,8 @@ if __name__ == "__main__":
             L1 = 1
         KV_LEN += L1
         total_part_num = (KV_LEN + KV_BLOCK - 1) // KV_BLOCK
-        print(f'test {L0=} {L1=} {KV_LEN=} {total_part_num=}')
-        attention_mask = torch.randn([B, KV_LEN], dtype=torch.float32)
+        attention_mask = torch.zeros([B, KV_LEN], dtype=torch.float32)
+        print(f'test {L0=} {L1=} {KV_LEN=} {total_part_num=} attention_mask.shape: {attention_mask.shape}')
         # [B, L1, (Hq + Hk + Hv) * S)]
         qkv = utils.to_cl(torch.randn([B, L1, (H + HK + HK) * S], dtype=torch.float16))
         result_opt1 = opt(qkv, attention_mask)
