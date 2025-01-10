@@ -371,9 +371,76 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
         XbyakVReg v6 = vr6;
         XbyakVReg v7 = vr7;
 
+        auto vr8 = jit->get_vreg();
+        auto vr9 = jit->get_vreg();
+        auto vra = jit->get_vreg();
+        auto vrb = jit->get_vreg();
+
+        auto vrc = jit->get_vreg();
+        auto vrd = jit->get_vreg();
+        auto vre = jit->get_vreg();
+        auto vrf = jit->get_vreg();
+#ifdef __x86_64__
+        jit->vpxor(vr0, vr0, vr0);
+        jit->vpxor(vr1, vr1, vr1);
+        jit->vpxor(vr2, vr2, vr2);
+        jit->vpxor(vr3, vr3, vr3);
+
+        jit->vpxor(vr4, vr4, vr4);
+        jit->vpxor(vr5, vr5, vr5);
+        jit->vpxor(vr6, vr6, vr6);
+        jit->vpxor(vr7, vr7, vr7);
+
+        jit->vpxor(vr8, vr8, vr8);
+        jit->vpxor(vr9, vr9, vr9);
+        jit->vpxor(vra, vra, vra);
+        jit->vpxor(vrb, vrb, vrb);
+        jit->vpxor(vrc, vrc, vrc);
+        jit->vpxor(vrd, vrd, vrd);
+        jit->vpxor(vre, vre, vre);
+        jit->vpxor(vrf, vrf, vrf);
+#endif
         idx = 0;
         jit->do_while_(idx < cnt, [&] {
             for (int i = 0; i < UNROLL; i++) {
+#ifdef __x86_64__
+                if (op == "fabs") {
+                    jit->vpabsd(v0, v0);
+                    jit->vpabsd(v1, v1);
+                    jit->vpabsd(v2, v2);
+                    jit->vpabsd(v3, v3);
+                }
+                if (op == "fma") {
+                    jit->vfmadd231ps(v1, v0, v0);
+                    jit->vfmadd231ps(v3, v2, v2);
+                    jit->vfmadd231ps(v5, v4, v4);
+                    jit->vfmadd231ps(v7, v6, v6);
+
+                    jit->vfmadd231ps(vr9, vr8, vr8);
+                    jit->vfmadd231ps(vrb, vra, vra);
+                    jit->vfmadd231ps(vrd, vrc, vrc);
+                    jit->vfmadd231ps(vrf, vre, vre);
+                }
+                if (op == "vnni") {
+                    jit->vpdpbusd(v1, v0, v0, Xbyak::VexEncoding);
+                    jit->vpdpbusd(v3, v2, v2, Xbyak::VexEncoding);
+                    jit->vpdpbusd(v5, v4, v4, Xbyak::VexEncoding);
+                    jit->vpdpbusd(v7, v6, v6, Xbyak::VexEncoding);
+
+                    jit->vpdpbusd(vr9, vr8, vr8, Xbyak::VexEncoding);
+                    jit->vpdpbusd(vrb, vra, vra, Xbyak::VexEncoding);
+                    jit->vpdpbusd(vrd, vrc, vrc, Xbyak::VexEncoding);
+                    jit->vpdpbusd(vrf, vre, vre, Xbyak::VexEncoding);
+                }
+                if (op == "fadd") {
+                    jit->vaddps(v1, v1, v1);
+                    jit->vaddps(v2, v2, v2);
+                    jit->vaddps(v3, v3, v3);
+                    jit->vaddps(v4, v4, v4);
+                }
+#endif
+
+#ifdef __aarch64__
                 if (op == "fabs") {
                     jit->fabs(v1.s4, v0.s4);
                     jit->fabs(v3.s4, v2.s4);
@@ -392,6 +459,7 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
                     jit->fadd(v3.s4, v3.s4, v3.s4);
                     jit->fadd(v4.s4, v4.s4, v4.s4);
                 }
+#endif
             }
             idx++;
         });
@@ -409,23 +477,41 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
         (*jit)(1000);
         auto evs = p.stop();
 
-        auto loop_count = 1000 * UNROLL * 4;
+        auto loop_count = 1000 * UNROLL * (op == "fma" || op == "vnni" ? 8 : 4);
+        auto simd_width = jit->vreg_bits() / 32;
+        if (op == "vnni") simd_width *= 4;
+        if (op == "fma" || op == "vnni" || op == "fmla") simd_width *= 2;
         auto cycles = (double)evs["C"] / loop_count;
         auto instructions = (double)evs["I"] / loop_count;
-        printf("\e[0;36m %s %llu (ns) CPI : %.2f Instructions & Cycles: %.2f, %.2f (per iteration of %d loops) "
+        printf("\e[0;36m %8s %llu (ns) CPI : %.2f Instructions & Cycles: %.2f, %.2f (per iteration of %d loops) %.2f(GHz) %.2f(GInst/s) %.2f(GOPS) --- %s"
                "\e[0m\n",
                op.c_str(),
                evs["ns"],
                cycles / instructions,
                instructions,
                cycles,
-               loop_count);
+               loop_count,
+               (double)evs["C"]/evs["ns"],
+               (double)evs["I"]/evs["ns"],
+               (double)evs["I"] * simd_width/evs["ns"],
+               op.c_str());
     };
     std::string op(op_name);
     if (op == "all") {
+        for(int i = 0; i < 4; i++) {
+#ifdef __x86_64__
+            printf("============\n");
+            do_test("fabs", UNROLL);
+            do_test("fma", UNROLL);
+            do_test("vnni", UNROLL);
+            do_test("fadd", UNROLL);
+#endif
+#ifdef __aarch64__
         do_test("fabs", UNROLL);
         do_test("fmla", UNROLL);
         do_test("fadd", UNROLL);
+#endif
+        }
     } else {
         do_test(op, UNROLL);
     }

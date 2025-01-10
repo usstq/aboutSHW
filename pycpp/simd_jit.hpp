@@ -36,6 +36,10 @@ constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
 
 struct jit_generator : public Xbyak::CodeGenerator {
     const char* m_kernel_name;
+
+    uint32_t vreg_bits() {
+        return use_avx512 ? 512 : 256;
+    }
     jit_generator(const char* name) : m_kernel_name(name), sreg_pool("sreg_pool"), vreg_pool("vreg_pool") {
         vreg_pool.add_range(0, 15);
         if (use_avx512)
@@ -112,7 +116,7 @@ struct jit_generator : public Xbyak::CodeGenerator {
         return jit_kernel_code;
     }
 
-    void return_(int imm32 = 0) {
+    void return_(int imm32) {
         mov(rax, imm32);
         postamble();
     }
@@ -127,13 +131,10 @@ struct jit_generator : public Xbyak::CodeGenerator {
         int err_code = Xbyak::GetError();
         if (err_code != Xbyak::ERR_NONE)
             return err_code;
-        if (!jit_debug().empty()) {
-            std::cout << "jit_generator generate() is done: " << m_kernel_name << std::endl;
-            if (jit_debug() == m_kernel_name || jit_debug() == "*") {
-                dump();
-            }
-        }
         jit_kernel_code = getCode();
+        if (ov::intel_cpu::SIMDJIT_DEBUG > 10) {
+            ov::intel_cpu::jit_dump_asm(m_kernel_name, jit_kernel_code, this->getSize());
+        }        
         return (jit_kernel_code) ? 0 : -1;
     }
 
@@ -179,6 +180,11 @@ using XbyakLabel = Xbyak_aarch64::Label;
 
 struct jit_generator : public Xbyak_aarch64::CodeGenerator {
     const char* m_kernel_name;
+
+    uint32_t vreg_bits() {
+        return 128;
+    }
+
     jit_generator(const char* name, bool preserve_extra_xregs = false, bool preserve_extra_vregs = false)
         : m_kernel_name(name),
           m_preserve_extra_xregs(preserve_extra_xregs),

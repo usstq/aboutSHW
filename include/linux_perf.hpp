@@ -69,13 +69,13 @@ inline uint64_t get_time_ns() {
     return (tp0.tv_sec * 1000000000) + tp0.tv_nsec;    
 }
 
-#ifdef __i386__
+#ifdef __x86_64__
 #include <x86intrin.h>
-uint64_t read_tsc(void) {
+inline uint64_t read_tsc(void) {
     return __rdtsc();
 }
-uint64_t read_pmc(int index) {
-    return _rdpmc();
+inline uint64_t read_pmc(int index) {
+    return __rdpmc(index);
 }
 #endif
 
