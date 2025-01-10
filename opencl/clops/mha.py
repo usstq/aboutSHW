@@ -1,7 +1,6 @@
 from . import cl
 import numpy as np
 from .utils import *
-
 cl_kernel_sources_ref = r'''
 // global_id [Hq, batch_size]
 __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk + Hv) * head_size)]
@@ -30,9 +29,11 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     int H_qkv =  Hq + Hk + Hk;
 
     // [batch_size, Hk, max_kv_len, head_size]
-    size_t kv_cache_offset = ((b*Hk + kv_h) * max_kv_len + kv_seq_len0) * head_size;
-    __global half *k_cache_dest = param_cache_k + kv_cache_offset;
-    __global half *v_cache_dest = param_cache_v + kv_cache_offset;
+    __global half * key_start =  param_cache_k + (b * Hk + kv_h) * max_kv_len * head_size;
+    __global half * val_start =  param_cache_v + (b * Hk + kv_h) * max_kv_len * head_size;
+
+    __global half *k_cache_dest = key_start + kv_seq_len0 * head_size;
+    __global half *v_cache_dest = val_start + kv_seq_len0 * head_size;
     
      // [batch_size, L, (Hq + Hk + Hv) * head_size)]
     __global half *k_src = param_qkv + (b * L * H_qkv + Hq + kv_h) * head_size;
@@ -41,7 +42,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     int qkv_L_stride = H_qkv * head_size;
 
     //concat kv cache
-    for (int l = 0; l < L; l++) {
+    for (int i = 0; i < L; i++) {
         for (int j = 0; j < head_size; j++) {
             k_cache_dest[j] = k_src[j];
             v_cache_dest[j] = v_src[j];
@@ -57,9 +58,6 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     // [batch_size, L, (Hq + Hk + Hv) * head_size)]
     __global half * query =  param_qkv + (b * L * H_qkv  + h) * head_size;
     
-     // [batch_size, Hk, max_kv_len, head_size]
-    __global half * key_start =  param_cache_k + (b * Hk + kv_h) * max_kv_len * head_size;
-    __global half * val_start =  param_cache_v + (b * Hk + kv_h) * max_kv_len * head_size;
     
     // [batch_size, L, Hq * head_size]
     __global half * output =  param_output + (b * L * Hq + h) * head_size; 
@@ -69,13 +67,14 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     for (m = 0; m < L; m++) {
         __global half * key = key_start;
         float max_attn_score = -1e9f;
+        int kv_len = m + kv_seq_len0;
+
         //loop past key
-        for (n = 0; n < (kv_seq_len0 + L); n++) {
+        for (n = 0; n <= kv_len; n++) {
             float dot_product = 0.f;
             //dot product 
             for (k = 0; k < head_size; k++)
                 dot_product += query[k] * key[k];
-
             dot_product *= head_size_scaler;
             atten_score[n] = dot_product;
             if (dot_product > max_attn_score)
@@ -88,13 +87,13 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
 
         //reduce sum
         float sum = 0.f;
-        for (n = 0; n < (kv_seq_len0 + L); n++) {
+        for (n = 0; n <= kv_len; n++) {
             float a = exp(atten_score[n] - max_attn_score);
             atten_score[n] = a;
             sum += atten_score[n];
         }
         //softmax
-        for (n = 0; n < (kv_seq_len0 + L); n++)
+        for (n = 0; n <= kv_len; n++)
             atten_score[n]= atten_score[n] / sum;
 
         //atten_score * v
@@ -102,7 +101,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
             // [batch_size, Hk, max_kv_len, head_size]
             __global half * val = val_start;
             float output_val = 0.f;
-            for (k = 0; k < (kv_seq_len0 + L); k++) {
+            for (k = 0; k <= kv_len; k++) {
                 output_val += atten_score[k] * val[n];
                 val += head_size;
             }
@@ -113,6 +112,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     }
 }
 '''
+
 
 cl_kernel_sources = r'''
 __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv) * S)]
@@ -807,10 +807,12 @@ if __name__ == "__main__":
     MAX_KV_LEN = 256*8
     B = 2
     KV_BLOCK = 128
+    torch.manual_seed(0);
+
     ref = MHA(H, HK, S, MAX_KV_LEN, True)
     opt = MHA(H, HK, S, MAX_KV_LEN, False, kv_block=KV_BLOCK)
     first_token = 512*2-4  #KV_BLOCK - 2
-    second_token_num = 2
+    second_token_num = 25
     KV_LEN = 0
     for idx in range(second_token_num):
         L0 = KV_LEN
@@ -823,6 +825,7 @@ if __name__ == "__main__":
         attention_mask = torch.zeros([B, KV_LEN], dtype=torch.float32)
         print(f'test {L0=} {L1=} {KV_LEN=} {total_part_num=} attention_mask.shape: {attention_mask.shape}')
         # [B, L1, (Hq + Hk + Hv) * S)]
+        torch.manual_seed(0);
         qkv = utils.to_cl(torch.randn([B, L1, (H + HK + HK) * S], dtype=torch.float16))
         result_opt1 = opt(qkv, attention_mask)
         result_ref1 = ref(qkv, attention_mask)
