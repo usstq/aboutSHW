@@ -21,7 +21,6 @@ inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int
 #include <cstring>
 #include <vector>
 #include <atomic>
-#include <x86intrin.h>
 #include <sys/mman.h>
 #include <thread>
 #include <iostream>
@@ -70,6 +69,37 @@ inline uint64_t get_time_ns() {
     return (tp0.tv_sec * 1000000000) + tp0.tv_nsec;    
 }
 
+#ifdef __x86_64__
+#include <x86intrin.h>
+inline uint64_t read_tsc(void) {
+    return __rdtsc();
+}
+inline uint64_t read_pmc(int index) {
+    return __rdpmc(index);
+}
+#endif
+
+#ifdef __aarch64__
+// SPDX-License-Identifier: GPL-2.0
+uint64_t read_tsc(void) {
+    uint64_t val;
+    /*
+     * According to ARM DDI 0487F.c, from Armv8.0 to Armv8.5 inclusive, the
+     * system counter is at least 56 bits wide; from Armv8.6, the counter
+     * must be 64 bits wide.  So the system counter could be less than 64
+     * bits wide and it is attributed with the flag 'cap_user_time_short'
+     * is true.
+     */
+    asm volatile("mrs %0, cntvct_el0" : "=r" (val));
+    return val;
+}
+uint64_t read_pmc(int index) {
+    uint64_t val;
+    asm volatile("mrs %0, PMCCNTR_EL0" : "=r"(val));
+    return val;
+}
+#endif
+
 struct TscCounter {
     uint64_t tsc_ticks_per_second;
     uint64_t tsc_ticks_base;
@@ -84,11 +114,11 @@ struct TscCounter {
         return (tsc_ticks1 - tsc_ticks0) * 1000000.0 / tsc_ticks_per_second;
     }
     TscCounter() {
-        uint64_t start_ticks = __rdtsc();
+        uint64_t start_ticks = read_tsc();
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        tsc_ticks_per_second = (__rdtsc() - start_ticks);
+        tsc_ticks_per_second = (read_tsc() - start_ticks);
         std::cout << LINUX_PERF_"tsc_ticks_per_second = " << tsc_ticks_per_second << std::endl;
-        tsc_ticks_base = __rdtsc();
+        tsc_ticks_base = read_tsc();
 
         // use CLOCK_MONOTONIC_RAW instead of TSC
         tsc_ticks_per_second = 1000000000; // ns
@@ -595,7 +625,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         uint64_t tsc_start;
         uint64_t tsc_end;
         std::string title;
-        const char * cat;
+        std::string cat;
         int32_t id;
         static const int data_size = 16; // 4(fixed) + 8(PMU) + 4(software)
         uint64_t data[data_size] = {0};
@@ -639,6 +669,9 @@ struct PerfEventGroup : public IPerfEventDumper {
         ProfileData(const std::string& title) : title(title) {
             start();
         }
+        ProfileData(const std::string& title, const std::string& cat) : title(title), cat(cat) {
+            start();
+        }
         void start() {
             tsc_start = get_time_ns();
         }
@@ -666,7 +699,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         for (auto& d : all_dump_data) {
             auto duration = tsc.tsc_to_usec(d.tsc_start, d.tsc_end);
             auto title = std::string(d.title) + "_" + std::to_string(d.id);
-            auto cat = d.cat;
+            auto& cat = d.cat;
             //auto pid = serial;
             auto start = tsc.tsc_to_usec(d.tsc_start);
             //auto end = tsc.tsc_to_usec(d.tsc_end);
@@ -748,7 +781,55 @@ struct PerfEventGroup : public IPerfEventDumper {
     struct Config {
         uint32_t type;
         uint64_t config;
-        const char * name;
+        std::string name;
+
+        bool is_cpu_cycles() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_CPU_CYCLES;
+        }
+        bool is_instructions() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_INSTRUCTIONS;
+        }
+        Config(std::string str) {
+            if (str == "HW_CPU_CYCLES" || str == "cycles") {
+                type = PERF_TYPE_HARDWARE;
+                config = PERF_COUNT_HW_CPU_CYCLES;
+                name = str;
+            }
+            else if (str == "HW_INSTRUCTIONS" || str == "instructions") {
+                type = PERF_TYPE_HARDWARE;
+                config = PERF_COUNT_HW_INSTRUCTIONS;
+                name = str;
+            }
+            else if (str == "SW_PAGE_FAULTS" || str == "pagefaults") {
+                type = PERF_TYPE_SOFTWARE;
+                config =  PERF_COUNT_SW_PAGE_FAULTS;
+                name = str;
+            } else {
+                type = PERF_TYPE_RAW;
+                auto items = str_split(str, "=");
+                if (items.size() != 2)
+                    throw std::runtime_error(std::string("Unknown Perf config: ") + str);
+                name = items[0];
+                auto values = str_split(items[1], ",");
+                // 1.raw_config
+                // 2.EventSel, UMask
+                // 3.EventSel, UMask, CMask
+                if (values.size() == 1) {
+                    config = std::strtoull(values[0].c_str(), nullptr, 0);
+                } else if (values.size() == 2) {
+                    config = X86_RAW_EVENT(
+                                std::strtoull(values[0].c_str(), nullptr, 0), 
+                                std::strtoull(values[1].c_str(), nullptr, 0), 0);
+                } else if (values.size() == 3) {
+                    config = X86_RAW_EVENT(
+                                std::strtoull(values[0].c_str(), nullptr, 0), 
+                                std::strtoull(values[1].c_str(), nullptr, 0),
+                                std::strtoull(values[2].c_str(), nullptr, 0));
+                } else {
+                    throw std::runtime_error(std::string("Unknown Perf config (too many values): ") + str);
+                }
+            }
+        }
         Config(uint32_t type, uint64_t config, const char * name = "?") : type(type), config(config), name(name) {}
     };
 
@@ -767,7 +848,7 @@ struct PerfEventGroup : public IPerfEventDumper {
                 add_raw(tc.config);
             }
             events.back().name = tc.name;
-            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", strlen(tc.name));
+            snprintf(events.back().format, sizeof(events.back().format), "%%%lulu, ", tc.name.size());
         }
 
         // env var defined raw events
@@ -970,7 +1051,7 @@ struct PerfEventGroup : public IPerfEventDumper {
     }
 
     uint64_t rdpmc(int i, uint64_t base = 0) {
-        return (_rdpmc(events[i].pmc_index - 1) - base) & pmc_mask;
+        return (read_pmc(events[i].pmc_index - 1) - base) & pmc_mask;
     }
 
     template<class FN>
@@ -982,7 +1063,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         if (use_pmc) {
             for(int i = 0; i < cnt; i++) {
                 if (events[i].pmc_index)
-                    pmc[i] = _rdpmc(events[i].pmc_index - 1);
+                    pmc[i] = read_pmc(events[i].pmc_index - 1);
                 else
                     pmc[i] = 0;
             }
@@ -993,14 +1074,14 @@ struct PerfEventGroup : public IPerfEventDumper {
             }
         }
 
-        auto tsc0 = __rdtsc();
+        auto tsc0 = read_tsc();
         fn();
-        auto tsc1 = __rdtsc();
+        auto tsc1 = read_tsc();
 
         if (use_pmc) {
             for(int i = 0; i < cnt; i++) {
                 if (events[i].pmc_index)
-                    pmc[i] = (_rdpmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
+                    pmc[i] = (read_pmc(events[i].pmc_index - 1) - pmc[i]) & pmc_mask;
                 else
                     pmc[i] = 0;
             }
@@ -1094,6 +1175,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         ProfileScope& operator=(const ProfileScope&) = delete;
 
         ProfileScope(ProfileScope&& other) {
+            if (pevg) finish();
             pevg = other.pevg;
             pd = other.pd;
             other.pevg = nullptr;
@@ -1102,6 +1184,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
         ProfileScope& operator=(ProfileScope&& other) {
             if (&other != this) {
+                if (pevg) finish();
                 pevg = other.pevg;
                 pd = other.pd;
                 other.pevg = nullptr;
@@ -1128,7 +1211,7 @@ struct PerfEventGroup : public IPerfEventDumper {
             if (use_pmc) {
                 for (size_t i =0; i < num_events; i++)
                     if (pevg->events[i].pmc_index)
-                        pd->data[i] = (_rdpmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
+                        pd->data[i] = (read_pmc(pevg->events[i].pmc_index - 1) - pd->data[i]) & pevg->pmc_mask;
                     else
                         pd->data[i] = 0;
             } else {
@@ -1154,7 +1237,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         }
     };
 
-    ProfileData* _profile(const std::string& title, int id = 0) {
+    ProfileData* _profile(const std::string& title, int id = 0, const std::string& cat = "") {
         if (get_sampling_lock().load() != 0)
             return nullptr;
         if (dump_limit == 0)
@@ -1165,7 +1248,7 @@ struct PerfEventGroup : public IPerfEventDumper {
 
         all_dump_data.emplace_back(title);
         auto* pd = &all_dump_data.back();
-        pd->cat = "enable";
+        pd->cat = cat;
         pd->id = id;
 
         // use rdpmc if possible
@@ -1173,7 +1256,7 @@ struct PerfEventGroup : public IPerfEventDumper {
         if (use_pmc) {
             for (size_t i =0; i < events.size() && i < pd->data_size; i++)
                 if (events[i].pmc_index)
-                    pd->data[i] = _rdpmc(events[i].pmc_index - 1);
+                    pd->data[i] = read_pmc(events[i].pmc_index - 1);
         } else {
             read();
             for (size_t i =0; i < events.size() && i < pd->data_size; i++)
@@ -1210,6 +1293,16 @@ template <typename ... Args>
 ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+    return {&pevg, pd};
+}
+
+template <typename ... Args>
+ProfileScope Profile(const std::string& title, const std::string& category, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id, category);
     if (pd) {
         pd->set_extra_data(std::forward<Args>(args)...);
     }
