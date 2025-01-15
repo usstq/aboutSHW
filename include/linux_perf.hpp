@@ -1,3 +1,4 @@
+#pragma once
 
 #include <linux/perf_event.h>
 #include <time.h>
@@ -5,6 +6,8 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>           /* For O_* constants */
+#include <sys/stat.h>        /* For mode constants */
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
@@ -14,6 +17,10 @@
 inline int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) {
 	return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
+
+#ifdef __x86_64__
+#include <x86intrin.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -70,7 +77,6 @@ inline uint64_t get_time_ns() {
 }
 
 #ifdef __x86_64__
-#include <x86intrin.h>
 inline uint64_t read_tsc(void) {
     return __rdtsc();
 }
@@ -198,10 +204,62 @@ struct PerfEventJsonDumper {
         return serial_id;
     }
 
+#if 0
     static PerfEventJsonDumper& get() {
         static PerfEventJsonDumper inst;
         return inst;
     }
+#else
+    // local C++ static-based singleton fails when this header-only tool is being
+    // used by two separate shared libs (or one by shared lib, another by final application exe)
+    //
+    template<class T>
+    struct singleton_over_so {
+        static constexpr const char * shm_name = "/linuxperf_shm01";
+        struct shm_data {
+            T * pobj;
+            int64_t ref_cnt;
+            pid_t pid_spinlock0;
+            pid_t pid_spinlock1;
+        } * _data;
+        T * pobj;
+        singleton_over_so() {
+            int fd = shm_open(shm_name, O_CREAT | O_RDWR, 0600);
+            if (ftruncate(fd, 4096) != 0)
+                perror("ftruncate failed!");
+            pid_t pid = getpid();
+            _data = reinterpret_cast<shm_data*>(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
+            if (__atomic_exchange_n(&_data->pid_spinlock0, pid, __ATOMIC_SEQ_CST) != pid) {
+                // we are the first one that set pid_spinlock to pid, do initialization
+                _data->pobj = new T();
+                __atomic_store_n(&_data->ref_cnt, 0, __ATOMIC_SEQ_CST);
+                __atomic_store_n(&_data->pid_spinlock1, pid, __ATOMIC_SEQ_CST);
+            } else {
+                // spin until the owner has done
+                while (__atomic_load_n(&_data->pid_spinlock1, __ATOMIC_SEQ_CST) != pid);
+            }
+            __atomic_add_fetch(&_data->ref_cnt, 1, __ATOMIC_SEQ_CST);
+            close(fd);
+
+            pobj = _data->pobj;
+        }
+        T& obj() {
+            return *(pobj);
+        }
+        ~singleton_over_so() {
+            if (__atomic_sub_fetch(&_data->ref_cnt, 1, __ATOMIC_SEQ_CST) == 0) {
+                delete _data->pobj;
+                munmap(_data, 4096);
+            }
+            shm_unlink(shm_name);
+        }
+    };
+
+    static PerfEventJsonDumper& get() {
+        static singleton_over_so<PerfEventJsonDumper> inst;
+        return inst.obj();
+    }
+#endif
 };
 
 inline std::vector<std::string> str_split(const std::string& s, std::string delimiter) {
