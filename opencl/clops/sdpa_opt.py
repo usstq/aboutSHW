@@ -11,7 +11,6 @@ class SDPA_opt:
         self.SUBGROUP_SIZE=16
         SEQ_LEN_PARTITION_SIZE=(HEAD_SIZE*self.SG_SCALE_FACTOR)
         self.TARGET_SEQ_LEN_BLOCK_SIZE=16
-        BROADCAST_GROUP_SIZE=Hq//Hk
         
         assert(Hq % Hk == 0);     # implied
         assert(HEAD_SIZE % self.SUBGROUP_SIZE == 0);     # implied
@@ -19,7 +18,7 @@ class SDPA_opt:
         
         if self.is_optimized:
             cl_source_file = "cl_kernels/sdpa_opt_new.cl"
-            self.kernel_name = 'sdpa_opt_multi_tokens'
+            self.kernel_name = 'sdpa_opt_multi_tokens_2'
         else:
             cl_source_file = "cl_kernels/sdpa_new.cl"
             self.kernel_name = 'sdpa_opt_multi_tokens'
@@ -29,7 +28,7 @@ class SDPA_opt:
             cl_kernel_sources = file.read()
         # print(cl_kernel_sources[:100])
         options = f'-DHEAD_SIZE={HEAD_SIZE} -DNUM_HEADS={Hq} -DNUM_KV_HEADS={Hk} \
-                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -DBROADCAST_GROUP_SIZE={BROADCAST_GROUP_SIZE} -cl-mad-enable'
+                    -DSG_SCALE_FACTOR={self.SG_SCALE_FACTOR} -DSEQ_LEN_PARTITION_SIZE={SEQ_LEN_PARTITION_SIZE} -cl-mad-enable'
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
 
     def __call__(self, shape_info_input, query_input, key_input, value_input, attn_mask_input, scale_input):
@@ -175,49 +174,74 @@ if __name__ == "__main__":
             qkv = torch.cat((q, k, v), 2)
             qkv = torch.reshape(qkv, (B, Lq, (Hq + Hk + Hk) * HEAD_SIZE))        
             ref0, durs = MHA_cl_impl(qkv.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE)
-            print(f'{ref0=}\n')
+            # print(f'{ref0=}\n')
             for i, ns in enumerate(durs):
                 print(f'{Colors.CYAN}{ref0.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
 
         ref, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, False)
-        print(f'{ref=}\n')
+        # print(f'{ref=}\n')
+        ref_t = 0
         for i, ns in enumerate(durs):
             print(f'{Colors.BLUE}{ref.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+            ref_t += ns
 
         opt, durs = sdpa_impl(q.clone(), k.clone(), v.clone(), attention_mask.clone(), scale.clone(), Hq, Hk, HEAD_SIZE, True)
-        print(f'{opt=}\n')
+        # print(f'{opt=}\n')
         for i, ns in enumerate(durs):
-            print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms {Colors.END}')
+            print(f'{Colors.BLUE}{opt.shape=}, {i}/{len(durs)} {ns*1e-6:.3f} ms, with improvment {(ref_t - ns)/ref_t*100:.2f}% {Colors.END}')
             
         # print(f'all zeros? {np.all(ref == 0)} {np.all(opt == 0)}')
 
         try:
             if not np.allclose(ref, opt, atol=0.01, rtol=0.01, equal_nan=True):
                 pos = np.where(np.abs(ref - opt) > 0.01)
-                # print(f"{pos[2]=}")
-                # for d in set(pos[2]):
-                #     print(f"{d=}")
-                print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
                 if not pos[0].size > 0:
                     pos = np.where(np.isnan(opt))
-                    print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
-                print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
+                    # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                # print(f'ref_val = {ref[pos]}\nopt_val={opt[pos]}\n')
                 raise Exception("failed.")
-            print(f'{Colors.GREEN} PASS at shape = {opt.shape}.{Colors.END}')
+            print(f'{Colors.GREEN} ref:opt PASS at shape = {opt.shape}.{Colors.END}')
         except Exception as inst:
-            print(f'{Colors.RED} FAIL at shape = {opt.shape}.{Colors.END}')
+            print(f'{Colors.RED} ref:opt FAIL at shape = {opt.shape}.{Colors.END}')
+
+        if Lq == Lk:
+            try:
+                if not np.allclose(ref0, ref, atol=0.01, rtol=0.01, equal_nan=True):
+                    pos = np.where(np.abs(ref0 - ref) > 0.01)
+                    # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    if not pos[0].size > 0:
+                        pos = np.where(np.isnan(ref))
+                    #     print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    # print(f'ref_val = {ref0[pos]}\nopt_val={ref[pos]}\n')
+                    raise Exception("failed.")
+                print(f'{Colors.GREEN} ref0:ref PASS at shape = {ref.shape}.{Colors.END}')
+            except Exception as inst:
+                print(f'{Colors.RED} ref0:ref FAIL at shape = {ref.shape}.{Colors.END}')
+            try:
+                if not np.allclose(ref0, opt, atol=0.01, rtol=0.01, equal_nan=True):
+                    pos = np.where(np.abs(ref0 - opt) > 0.01)
+                    # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    if not pos[0].size > 0:
+                        pos = np.where(np.isnan(opt))
+                        # print(f"{pos=} {pos[2].shape=} {pos[3].shape=}")
+                    # print(f'ref_val = {ref0[pos]}\nopt_val={opt[pos]}\n')
+                    raise Exception("failed.")
+                print(f'{Colors.GREEN} ref0:opt PASS at shape = {opt.shape}.{Colors.END}')
+            except Exception as inst:
+                print(f'{Colors.RED} ref0:opt FAIL at shape = {opt.shape}.{Colors.END}')
 
     # "B, Hq, Hk, HEAD_SIZE, Lq, Lk"
     for _ in range(1):
         test_acc(1, 28, 7, 128, 8410, 8410, True)   # tail
-        test_acc(1, 28, 14, 128, 4096, 4096, True)
-        test_acc(1, 28, 14, 64, 4096, 4096, True)
         # test_acc(1, 24, 6, 128, 2134, 2134, True)   # tail
         # test_acc(1, 28, 7, 128, 64*128, 64*128, True)
         # test_acc(1, 24, 6, 128, 16*128, 16*128, False)
         # test_acc(1, 24, 6, 128, 2134, 2134, False)   # tail
-        # test_acc(1, 1, 1, 128, 3*128, 3*128, False)
-        # test_acc(2, 1, 1, 128, 1, 128, True)   # tail
+        # test_acc(1, 1, 1, 128, 3*128, 3*128, True)
+        # test_acc(2, 28, 7, 128, 3*128, 3*128, True)
+        # test_acc(1, 1, 1, 16, 2*16, 2*16, False)
+        # test_acc(1, 1, 1, 16, 16, 16, True)
         # for k in range(20, 21):
         #     test_acc(1, 1, 1, 128, 16*k)
     sys.exit(0)
