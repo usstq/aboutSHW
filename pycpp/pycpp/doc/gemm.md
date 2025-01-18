@@ -4,7 +4,7 @@ in [test_reg_blocking.py](test_reg_blocking.py), we implemented a few register b
 
 ```bash
 $ python -m pycpp.doc.test_reg_blocking
-jit-4x3 0.003 ms   5.7 GHz  CPI:6.1  180 GFLOPS 
+jit-4x3 0.003 ms   5.7 GHz  CPI:6.1  180 GFLOPS # SPLIT_LOADS observed
 jit-6x2 0.003 ms   5.8 GHz  CPI:6.0  184 GFLOPS 
 jit-3x4 0.003 ms   5.8 GHz  CPI:6.3  174 GFLOPS # SPLIT_LOADS observed
 jit-2x6 0.003 ms   5.7 GHz  CPI:6.5  170 GFLOPS 

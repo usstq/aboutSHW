@@ -8,30 +8,40 @@ class CFunc:
     def __init__(self, ctype_callable, name):
         self.func = ctype_callable
         self.name = name
+        # with this: return 64-bit pointer is possible
+        self.func.restype = ctypes.c_longlong
 
     def __call__(self, *args):
         # translate args into ctypes
+        # test shows that use 64bit c_longlong even when actual arg type is 32bit int is OK on x86-64
         cargs = []
         for a in args:
             if isinstance(a, int):
-                cargs.append(ctypes.c_int(a))
+                # Note: isinstance(a, int) is True when a is bool type, 
+                cargs.append(ctypes.c_longlong(a))
             elif isinstance(a, float):
                 cargs.append(ctypes.c_float(a))
             elif isinstance(a, str):
                 cargs.append(ctypes.c_char_p(a.encode('utf-8')))
             elif isinstance(a, np.ndarray):
                 cargs.append(a.ctypes.data_as(ctypes.c_void_p))
+            elif a is None:
+                cargs.append(ctypes.c_void_p())
+            elif isinstance(a, ctypes.c_void_p):
+                cargs.append(a)
             else:
                 raise Exception(f"Unspported type '{type(a)}' to C function")
-        self.func(*cargs)
+        return self.func(*cargs)
 
 class CLib:
     def __init__(self, src, options, lineno_base, co_filename, disasm):
         with tempfile.TemporaryDirectory() as tmp_dir:
             temp_name = next(tempfile._get_candidate_names())
             so_path = os.path.join(tmp_dir,temp_name+'.so')
-            args = f"gcc -fopenmp -shared -o {so_path} {options} -Wall -fpic -x c++ - -lstdc++"
+            args = f"gcc -fopenmp -shared -o {so_path} -Wall -fpic -x c++ - -lstdc++ {options}"
 
+            # insert empty lines into source code so source line number can match
+            src = "\n"*lineno_base + src
             cc = subprocess.Popen(args.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             cc.stdin.write(src)
             cc.stdin.close()
@@ -48,8 +58,8 @@ class CLib:
                     if s.startswith("<stdin>:"):
                         parts = s.split(":")
                         parts[0] = co_filename
-                        if (parts[1].isnumeric()):
-                            parts[1] = str(int(parts[1]) + lineno_base)
+                        #if (parts[1].isnumeric()):
+                        #    parts[1] = str(int(parts[1]) + lineno_base)
                         s = ":".join(parts)
                     print(f"\033[31m{s}\033[0m", file=sys.stderr)
 

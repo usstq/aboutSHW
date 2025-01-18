@@ -1,3 +1,6 @@
 [submodule "thirdparty/xbyak"]
 	path = thirdparty/xbyak
 	url = https://github.com/herumi/xbyak.git
+[submodule "thirdparty/xbyak_aarch64"]
+	path = thirdparty/xbyak_aarch64
+	url = https://github.com/fujitsu/xbyak_aarch64.git

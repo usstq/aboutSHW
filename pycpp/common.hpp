@@ -6,9 +6,19 @@
 #include <algorithm>
 #include <cstring>
 #include <x86intrin.h>
+#include <sstream>
+#include "simd.hpp"
+
+#ifndef ASSERT
+#    define ASSERT(cond)                                                     \
+        if (!(cond)) {                                                       \
+            std::stringstream ss;                                            \
+            ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
+            throw std::runtime_error(ss.str());                              \
+        }
+#endif
 
 // https://stackoverflow.com/a/21371401/9292588
-#if USE_DEBUG
 #define DEBUG0(...) std::cout << "===" << __LINE__ << ":" << std::endl;
 #define DEBUG1(x) std::cout << "===" << __LINE__ << ":" << #x << "=" << x << std::endl;
 #define DEBUG2(x1, x2) std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << std::endl;
@@ -18,11 +28,7 @@
 #define DEBUG6(x1, x2, x3, x4, x5, x6) std::cout << "===" << __LINE__ << ":" << #x1 << "=" << x1 << "," << #x2 << "=" << x2 << "," << #x3 << "=" << x3 << "," << #x4 << "=" << x4 <<  "," << #x5 << "=" << x5 << "," << #x6 << "=" << x6 << std::endl;
 
 #define GET_MACRO(_0, _1, _2, _3, _4, _5, _6, NAME, ...) NAME
-#define DEBUG(...) GET_MACRO(_0 __VA_OPT__(,) __VA_ARGS__,  DEBUG6, DEBUG5, DEBUG4, DEBUG3, DEBUG2, DEBUG1, DEBUG0)(__VA_ARGS__)
-#else
-#define DEBUG(...)
-#endif
-
+#define DEBUG_LOG(...) GET_MACRO(_0 __VA_OPT__(,) __VA_ARGS__,  DEBUG6, DEBUG5, DEBUG4, DEBUG3, DEBUG2, DEBUG1, DEBUG0)(__VA_ARGS__)
 
 template <typename T, typename Q>
 inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
