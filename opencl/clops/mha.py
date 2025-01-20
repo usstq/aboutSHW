@@ -29,44 +29,45 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
     int H_qkv =  Hq + Hk + Hk;
 
     // [batch_size, Hk, max_kv_len, head_size]
-    __global half * key_start =  param_cache_k + (b * Hk + kv_h) * max_kv_len * head_size;
-    __global half * val_start =  param_cache_v + (b * Hk + kv_h) * max_kv_len * head_size;
+    __global half * past_kcache_base =  param_cache_k + (b * Hk + kv_h) * max_kv_len * head_size;
+    __global half * past_vkcache_base =  param_cache_v + (b * Hk + kv_h) * max_kv_len * head_size;
 
-    __global half *k_cache_dest = key_start + kv_seq_len0 * head_size;
-    __global half *v_cache_dest = val_start + kv_seq_len0 * head_size;
-    
-     // [batch_size, L, (Hq + Hk + Hv) * head_size)]
-    __global half *k_src = param_qkv + (b * L * H_qkv + Hq + kv_h) * head_size;
-    __global half *v_src = k_src + Hk * head_size;
-    
+    __global half *past_kcache_dest = past_kcache_base + kv_seq_len0 * head_size;
+    __global half *past_vcache_dest = past_vkcache_base + kv_seq_len0 * head_size;
     int qkv_L_stride = H_qkv * head_size;
+    {
+        // [batch_size, L, (Hq + Hk + Hv) * head_size)]
+        __global half *k_entry = param_qkv + (b * L * H_qkv + Hq + kv_h) * head_size;
+        __global half *v_entry = k_entry + Hk * head_size;
+        
 
-    //concat kv cache
-    for (int i = 0; i < L; i++) {
-        for (int j = 0; j < head_size; j++) {
-            k_cache_dest[j] = k_src[j];
-            v_cache_dest[j] = v_src[j];
+        //concat kv cache
+        for (int i = 0; i < L; i++) {
+            for (int j = 0; j < head_size; j++) {
+                past_kcache_dest[j] = k_entry[j];
+                past_vcache_dest[j] = v_entry[j];
+            }
+            k_entry += qkv_L_stride;
+            v_entry += qkv_L_stride;
+            past_kcache_dest += head_size;
+            past_vcache_dest += head_size;
         }
-        k_src += qkv_L_stride;
-        v_src += qkv_L_stride;
-        k_cache_dest += head_size;
-        v_cache_dest += head_size;
     }
-    
+        
      // [batch_size, Hq, max_kv_len]
     __global float * atten_score = param_attn_score + (b * Hq + h) * max_kv_len;
+
     // [batch_size, L, (Hq + Hk + Hv) * head_size)]
     __global half * query =  param_qkv + (b * L * H_qkv  + h) * head_size;
-    
-    
+
     // [batch_size, L, Hq * head_size]
     __global half * output =  param_output + (b * L * Hq + h) * head_size; 
 
     int m,n,k;
     //loop per input sequence
     for (m = 0; m < L; m++) {
-        __global half * key = key_start;
-        float max_attn_score = -1e9f;
+        __global half * key = past_kcache_base;
+        float max_attn_score = -FLT_MAX;
         int kv_len = m + kv_seq_len0;
 
         //loop past key
@@ -99,7 +100,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
         //atten_score * v
         for (n = 0; n < head_size; n++) {
             // [batch_size, Hk, max_kv_len, head_size]
-            __global half * val = val_start;
+            __global half * val = past_vkcache_base;
             float output_val = 0.f;
             for (k = 0; k <= kv_len; k++) {
                 output_val += atten_score[k] * val[n];
@@ -831,6 +832,8 @@ if __name__ == "__main__":
         result_ref1 = ref(qkv, attention_mask)
         result_ref1_cpu = result_ref1.numpy()
         result_opt1_cpu = result_opt1.numpy()
+        # result_ref1_cpu = result_ref1_cpu[:,-1,:]
+        # result_opt1_cpu = result_opt1_cpu[:,-1,:]
         if not np.allclose(result_ref1_cpu, result_opt1_cpu, atol=0.02, rtol=0.02):
             print(f'{result_ref1_cpu=}\n{result_opt1_cpu=}')
             pos = np.where(np.abs(result_ref1_cpu - result_opt1_cpu) > 0.02)
