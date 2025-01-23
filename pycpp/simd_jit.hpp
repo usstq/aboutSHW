@@ -37,10 +37,159 @@ constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
 struct jit_generator : public Xbyak::CodeGenerator {
     const char* m_kernel_name;
 
+    struct jcout {
+        Xbyak::CodeGenerator * jit;
+        std::vector<Xbyak::Reg64> preserved_regs;
+        std::vector<Xbyak::Xmm> preserved_vmms;
+        int vmm_size_byte;
+        jcout(Xbyak::CodeGenerator* jit) : jit(jit) {
+            preserved_regs = {jit->rbp,
+                              jit->rsp,
+                              jit->rax,
+                              jit->rbx,
+                              jit->rcx,
+                              jit->rdx,
+                              jit->rdi,
+                              jit->rsi,
+                              jit->r8,
+                              jit->r9,
+                              jit->r10,
+                              jit->r11,
+                              jit->r12,
+                              jit->r13,
+                              jit->r14,
+                              jit->r15};
+            for (int i = 0; i < 16; i++) {
+                preserved_vmms.push_back(Xbyak::Ymm(i));
+            }
+            vmm_size_byte = preserved_vmms[0].getBit() / 8;
+        }
+        enum class jout_options {
+            as_f32 = 1,
+            as_i32 = 2,
+        };
+        jout_options m_jout_opt;
+        jout_options as_f32 = jout_options::as_f32;
+        jout_options as_i32 = jout_options::as_i32;
+        void _jit_cout(jout_options value) {
+            m_jout_opt = value;
+        }
+        static void printf_vec_float(uint32_t* v, int count) {
+            printf("[");
+            for (int i = count - 1; i >= 0; i--) {
+                printf("%.5g", *reinterpret_cast<float*>(&v[i]));
+                if (i > 0)
+                    printf(",");
+            }
+            printf("]");
+        }
+        static void printf_vec_i32(uint32_t* v, int count) {
+            printf("[");
+            for (int i = count - 1; i >= 0; i--) {
+                printf("%08x", v[i]);
+                if (i > 0)
+                    printf(",");
+            }
+            printf("]");
+        }
+        void _jit_cout(Xbyak::Xmm value) {
+            auto rbp = jit->rbp;
+            auto rsi = jit->rsi;
+            auto rdi = jit->rdi;
+            int rbp_disp = -1;
+            for(int i = 0; i < preserved_vmms.size(); i++) {
+                //printf(">>>>>>>>> [%d/%d] %d\n",i, preserved_vmms.size(), preserved_vmms[i].getIdx());
+                if (value.getIdx() == preserved_vmms[i].getIdx()) {
+                    rbp_disp = ((preserved_vmms.size() - 1) - i) * vmm_size_byte;
+                    break;
+                }
+            }
+            assert(rbp_disp >= 0);
+            rbp_disp -= (preserved_regs.size() - 1) * 8 + preserved_vmms.size() * vmm_size_byte;
+
+            jit->mov(rsi, 0);
+            jit->lea(rdi, jit->ptr[rbp + rbp_disp]);
+            jit->mov(jit->esi, value.getBit()/32);
+            if (m_jout_opt == jout_options::as_f32) {
+                jit->call(reinterpret_cast<const void*>(printf_vec_float));
+            } else {
+                jit->call(reinterpret_cast<const void*>(printf_vec_i32));
+            }
+        }
+        void _jit_cout(Xbyak::Reg64 value) {
+            const char * fmt_r64 = "0x%llx";
+            // load reg from snapshot on the stack
+            jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt_r64));
+            bool found = false;
+            for(int i = 0; i < preserved_regs.size(); i++) {
+                if (value.getIdx() == preserved_regs[i].getIdx()) {
+                    jit->mov(jit->rsi, jit->ptr[jit->rbp + (preserved_regs.size() - i)*8 - preserved_regs.size()*8]);
+                    found = true;
+                    break;
+                }
+            }
+            assert(found);
+            jit->call(reinterpret_cast<const void*>(printf));
+        }
+        void _jit_cout(const char * value) {
+            const char * fmt_cstr = "%s";
+            jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt_cstr));
+            jit->mov(jit->rsi, reinterpret_cast<uintptr_t>(value));
+            jit->call(reinterpret_cast<const void*>(printf));
+        }
+        void _jit_cout(int64_t value) {
+            const char * fmt = "%lld";
+            jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt));
+            jit->mov(jit->rsi, value);
+            jit->call(reinterpret_cast<const void*>(printf));
+        }
+        template <typename... Args>
+        void operator()(Args... args) {
+            // setup frames
+            // rbp, rsp, rax, 
+            auto rbp = jit->rbp;
+            auto rsp = jit->rsp;
+            auto r15 = jit->r15;
+            jit->push(rbp);
+            jit->mov(rbp, rsp); // rbp points to preserved_regs, start with rbp, rsp's value is (rbp - 8)
+            jit->add(rbp, 8);
+            jit->push(rbp); // this is the rsp before calling jit_cout
+            jit->sub(rbp, 8);
+            for(int i = 2; i < preserved_regs.size(); i++)
+                jit->push(preserved_regs[i]);
+
+            for(int i = 0; i < preserved_vmms.size(); i++) {
+                auto& vmm = preserved_vmms[i];
+                jit->vmovdqu(jit->ptr[rsp - (i + 1)*(vmm_size_byte)], vmm);
+            }
+            jit->sub(rsp, preserved_vmms.size() * vmm_size_byte);
+
+            // align stack for calling printf
+            jit->mov(r15, rsp);
+            jit->and_(rsp, -16);
+
+            // _jit_cout will not use r15
+            int dummy[sizeof...(Args)] = {(_jit_cout(args), 0)...};
+            (void)dummy;
+            _jit_cout("\n");
+
+            jit->mov(rsp, r15);
+            jit->add(rsp, preserved_vmms.size() * preserved_vmms[0].getBit()/8);
+            for(int i = 0; i < preserved_vmms.size(); i++) {
+                auto& vmm = preserved_vmms[i];
+                jit->vmovdqu(vmm, jit->ptr[rsp - (i + 1)*(vmm_size_byte)]);
+            }
+            for(int i = preserved_regs.size() - 1; i >= 2 ; i--)
+                jit->pop(preserved_regs[i]);
+            jit->pop(rbp);
+            jit->pop(rbp);
+        }
+    } jcout;
+
     uint32_t vreg_bits() {
         return use_avx512 ? 512 : 256;
     }
-    jit_generator(const char* name) : m_kernel_name(name), sreg_pool("sreg_pool"), vreg_pool("vreg_pool") {
+    jit_generator(const char* name) : m_kernel_name(name), sreg_pool("sreg_pool"), vreg_pool("vreg_pool"), jcout(this) {
         vreg_pool.add_range(0, 15);
         if (use_avx512)
             vreg_pool.add_range(16, 31);
@@ -54,7 +203,8 @@ struct jit_generator : public Xbyak::CodeGenerator {
                                               Xbyak::Operand::RDI,
                                               Xbyak::Operand::RSI,
                                               Xbyak::Operand::RBX,
-                                              Xbyak::Operand::RBP,
+                                              Xbyak::Operand::RAX,
+                                              // Xbyak::Operand::RBP,
                                               Xbyak::Operand::R10,
                                               Xbyak::Operand::R11,
                                               Xbyak::Operand::R12,
@@ -72,7 +222,8 @@ struct jit_generator : public Xbyak::CodeGenerator {
 
                                               // regs for local variables
                                               Xbyak::Operand::RBX,
-                                              Xbyak::Operand::RBP,
+                                              Xbyak::Operand::RAX,
+                                              // Xbyak::Operand::RBP,
                                               Xbyak::Operand::R10,
                                               Xbyak::Operand::R11,
                                               Xbyak::Operand::R12,
@@ -96,9 +247,10 @@ struct jit_generator : public Xbyak::CodeGenerator {
     void preamble() {
         for (size_t i = 0; i < num_abi_save_gpr_regs; ++i) {
             push(XbyakSReg64(abi_save_gpr_regs[i]));
-            // Stack magic: save rsp into rbp state to be able to unwind stack.
-            if (i == 0)
+            if (abi_save_gpr_regs[i] == Xbyak::Operand::RBP) {
+                // Stack magic: save rsp into rbp state to be able to unwind stack.
                 mov(rbp, rsp);
+            }
         }
     }
     void uni_vzeroupper() {
@@ -589,9 +741,6 @@ public:
     }
 
     SIMDJit(const char* name = "") : jit_generator(name) {
-#ifdef __x86_64__
-        mov(rax, rsp);
-#endif
         preamble();
     }
 
@@ -609,7 +758,7 @@ public:
 #ifdef __x86_64__
         // https://en.wikipedia.org/wiki/X86_calling_conventions#x86-64_calling_conventions
         if (idx >= abi_param_regs_num)
-            mov(ret, ptr[rax + (idx - abi_param_regs_num + 1) * 8]);  // load from stack
+            mov(ret, ptr[rbp + (idx - abi_param_regs_num + 2) * 8]);  // load from stack
 #endif
 #ifdef __aarch64__
         // https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)

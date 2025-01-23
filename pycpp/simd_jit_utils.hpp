@@ -63,7 +63,7 @@ public:
     int allocate(int slot_index = -1) {
         // allocate register with specific slot index
         if (slot_index >= 0) {
-            OPENVINO_ASSERT(static_cast<size_t>(slot_index) < m_reg_status.size());
+            OPENVINO_ASSERT(static_cast<size_t>(slot_index) < m_reg_status.size(), slot_index, " > ", m_reg_status.size());
             OPENVINO_ASSERT((m_reg_status[slot_index] & mark_used) == 0);
             auto reg_idx = m_reg_status[slot_index];
             m_reg_status[slot_index] |= mark_used;

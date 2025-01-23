@@ -336,10 +336,46 @@ void ctrlflow_unit_tests() {
     test_if_else(20, 10, 10);
 }
 
+static void args_test() {
+    auto test_arg = [](int arg_id) {
+        auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
+        auto arg = jit->get_arg(arg_id);
+        jit->return_(arg);
+        jit->finalize();
+        int args[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13};
+        
+        auto res = (*jit)(args[0], args[1], args[2], args[3],
+                      args[4], args[5], args[6], args[7],
+                      args[8], args[9], args[10], args[11],
+                      args[12], args[13], args[14], args[15]);
+        OPENVINO_ASSERT(res == args[arg_id]);
+    };
+    for(int i = 0; i < 14; i++) {
+        test_arg(i);
+    }
+}
+
 extern "C" void test() {
     unit_tests();
     expr_tests();
     ctrlflow_unit_tests();
+    args_test();
+}
+
+extern "C" void debug(int v) {
+    std::cout << "v = " << v << std::endl;
+    auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
+    auto cnt = jit->get_arg(0);
+    cnt += cnt + 1;
+    //jit->int_(3);
+    auto p = jit->get_sreg();
+    p = 0;
+    jit->mov(jit->dword[p.r64()], 1);
+    jit->return_(cnt);
+    jit->finalize();
+    std::cout << "PID = " << getpid() << std::endl;
+    auto ret = (*jit)(v);
+    std::cout << "jit returns " << ret << std::endl;
 }
 
 #include "simple_perf.hpp"
@@ -515,4 +551,72 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
     } else {
         do_test(op, UNROLL);
     }
+}
+
+
+#include <stdio.h>
+#include <stdint.h>
+
+extern "C" void printreg() {
+    printf("aaaaaaaaaaaaaa\n");
+    auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
+    auto arg0 = jit->get_arg(0);
+    auto arg1 = jit->get_arg(1);
+    auto arg2 = jit->get_arg(2);
+    auto arg3 = jit->get_arg(3);
+    
+    auto s0 = jit->get_sreg();
+    auto v0 = jit->get_vreg();
+    auto v1 = jit->get_vreg();
+    auto v2 = jit->get_vreg();
+
+    // VBROADCASTSS
+    float fvalue = 0.981234;
+    int32_t ivalue = 0x87654321;
+    jit->mov(s0, reinterpret_cast<uintptr_t>(&fvalue));
+    jit->vbroadcastss(v0, jit->ptr[s0.r64()]);
+
+
+    float fvalues[8] = {
+        0.981,
+        0.982,
+        0.983,
+        0.984,
+        0.985,
+        0.986,
+        0.987,
+        0.988,
+    };
+    uint32_t ivalues[8] = {
+        0x87654321,
+        0x87654322,
+        0x87654323,
+        0x87654324,
+        0x87654325,
+        0x87654326,
+        0x87654327,
+        0x87654328,
+    };
+    jit->mov(s0, reinterpret_cast<uintptr_t>(&fvalues));
+    jit->vmovdqu(v0, jit->ptr[s0.r64()]);
+    jit->vmovdqu(v2, jit->ptr[s0.r64()]);
+
+
+    jit->mov(s0, reinterpret_cast<uintptr_t>(&ivalues));
+    jit->vmovdqu(v1, jit->ptr[s0.r64()]);
+
+    jit->mov(jit->rax, jit->rsp);
+    //jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, " arg0=", arg0,", arg1=", arg1, ", arg2=", arg2, ", arg3=", arg3);
+    //jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, " arg0=", arg0,", arg1=", arg1, ", arg2=", arg2, ", arg3=", arg3);
+    //jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, " vmm0=", jit->jcout.as_f32, v0, jit->jcout.as_i32, ", vmm1=", v1);
+    jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, jit->jcout.as_f32, ", vmm2=", v2);
+    jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, jit->jcout.as_i32, ", vmm1=", v1);
+    jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, jit->jcout.as_f32, ", vmm0=", v0);
+    jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, jit->jcout.as_i32, ", vmm1=", v1);
+    jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, jit->jcout.as_f32, ", vmm0=", v0);
+
+    jit->return_(jit->rax);
+    jit->finalize();
+    auto ret = (*jit)(1,2,3,4);
+    printf("ret = %llx\n", ret);
 }

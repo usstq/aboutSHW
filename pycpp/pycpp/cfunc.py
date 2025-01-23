@@ -35,44 +35,42 @@ class CFunc:
 
 class CLib:
     def __init__(self, src, options, lineno_base, co_filename, disasm):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            temp_name = next(tempfile._get_candidate_names())
-            so_path = os.path.join(tmp_dir,temp_name+'.so')
-            args = f"gcc -fopenmp -shared -o {so_path} -Wall -fpic -x c++ - -lstdc++ {options}"
+        so_path = os.path.join('./clib.so')
+        args = f"gcc -fopenmp -shared -o {so_path} -Wall -fpic -x c++ - -lstdc++ {options}"
+        print(args)
+        # insert empty lines into source code so source line number can match
+        src = "\n"*lineno_base + src
+        cc = subprocess.Popen(args.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        cc.stdin.write(src)
+        cc.stdin.close()
 
-            # insert empty lines into source code so source line number can match
-            src = "\n"*lineno_base + src
-            cc = subprocess.Popen(args.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            cc.stdin.write(src)
-            cc.stdin.close()
+        # Read the output of the grep process
+        output = cc.stderr.read()
+        cc.stderr.close()
 
-            # Read the output of the grep process
-            output = cc.stderr.read()
-            cc.stderr.close()
+        cc.wait()
 
-            cc.wait()
+        if cc.returncode != 0:
+            # lineno_base
+            for s in output.splitlines():
+                if s.startswith("<stdin>:"):
+                    parts = s.split(":")
+                    parts[0] = co_filename
+                    #if (parts[1].isnumeric()):
+                    #    parts[1] = str(int(parts[1]) + lineno_base)
+                    s = ":".join(parts)
+                print(f"\033[31m{s}\033[0m", file=sys.stderr)
 
-            if cc.returncode != 0:
-                # lineno_base
-                for s in output.splitlines():
-                    if s.startswith("<stdin>:"):
-                        parts = s.split(":")
-                        parts[0] = co_filename
-                        #if (parts[1].isnumeric()):
-                        #    parts[1] = str(int(parts[1]) + lineno_base)
-                        s = ":".join(parts)
-                    print(f"\033[31m{s}\033[0m", file=sys.stderr)
+            raise Exception(f"CLib compilation failed with command line:\n{args}")
 
-                raise Exception(f"CLib compilation failed with command line:\n{args}")
+        # print(f"{so_path} genearted.")
 
-            # print(f"{so_path} genearted.")
+        self.dll = ctypes.cdll.LoadLibrary(so_path)
+        
+        if disasm:
+            subprocess.run(f"objdump -d {so_path} -M intel".split())
 
-            self.dll = ctypes.cdll.LoadLibrary(so_path)
-            
-            if disasm:
-                subprocess.run(f"objdump -d {so_path} -M intel".split())
-
-            # self.dll.test(ctypes.pointer(ctypes.c_float(5)), ctypes.c_int(1))
+        # self.dll.test(ctypes.pointer(ctypes.c_float(5)), ctypes.c_int(1))
 
     def __getattr__(self, name):
         return CFunc(getattr(self.dll, name), name)
