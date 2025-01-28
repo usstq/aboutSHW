@@ -22,7 +22,7 @@ struct LinuxPerf {
                                 unsigned long flags) {
         int fd;
         fd = syscall(SYS_perf_event_open, hw_event, pid, cpu, group_fd, flags);
-        OPENVINO_ASSERT(fd != -1, "perf_event_open failed");
+        ASSERT(fd != -1, "perf_event_open failed");
         return fd;
     }
 
@@ -95,12 +95,12 @@ struct LinuxPerf {
         m_events = events;
         // Create event group leader
         m_events[0].fd = perf_event_open(&m_events[0].attr, 0, -1, -1, 0);
-        OPENVINO_ASSERT(m_events[0].fd >= 0);
+        ASSERT(m_events[0].fd >= 0);
         ioctl(m_events[0].fd, PERF_EVENT_IOC_ID, &m_events[0].id);
         // Let's create the rest of the events while using fd[0] as the group leader
         for (int i = 1; i < m_events.size(); i++) {
             m_events[i].fd = perf_event_open(&m_events[i].attr, 0, -1, m_events[0].fd, 0);
-            OPENVINO_ASSERT(m_events[i].fd >= 0);
+            ASSERT(m_events[i].fd >= 0);
             ioctl(m_events[i].fd, PERF_EVENT_IOC_ID, &m_events[i].id);
         }
     }
@@ -137,7 +137,7 @@ struct LinuxPerf {
 
         // Read the group of counters and print result
         read(m_events[0].fd, &counter_results, sizeof(read_format));
-        OPENVINO_ASSERT(m_events.size() == counter_results.nr);
+        ASSERT(m_events.size() == counter_results.nr);
 
         for (int i = 0; i < counter_results.nr; i++) {
             for (int j = 0; j < m_events.size(); j++) {

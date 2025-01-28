@@ -690,17 +690,17 @@ inline SRegExpr operator!=(SRegExpr&& lhs, SRegExpr&& rhs) {
     return SRegExpr("!=", std::move(lhs), std::move(rhs));
 }
 inline SRegExpr operator&&(SRegExpr&& lhs, SRegExpr&& rhs) {
-    OPENVINO_ASSERT(lhs.pimpl->is_logical_op());
-    OPENVINO_ASSERT(rhs.pimpl->is_logical_op());
+    ASSERT(lhs.pimpl->is_logical_op());
+    ASSERT(rhs.pimpl->is_logical_op());
     return SRegExpr("&&", std::move(lhs), std::move(rhs));
 }
 inline SRegExpr operator||(SRegExpr&& lhs, SRegExpr&& rhs) {
-    OPENVINO_ASSERT(lhs.pimpl->is_logical_op());
-    OPENVINO_ASSERT(rhs.pimpl->is_logical_op());
+    ASSERT(lhs.pimpl->is_logical_op());
+    ASSERT(rhs.pimpl->is_logical_op());
     return SRegExpr("||", std::move(lhs), std::move(rhs));
 }
 inline SRegExpr operator!(SRegExpr&& lhs) {
-    OPENVINO_ASSERT(lhs.pimpl->is_logical_op());
+    ASSERT(lhs.pimpl->is_logical_op());
     return SRegExpr("!", std::move(lhs));
 }
 
@@ -762,7 +762,7 @@ public:
 #endif
 #ifdef __aarch64__
         // https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
-        OPENVINO_ASSERT(idx < 8);
+        ASSERT(idx < 8);
 #endif
         return ret;
     }
@@ -1038,7 +1038,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                 imul(dst, lhs->as_r64<XbyakSReg64>());
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
             return;
@@ -1058,7 +1058,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                 imul(dst, dst, lhs->as_imm32());
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
             return;
@@ -1066,10 +1066,10 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
         // addressing expression
         if (paddr) {
             auto to_RegExp = [&] {
-                OPENVINO_ASSERT(paddr);
+                ASSERT(paddr);
 
                 if (paddr->base_reg < 0) {
-                    OPENVINO_ASSERT(paddr->index_reg >= 0);
+                    ASSERT(paddr->index_reg >= 0);
                     return XbyakSReg64(paddr->index_reg) * paddr->scale + paddr->disp;
                 } else if (paddr->index_reg >= 0)
                     return XbyakSReg64(paddr->base_reg) + XbyakSReg64(paddr->index_reg) * paddr->scale + paddr->disp;
@@ -1093,7 +1093,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                     imul(dst, temp);
                     break;
                 default:
-                    OPENVINO_ASSERT(false);
+                    ASSERT(false);
                     break;
                 }
             }
@@ -1213,7 +1213,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
         // try to replace last scratch register with assign destination register
         auto assign_dst_reg_idx = pdst->r64().getIdx();
         auto assign_dst_reg_scratch_sn = pimpl->data;
-        OPENVINO_ASSERT(assign_dst_reg_scratch_sn >= scratch_reg_base);
+        ASSERT(assign_dst_reg_scratch_sn >= scratch_reg_base);
         // find the appearance of last access
         int last_access_exec_id = -1;
         int op_exec_id = 0;
@@ -1316,14 +1316,14 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                 sar(dst, p->rhs->as_imm32());
             else {
                 // only cl register supportted, we need allocate cl
-                OPENVINO_ASSERT(false);  // sar(dst, p->rhs->as_r64());
+                ASSERT(false);  // sar(dst, p->rhs->as_r64());
             }
         } else if (p->is_op("<<")) {
             if (p->rhs->is_imm())
                 shl(dst, p->rhs->as_imm32());
             else {
                 // only cl register supportted, we need allocate cl
-                OPENVINO_ASSERT(false);  // shl(dst, p->rhs->as_r64());
+                ASSERT(false);  // shl(dst, p->rhs->as_r64());
             }
         } else if (p->is_op("&")) {
             if (p->rhs->is_imm())
@@ -1383,7 +1383,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                     setle(dst.cvt8());
             }
         } else {
-            OPENVINO_ASSERT(0, "Unsupported OP: ", p->op);
+            ASSERT(0, "Unsupported OP: ", p->op);
         }
         return true;
     });
@@ -1405,7 +1405,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
                 imul(*pdst, pimpl->as_r64<XbyakSReg64>());
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
         }
@@ -1609,7 +1609,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 mul(dst, dst, lhs->as_r64<XbyakSReg64>());
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
             return;
@@ -1653,7 +1653,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 mul(dst, dst, imm_reg);
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
             return;
@@ -1713,7 +1713,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
 
             RegExprImpl::SHIFT_TYPE shift_type = RegExprImpl::SHIFT_TYPE::NONE;
             if (p->rhs->is_op(">>") || p->rhs->is_op("<<")) {
-                OPENVINO_ASSERT(imm32 >= 0 && imm32 < 64);
+                ASSERT(imm32 >= 0 && imm32 < 64);
                 if (p->rhs->is_op(">>"))
                     p->shift_type = RegExprImpl::SHIFT_TYPE::ASR;
                 if (p->rhs->is_op("<<"))
@@ -1784,7 +1784,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                     if (last_bit != cur_bit)
                         num_bit_switch ++;
                 }
-                OPENVINO_ASSERT(num_bit_switch > 0);
+                ASSERT(num_bit_switch > 0);
                 if (num_bit_switch == 1 || num_bit_switch == 2) {
                     is_op_support_imm = true;
                 }
@@ -1869,7 +1869,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
         auto dst = XbyakSReg64(p->data);
         expr_stat.ops_cnt++;
         if (p->is_op(" ")) {
-            OPENVINO_ASSERT(p->lhs->is_imm());
+            ASSERT(p->lhs->is_imm());
             mov(dst, p->lhs->as_imm32());
         } else if (p->is_op("+")) {
             if (p->rhs->is_imm())
@@ -1981,10 +1981,10 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 else if (p->is_op("<="))
                     cset(dst, Xbyak_aarch64::Cond::LE);
                 else
-                    OPENVINO_ASSERT(false);
+                    ASSERT(false);
             }
         } else {
-            OPENVINO_ASSERT(false, "Unsupported OP: ", p->op);
+            ASSERT(false, "Unsupported OP: ", p->op);
         }
         return true;
     });
@@ -2011,7 +2011,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 mul(*pdst, *pdst, pimpl->as_r64<XbyakSReg64>());
                 break;
             default:
-                OPENVINO_ASSERT(false);
+                ASSERT(false);
                 break;
             }
         }

@@ -47,7 +47,7 @@ void unit_tests() {
         }
         jit->finalize();
         auto result = (*jit)(dst, a, b);
-        OPENVINO_ASSERT(result == answer, "unit_test ", op, " failed! ", result, " != ", answer);
+        ASSERT(result == answer, "unit_test ", op, " failed! ", result, " != ", answer);
         return jit;
     };
     do_test("n", 0, 1, -2, -1);
@@ -121,7 +121,7 @@ ExprKPI complex_expression(int id, T& dst, T& a, T& b, T& c, T& d, T& e, T& f) {
         dst = ((a > 1) || (b < 2)) && (!(f == 0));
         return ExprKPI_AARCH64(1, 6) ExprKPI_X64(1, 9);
     default:
-        OPENVINO_ASSERT(false, "not supported expression id : ", id);
+        ASSERT(false, "not supported expression id : ", id);
     }
     return ExprKPI(0, 0);
 }
@@ -153,15 +153,15 @@ void expr_tests() {
         auto result = (*jit)(dst, a, b, c, d, e, f);
         auto answer = dst;
         auto expect_st = complex_expression(id, answer, a, b, c, d, e, f);
-        OPENVINO_ASSERT(result == answer, "expr_test[", id, "] failed! ", result, " != ", answer);
-        OPENVINO_ASSERT(jit->expr_stat.scratch_reg_cnt <= expect_st.scratch_reg_cnt,
+        ASSERT(result == answer, "expr_test[", id, "] failed! ", result, " != ", answer);
+        ASSERT(jit->expr_stat.scratch_reg_cnt <= expect_st.scratch_reg_cnt,
                         " expr_test[",
                         id,
                         "] used ",
                         jit->expr_stat.scratch_reg_cnt,
                         " scratch registers, expecting ",
                         expect_st.scratch_reg_cnt);
-        OPENVINO_ASSERT(jit->expr_stat.ops_cnt <= expect_st.ops_cnt,
+        ASSERT(jit->expr_stat.ops_cnt <= expect_st.ops_cnt,
                         " expr_test[",
                         id,
                         "] used ",
@@ -193,7 +193,7 @@ void ctrlflow_unit_tests() {
         jit->finalize();
         int dst = 0;
         auto result = (*jit)(dst, start, stop, step);
-        OPENVINO_ASSERT(result == answer,
+        ASSERT(result == answer,
                         "test_for_loop(",
                         start,
                         ",",
@@ -226,7 +226,7 @@ void ctrlflow_unit_tests() {
         jit->finalize();
         int dst = 0;
         auto result = (*jit)(dst, start, stop, step);
-        OPENVINO_ASSERT(result == answer,
+        ASSERT(result == answer,
                         "test_for_loop2(",
                         start,
                         ",",
@@ -261,7 +261,7 @@ void ctrlflow_unit_tests() {
         jit->finalize();
         int dst = 0;
         auto result = (*jit)(dst, start, stop, step);
-        OPENVINO_ASSERT(result == answer,
+        ASSERT(result == answer,
                         "test_while(",
                         start,
                         ",",
@@ -295,7 +295,7 @@ void ctrlflow_unit_tests() {
         jit->finalize();
         int dst = 0;
         auto result = (*jit)(dst, start, stop, step);
-        OPENVINO_ASSERT(result == answer,
+        ASSERT(result == answer,
                         "test_do_while(",
                         start,
                         ",",
@@ -330,7 +330,7 @@ void ctrlflow_unit_tests() {
         jit->finalize();
         int dst = 0;
         auto result = (*jit)(dst, va, vb);
-        OPENVINO_ASSERT(result == answer, "test_if_else(", va, ",", vb, ") failed! ", result, " != ", answer);
+        ASSERT(result == answer, "test_if_else(", va, ",", vb, ") failed! ", result, " != ", answer);
     };
     test_if_else(10, 20, 10);
     test_if_else(20, 10, 10);
@@ -348,14 +348,14 @@ static void args_test() {
                       args[4], args[5], args[6], args[7],
                       args[8], args[9], args[10], args[11],
                       args[12], args[13], args[14], args[15]);
-        OPENVINO_ASSERT(res == args[arg_id]);
+        ASSERT(res == args[arg_id]);
     };
     for(int i = 0; i < 14; i++) {
         test_arg(i);
     }
 }
 
-extern "C" void test() {
+void simd_test_basic() {
     unit_tests();
     expr_tests();
     ctrlflow_unit_tests();
@@ -380,7 +380,7 @@ extern "C" void debug(int v) {
 
 #include "simple_perf.hpp"
 
-extern "C" void tput(const char* op_name, const int UNROLL) {
+void simd_test_tput(const char* op_name, const int UNROLL) {
     LinuxPerf p({{"C", 0}, {"I", 0}});
 
     auto get_tput_kernel = [](std::string op, const int UNROLL) {
@@ -519,7 +519,7 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
         if (op == "fma" || op == "vnni" || op == "fmla") simd_width *= 2;
         auto cycles = (double)evs["C"] / loop_count;
         auto instructions = (double)evs["I"] / loop_count;
-        printf("\e[0;36m %8s %llu (ns) CPI : %.2f Instructions & Cycles: %.2f, %.2f (per iteration of %d loops) %.2f(GHz) %.2f(GInst/s) %.2f(GOPS) --- %s"
+        printf("\e[0;36m %8s %lu (ns) CPI : %.2f Instructions & Cycles: %.2f, %.2f (per iteration of %d loops) %.2f(GHz) %.2f(GInst/s) %.2f(GOPS) --- %s"
                "\e[0m\n",
                op.c_str(),
                evs["ns"],
@@ -557,7 +557,7 @@ extern "C" void tput(const char* op_name, const int UNROLL) {
 #include <stdio.h>
 #include <stdint.h>
 
-extern "C" void printreg() {
+void simd_test_printreg() {
     printf("aaaaaaaaaaaaaa\n");
     auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
     auto arg0 = jit->get_arg(0);
@@ -598,7 +598,11 @@ extern "C" void printreg() {
         0x87654328,
     };
     jit->mov(s0, reinterpret_cast<uintptr_t>(&fvalues));
-    jit->vmovdqu(v0, jit->ptr[s0.r64()]);
+    
+    //VBROADCASTSS
+
+    jit->vbroadcastss(v0, jit->ptr[s0.r64()]);
+    //jit->vmovdqu(v0, jit->ptr[s0.r64()]);
     jit->vmovdqu(v2, jit->ptr[s0.r64()]);
 
 
@@ -618,5 +622,5 @@ extern "C" void printreg() {
     jit->return_(jit->rax);
     jit->finalize();
     auto ret = (*jit)(1,2,3,4);
-    printf("ret = %llx\n", ret);
+    printf("ret = %lx\n", ret);
 }

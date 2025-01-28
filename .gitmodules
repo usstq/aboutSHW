@@ -4,3 +4,6 @@
 [submodule "thirdparty/xbyak_aarch64"]
 	path = thirdparty/xbyak_aarch64
 	url = https://github.com/fujitsu/xbyak_aarch64.git
+[submodule "thirdparty/pybind11"]
+	path = thirdparty/pybind11
+	url = https://github.com/pybind/pybind11.git

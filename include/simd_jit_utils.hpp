@@ -63,8 +63,8 @@ public:
     int allocate(int slot_index = -1) {
         // allocate register with specific slot index
         if (slot_index >= 0) {
-            OPENVINO_ASSERT(static_cast<size_t>(slot_index) < m_reg_status.size(), slot_index, " > ", m_reg_status.size());
-            OPENVINO_ASSERT((m_reg_status[slot_index] & mark_used) == 0);
+            ASSERT(static_cast<size_t>(slot_index) < m_reg_status.size(), slot_index, " > ", m_reg_status.size());
+            ASSERT((m_reg_status[slot_index] & mark_used) == 0);
             auto reg_idx = m_reg_status[slot_index];
             m_reg_status[slot_index] |= mark_used;
             return reg_idx;
@@ -73,7 +73,7 @@ public:
         auto it = std::find_if(m_reg_status.begin(), m_reg_status.end(), [](int& v) {
             return (v & mark_used) == 0;
         });
-        OPENVINO_ASSERT(it != m_reg_status.end(), "regiter pool ", m_name, " exhausted.");
+        ASSERT(it != m_reg_status.end(), "regiter pool ", m_name, " exhausted.");
         auto reg_idx = *it;
         *it |= mark_used;
         return reg_idx;
@@ -121,11 +121,11 @@ struct RegExprImpl {
 
     template <typename T>
     T as_r64() {
-        OPENVINO_ASSERT(!is_op("i"));
+        ASSERT(!is_op("i"));
         return T(data);
     }
     int as_imm32() {
-        OPENVINO_ASSERT(is_op("i"));
+        ASSERT(is_op("i"));
         return data;
     }
 

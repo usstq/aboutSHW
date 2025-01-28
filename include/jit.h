@@ -134,6 +134,7 @@ class jit_generator : public Xbyak::CodeGenerator {
       return err_code;
     generate();
     finalize(name);
+    return 0;
   }
 
 
