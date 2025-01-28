@@ -7,6 +7,8 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <iomanip>
+#include <vector>
 
 // https://stackoverflow.com/a/21371401/9292588
 inline const char* filename(const char* path) {
@@ -172,6 +174,8 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
 #define DEBUG_LOG(...) \
     GET_MACRO(_0 __VA_OPT__(, ) __VA_ARGS__, DEBUG6, DEBUG5, DEBUG4, DEBUG3, DEBUG2, DEBUG1, DEBUG0)(__VA_ARGS__)
 
+
+#ifdef XBYAK_XBYAK_H_
 template <class J>
 struct JitInfo {
     struct jcout {
@@ -435,3 +439,4 @@ struct JitInfo {
         pclose(fp);
     }
 };
+#endif

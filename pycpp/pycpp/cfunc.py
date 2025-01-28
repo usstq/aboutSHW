@@ -22,6 +22,20 @@ class CFunc:
             elif isinstance(a, float):
                 cargs.append(ctypes.c_float(a))
             elif isinstance(a, str):
+                try:
+                    v = int(a, 0)
+                    cargs.append(ctypes.c_longlong(v))
+                    continue
+                except: 
+                    pass
+
+                try:
+                    v = float(a)
+                    cargs.append(ctypes.c_float(v))
+                    continue
+                except: 
+                    pass
+
                 cargs.append(ctypes.c_char_p(a.encode('utf-8')))
             elif isinstance(a, np.ndarray):
                 cargs.append(a.ctypes.data_as(ctypes.c_void_p))

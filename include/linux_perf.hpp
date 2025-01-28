@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef __cplusplus
+
 #include <linux/perf_event.h>
 #include <time.h>
 //#include <linux/time.h>
@@ -703,14 +705,16 @@ struct PerfEventGroup : public IPerfEventDumper {
             return '\0';
         }
         template<typename T>
-        void set_extra_data(int i, T* t) { extra_data[i].p = t; }
-        void set_extra_data(int i, float t) { extra_data[i].f = t; }
-        void set_extra_data(int i, double t) { extra_data[i].f = t; }
+        void set_extra_data(int i, T* t) { extra_data[i].p = t; extra_data_type[i] = 'p';}
+        void set_extra_data(int i, float t) { extra_data[i].f = t;  extra_data_type[i] = 'f';}
+        void set_extra_data(int i, double t) { extra_data[i].f = t;  extra_data_type[i] = 'f';}
         template<typename T>
         void set_extra_data(int i, T t) {
             static_assert(std::is_integral<T>::value);
             extra_data[i].i = t;
+            extra_data_type[i] = 'i';
         }
+        void set_extra_data(int i) { extra_data_type[i] = '\0';}
 
         template <typename ... Values>
         void set_extra_data(Values... vals) {
@@ -1383,6 +1387,21 @@ ProfileScope Profile(float sampling_probability, const std::string& title, int i
     return {&pevg, pd, disable_profile};
 }
 
+template <typename ... Args>
+ProfileScope Profile(float sampling_probability, const std::string& title, const std::string& category, int id = 0, Args&&... args) {
+    auto& pevg = PerfEventGroup::get();
+    auto* pd = pevg._profile(title, id, category);
+    if (pd) {
+        pd->set_extra_data(std::forward<Args>(args)...);
+    }
+
+    bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
+    if (disable_profile) {
+        PerfEventGroup::get_sampling_lock() ++;
+    }
+    return {&pevg, pd, disable_profile};
+}
+
 inline int Init() {
     // this is for capture all context switching events
     PerfEventCtxSwitch::get();
@@ -1394,6 +1413,53 @@ inline int Init() {
 
 } // namespace LinuxPerf
 
+
+#ifdef LINUX_PERF_C_API
+#include <cstdarg>
+extern "C" void* linux_perf_profile_start(const char * title, const char * category, int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    auto& pevg = LinuxPerf::PerfEventGroup::get();
+    auto* pd = pevg._profile(title, 0, category);
+    if (pd) {
+        for(int j=0; j<count; j++) {
+            pd->set_extra_data(j, va_arg(ap,int));
+        }
+        pd->set_extra_data(count);
+    }
+    va_end(ap);
+    return reinterpret_cast<void*>(new LinuxPerf::ProfileScope{&pevg, pd});
+}
+extern "C" void* linux_perf_profile_start_prob(const char * title, const char * category, float sampling_probability, int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+
+    auto& pevg = LinuxPerf::PerfEventGroup::get();
+    auto* pd = pevg._profile(title, 0, category);
+    if (pd) {
+        for(int j=0; j<count; j++)
+            pd->set_extra_data(j, va_arg(ap,int));
+        pd->set_extra_data(count);
+    }
+
+    bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
+    if (disable_profile) {
+        LinuxPerf::PerfEventGroup::get_sampling_lock() ++;
+    }
+    va_end(ap);
+    return reinterpret_cast<void*>(new LinuxPerf::ProfileScope{&pevg, pd, disable_profile});
+}
+
+extern "C" void linux_perf_profile_end(void * p) {
+    delete reinterpret_cast<LinuxPerf::ProfileScope *>(p);
+}
+#endif
+#else ///#ifdef __cplusplus
+// C_API
+extern void* linux_perf_profile_start(const char * title, const char * category, int count, ...);
+extern void* linux_perf_profile_start_prob(const char * title, const char * category, float sampling_probability, int count, ...);
+extern void linux_perf_profile_end(void* p);
+#endif ///#ifdef __cplusplus
 
 
 #if 0
