@@ -67,10 +67,12 @@ struct jit_generator : public Xbyak::CodeGenerator {
         enum class jout_options {
             as_f32 = 1,
             as_i32 = 2,
+            as_hex8 = 3,
         };
         jout_options m_jout_opt;
         jout_options as_f32 = jout_options::as_f32;
         jout_options as_i32 = jout_options::as_i32;
+        jout_options as_hex8 = jout_options::as_hex8;
         void _jit_cout(jout_options value) {
             m_jout_opt = value;
         }
@@ -89,6 +91,13 @@ struct jit_generator : public Xbyak::CodeGenerator {
                 printf("%08x", v[i]);
                 if (i > 0)
                     printf(",");
+            }
+            printf("]");
+        }
+        static void printf_vec_hex8(uint8_t* v, int count) {
+            printf("[");
+            for (int i = 0; i < count; i++) {
+                printf("%02x ", v[i]);
             }
             printf("]");
         }
@@ -112,8 +121,11 @@ struct jit_generator : public Xbyak::CodeGenerator {
             jit->mov(jit->esi, value.getBit()/32);
             if (m_jout_opt == jout_options::as_f32) {
                 jit->call(reinterpret_cast<const void*>(printf_vec_float));
-            } else {
+            } else if (m_jout_opt == jout_options::as_i32) {
                 jit->call(reinterpret_cast<const void*>(printf_vec_i32));
+            } else {
+                jit->mov(jit->esi, value.getBit()/8);
+                jit->call(reinterpret_cast<const void*>(printf_vec_hex8));
             }
         }
         void _jit_cout(Xbyak::Reg64 value) {
@@ -257,7 +269,9 @@ struct jit_generator : public Xbyak::CodeGenerator {
         // if (mayiuse(avx))
         vzeroupper();
     }
+    bool is_post_amble_called = false;
     void postamble() {
+        is_post_amble_called = true;
         for (size_t i = 0; i < num_abi_save_gpr_regs; ++i)
             pop(XbyakSReg64(abi_save_gpr_regs[num_abi_save_gpr_regs - 1 - i]));
         uni_vzeroupper();
@@ -280,6 +294,9 @@ struct jit_generator : public Xbyak::CodeGenerator {
     }
 
     int finalize() {
+        if (!is_post_amble_called) {
+            throw std::runtime_error("postamble is not generated, besure return_() is called at least once.");
+        }
         int err_code = Xbyak::GetError();
         if (err_code != Xbyak::ERR_NONE)
             return err_code;
@@ -515,6 +532,17 @@ public:
     operator const XbyakVReg&() const {
         return *reg;
     }
+    Xbyak::Ymm ymm() const {
+        return Xbyak::Ymm(reg->getIdx());
+    }
+    Xbyak::Xmm xmm() const {
+        return Xbyak::Xmm(reg->getIdx());
+    }
+    inline void load(const int32_t brdi32) const;
+    inline void load(const float brdf32) const;
+    inline void load(const void* pv) const;
+    inline void load(const VReg& rhs) const;
+    // do not overload `operator=`
 };
 
 class SRegExpr {
@@ -753,7 +781,11 @@ public:
         return (*fptr)(args...);
     }
 
-    SReg get_arg(int idx) {
+    int m_arg_id = 0;
+    SReg get_arg(int idx = -1) {
+
+        if (idx < 0) idx = m_arg_id++;
+
         auto ret = SReg(this, alloc_reg64(idx));
 #ifdef __x86_64__
         // https://en.wikipedia.org/wiki/X86_calling_conventions#x86-64_calling_conventions
@@ -1456,6 +1488,42 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             jz(label, T_NEAR);
         }
     }
+}
+
+inline void VReg::load(const int32_t brdi32) const {
+    if (brdi32 == 0) {
+        jit->vpxor(*reg, *reg, *reg);
+    } else {
+        auto s = jit->get_sreg();
+        jit->mov(s, brdi32);
+        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
+        jit->vpbroadcastd(*reg, Xbyak::Xmm(reg->getIdx()));
+    }
+}
+
+inline void VReg::load(const float brdf32) const {
+    if (brdf32 == 0) {
+        jit->vpxor(*reg, *reg, *reg);
+    } else {
+        auto s = jit->get_sreg();
+        jit->mov(s, reinterpret_cast<const uint32_t&>(brdf32));
+        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
+        jit->vbroadcastss(*reg, Xbyak::Xmm(reg->getIdx()));
+    }
+}
+
+inline void VReg::load(const void* pv) const {
+    if (pv == nullptr) {
+        jit->vpxor(*reg, *reg, *reg);
+    } else {
+        auto s = jit->get_sreg();
+        jit->mov(s, reinterpret_cast<uintptr_t>(pv));
+        jit->vmovdqu(*reg, jit->ptr[s.r64()]);
+    }
+}
+
+inline void VReg::load(const VReg& rhs) const {
+    jit->vmovdqa(*reg, rhs);
 }
 #endif
 // https://courses.cs.washington.edu/courses/cse469/19wi/arm64.pdf

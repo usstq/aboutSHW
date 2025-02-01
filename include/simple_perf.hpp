@@ -60,7 +60,13 @@ struct LinuxPerf {
         int id;                // event ids for file descriptors
         uint64_t value;
         perf_event_attr attr;  // Configuration structure for perf events (see man perf_event_open)
-        event(std::string _name, uint64_t _config = 0) : name(_name), config(_config) {
+        bool is_cycles() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_CPU_CYCLES;
+        }
+        bool is_instructions() {
+            return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_INSTRUCTIONS;
+        }
+        event(const std::string _name, const uint64_t _config = 0) : name(_name), config(_config) {
             if (name == "CPU_CYCLES" || name == "C") {
                 type = PERF_TYPE_HARDWARE;
                 config = PERF_COUNT_HW_CPU_CYCLES;
@@ -91,8 +97,18 @@ struct LinuxPerf {
 
     std::vector<event> m_events;
 
-    LinuxPerf(const std::initializer_list<event>& events) {
+    std::string m_ev_name_cycles;
+    std::string m_ev_name_instructions;
+
+    // default : only hw cycles & instructions
+    LinuxPerf() : LinuxPerf({{"C", 0}, {"I", 0}}) {}
+
+    LinuxPerf(const std::vector<event>& events) {
         m_events = events;
+        for(int i = 0; i < m_events.size(); i++) {
+            if (m_events[i].is_cycles()) m_ev_name_cycles = m_events[i].name;
+            if (m_events[i].is_instructions()) m_ev_name_instructions = m_events[i].name;
+        }
         // Create event group leader
         m_events[0].fd = perf_event_open(&m_events[0].attr, 0, -1, -1, 0);
         ASSERT(m_events[0].fd >= 0);
@@ -104,6 +120,7 @@ struct LinuxPerf {
             ioctl(m_events[i].fd, PERF_EVENT_IOC_ID, &m_events[i].id);
         }
     }
+    LinuxPerf(const std::initializer_list<event>& events) : LinuxPerf(std::vector<event>(events)) {}
 
     inline uint64_t get_time_ns() {
         struct timespec tp0;
@@ -154,6 +171,42 @@ struct LinuxPerf {
         // Close counter file descriptors
         for (int i = 0; i < TOTAL_EVENTS; i++) {
             close(m_events[i].fd);
+        }
+    }
+
+    // profiling callable
+    template<class F>
+    void operator()(F func, std::string name, int n_repeats = 1, int loop_count = 1, double ops = 0, double bytes = 0) {
+        for(int round = 0; round < n_repeats; round++) {
+            start();
+            func();
+            auto evs = stop();
+
+            printf("\e[0;36m[%8s] No.%d/%d %lu(ns) ", name.c_str(), round, n_repeats, evs["ns"]);
+
+            for (auto const& x : evs) {
+                if (x.first != "ns")
+                    printf("%s/", x.first.c_str());
+            }
+            printf("(per-iter): ");
+            for (auto const& x : evs) {
+                if (x.first != "ns")
+                    printf("%.1f ", (double)x.second/loop_count);
+            }
+
+            if (!m_ev_name_cycles.empty() && !m_ev_name_instructions.empty())
+                printf("CPI: %.2f ", (double)evs[m_ev_name_cycles]  / (double)evs[m_ev_name_instructions]);
+            if (!m_ev_name_cycles.empty())
+                printf("%.2f(GHz) ", (double)evs[m_ev_name_cycles]/evs["ns"]);
+
+            if (ops > 0)
+                printf("%.1f(GOP/S) ", ops/evs["ns"]);
+            if (bytes > 0)
+                printf("%.1f(GB/S) ", bytes/evs["ns"]);
+            if (ops > 0 && bytes > 0)
+                printf("%.1f(OP/B) ", ops/bytes);
+
+            printf("\e[0m\n");
         }
     }
 };

@@ -8,16 +8,17 @@ intermediate_size = 8640
 
 
 # make csrc & import lib
-subprocess.check_output(["cmake", "-B", "build"], shell=False)
+subprocess.check_output(["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug"], shell=False)
 subprocess.check_output(["cmake", "--build", "build", "--config", "Debug"], shell=False)
 from build import lut_gemm
 
 print(dir(lut_gemm))
 a = np.random.randint(low=-1, high=2, size=(3, 4), dtype=np.int8)
-print(a)
-c = lut_gemm.test(a)
+c = lut_gemm.pack_i2s(a)
 print(c.shape, c.strides, c.dtype, c)
-sys.exit(0)
+
+def test_mbench_i2s():
+    lut_gemm.mbench()
 
 class LUTGemm(object):
     def __init__(self, K, N, M=None):
