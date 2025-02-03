@@ -66,7 +66,7 @@ struct PerfData {
                 auto& evt_name = m_configs[i].name;
                 if (m_configs[i].is_cpu_cycles())
                     avg_cycles = m_evts[evt_name] / (double)(m_rounds);
-                printf("%s(%llu) ", evt_name.c_str(), m_evts[evt_name]/m_rounds);
+                printf("%s(%lu) ", evt_name.c_str(), m_evts[evt_name]/m_rounds);
             }
             auto dt_ns = m_evts["ns"] / (double)(m_rounds);
 

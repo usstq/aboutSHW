@@ -1,16 +1,5 @@
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
-
-#include "misc.hpp"
-#include "simd_jit.hpp"
+#include "common.hpp"
 #include "simd_jit_tests.hpp"
-
-using ov::intel_cpu::SIMDJit;
-using ov::intel_cpu::SReg;
-using ov::intel_cpu::VReg;
-
-namespace py = pybind11;
-
 // micro kernel for lut 1.58 bits
 // how kernel can be built on more organized way?
 //   3 ternary-valued (-1, 0, 1) elements along reduction axis (K) were encoded into

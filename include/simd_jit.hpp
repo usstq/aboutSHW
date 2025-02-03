@@ -68,11 +68,16 @@ struct jit_generator : public Xbyak::CodeGenerator {
             as_f32 = 1,
             as_i32 = 2,
             as_hex8 = 3,
+            as_i8 = 4,
+            as_i16 = 5,
         };
         jout_options m_jout_opt;
         jout_options as_f32 = jout_options::as_f32;
         jout_options as_i32 = jout_options::as_i32;
         jout_options as_hex8 = jout_options::as_hex8;
+        jout_options as_x8 = jout_options::as_hex8;
+        jout_options as_i8 = jout_options::as_i8;
+        jout_options as_i16 = jout_options::as_i16;
         void _jit_cout(jout_options value) {
             m_jout_opt = value;
         }
@@ -101,6 +106,20 @@ struct jit_generator : public Xbyak::CodeGenerator {
             }
             printf("]");
         }
+        static void printf_vec_i8(int8_t* v, int count) {
+            printf("[");
+            for (int i = 0; i < count; i++) {
+                printf("%2d ", v[i]);
+            }
+            printf("]");
+        }
+        static void printf_vec_i16(int16_t* v, int count) {
+            printf("[");
+            for (int i = 0; i < count; i++) {
+                printf("%4d  ", v[i]);
+            }
+            printf("]");
+        }
         void _jit_cout(Xbyak::Xmm value) {
             auto rbp = jit->rbp;
             auto rsi = jit->rsi;
@@ -123,9 +142,15 @@ struct jit_generator : public Xbyak::CodeGenerator {
                 jit->call(reinterpret_cast<const void*>(printf_vec_float));
             } else if (m_jout_opt == jout_options::as_i32) {
                 jit->call(reinterpret_cast<const void*>(printf_vec_i32));
-            } else {
+            } else if (m_jout_opt == jout_options::as_hex8) {
                 jit->mov(jit->esi, value.getBit()/8);
                 jit->call(reinterpret_cast<const void*>(printf_vec_hex8));
+            } else if (m_jout_opt == jout_options::as_i8) {
+                jit->mov(jit->esi, value.getBit()/8);
+                jit->call(reinterpret_cast<const void*>(printf_vec_i8));
+            } else if (m_jout_opt == jout_options::as_i16) {
+                jit->mov(jit->esi, value.getBit()/16);
+                jit->call(reinterpret_cast<const void*>(printf_vec_i16));
             }
         }
         void _jit_cout(Xbyak::Reg64 value) {
@@ -295,7 +320,8 @@ struct jit_generator : public Xbyak::CodeGenerator {
 
     int finalize() {
         if (!is_post_amble_called) {
-            throw std::runtime_error("postamble is not generated, besure return_() is called at least once.");
+            // throw std::runtime_error("postamble is not generated, besure return_() is called at least once.");
+            return_();
         }
         int err_code = Xbyak::GetError();
         if (err_code != Xbyak::ERR_NONE)
@@ -478,6 +504,14 @@ namespace intel_cpu {
 class SIMDJit;
 class SRegExpr;
 
+struct default_simd_jit_t {
+    SIMDJit * cur;
+    static default_simd_jit_t& get() {
+        static default_simd_jit_t inst;
+        return inst;
+    }
+};
+
 class SReg {
 private:
     SIMDJit* jit = nullptr;
@@ -485,7 +519,9 @@ private:
 
 public:
     SReg(SIMDJit* jit, std::shared_ptr<XbyakSReg64> reg) : jit(jit), reg(reg) {}
-    SReg() = default;
+    SReg();
+    SReg(const SReg& rhs) = default;
+
     bool empty() const {
         return !static_cast<bool>(reg);
     }
@@ -522,7 +558,8 @@ private:
 
 public:
     VReg(SIMDJit* jit, std::shared_ptr<XbyakVReg> reg) : jit(jit), reg(reg) {}
-    VReg() = default;
+    VReg();
+    VReg(const VReg& rhs) = default;
     bool empty() const {
         return !static_cast<bool>(reg);
     }
@@ -542,7 +579,8 @@ public:
     inline void load(const float brdf32) const;
     inline void load(const void* pv) const;
     inline void load(const VReg& rhs) const;
-    // do not overload `operator=`
+    inline void load(SRegExpr&& addr) const;
+    inline void store(SRegExpr&& addr) const;
 };
 
 class SRegExpr {
@@ -565,12 +603,37 @@ public:
               index_reg(index_reg),
               scale(scale),
               disp(disp) {}
+        Xbyak::RegExp to_addr() {
+            if (base_reg < 0) {
+                ASSERT(index_reg >= 0);
+                return XbyakSReg64(index_reg) * scale + disp;
+            } else if (index_reg >= 0)
+                return XbyakSReg64(base_reg) + XbyakSReg64(index_reg) * scale + disp;
+            else
+                return XbyakSReg64(base_reg) + disp;
+        }
+        std::string to_string() {
+            std::stringstream ss;
+            ss << "[";
+            if (base_reg >= 0)
+                ss << "{r" << base_reg << "}";
+            else
+                ss << "{}";
+
+            if (index_reg >= 0) {
+                ss << " + {r" << index_reg << "} x " << scale;
+            }
+            ss << " + " << disp << "]";
+            return ss.str();
+        }
     };
     std::unique_ptr<Addressing> paddr;
 
     SRegExpr(int data) : pimpl(new RegExprImpl("i", data)) {}
 
-    SRegExpr(SReg r) : pimpl(new RegExprImpl("r", r.r64().getIdx())) {}
+    SRegExpr(SReg r) : pimpl(new RegExprImpl("r", r.r64().getIdx())) {
+        paddr.reset(new Addressing(r.r64().getIdx(), -1, 1, 0));
+    }
 
     SRegExpr(const char* type, int data) : pimpl(new RegExprImpl(type, data)) {}
     SRegExpr(const char* op, SRegExpr&& lhs) : pimpl(new RegExprImpl(op, lhs.pimpl)) {}
@@ -592,12 +655,18 @@ public:
                     paddr.reset(new Addressing(-1, pimpl->lhs->data, pimpl->rhs->data, 0));
             }
         } else if (pimpl->is_op("+") && pimpl->rhs->is_leaf()) {
-            // merge addressing mode: only (+base) or (+disp) is allowed
-            if (rhs.paddr)
+            //std::cout << "pimpl->is_swapped = " << pimpl->is_swapped << std::endl;
+            //std::cout << "lhs.paddr = " << (lhs.paddr ? lhs.paddr->to_string() : "N/A") << std::endl;
+            //std::cout << "rhs.paddr = " << (rhs.paddr ? rhs.paddr->to_string() : "N/A") << std::endl;
+
+            if (pimpl->is_swapped) {
                 paddr = std::move(rhs.paddr);
-            if (lhs.paddr)
+            } else {
                 paddr = std::move(lhs.paddr);
+            }
             if (paddr) {
+                // merge addressing mode: only (+base) or (+disp) is allowed
+                //std::cout << "paddr = " << paddr->to_string() << std::endl;
                 // update pattern
                 if (pimpl->rhs->is_imm()) {
                     paddr->disp += pimpl->rhs->data;
@@ -616,24 +685,17 @@ public:
                 }
             }
         }
+        //show("SRegExpr constructed:");
     }
 
     void show(std::string title) const {
         std::cout << "\033[32m::::" << title << "::::\033[0m" << std::endl;
         if (paddr) {
-            std::cout << "Addressing:";
-            if (paddr->base_reg >= 0)
-                std::cout << " {r" << paddr->base_reg << "}";
-            else
-                std::cout << " {}";
-
-            if (paddr->index_reg >= 0) {
-                std::cout << " + {r" << paddr->index_reg << "} x " << paddr->scale;
-            }
-            std::cout << " + " << paddr->disp << std::endl;
+            std::cout << "\tAddressing:" << paddr->to_string() << std::endl;
         }
+        if (pimpl)
         pimpl->for_each_op([&](RegExprImpl* p) {
-            std::cout << p->name() << " = " << p->lhs->name() << " " << p->op << " "
+            std::cout << "\t" << p->name() << " = " << p->lhs->name() << " " << p->op << " "
                       << (p->rhs ? p->rhs->name() : std::string("( )"));
 #ifdef __aarch64__
             if (p->shift_type != RegExprImpl::SHIFT_TYPE::NONE) {
@@ -753,10 +815,42 @@ struct convert_call_arg<uint32_t> {
     using type = int64_t;
 };
 
+// copied from pybind11
+template <typename T>
+struct remove_class {};
+template <typename C, typename R, typename... A>
+struct remove_class<R (C::*)(A...)> {
+    using type = R(A...);
+};
+template <typename C, typename R, typename... A>
+struct remove_class<R (C::*)(A...) const> {
+    using type = R(A...);
+};
+
+
+
 //=========================================================================================
 class SIMDJit : public jit_generator {
 public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(SIMDJit);
+
+    template <typename Func, typename Return, typename... Args>
+    static std::shared_ptr<SIMDJit> _create(Func &&f, Return (*)(SIMDJit*, Args...)) {
+        auto jit = std::make_shared<SIMDJit>();
+        default_simd_jit_t::get().cur = jit.get();
+        // https://stackoverflow.com/questions/68882421/using-a-pack-expansion-with-an-index-is-it-ub
+        auto convertedArgs = std::tuple{jit.get(), static_cast<Args>(jit->get_arg())...};
+        std::apply(f, convertedArgs);
+        jit->finalize();
+        default_simd_jit_t::get().cur = nullptr;
+        return jit;
+    }
+
+    template <typename Func>
+    static std::shared_ptr<SIMDJit> create(Func&& f) {
+        using fsig = typename remove_class<decltype(&Func::operator())>::type;
+        return _create(f, (fsig *)(nullptr));
+    }
 
     std::shared_ptr<void> get_disasm(int enable) {
         if (enable) {
@@ -926,6 +1020,22 @@ public:
     }
 };
 
+inline SReg::SReg() {
+    auto* cur_jit = default_simd_jit_t::get().cur;
+    if (cur_jit) {
+        // allocate sreg
+        jit = cur_jit;
+        reg = cur_jit->get_sreg().reg;
+    }
+}
+inline VReg::VReg() {
+    auto* cur_jit = default_simd_jit_t::get().cur;
+    if (cur_jit) {
+        // allocate sreg
+        jit = cur_jit;
+        reg = cur_jit->get_vreg().reg;
+    }
+}
 //========================================================================================================
 #ifdef __x86_64__
 template <typename Fn, typename START, typename STEP>
@@ -1524,6 +1634,15 @@ inline void VReg::load(const void* pv) const {
 
 inline void VReg::load(const VReg& rhs) const {
     jit->vmovdqa(*reg, rhs);
+}
+
+inline void VReg::load(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+}
+inline void VReg::store(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
 }
 #endif
 // https://courses.cs.washington.edu/courses/cse469/19wi/arm64.pdf

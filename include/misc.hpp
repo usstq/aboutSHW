@@ -230,6 +230,61 @@ std::shared_ptr<T> alloc_cache_aligned(int count) {
 }
 
 //========================================================================
+// parallel_st
+#ifdef _OPENMP
+
+#include "omp.h"
+
+template<class F>
+void parallel_st(int n_work_items, int n_work_group_size, F f) {
+    ASSERT((n_work_items % n_work_group_size) == 0);
+
+    auto n_work_groups = n_work_items / n_work_group_size;
+    auto nthr = omp_get_max_threads();
+    #pragma omp parallel
+    {
+        int ithr = omp_get_thread_num();
+
+        int n_my_works = n_work_groups / nthr;
+        int left_overs = n_work_groups - (n_my_works * nthr); // < nthr
+        int n0, n1;
+        if (ithr < left_overs) {
+            n0 = ithr * (n_my_works + 1);
+            n1 = n0 + (n_my_works + 1);
+        } else {
+            n0 = left_overs * (n_my_works + 1) + (ithr - left_overs) * n_my_works;
+            n1 = n0 + n_my_works;
+        }
+
+        // n0/n1 are group id
+        if (n1 > n0)
+            f(ithr, nthr, n0, n1);
+    }
+}
+#else
+template<class F>
+void parallel_st(int n_work_items, int n_work_group_size, F f) {
+    ASSERT((n_work_items % n_work_group_size) == 0);
+    auto n_work_groups = n_work_items / n_work_group_size;
+    f(0, 1, 0, n_work_groups);
+}
+#endif
+
+template<int nbits, typename... Sizes>
+int32_t get_imm8 (Sizes ... args){
+    int v[] = { static_cast<int>(args)... };
+    constexpr auto nargs = sizeof...(args);
+    int32_t imm = 0;
+    int ulimit = (1 << nbits);
+    static_assert(nargs * nbits <= 8);
+    for (int i = 0; i < nargs; i++) {
+        ASSERT(v[i] >= 0 && v[i] <= ulimit);
+        imm |= (v[i] << (i*nbits));
+    }
+    return imm;
+}
+
+//========================================================================
 // tensorND
 template <typename T, int TENSORND_MAXDIMS=8>
 struct tensorND {

@@ -159,11 +159,14 @@ struct RegExprImpl {
         return false;
     }
 
+    bool is_swapped = false;
     void try_swap_lhs_rhs() {
         if (is_op("+") || is_op("*") || is_op("&") || is_op("|")) {
             std::swap(lhs, rhs);
+            is_swapped = true;
         } else if (is_cmp()) {
             std::swap(lhs, rhs);
+            is_swapped = true;
             if (is_op(">"))
                 op = "<";
             else if (is_op(">="))
@@ -174,6 +177,7 @@ struct RegExprImpl {
                 op = ">=";
         } else {
             // no swap
+            is_swapped = false;
         }
     }
 

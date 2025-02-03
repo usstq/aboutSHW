@@ -1,99 +1,70 @@
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
-
-#include "misc.hpp"
-#include "simd_jit.hpp"
-#include "simple_perf.hpp"
-#include "omp.h"
-
-using ov::intel_cpu::SIMDJit;
-using ov::intel_cpu::SReg;
-using ov::intel_cpu::VReg;
-
-namespace py = pybind11;
+#include "common.hpp"
 
 std::shared_ptr<SIMDJit> get_i2s8_mkernel() {
-    auto jit = std::make_shared<SIMDJit>("mk_i2s8");
+    return SIMDJit::create(
+        [](SIMDJit* jit, SReg cnt, SReg pa, SReg stride_a, SReg pb, SReg pc, SReg stride_c, SReg do_accumulate) {
+            VReg mask3;
+            mask3.load(0x03030303);
 
-    auto cnt = jit->get_arg();
-    auto pa = jit->get_arg();
-    auto stride_a = jit->get_arg();
-    auto pb = jit->get_arg();
-    auto pc = jit->get_arg();
-    auto stride_c = jit->get_arg();
-    auto do_accumulate = jit->get_arg();
+            VReg vax, vay, vb0, vb1, vbx, vby;
+            VReg vc[8];
 
-    auto mask3 = jit->get_vreg();
-    mask3.load(0x03030303);
+            for (int i = 0; i < 8; i++) {
+                jit->vpxor(vc[i], vc[i], vc[i]);
+            }
+            jit->do_while_(cnt > 0, [&] {
+                jit->vpbroadcastd(vax, jit->ptr[pa.r64()]);
+                jit->vpbroadcastd(vay, jit->ptr[pa.r64() + 4]);
+                vb0.load(pb);
+                vb1.load(pb + 32);
 
-    auto vc = jit->get_vregs(8);
-    for (int i = 0; i < 8; i++) {
-        jit->vpxor(vc[i], vc[i], vc[i]);
-    }
+                // (4 x 2bit) => (4 x 8bit) -> VNNI
+                jit->vpand(vbx, vb0, mask3);
+                jit->vpand(vby, vb1, mask3);
+                jit->vpdpbusd(vc[0], vbx, vax, Xbyak::VexEncoding);
+                jit->vpdpbusd(vc[4], vby, vay, Xbyak::VexEncoding);
 
-    auto vax = jit->get_vreg();
-    auto vay = jit->get_vreg();
-    auto vb0 = jit->get_vreg();
-    auto vb1 = jit->get_vreg();
-    auto vbx = jit->get_vreg();
-    auto vby = jit->get_vreg();
+                jit->vpsrlw(vbx, vb0, 2);
+                jit->vpsrlw(vby, vb1, 2);
+                jit->vpand(vbx, vbx, mask3);
+                jit->vpand(vby, vby, mask3);
+                jit->vpdpbusd(vc[1], vbx, vax, Xbyak::VexEncoding);
+                jit->vpdpbusd(vc[5], vby, vay, Xbyak::VexEncoding);
 
-    jit->do_while_(cnt > 0, [&] {
-        jit->vpbroadcastd(vax, jit->ptr[pa.r64()]);
-        jit->vpbroadcastd(vay, jit->ptr[pa.r64() + 4]);
-        jit->vmovdqu(vb0, jit->ptr[pb.r64()]);
-        jit->vmovdqu(vb1, jit->ptr[pb.r64() + 32]);
-        // (4 x 2bit) => (4 x 8bit) -> VNNI
-        jit->vpand(vbx, vb0, mask3);
-        jit->vpand(vby, vb1, mask3);
-        jit->vpdpbusd(vc[0], vbx, vax, Xbyak::VexEncoding);
-        jit->vpdpbusd(vc[4], vby, vay, Xbyak::VexEncoding);
+                jit->vpsrlw(vbx, vb0, 4);
+                jit->vpsrlw(vby, vb1, 4);
+                jit->vpand(vbx, vbx, mask3);
+                jit->vpand(vby, vby, mask3);
+                jit->vpdpbusd(vc[2], vbx, vax, Xbyak::VexEncoding);
+                jit->vpdpbusd(vc[6], vby, vay, Xbyak::VexEncoding);
 
-        jit->vpsrlw(vbx, vb0, 2);
-        jit->vpsrlw(vby, vb1, 2);
-        jit->vpand(vbx, vbx, mask3);
-        jit->vpand(vby, vby, mask3);
-        jit->vpdpbusd(vc[1], vbx, vax, Xbyak::VexEncoding);
-        jit->vpdpbusd(vc[5], vby, vay, Xbyak::VexEncoding);
+                jit->vpsrlw(vbx, vb0, 6);
+                jit->vpsrlw(vby, vb1, 6);
+                jit->vpand(vbx, vbx, mask3);
+                jit->vpand(vby, vby, mask3);
+                jit->vpdpbusd(vc[3], vbx, vax, Xbyak::VexEncoding);
+                jit->vpdpbusd(vc[7], vby, vay, Xbyak::VexEncoding);
 
-        jit->vpsrlw(vbx, vb0, 4);
-        jit->vpsrlw(vby, vb1, 4);
-        jit->vpand(vbx, vbx, mask3);
-        jit->vpand(vby, vby, mask3);
-        jit->vpdpbusd(vc[2], vbx, vax, Xbyak::VexEncoding);
-        jit->vpdpbusd(vc[6], vby, vay, Xbyak::VexEncoding);
-
-        jit->vpsrlw(vbx, vb0, 6);
-        jit->vpsrlw(vby, vb1, 6);
-        jit->vpand(vbx, vbx, mask3);
-        jit->vpand(vby, vby, mask3);
-        jit->vpdpbusd(vc[3], vbx, vax, Xbyak::VexEncoding);
-        jit->vpdpbusd(vc[7], vby, vay, Xbyak::VexEncoding);
-
-        jit->prefetcht1(jit->ptr[pb.r64() + 4096]);
-        pa += 8;
-        pb += 64;
-        cnt -= 8;
-    });
-    jit->vpaddd(vc[0], vc[0], vc[4]);
-    jit->vpaddd(vc[1], vc[1], vc[5]);
-    jit->vpaddd(vc[2], vc[2], vc[6]);
-    jit->vpaddd(vc[3], vc[3], vc[7]);
-    jit->if_ (do_accumulate != 0, [&] {
-        jit->vpaddd(vc[0], vc[0], jit->ptr[pc.r64() + 32 * 0]);
-        jit->vpaddd(vc[1], vc[1], jit->ptr[pc.r64() + 32 * 1]);
-        jit->vpaddd(vc[2], vc[2], jit->ptr[pc.r64() + 32 * 2]);
-        jit->vpaddd(vc[3], vc[3], jit->ptr[pc.r64() + 32 * 3]);
-    });
-
-    jit->vmovdqu(jit->ptr[pc.r64() + 32 * 0], vc[0]);
-    jit->vmovdqu(jit->ptr[pc.r64() + 32 * 1], vc[1]);
-    jit->vmovdqu(jit->ptr[pc.r64() + 32 * 2], vc[2]);
-    jit->vmovdqu(jit->ptr[pc.r64() + 32 * 3], vc[3]);
-
-    jit->return_();
-    jit->finalize();
-    return jit;
+                jit->prefetcht1(jit->ptr[pb.r64() + 4096]);
+                pa += 8;
+                pb += 64;
+                cnt -= 8;
+            });
+            jit->vpaddd(vc[0], vc[0], vc[4]);
+            jit->vpaddd(vc[1], vc[1], vc[5]);
+            jit->vpaddd(vc[2], vc[2], vc[6]);
+            jit->vpaddd(vc[3], vc[3], vc[7]);
+            jit->if_(do_accumulate != 0, [&] {
+                jit->vpaddd(vc[0], vc[0], jit->ptr[pc.r64() + 32 * 0]);
+                jit->vpaddd(vc[1], vc[1], jit->ptr[pc.r64() + 32 * 1]);
+                jit->vpaddd(vc[2], vc[2], jit->ptr[pc.r64() + 32 * 2]);
+                jit->vpaddd(vc[3], vc[3], jit->ptr[pc.r64() + 32 * 3]);
+            });
+            vc[0].store(pc + 32 * 0);
+            vc[1].store(pc + 32 * 1);
+            vc[2].store(pc + 32 * 2);
+            vc[3].store(pc + 32 * 3);
+        });
 }
 
 void mbench_i2s8() {
@@ -107,12 +78,12 @@ void mbench_i2s8() {
     auto C = alloc_cache_aligned<int32_t>(M * N, 0);
     // start test
     // warm-up code cache
-    (*jit)(4, A.get(), K, B.get(), C.get(), N*4, 0);
+    (*jit)(4, A.get(), K, B.get(), C.get(), N * 4, 0);
 
     printf("(%d,%d,%d) size of A,B = %d, %d bytes\n", M, K, N, M * K, K * N / 4);
     perf(
         [&] {
-            (*jit)(K, A.get(), K, B.get(), C.get(), N*4, 0);
+            (*jit)(K, A.get(), K, B.get(), C.get(), N * 4, 0);
         },
         std::string("i2s8"),
         4,                   // repeat
@@ -122,7 +93,7 @@ void mbench_i2s8() {
     );
 }
 
-void pack_vnni_4x32(SIMDJit * jit, VReg v0, VReg v1, VReg v2, VReg v3) {
+void pack_vnni_4x32(SIMDJit* jit, VReg v0, VReg v1, VReg v2, VReg v3) {
     auto va = jit->get_vreg();
     auto vb = jit->get_vreg();
     auto vc = jit->get_vreg();
@@ -133,54 +104,34 @@ void pack_vnni_4x32(SIMDJit * jit, VReg v0, VReg v1, VReg v2, VReg v3) {
     jit->vpunpckhbw(vc, v0, v1);
     jit->vpunpckhbw(vd, v2, v3);
 
-    //jit->jcout(va, "\n", vb, "\n", vc, "\n", vd, "\n");
+    // jit->jcout(va, "\n", vb, "\n", vc, "\n", vd, "\n");
 
     jit->vpunpcklwd(v0, va, vb);
     jit->vpunpcklwd(v1, vc, vd);
     jit->vpunpckhwd(v2, va, vb);
     jit->vpunpckhwd(v3, vc, vd);
 
-    //jit->jcout(v0, "\n", v1, "\n", v2, "\n", v3, "\n");
+    // jit->jcout(v0, "\n", v1, "\n", v2, "\n", v3, "\n");
     jit->vperm2i128(va.ymm(), v0.ymm(), v2.ymm(), 0x20);
     jit->vperm2i128(vb.ymm(), v1.ymm(), v3.ymm(), 0x20);
     jit->vperm2i128(vc.ymm(), v0.ymm(), v2.ymm(), 0x31);
     jit->vperm2i128(vd.ymm(), v1.ymm(), v3.ymm(), 0x31);
 
-    //jit->jcout(va, "\n", vb, "\n", vc, "\n", vd, "\n");
+    // jit->jcout(va, "\n", vb, "\n", vc, "\n", vd, "\n");
     v0.load(va);
     v1.load(vb);
     v2.load(vc);
     v3.load(vd);
 }
 
-template<class F>
-void parallel_st(int n_works, F f) {
-    auto nthr = omp_get_max_threads();
-    #pragma omp parallel
-    {
-        int ithr = omp_get_thread_num();
-
-        int n_my_works = n_works / nthr;
-        int left_overs = n_works - (n_my_works * nthr); // < nthr
-        int n0, n1;
-        if (ithr < left_overs) {
-            n0 = ithr * (n_my_works + 1);
-            n1 = n0 + (n_my_works + 1);
-        } else {
-            n0 = left_overs * (n_my_works + 1) + (ithr - left_overs) * n_my_works;
-            n1 = n0 + n_my_works;
-        }
-        f(ithr, nthr, n0, n1);
-    }
-}
-
 void test_parallel_st() {
-    for(int n_works = 1; n_works < 32; n_works ++) {
+    for (int n_works = 1; n_works < 32; n_works++) {
         std::cout << " =========== n_works = " << n_works << std::endl;
-        parallel_st(n_works, [&](int ithr, int nthr, int n0, int n1) {
-            #pragma omp critical
+        parallel_st(n_works, 1, [&](int ithr, int nthr, int n0, int n1) {
+#pragma omp critical
             {
-                std::cout << "ithr=" << ithr << "/"  << nthr << "  " << n0 << " ~ " << n1 << " = " << n1 - n0 << std::endl;
+                std::cout << "ithr=" << ithr << "/" << nthr << "  " << n0 << " ~ " << n1 << " = " << n1 - n0
+                          << std::endl;
             }
         });
     }
@@ -198,62 +149,32 @@ py::array_t<int32_t> mm_i2s(py::array_t<int8_t> X, py::array_t<uint8_t> PackedW)
     py::array_t<int32_t> Y({M, N});
 
     auto BN = 32;
-    auto nBN = N / BN;
-    auto N_tail = N - nBN * BN;
-    ASSERT(N_tail == 0);
 
-    //test_parallel_st();
-    parallel_st(nBN, [&](int ithr, int nthr, int n0, int n1) {
-        for(int n = n0; n < n1; n++) {
-            (*jit)(K, X.data(), K, PackedW.data() + n*K*8,
-                   Y.mutable_data(0, n*BN), N*sizeof(int32_t), 0);
+    // test_parallel_st();
+    parallel_st(N, BN, [&](int ithr, int nthr, int n0, int n1) {
+        for (int n = n0; n < n1; n++) {
+            (*jit)(K, X.data(), K, PackedW.data() + n * K * 8, Y.mutable_data(0, n * BN), N * sizeof(int32_t), 0);
         }
     });
     return Y;
 }
 
 py::array_t<uint8_t> pack_i2s(py::array_t<int8_t> W) {
-    static auto jit = [] {
-        auto jit = std::make_shared<SIMDJit>("mk_i2s8");
-        auto v0 = jit->get_vreg();
-        auto v1 = jit->get_vreg();
-        auto v2 = jit->get_vreg();
-        auto v3 = jit->get_vreg();
-
-        auto src = jit->get_arg(0);
-        auto src_stride = jit->get_arg(1);
-        auto dst = jit->get_arg(2);
-        auto K = jit->get_arg(3);
-        /*
-        static uint8_t data0[32*4];
-        for(int i = 0; i < 4; i++) {
-            for(int k = 0; k < 32; k++) {
-                data0[i*32 + k] = k + 0x20 * i;
-            }
-        }
-        v0.load(&data0[0]);
-        v1.load(&data0[32]);
-        v2.load(&data0[32*2]);
-        v3.load(&data0[32*3]);
-        */
-
-        auto src2 = jit->get_sreg();
+    static auto jit = SIMDJit::create([](SIMDJit* jit, SReg src, SReg src_stride, SReg dst, SReg K) {
+        VReg v0, v1, v2, v3, one, mask3;
+        SReg src2;
         src2 = src + src_stride * 2;
-
-        auto one = jit->get_vreg();
-        auto mask3 = jit->get_vreg();
         one.load(0x01010101);
         mask3.load(0x03030303);
+        jit->do_while_(K > 0, [&] {
+            v0.load(src);
+            v1.load(src + src_stride);
+            v2.load(src2);
+            v3.load(src2 + src_stride);
 
-        jit->do_while_(K > 0, [&]{
-            jit->vmovdqu(v0, jit->ptr[src.r64()]);
-            jit->vmovdqu(v1, jit->ptr[src.r64() + src_stride.r64()]);
-            jit->vmovdqu(v2, jit->ptr[src2.r64()]);
-            jit->vmovdqu(v3, jit->ptr[src2.r64() + src_stride.r64()]);
-
-            //jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
-            pack_vnni_4x32(jit.get(), v0, v1, v2, v3);
-            //jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
+            // jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
+            pack_vnni_4x32(jit, v0, v1, v2, v3);
+            // jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
 
             // -1, 0, 1 ===(I2_S encoding)===> 0, 1, 2
             jit->vpaddb(v0, v0, one);
@@ -270,24 +191,21 @@ py::array_t<uint8_t> pack_i2s(py::array_t<int8_t> W) {
             jit->vpsllw(v2, v2, 4);
             jit->vpsllw(v3, v3, 6);
 
-            //jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
+            // jit->jcout(jit->jcout.as_hex8, v0, "\n", v1, "\n", v2, "\n", v3, "\n");
 
             jit->vpor(v0, v0, v1);
             jit->vpor(v2, v2, v3);
             jit->vpor(v0, v0, v2);
 
-            //jit->jcout(v0, "\n");
-            jit->vmovdqu(jit->ptr[dst.r64()], v0);
+            // jit->jcout(v0, "\n");
+            v0.store(dst);
 
-            src += src_stride*4;
-            src2 += src_stride*4;
+            src += src_stride * 4;
+            src2 += src_stride * 4;
             K -= 4;
-            dst += 4*8;
+            dst += 4 * 8;
         });
-        jit->return_();
-        jit->finalize();
-        return jit;
-    }();
+    });
 
     ASSERT(W.ndim() == 2);
     auto K = W.shape(0);
@@ -296,13 +214,13 @@ py::array_t<uint8_t> pack_i2s(py::array_t<int8_t> W) {
     ASSERT((K % 4) == 0);
     ASSERT((N % 32) == 0);
 
-    py::array_t<int8_t> PackedW({K, N/4});
+    py::array_t<int8_t> PackedW({K, N / 4});
     auto* pdst = PackedW.mutable_data();
 
-    parallel_st(N / 32, [&](int ithr, int nthr, int n0, int n1) {
-        for(int n = n0; n < n1; n++) {
+    parallel_st(N / 32, 1, [&](int ithr, int nthr, int n0, int n1) {
+        for (int n = n0; n < n1; n++) {
             // Kx32 => Kx8
-            (*jit)(psrc + n*32, N, pdst + n*(K*8), K);
+            (*jit)(psrc + n * 32, N, pdst + n * (K * 8), K);
         }
     });
     return PackedW;

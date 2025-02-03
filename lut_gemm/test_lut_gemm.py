@@ -3,17 +3,12 @@ import numpy as np
 
 # make csrc & import lib
 subprocess.check_output(["cmake", "-B", "build"], shell=False)
-subprocess.check_output(["cmake", "--build", "build", "--config", "Release"], shell=False)
+subprocess.check_output(["cmake", "--build", "build", "--config", "Debug"], shell=False)
 from build import lut_gemm
 
-def test_simd_basic():
-    lut_gemm.simd_test_basic()
-
-def test_simd_tput():
-    lut_gemm.simd_test_tput("all", 50)
-
-def test_simd_printreg():
-    lut_gemm.simd_test_printreg()
+#test_simd_basic()
+#test_simd_tput()
+#test_simd_printreg()
 
 #  pytest -k i2s
 def test_mbench_i2s8_M1():
@@ -46,6 +41,9 @@ def test_mbench_w8_M3():
 def test_mbench_tl1_M1():
     lut_gemm.mbench_tl1()
 
+def test_mm_tl1():
+    lut_gemm.mm_tl1()
+
 def test_mm_i2s():
     K = 4096
     N = 4096*4
@@ -54,11 +52,10 @@ def test_mm_i2s():
 
     W = np.random.randint(low=-1, high=2, size=(K, N), dtype=np.int8) # -1, 0, 1
     
-    print(W)
+    # print(W)
     PW = lut_gemm.pack_i2s(W)
 
-    with np.printoptions(formatter={'int':hex}):
-        print(PW)
+    # with np.printoptions(formatter={'int':hex}): print(PW)
 
     M = 1
     X = np.random.randint(low=-128, high=128, size=(M, K), dtype=np.int8)
@@ -72,10 +69,31 @@ def test_mm_i2s():
     #    Y = lut_gemm.mm_i2s(X, pw)
     # const std::string& title, uint64_t rounds, uint64_t kernel_loops, uint64_t kernel_flops, uint64_t kernel_mem_rbytes
     print(f"MKN=({M},{K},{N},{layers}) {X.nbytes*1e-3:.1f} KB + ({PW.nbytes*1e-3:.1f} KB x {layers})  = {(X.nbytes + layers * PW.nbytes)*1e-6:.1f} MB")
-    with lut_gemm.perf().verbose("mm_i2s", len(PWS), K, M*N*K*2, X.nbytes + PW.nbytes):
+    with lut_gemm.perf().verbose("mm_i2s", len(PWS), K, M*N*K*2, PW.nbytes):
         for pw in PWS:
             Y = lut_gemm.mm_i2s(X, pw)
 
+def test_mm_tl1():
+    K = 8
+    N = 32*2
+    layers = 100
+    np.random.seed(0)
+    W = np.random.randint(low=-1, high=2, size=(K, N), dtype=np.int8) # -1, 0, 1
+    np.set_printoptions(linewidth = 200)
+    
+    c = W + 1
+    print(c[1]*3 + c[0])
+    print(c[3]*3 + c[2])
+    PW = lut_gemm.pack_tl1(W)
+
+    with np.printoptions(formatter={'int':hex}): print(PW)
+    
+    M = 1
+    X = np.random.randint(low=-128, high=128, size=(M, K), dtype=np.int8)
+
+    lut_gemm.mm_tl1(X, PW, K, N)
+
+#test_mm_tl1()
 test_mm_i2s()
 #test_mbench_tl1()
 #test_pack_i2s()

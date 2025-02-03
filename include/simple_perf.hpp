@@ -1,3 +1,4 @@
+#pragma once
 #include <inttypes.h>
 #include <linux/perf_event.h> /* Definition of PERF_* constants */
 #include <stdio.h>
