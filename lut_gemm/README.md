@@ -81,11 +81,27 @@ $ numactl -C0,2,4,6,8,10,12,14 python ./utils/e2e_benchmark.py -m=models/bitnet_
     sch[CBits].reorder(koC, nC, kiC, mC)
 ```
 
+
+```bash
+numactl -C0,2,4,6 pytest -rP -k mm_i2s
+HW_CPU_CYCLES(1278302) HW_INSTRUCTIONS(2211083)  [mm_i2s] 0.225 ms  5.7 GHz  CPI:312.1  596.7 GFLOPS  74.6 GB/s
+```
+
+
 ## `Conclusion` VNNI based vs LUT based
 gemm problem is gradually become compute-bounded when M > 1, and if the implementation is VNNI based, the best compute-bounded kernel would be decompress(pre-unpack) weight into VNNI format and kernel can read VNNI weight's w/o decompress it at runtime.
 
 But LUT based kernel using `vpshufb`, each instruction provides `(M*K*N)*2=(1*4*32)*2=256` OPS, which is `4x` of OPS VNNI could provide (`1*4*8*2=64`).
 so LUT methods can be used on compute-bounded case too.
+
+## `Pain point` - SIMD intrinsics are hard to use
+
+unlike plain C language which supports versatile behaviour programing using very small set of syntax, SIMD instructions are instead very complex and hard to understood or remember, especially the data-movement related instructions, we can categorize them into few types:
+ - shuffle within a single source register : `vpshufb`/`vpshufd`/`vpshuflw`/`vshufps`/`vpermps`/`vpermd`/
+ - pick out from 2 source registers according to a pre-defined pattern : `vpunpcklbw`/`vpunpckhbw`
+ - pick out from 2 source registers according to cutom pattern : `vperm2i128`/`vperm2f128`/``
+
+the pain point is, there is no all-purpose instruction which does everything, each instruction has its own limitations (which is often strange & unnatural) so you have to choose them carefully and combine them according to real cases, this is very hard, since programmer needs to memorize all instructions and do smart choices to combine them.
 
 ## `Coding practice` - invoking CMake at runtime
 

@@ -14,7 +14,7 @@
 #include "misc.hpp"
 #define TOTAL_EVENTS 6
 
-struct LinuxPerf {
+struct LinuxSimplePerf {
     // Executes perf_event_open syscall and makes sure it is successful or exit
     static long perf_event_open(struct perf_event_attr* hw_event,
                                 pid_t pid,
@@ -102,9 +102,9 @@ struct LinuxPerf {
     std::string m_ev_name_instructions;
 
     // default : only hw cycles & instructions
-    LinuxPerf() : LinuxPerf({{"C", 0}, {"I", 0}}) {}
+    LinuxSimplePerf() : LinuxSimplePerf({{"C", 0}, {"I", 0}}) {}
 
-    LinuxPerf(const std::vector<event>& events) {
+    LinuxSimplePerf(const std::vector<event>& events) {
         m_events = events;
         for(int i = 0; i < m_events.size(); i++) {
             if (m_events[i].is_cycles()) m_ev_name_cycles = m_events[i].name;
@@ -121,7 +121,7 @@ struct LinuxPerf {
             ioctl(m_events[i].fd, PERF_EVENT_IOC_ID, &m_events[i].id);
         }
     }
-    LinuxPerf(const std::initializer_list<event>& events) : LinuxPerf(std::vector<event>(events)) {}
+    LinuxSimplePerf(const std::initializer_list<event>& events) : LinuxSimplePerf(std::vector<event>(events)) {}
 
     inline uint64_t get_time_ns() {
         struct timespec tp0;
@@ -168,7 +168,7 @@ struct LinuxPerf {
         return m_evs;
     }
 
-    ~LinuxPerf() {
+    ~LinuxSimplePerf() {
         // Close counter file descriptors
         for (int i = 0; i < TOTAL_EVENTS; i++) {
             close(m_events[i].fd);

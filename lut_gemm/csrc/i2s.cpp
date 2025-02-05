@@ -68,7 +68,7 @@ std::shared_ptr<SIMDJit> get_i2s8_mkernel() {
 }
 
 void mbench_i2s8() {
-    LinuxPerf perf;
+    LinuxSimplePerf perf;
     auto jit = get_i2s8_mkernel();
     auto M = 1;
     auto K = 4096;

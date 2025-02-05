@@ -381,7 +381,7 @@ extern "C" void debug(int v) {
 #include "simple_perf.hpp"
 
 void simd_test_tput(const char* op_name, const int UNROLL) {
-    LinuxPerf p({{"C", 0}, {"I", 0}});
+    LinuxSimplePerf p({{"C", 0}, {"I", 0}});
 
     auto get_tput_kernel = [](std::string op, const int UNROLL) {
         auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");

@@ -196,7 +196,7 @@ JIT::Ptr get_i2s_mkernel(int M) {
 
 
 void mbench_i2s(int M) {
-    LinuxPerf perf;
+    LinuxSimplePerf perf;
     auto jit = get_i2s_mkernel(M);
 
     auto K = 4096;
@@ -223,7 +223,7 @@ void mbench_i2s(int M) {
 
 void mbench_w4(int M) {
     ASSERT(M == 1 || M == 2);
-    LinuxPerf perf;
+    LinuxSimplePerf perf;
     auto jit = std::make_shared<JIT>("mk_i2s");
     {
         auto va = jit->get_vreg();
@@ -299,7 +299,7 @@ void mbench_w4(int M) {
 
 void mbench_w8(int M) {
     ASSERT(M > 0 && M < 5);
-    LinuxPerf perf;
+    LinuxSimplePerf perf;
     auto jit = std::make_shared<JIT>("mk_i2s");
     {
         auto va0 = jit->get_vreg();

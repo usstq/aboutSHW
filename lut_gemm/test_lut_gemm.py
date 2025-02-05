@@ -65,36 +65,53 @@ def test_mm_i2s():
     assert np.allclose(Y, Yref)
 
     PWS = [PW.copy() for i in range(layers)]
+    for pw in PWS:
+        Y = lut_gemm.mm_i2s(X, pw)
     #for pw in PWS:
     #    Y = lut_gemm.mm_i2s(X, pw)
     # const std::string& title, uint64_t rounds, uint64_t kernel_loops, uint64_t kernel_flops, uint64_t kernel_mem_rbytes
     print(f"MKN=({M},{K},{N},{layers}) {X.nbytes*1e-3:.1f} KB + ({PW.nbytes*1e-3:.1f} KB x {layers})  = {(X.nbytes + layers * PW.nbytes)*1e-6:.1f} MB")
-    with lut_gemm.perf().verbose("mm_i2s", len(PWS), K, M*N*K*2, PW.nbytes):
+    with lut_gemm.perf().verbose("mm_i2s", len(PWS), (N//32)*(K//4), M*N*K*2, PW.nbytes):
         for pw in PWS:
             Y = lut_gemm.mm_i2s(X, pw)
 
 def test_mm_tl1():
-    K = 8
-    N = 32*2
+    K = 4096
+    N = 4096*4
     layers = 100
     np.random.seed(0)
     W = np.random.randint(low=-1, high=2, size=(K, N), dtype=np.int8) # -1, 0, 1
     np.set_printoptions(linewidth = 200)
-    
-    c = W + 1
-    print(c[1]*3 + c[0])
-    print(c[3]*3 + c[2])
+
     PW = lut_gemm.pack_tl1(W)
 
-    with np.printoptions(formatter={'int':hex}): print(PW)
+    #with np.printoptions(formatter={'int':hex}): print(PW)
     
     M = 1
     X = np.random.randint(low=-128, high=128, size=(M, K), dtype=np.int8)
+    Yref = X.astype(np.int32) @ W.astype(np.int32)
+    
+    #print("X=\n", X)
+    #print("W=\n", W)
+    
+    Y = lut_gemm.mm_tl1(X, PW, K, N)
+    PWS = [PW.copy() for i in range(layers)]
+    for pw in PWS:
+        Y = lut_gemm.mm_tl1(X, pw, K, N)
 
-    lut_gemm.mm_tl1(X, PW, K, N)
+    #PWS = [PW for i in range(layers)]
+    print(f"MKN=({M},{K},{N},{layers}) {X.nbytes*1e-3:.1f} KB + ({PW.nbytes*1e-3:.1f} KB x {layers})  = {(X.nbytes + layers * PW.nbytes)*1e-6:.1f} MB")
+    with lut_gemm.perf().verbose("mm_tl1", len(PWS), (N//32)*(K//4), M*N*K*2, PW.nbytes):
+        for pw in PWS:
+            Y = lut_gemm.mm_tl1(X, pw, K, N)
 
-#test_mm_tl1()
-test_mm_i2s()
-#test_mbench_tl1()
+    if not np.allclose(Y, Yref):
+        print("Y=", Y)
+        print("Yref=", Yref)
+        assert False
+
+test_mm_tl1()
+#test_mm_i2s()
+#test_mbench_tl1_M1()
 #test_pack_i2s()
 #test_mbench_i2s8a_M1()
