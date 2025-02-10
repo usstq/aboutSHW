@@ -705,26 +705,48 @@ struct PerfEventGroup : public IPerfEventDumper {
             return '\0';
         }
         template<typename T>
-        void set_extra_data(int i, T* t) { extra_data[i].p = t; extra_data_type[i] = 'p';}
-        void set_extra_data(int i, float t) { extra_data[i].f = t;  extra_data_type[i] = 'f';}
-        void set_extra_data(int i, double t) { extra_data[i].f = t;  extra_data_type[i] = 'f';}
+        void set_extra_data(int& i, T* t) {
+            extra_data_type[i] = get_extra_type(t);
+            extra_data[i].p = t;
+            i++;
+        }
+        void set_extra_data(int& i, float t) {
+            extra_data_type[i] = get_extra_type(t);
+            extra_data[i].f = t;
+            i++;
+        }
+        void set_extra_data(int& i, double t) {
+            extra_data_type[i] = get_extra_type(t);
+            extra_data[i].f = t;
+            i++;
+        }
+
         template<typename T>
-        void set_extra_data(int i, T t) {
+        void set_extra_data(int& i, T t) {
             static_assert(std::is_integral<T>::value);
+            extra_data_type[i] = get_extra_type(t);
             extra_data[i].i = t;
-            extra_data_type[i] = 'i';
+            i++;
+        }
+
+        template<typename T>
+        void set_extra_data(int& i, const std::vector<T>& t) {
+            static_assert(std::is_integral<T>::value || std::is_floating_point<T>::value);
+            extra_data_type[i] = 'v';
+            extra_data[i].i = t.size(); // vector size
+            i++;
+            for (auto& value : t) {
+                set_extra_data(i, value);
+            }
         }
         void set_extra_data(int i) { extra_data_type[i] = '\0';}
 
         template <typename ... Values>
-        void set_extra_data(Values... vals) {
+        void set_extra_datas(Values... vals) {
             static_assert(data_size >= sizeof...(vals));
             int j = 0;
-            int unused1[] = { 0, (set_extra_data(j++, vals), 0)... };
+            int unused1[] = { 0, (set_extra_data(j, vals), 0)... };
             (void)unused1;
-            j = 0;
-            int unused2[] = { 0, (extra_data_type[j++] = get_extra_type(vals), 0)... };
-            (void)unused2;
             extra_data_type[j] = '\0';
         }
 
@@ -815,7 +837,20 @@ struct PerfEventGroup : public IPerfEventDumper {
                         if (d.extra_data_type[i] == 'f') ss << sep << d.extra_data[i].f;
                         else if (d.extra_data_type[i] == 'i') ss << sep << d.extra_data[i].i;
                         else if (d.extra_data_type[i] == 'p') ss << sep << "\"" << d.extra_data[i].p << "\"";
-                        else ss << sep << "\"?\"";
+                        else if (d.extra_data_type[i] == 'v') {
+                            auto vec_size = d.extra_data[i].i;
+                            ss << sep << "\"(";
+                            const char * sep2 = "";
+                            i++;
+                            auto i_end = i + vec_size;
+                            for (; i < i_end; i++) {
+                                if (d.extra_data_type[i] == 'f') ss << sep2 << d.extra_data[i].f;
+                                if (d.extra_data_type[i] == 'i') ss << sep2 << d.extra_data[i].i;
+                                sep2 = ",";
+                            }
+                            i--;
+                            ss << ")\"";
+                        } else ss << sep << "\"?\"";
                         sep = ",";
                     }
                     ss << "]";
@@ -1351,12 +1386,13 @@ struct PerfEventGroup : public IPerfEventDumper {
 using ProfileScope = PerfEventGroup::ProfileScope;
 
 // pwe-thread event group with default events pre-selected
+// args can be:      int/float/vector
 template <typename ... Args>
 ProfileScope Profile(const std::string& title, int id = 0, Args&&... args) {
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
     if (pd) {
-        pd->set_extra_data(std::forward<Args>(args)...);
+        pd->set_extra_datas(std::forward<Args>(args)...);
     }
     return {&pevg, pd};
 }
@@ -1366,7 +1402,7 @@ ProfileScope Profile(const std::string& title, const std::string& category, int 
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id, category);
     if (pd) {
-        pd->set_extra_data(std::forward<Args>(args)...);
+        pd->set_extra_datas(std::forward<Args>(args)...);
     }
     return {&pevg, pd};
 }
@@ -1377,7 +1413,7 @@ ProfileScope Profile(float sampling_probability, const std::string& title, int i
     auto& pevg = PerfEventGroup::get();
     auto* pd = pevg._profile(title, id);
     if (pd) {
-        pd->set_extra_data(std::forward<Args>(args)...);
+        pd->set_extra_datas(std::forward<Args>(args)...);
     }
 
     bool disable_profile = ((std::rand() % 1000)*0.001f >= sampling_probability);
