@@ -121,7 +121,7 @@ def test_FMA_basic():
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemm(__global half * A, __global half *B,  __global half *C, int N, int K) {
         half sum = 0;
-        ushort input = intel_sub_group_block_read_us((const __global ushort*)(A));q
+        ushort input = intel_sub_group_block_read_us((const __global ushort*)(A));
         __attribute__((opencl_unroll_hint))
         for (int j = 0; j < SG_SZ; j++) {
             half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B));
