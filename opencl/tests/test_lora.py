@@ -76,7 +76,7 @@ def test_lora():
     wei = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
     # C = np.matmul(A, B)
     ref_ker = kernel_cache(reference, "")
-    # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stide.So flatten and reshape.
+    # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stride.So flatten and reshape.
     weiQ = wei[:, 0:RANK].flatten().reshape(K, RANK)
     weiK = wei[:, RANK:2*RANK].flatten().reshape(K, RANK)
     weiV = wei[:, 2*RANK:N].flatten().reshape(K, RANK)
@@ -89,12 +89,13 @@ def test_lora():
     tWeiV = cl.tensor(weiV)
 
     ref_ker.enqueue("gemmA", [1, N],[1, RANK], tInput, tWei, tRefC, N, K)
+    # Each WG would ouput [1, RANK]
     ref_ker.enqueue("gemmA_with_split_wei", [1, N],[1, RANK], tInput, tWeiQ, tWeiK, tWeiV, tC, RANK, K, N)
     cl.finish()
     compare(tRefC.numpy(), tC.numpy())
     SG_SZ = 16
-    # There are 8 Xecores, Run in parallel in 8 Xecores. can also try multiple of xecore number.
-    WG_NUM = 3
+    # Run in parallel in 8 Xecores.
+    WG_NUM = 8
     # RANK and input hidden_size should be multiple of subgroup_size
     assert RANK % SG_SZ == 0 and RANK//SG_SZ >= 1, f"'Rank'  {RANK} is not multiple of SG_SIZE {SG_SZ}"
     assert N <=256, f"'N'  {N} exceeds max value 256"
@@ -105,15 +106,15 @@ def test_lora():
     K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
     tTempC = cl.tensor([WG_NUM, N], np.dtype(np.float16))
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DRANK={RANK}")
+    # N columns in one WG. The WG_NUM would separate K.
     opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiQ, tWeiK, tWeiV, tTempC, N, K)
+    cl.finish()
     C = np.zeros([1, N], dtype=np.float16)
     tempC = tTempC.numpy()
     for i in range(N):
         for j in range(WG_NUM):
             C[0][i] += tempC[j][i]
     compare(tRefC.numpy(), C)
-    cl.finish()
-
 
 # C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]
 def test_FMA_basic():
