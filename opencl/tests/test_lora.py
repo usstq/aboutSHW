@@ -9,7 +9,7 @@ from clops import compare
 from clops.utils import *
 def test_lora():
     reference =  r'''
-    __kernel void Wa_gemm(__global half * A, __global half *B,  __global half *CC, int N, int K) {
+    __kernel void A_gemm(__global half * A, __global half *B,  __global half *CC, int N, int K) {
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
         float sum = 0.f;
@@ -17,7 +17,7 @@ def test_lora():
             sum += A[m_idx*K+i]*B[i*N+n_idx];
         CC[m_idx*N+n_idx] = sum;
     }
-    __kernel void split_Wa_gemm(__global half * A, __global half *BQ, __global half *BK,__global half *BV, __global half *CC, int RANK, int K, int N) {
+    __kernel void split_A_gemm(__global half * A, __global half *BQ, __global half *BK,__global half *BV, __global half *CC, int RANK, int K, int N) {
         int n = get_global_id(1);
         int n_blk = get_group_id(1);
         __global half*B = NULL;
@@ -37,18 +37,18 @@ def test_lora():
     '''
     opt_src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void Wa_gemm(__global half * A, __global half *B,  __global half *temp_res, int N, int K) {
+    __kernel void A_gemm(__global half * A, __global half *B,  __global half *temp_res, int N, int K) {
         int gid =  get_group_id(0);
         int sgid = get_sub_group_id();
         __global half *C_ptr = temp_res + N * gid + sgid * SG_SZ;
         int k_start = gid * K_PER_WG;
-        int k_num = (k_start + K_PER_WG) > K ?  (K-k_start): K_PER_WG;
+        int k_blk_num = ((k_start + K_PER_WG) > K ?  (K-k_start): K_PER_WG) / SG_SZ;
         __global half* weight_ptr= B + k_start * N + SG_SZ * sgid;
         __global half* input_ptr= A + k_start;
 
         half sum = 0;
-        for (int k_blk = 0; k_blk < k_num/SG_SZ; k_blk++) {
-            ushort input = intel_sub_group_block_read_us((const __global ushort*)((input_ptr + k_blk * SG_SZ)));
+        for (int k_blk = 0; k_blk < k_blk_num; k_blk++) {
+            ushort input = intel_sub_group_block_read_us((const __global ushort*)(input_ptr));
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
                 half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)weight_ptr));
@@ -56,6 +56,7 @@ def test_lora():
                 sum = fma(aa, bb, sum);
                 weight_ptr += N;
             }
+            input_ptr += SG_SZ;
         }
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
     }
@@ -70,20 +71,21 @@ def test_lora():
     B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
     # C = np.matmul(A, B)
     ref_ker = kernel_cache(reference, "")
-    # BQ = B[:, 0:RANK].flatten().reshape(K, RANK)
-    # BK = B[:, RANK:2*RANK].flatten().reshape(K, RANK)
-    # BV = B[:, 2*RANK:N].flatten().reshape(K, RANK)
+    #slicing would keep the original slide. So flatten and reshape
+    BQ = B[:, 0:RANK].flatten().reshape(K, RANK)
+    BK = B[:, RANK:2*RANK].flatten().reshape(K, RANK)
+    BV = B[:, 2*RANK:N].flatten().reshape(K, RANK)
     tRefC = cl.tensor([1, N], np.dtype(np.float16))
     tC = cl.tensor([1, N], np.dtype(np.float16))
     tA = cl.tensor(A)
     tB = cl.tensor(B)
-    # tBQ = cl.tensor(BQ)
-    # tBK = cl.tensor(BK)
-    # tBV = cl.tensor(BV)
+    tBQ = cl.tensor(BQ)
+    tBK = cl.tensor(BK)
+    tBV = cl.tensor(BV)
 
-    ref_ker.enqueue("Wa_gemm", [1, N],[1, RANK], tA, tB, tRefC, N, K)
+    ref_ker.enqueue("A_gemm", [1, N],[1, RANK], tA, tB, tRefC, N, K)
     cl.finish()
-    # ref_ker.enqueue("split_Wa_gemm", [1, N],[1, RANK], tA, tBQ, tBK, tBV, tRefC, RANK, K, N)
+    # ref_ker.enqueue("split_A_gemm", [1, N],[1, RANK], tA, tBQ, tBK, tBV, tRefC, RANK, K, N)
     SG_SZ = 16
     # There are 8 Xecores, Run in parallel in 8 Xecores. can also try multiple of xecore number.
     WG_NUM = 8
@@ -95,7 +97,7 @@ def test_lora():
     K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
     tTemp = cl.tensor([WG_NUM, N], np.dtype(np.float16))    
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG}")
-    opt_kernel.enqueue("Wa_gemm", [N*WG_NUM],[N], tA, tB, tTemp, N, K)
+    opt_kernel.enqueue("A_gemm", [N*WG_NUM],[N], tA, tB, tTemp, N, K)
     C = np.zeros([1, N], dtype=np.float16)
     tempRes = tTemp.numpy()
     for i in range(N):
