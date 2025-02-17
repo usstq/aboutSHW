@@ -115,6 +115,67 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
 #define ECOUT(...) easy_cout(__FILE__, __func__, __LINE__, __VA_ARGS__)
 #define ECOUT2(...) easy_cout(nullptr, __func__, __LINE__, __VA_ARGS__)
 
+#define DEBUG0(...)        easy_cout(__FILE__, __func__, __LINE__);
+#define DEBUG1(x)          easy_cout(__FILE__, __func__, __LINE__, #x, "=", x);
+#define DEBUG2(x1, x2)     easy_cout(__FILE__, __func__, __LINE__, #x1, "=", x1, ",", #x2, "=", x2);
+#define DEBUG3(x1, x2, x3) easy_cout(__FILE__, __func__, __LINE__, #x1, "=", x1, ",", #x2, "=", x2, ",", #x3, "=", x3);
+#define DEBUG4(x1, x2, x3, x4) \
+    easy_cout(__FILE__, __func__, __LINE__, #x1, "=", x1, ",", #x2, "=", x2, ",", #x3, "=", x3, ",", #x4, "=", x4);
+#define DEBUG5(x1, x2, x3, x4, x5) \
+    easy_cout(__FILE__,            \
+              __func__,            \
+              __LINE__,            \
+              #x1,                 \
+              "=",                 \
+              x1,                  \
+              ",",                 \
+              #x2,                 \
+              "=",                 \
+              x2,                  \
+              ",",                 \
+              #x3,                 \
+              "=",                 \
+              x3,                  \
+              ",",                 \
+              #x4,                 \
+              "=",                 \
+              x4,                  \
+              ",",                 \
+              #x5,                 \
+              "=",                 \
+              x5);
+#define DEBUG6(x1, x2, x3, x4, x5, x6) \
+    easy_cout(__FILE__,                \
+              __func__,                \
+              __LINE__,                \
+              #x1,                     \
+              "=",                     \
+              x1,                      \
+              ",",                     \
+              #x2,                     \
+              "=",                     \
+              x2,                      \
+              ",",                     \
+              #x3,                     \
+              "=",                     \
+              x3,                      \
+              ",",                     \
+              #x4,                     \
+              "=",                     \
+              x4,                      \
+              ",",                     \
+              #x5,                     \
+              "=",                     \
+              x5,                      \
+              ",",                     \
+              #x6,                     \
+              "=",                     \
+              x6);
+
+#define GET_MACRO(_0, _1, _2, _3, _4, _5, _6, NAME, ...) NAME
+#define DEBUG_LOG(...) \
+    GET_MACRO(_0 __VA_OPT__(, ) __VA_ARGS__, DEBUG6, DEBUG5, DEBUG4, DEBUG3, DEBUG2, DEBUG1, DEBUG0)(__VA_ARGS__)
+
 //===============================================================
 // getenv
 inline int64_t getenv(const char * var, int64_t default_value) {
