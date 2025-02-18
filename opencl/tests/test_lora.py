@@ -9,13 +9,31 @@ from clops import compare
 from clops.utils import *
 def test_lora():
     reference =  r'''
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K) {
-        int m_idx = get_global_id(0);
-        int n_idx = get_global_id(1);
-        float sum = 0.f;
-        for (int i = 0; i < K; i++)
-            sum += A[m_idx*K+i]*B[i*N+n_idx];
-        CC[m_idx*N+n_idx] = sum;
+    __kernel void reduce(__global half * temp_C, __global half *C, int N, int cnt) {
+        int n_idx = get_global_id(0);
+        half sum = 0.f;
+        for (int i = 0; i < cnt; i++)
+            sum += temp_C[i*N + n_idx];
+        C[n_idx] = sum;
+    }
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk) {
+        // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
+        int n_idx = get_global_id(0);
+        size_t blk_num = K / k_blk;
+        half sum = 0.f;
+        for (int i = 0; i < blk_num; i++) {
+            half sub_sum = 0.f;
+            int k_idx = i*k_blk;
+            // incase K%k_blk != 0;
+            if ((k_idx + k_blk) > K)
+                k_blk = K - k_idx;
+            for (size_t sub_k = 0; sub_k < k_blk; sub_k++) {
+                sub_sum = fma(A[k_idx], B[k_idx*N+n_idx], sub_sum);
+                k_idx++;
+            }
+            sum += sub_sum;
+        }
+        CC[n_idx] = sum;
     }
     __kernel void gemmA_with_split_wei(__global half * A, __global half *BQ, __global half *BK,__global half *BV, __global half *CC, int RANK, int K, int N) {
         int n = get_global_id(1);
@@ -29,7 +47,7 @@ def test_lora():
             B = BV;
         int m = get_global_id(0);
         int sub_n = get_local_id(1);
-        float sum = 0.f;
+        half sum = 0.f;
         for (int i = 0; i < K; i++)
             sum += A[m*K+i]*B[i*RANK+sub_n];
         CC[m*N+n] = sum;
@@ -55,9 +73,10 @@ def test_lora():
             stride = KV_PROJ_SZ;
         }
 
-        float sum = 0.f;
+        half sum = 0.f;
         for (int i = 0; i < rank; i++)
-            sum += A[i]*BN[i*stride];
+            //sum += A[i]*BN[i*stride];
+            sum = fma(A[i], BN[i*stride], sum);
         CC[n_idx] = sum;
     }
     '''
@@ -91,7 +110,6 @@ def test_lora():
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
     }
 
-#if 0
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemmB(__global half * input_ptr,  __global half *BQ, __global half *BK,__global half *BV,  __global half *CC) {
         int wg_id = get_group_id(0);
@@ -130,79 +148,16 @@ def test_lora():
         }
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
     }
-#endif
-    __attribute__((intel_reqd_sub_group_size(16)))
-    __kernel void gemmB(__global half * input_ptr,  __global half *BQ, __global half *BK,__global half *BV,  __global half *CC) {
-        int wg_id = get_group_id(0);
-        int sg_id = get_sub_group_id();
-        unsigned int sg_idx = wg_id * 8  +  sg_id;
-
-        __global half *C_ptr = CC + sg_idx * 16;
-        // Default A, B for Q projection
-        __global half *A_ptr = input_ptr;
-        __global half *B_ptr = BQ + sg_idx * 16;
-        int stride_B = 1536;
-#if 0
-        if (sg_idx >= 128) {
-            // V projection
-            A_ptr = input_ptr + 128;
-            B_ptr = BV + (sg_idx * 16 - 2048);
-            stride_B = 512;
-        } else if (sg_idx >= 96 && sg_idx < 128) {
-            // K projection
-            A_ptr = input_ptr + 64;
-            B_ptr = BK + (sg_idx * SG_SZ - 1536);
-            stride_B = 512;
-        }
-#endif
-        half sum = 0;
-        for (int kk = 0; kk < 4; kk++) {
-            ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr));
-            for (int j = 0; j < SG_SZ; j++) {
-                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
-                half aa = as_half(intel_sub_group_broadcast(input, j));
-                sum = fma(aa, bb, sum);
-                B_ptr += 1536;
-            }
-            A_ptr += 16;
-        }
-        intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
-    }
     '''
     TOKEN_HIDDEN_SZ = 1536
     KV_PROJ_SZ = 512
     KV_GROUP_SZ = TOKEN_HIDDEN_SZ // KV_PROJ_SZ
-
     RANK = 64
     N = RANK * 3
     K = TOKEN_HIDDEN_SZ
-    # K = 16
-    np.random.seed(0)
-    vRANGE = 3
-    inputA = np.random.randint(-vRANGE, vRANGE+1, [1, K]).astype(np.float16)
-    weiA = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
-    # C = np.matmul(A, B)
-    ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
-    # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stride.So flatten and reshape.
-    weiA_Q = weiA[:, 0:RANK].flatten().reshape(K, RANK)
-    weiA_K = weiA[:, RANK:2*RANK].flatten().reshape(K, RANK)
-    weiA_V = weiA[:, 2*RANK:N].flatten().reshape(K, RANK)
-    tRefC = cl.tensor([1, N], np.dtype(np.float16))
-    tC = cl.tensor([1, N], np.dtype(np.float16))
-    tInput = cl.tensor(inputA)
-    tWeiA = cl.tensor(weiA)
-    tWeiA_Q = cl.tensor(weiA_Q)
-    tWeiA_K = cl.tensor(weiA_K)
-    tWeiA_V = cl.tensor(weiA_V)
-
-    ref_ker.enqueue("gemmA", [1, N],[1, RANK], tInput, tWeiA, tRefC, N, K)
-    # Each WG would ouput [1, RANK]
-    ref_ker.enqueue("gemmA_with_split_wei", [1, N],[1, RANK], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tC, RANK, K, N)
-    cl.finish()
-    compare(tRefC.numpy(), tC.numpy())
+    WG_NUM = 8
     SG_SZ = 16
     # Run in parallel in 8 Xecores.
-    WG_NUM = 8
     # RANK and input hidden_size should be multiple of subgroup_size
     assert RANK % SG_SZ == 0 and RANK//SG_SZ >= 1, f"'Rank'  {RANK} is not multiple of SG_SIZE {SG_SZ}"
     assert N <=256, f"'N'  {N} exceeds max value 256"
@@ -211,47 +166,60 @@ def test_lora():
     N_SG_NUM = N // SG_SZ
     K_SG_NUM = K // SG_SZ
     K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
-    tTempC = cl.tensor([WG_NUM, N], np.dtype(np.float16))
-    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ}")
-    # N columns in one WG. The WG_NUM would separate K.
-    opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tTempC, N, K)
-    cl.finish()
-    C = np.zeros([1, N], dtype=np.float16)
-    tempC = tTempC.numpy()
-    for i in range(N):
-        for j in range(WG_NUM):
-            C[0][i] += tempC[j][i]
-    compare(tRefC.numpy(), C)
-    # GEMM B
-    inputB = tRefC.numpy()
-    inputB_Q = inputB[:, 0:RANK].flatten().reshape(1, RANK)
-    inputB_K = inputB[:, RANK:2*RANK].flatten().reshape(1, RANK)
-    inputB_V = inputB[:, 2*RANK:N].flatten().reshape(1, RANK)
+    np.random.seed(0)
+    # inputA = np.random.rand(1, K).astype(np.float16)
+    # vRANGE = 2
+    # inputA = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
+    # weiA = np.random.randint(-vRANGE, vRANGE, [K, N]).astype(np.float16)
+    inputA = np.random.rand(1, K).astype(np.float16)
+    weiA = np.random.rand(K, N).astype(np.float16)
+    ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
+    # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stride.So flatten and reshape.
+    weiA_Q = weiA[:, 0:RANK].flatten().reshape(K, RANK)
+    weiA_K = weiA[:, RANK:2*RANK].flatten().reshape(K, RANK)
+    weiA_V = weiA[:, 2*RANK:N].flatten().reshape(K, RANK)
+    tRefC = cl.tensor([1, N], np.dtype(np.float16))
+    tInput = cl.tensor(inputA)
+    tWeiA = cl.tensor(weiA)
+    tWeiA_Q = cl.tensor(weiA_Q)
+    tWeiA_K = cl.tensor(weiA_K)
+    tWeiA_V = cl.tensor(weiA_V)
 
+    vRANGE = 5
     weiB_Q = np.random.randint(-vRANGE, vRANGE+1, [RANK, TOKEN_HIDDEN_SZ]).astype(np.float16)
     weiB_K = np.random.randint(-vRANGE, vRANGE+1, [RANK, KV_PROJ_SZ]).astype(np.float16)
     weiB_V = np.random.randint(-vRANGE, vRANGE+1, [RANK, KV_PROJ_SZ]).astype(np.float16)
-
-    ret_Q = np.matmul(inputB_Q, weiB_Q)
-    ret_K = np.matmul(inputB_K, weiB_K)
-    ret_V = np.matmul(inputB_V, weiB_V)
-    ret = np.concatenate((ret_Q, ret_K, ret_V), axis=1, dtype=np.float16)
-
-    tInputB = cl.tensor(inputB)
     tWeiB_Q = cl.tensor(weiB_Q)
     tWeiB_K = cl.tensor(weiB_K)
     tWeiB_V = cl.tensor(weiB_V)
     tRetRef = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
     tOutput = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
+    tC_Reduce = cl.tensor([1, N], np.dtype(np.float16))
 
-    # ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tInputB, tWeiB_Q, tWeiB_K, tWeiB_V, tRetRef, RANK)
+
+    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tRefC, N, K, K_PER_WG)
+    cl.finish()
+    # Each WG would ouput [1, RANK]
+    #tC = cl.tensor([1, N], np.dtype(np.float16))
+    #ref_ker.enqueue("gemmA_with_split_wei", [1, N],[1, RANK], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tC, RANK, K, N)
     # cl.finish()
+    #compare(tRefC.numpy(), tC.numpy())
 
-    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[128], tInputB, tWeiB_Q, tWeiB_K, tWeiB_V, tOutput)
+    tTempC = cl.tensor([WG_NUM, N], np.dtype(np.float16))
+    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ}")
+    # N columns in one WG. The WG_NUM would separate K.
+    opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tTempC, N, K)
+    cl.finish()
+    ref_ker.enqueue("reduce", [N],[N], tTempC, tC_Reduce, N, WG_NUM)
+    cl.finish()
+    compare(tRefC.numpy(), tC_Reduce.numpy())
+
+    ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tRefC, tWeiB_Q, tWeiB_K, tWeiB_V, tRetRef, RANK)
     cl.finish()
 
-    # compare(ret, tRetRef.numpy())
-    compare(ret, tOutput.numpy())
+    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[128], tC_Reduce, tWeiB_Q, tWeiB_K, tWeiB_V, tOutput)
+    cl.finish()
+    compare(tRetRef.numpy(), tOutput.numpy())
 
 
 # C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]
@@ -288,5 +256,5 @@ def test_FMA_basic():
     compare(C_ref, C.numpy())
 cl.profiling(True)
 test_lora()
-test_FMA_basic()
+# test_FMA_basic()
 print("-------------------------")
