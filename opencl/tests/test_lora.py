@@ -9,7 +9,7 @@ from clops import compare
 from clops.utils import *
 def test_lora():
     reference =  r'''
-    __kernel void reduce(__global half * temp_C, __global half *C, int N, int cnt) {
+    __kernel void reduceA(__global half * temp_C, __global half *C, int N, int cnt) {
         int n_idx = get_global_id(0);
         half sum = 0.f;
         for (int i = 0; i < cnt; i++)
@@ -166,38 +166,44 @@ def test_lora():
     N_SG_NUM = N // SG_SZ
     K_SG_NUM = K // SG_SZ
     K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
-    np.random.seed(0)
-    # inputA = np.random.rand(1, K).astype(np.float16)
-    # vRANGE = 2
-    # inputA = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
-    # weiA = np.random.randint(-vRANGE, vRANGE, [K, N]).astype(np.float16)
-    inputA = np.random.rand(1, K).astype(np.float16)
-    weiA = np.random.rand(K, N).astype(np.float16)
-    ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
+    USE_RANDINT = 1
+    # np.random.seed(0)
+    if USE_RANDINT:
+        vRANGE = 3
+        inputA = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
+        weiA = np.random.randint(-vRANGE, vRANGE, [K, N]).astype(np.float16)
+        weiB_Q = np.random.randint(-vRANGE, vRANGE, [RANK, TOKEN_HIDDEN_SZ]).astype(np.float16)
+        weiB_K = np.random.randint(-vRANGE, vRANGE, [RANK, KV_PROJ_SZ]).astype(np.float16)
+        weiB_V = np.random.randint(-vRANGE, vRANGE, [RANK, KV_PROJ_SZ]).astype(np.float16)
+    else :
+        inputA = np.random.rand(1, K).astype(np.float16)
+        weiA = np.random.rand(K, N).astype(np.float16)
+        weiB_Q = np.random.rand(RANK, TOKEN_HIDDEN_SZ).astype(np.float16)
+        weiB_K = np.random.rand(RANK, KV_PROJ_SZ).astype(np.float16)
+        weiB_V = np.random.rand(RANK, KV_PROJ_SZ).astype(np.float16)
     # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stride.So flatten and reshape.
     weiA_Q = weiA[:, 0:RANK].flatten().reshape(K, RANK)
     weiA_K = weiA[:, RANK:2*RANK].flatten().reshape(K, RANK)
     weiA_V = weiA[:, 2*RANK:N].flatten().reshape(K, RANK)
-    tRefC = cl.tensor([1, N], np.dtype(np.float16))
+    tOutputA_Ref = cl.tensor([1, N], np.dtype(np.float16))
     tInput = cl.tensor(inputA)
     tWeiA = cl.tensor(weiA)
     tWeiA_Q = cl.tensor(weiA_Q)
     tWeiA_K = cl.tensor(weiA_K)
     tWeiA_V = cl.tensor(weiA_V)
 
-    vRANGE = 5
-    weiB_Q = np.random.randint(-vRANGE, vRANGE+1, [RANK, TOKEN_HIDDEN_SZ]).astype(np.float16)
-    weiB_K = np.random.randint(-vRANGE, vRANGE+1, [RANK, KV_PROJ_SZ]).astype(np.float16)
-    weiB_V = np.random.randint(-vRANGE, vRANGE+1, [RANK, KV_PROJ_SZ]).astype(np.float16)
     tWeiB_Q = cl.tensor(weiB_Q)
     tWeiB_K = cl.tensor(weiB_K)
     tWeiB_V = cl.tensor(weiB_V)
-    tRetRef = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
-    tOutput = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
-    tC_Reduce = cl.tensor([1, N], np.dtype(np.float16))
 
+    tOutputB_Ref = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
+    tOutputA = cl.tensor([WG_NUM, N], np.dtype(np.float16))
+    toutputA_Reduce = cl.tensor([1, N], np.dtype(np.float16))
+    tOutputB = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
 
-    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tRefC, N, K, K_PER_WG)
+    ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
+    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG)
+    ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tOutputA_Ref, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB_Ref, RANK)
     cl.finish()
     # Each WG would ouput [1, RANK]
     #tC = cl.tensor([1, N], np.dtype(np.float16))
@@ -205,22 +211,14 @@ def test_lora():
     # cl.finish()
     #compare(tRefC.numpy(), tC.numpy())
 
-    tTempC = cl.tensor([WG_NUM, N], np.dtype(np.float16))
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ}")
     # N columns in one WG. The WG_NUM would separate K.
-    opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tTempC, N, K)
+    opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tOutputA, N, K)
+    ref_ker.enqueue("reduceA", [N],[N], tOutputA, toutputA_Reduce, N, WG_NUM)
+    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[128], toutputA_Reduce, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB)
     cl.finish()
-    ref_ker.enqueue("reduce", [N],[N], tTempC, tC_Reduce, N, WG_NUM)
-    cl.finish()
-    compare(tRefC.numpy(), tC_Reduce.numpy())
-
-    ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tRefC, tWeiB_Q, tWeiB_K, tWeiB_V, tRetRef, RANK)
-    cl.finish()
-
-    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[128], tC_Reduce, tWeiB_Q, tWeiB_K, tWeiB_V, tOutput)
-    cl.finish()
-    compare(tRetRef.numpy(), tOutput.numpy())
-
+    compare(tOutputA_Ref.numpy(), toutputA_Reduce.numpy())
+    compare(tOutputB_Ref.numpy(), tOutputB.numpy())
 
 # C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]
 def test_FMA_basic():
