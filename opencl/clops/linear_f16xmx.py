@@ -306,7 +306,7 @@ assert (BK//16 * SG_M)
 
 KDEBUG = 0
 
-if 1:
+if 0:
     print(f"{Colors.YELLOW}===== XMX hyper-param ===================")
     print(f"BM = {BM} WG_M = {WG_M}")
     print(f"BN = {BN} WG_N = {WG_N}")
@@ -314,10 +314,10 @@ if 1:
     print(f"SG_M x SG_N = {SG_M} x {SG_N}")
     print(f"WG HW threads = {WG_N*WG_M*100/(16*8):.1f} %  {WG_N}x{WG_M} = {WG_N*WG_M} ")
     print(f"SLM usage     = {SLM_use*100/SLM_size:.1f} %  {SLM_use} bytes(SLM:A {BM*BK*2} + SLM:B {BN*BK*2})")
-
-print(f"num of registers to copy A (per-sub-group per-BK-step) = {num_reg_slm_copyA}")
-print(f"num of registers to copy B (per-sub-group per-BK-step) = {num_reg_slm_copyB}")
-print(f"============================{Colors.END}")
+if 0:
+    print(f"num of registers to copy A (per-sub-group per-BK-step) = {num_reg_slm_copyA}")
+    print(f"num of registers to copy B (per-sub-group per-BK-step) = {num_reg_slm_copyB}")
+    print(f"============================{Colors.END}")
 
 class Linear_f16xmx:
     # if weight_up is provided, gate/up combination & silu/mul is fused

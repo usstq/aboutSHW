@@ -44,10 +44,10 @@ tensor test_dpas(tensor& a, tensor& b) {
             constexpr int N = 8;
             simd<half, M*16> A = esimd::block_load<half, M*16>(pA);
             
-            simd<half, N*16> B = esimd::gather<half, N*16>(pB);
+            /*simd<half, N*16> B = esimd::gather<half, N*16>(pB);
             simd<float, M*N> C;
             C = xmx::dpas<8, 8, float>(C, B, A);
-            esimd::block_store<float, M*N>(pC, C);
+            esimd::block_store<float, M*N>(pC, C);*/
         });
     });
     return c;
