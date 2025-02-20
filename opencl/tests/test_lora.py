@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from clops import compare
 from clops.utils import *
-def test_lora():
+def test_lora_fused_qkv():
     reference =  r'''
     __kernel void reduceA(__global half * temp_C, __global half *C, int N, int cnt) {
         int n_idx = get_global_id(0);
@@ -16,9 +16,11 @@ def test_lora():
             sum += temp_C[i*N + n_idx];
         C[n_idx] = sum;
     }
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk) {
-        // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, __global half * alpha) {
+        // Accumulate whole K to sum would meet accuracy issue for float data with opt kernel because of different k blocking behavior.
+        // First accumulat k_blk to sub_sum and then accumulat sub_sum to final sum. Behave same with opt kernel
         int n_idx = get_global_id(0);
+        half scale = alpha[get_group_id(0)];
         size_t blk_num = (K + k_blk -1 )/ k_blk;
         half sum = 0.f;
         for (int i = 0; i < blk_num; i++) {
@@ -33,8 +35,9 @@ def test_lora():
             }
             sum += sub_sum;
         }
-        CC[n_idx] = sum;
+        CC[n_idx] = sum * scale;
     }
+# if 0
     __kernel void gemmA_with_split_wei(__global half * A, __global half *BQ, __global half *BK,__global half *BV, __global half *CC, int RANK, int K, int N) {
         int n = get_global_id(1);
         int n_blk = get_group_id(1);
@@ -52,7 +55,7 @@ def test_lora():
             sum += A[m*K+i]*B[i*RANK+sub_n];
         CC[m*N+n] = sum;
     }
-
+#endif
     __kernel void gemmB(__global half * input, __global half *B_Q,  __global half *B_K, __global half *B_V, __global half *CC, int rank) {
         int wgs = get_num_groups(0);
         int wg_id = get_group_id(0);
@@ -100,6 +103,7 @@ def test_lora():
         int local_sz = get_local_size(0);
         int id_sg_local = get_sub_group_local_id();
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
+        __attribute__((opencl_unroll_hint))
         for (int offset = sgid * SG_SZ; offset < k_len; offset += local_sz) {
             __global half *input_ptr = subA_ptr + offset;
             half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
@@ -127,12 +131,13 @@ def test_lora():
     }
 
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmB(__global half * input_ptr,  __global half *BQ, __global half *BK,__global half *BV,  __global half *CC, int A_stride) {
+    __kernel void gemmB(__global half * input_ptr,  __global half *BQ, __global half *BK,__global half *BV,  __global half *CC, int A_stride, __global half * alpha) {
         int wg_id = get_group_id(0);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
         int sg_idx = wg_id * sg_num  +  sg_id;
         int id_sg_local = get_sub_group_local_id();
+        half scale;
 #if GEMMB_USE_SLM
         __local half reduce[RANK];
 #else
@@ -144,17 +149,20 @@ def test_lora():
         __global half *A_ptr = input_ptr;
         __global half *B_ptr = BQ + sg_idx * SG_SZ;
         int B_stride = KV_PROJ_SZ * KV_GROUP_SZ;
+        scale = alpha[0];
 
         if (sg_idx >= KV_PROJ_SZ * (KV_GROUP_SZ + 1) / SG_SZ) {
             // V projection
             A_ptr += RANK * 2;
             B_ptr = BV + sg_idx * SG_SZ - KV_PROJ_SZ * (KV_GROUP_SZ + 1);
             B_stride = KV_PROJ_SZ;
+            scale = alpha[2];
         } else if (sg_idx >=KV_PROJ_SZ * KV_GROUP_SZ / SG_SZ) {
             // K projection
             A_ptr += RANK;
             B_ptr = BK + sg_idx * SG_SZ - KV_PROJ_SZ * KV_GROUP_SZ;
             B_stride = KV_PROJ_SZ;
+            scale = alpha[1];
         }
 
         //1. Reduce
@@ -164,6 +172,7 @@ def test_lora():
         // We must ensure Q, K, V subgroups can't be mixed inot same WG. See  `GEMMB_USE_SLM` initializing check.
         int local_sz = get_local_size(0);
         //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
+        __attribute__((opencl_unroll_hint))
         for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
             __global half *subA_ptr = A_ptr + offset;
             __attribute__((opencl_unroll_hint))
@@ -187,10 +196,11 @@ def test_lora():
         half sum = 0;
         for (int kk = 0; kk < RANK; kk += SG_SZ) {
 #if GEMMB_USE_SLM
-            ushort input = intel_sub_group_block_read_us((const __local ushort*)(reduce + kk));
+            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + kk)));
 #else
             half input = reduce[id_sg_local + kk];
 #endif
+            input *= scale;
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
                 half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
@@ -221,15 +231,16 @@ def test_lora():
     N_SG_NUM = N // SG_SZ
     K_SG_NUM = K // SG_SZ
     K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
-    USE_RANDINT = 1
+    USE_RANDINT = 0
     # gemmb used 8 EUs per Xecore to balance the workload between Xecores(3, 4, 7, 8 Xecores can has)
     GEMMB_LOCAL_SIZE = 128
     assert (TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2) % GEMMB_LOCAL_SIZE == 0, f"GEMMB: 'global size' {(TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2)} is not multiple of 'local size' {GEMMB_LOCAL_SIZE}"
 
-    # Each Xecore should share the same [1,RANK] input for gemmb.If  KV_PROJ_SZ % GEMMB_LOCAL_SIZE, means  Xecore  would use 2 different inputs.
+    # Each Xecore should share the same [1,RANK] input for gemmB.If  KV_PROJ_SZ % GEMMB_LOCAL_SIZE, means  Xecore  would use 2 different inputs(such as `RANK` input elements across input_Q and input_K).
     GEMMB_USE_SLM = 1 if KV_PROJ_SZ % GEMMB_LOCAL_SIZE == 0 else 0
     GEMMA_USE_SLM = 1
     # np.random.seed(0)
+    print(f"WG_NUM for K: {WG_NUM} , GEMMB_USE_SLM: {GEMMB_USE_SLM}, GEMMA_USE_SLM: {GEMMA_USE_SLM}")
     if USE_RANDINT:
         vRANGE = 2
         inputA = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
@@ -244,6 +255,8 @@ def test_lora():
         weiB_K = np.random.rand(RANK, KV_PROJ_SZ).astype(np.float16)
         weiB_V = np.random.rand(RANK, KV_PROJ_SZ).astype(np.float16)
     # Split [K, N]  to  3 [K, RANK]. Slicing would keep the original stride.So flatten and reshape.
+    alpha = np.random.rand(3).astype(np.float16)
+    tAlpha = cl.tensor(alpha)
     weiA_Q = weiA[:, 0:RANK].flatten().reshape(K, RANK)
     weiA_K = weiA[:, RANK:2*RANK].flatten().reshape(K, RANK)
     weiA_V = weiA[:, 2*RANK:N].flatten().reshape(K, RANK)
@@ -263,26 +276,29 @@ def test_lora():
     toutputA_Reduce = cl.tensor([1, N], np.dtype(np.float16))
     tOutputB = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
     ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
-    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG)
+    # Each WG would update `RANK` columns. 3 WGs needed.
+    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG, tAlpha)
+    # Each WG would update `KV_PROJ_SZ` columns. (KV_GROUP_SZ + 2) WGs needed.
     ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tOutputA_Ref, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB_Ref, RANK)
     cl.finish()
 
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={WG_NUM} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM}")
     # N columns in one WG. K is divided by WG_NUM. K/WG_NUM accumulated  in each WG.
-    inputA_copy = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
     opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tOutputA, N, K)
-    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[GEMMB_LOCAL_SIZE], tOutputA, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB, N)
+    # `K` dimension is small. So divide columns across all the WGs. local size can be enlarged based on input hidden size and groups.
+    opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[GEMMB_LOCAL_SIZE], tOutputA, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB, N, tAlpha)
     cl.finish()
     if CHECK_RES:
         # reduce A kernel is used to check gemmA result.
         ref_ker.enqueue("reduceA", [N],[N], tOutputA, toutputA_Reduce, N, WG_NUM)
         cl.finish()
-        compare(tOutputA_Ref.numpy(), toutputA_Reduce.numpy())
-        print(" GEMMA OK!")
+        # multiplying scale make these comparing failing.ref mulitply in gemma, opt multiply in gemmb.
+        # compare(tOutputA_Ref.numpy(), toutputA_Reduce.numpy())
+        # print(" GEMMA OK!")
         compare(tOutputB_Ref.numpy(), tOutputB.numpy())
         print(" GEMMB OK!")
 
-# C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]
+# C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]. The basic kernel
 def test_FMA_basic():
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
@@ -315,6 +331,6 @@ def test_FMA_basic():
     cl.finish()
     compare(C_ref, C.numpy())
 cl.profiling(True)
-test_lora()
+test_lora_fused_qkv()
 # test_FMA_basic()
 print("-------------------------")
