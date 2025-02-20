@@ -93,11 +93,28 @@ def test_lora():
         __global half* B = NULL;
         B = (rank_idx == 0) ? BQ : (rank_idx == 1 ?  BK : BV);
         __global half* weight_ptr= B + k_start * RANK + (sgid % sg_in_rank) * SG_SZ;
-        __global half* input_ptr= A + k_start;
-
+        __global half* subA_ptr= A + k_start;
+#if GEMMA_USE_SLM
+        //Workgroup share same input activation and each subgroup would access all the elements of the shared intput.Put it into SLM.
+        __local half local_input[K_PER_WG];
+        int local_sz = get_local_size(0);
+        int id_sg_local = get_sub_group_local_id();
+        //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
+        for (int offset = sgid * SG_SZ; offset < k_len; offset += local_sz) {
+            __global half *input_ptr = subA_ptr + offset;
+            half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
+            local_input[offset + id_sg_local] = copy_val;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+#endif
         half sum = 0;
-        for (int kk = 0;  kk < k_len; kk += SG_SZ) {
-            ushort input = intel_sub_group_block_read_us((const __global ushort*)(input_ptr));
+        for (int subk = 0;  subk < k_len; subk += SG_SZ) {
+#if GEMMA_USE_SLM
+            //ushort input = as_ushort(local_input[subk + id_sg_local]);
+            ushort input = intel_sub_group_block_read_us((const __local ushort*)(local_input + subk));
+#else
+            ushort input = intel_sub_group_block_read_us((const __global ushort*)(subA_ptr + subk));
+#endif
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
                 half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)weight_ptr));
@@ -105,7 +122,6 @@ def test_lora():
                 sum = fma(aa, bb, sum);
                 weight_ptr += RANK;
             }
-            input_ptr += SG_SZ;
         }
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
     }
@@ -117,7 +133,7 @@ def test_lora():
         int sg_num = get_num_sub_groups();
         int sg_idx = wg_id * sg_num  +  sg_id;
         int id_sg_local = get_sub_group_local_id();
-#if USE_SLM_GEMMB
+#if GEMMB_USE_SLM
         __local half reduce[RANK];
 #else
         half reduce[RANK] = {0.f};
@@ -142,8 +158,10 @@ def test_lora():
         }
 
         //1. Reduce
-#if USE_SLM_GEMMB
-        //EACH WG would reduce the data and save into local memory `reduce[RANK]`.
+#if GEMMB_USE_SLM
+        //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
+        // Q, K, V has its separate input activation(let us call input_Q, input_K, input_V) and weight(BQ, BK, BV).
+        // We must ensure Q, K, V subgroups can't be mixed inot same WG. See  `GEMMB_USE_SLM` initializing check.
         int local_sz = get_local_size(0);
         //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
         for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
@@ -157,7 +175,7 @@ def test_lora():
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 #else
-
+        //Each work item would reduce the input activation.
         for (int i = 0; i < PART_NUM; i++) {
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < RANK; j++) {
@@ -168,7 +186,11 @@ def test_lora():
         //2.  GEMMB
         half sum = 0;
         for (int kk = 0; kk < RANK; kk += SG_SZ) {
+#if GEMMB_USE_SLM
+            ushort input = intel_sub_group_block_read_us((const __local ushort*)(reduce + kk));
+#else
             half input = reduce[id_sg_local + kk];
+#endif
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
                 half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
@@ -180,17 +202,19 @@ def test_lora():
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
     }
     '''
+    CHECK_RES = 1
     TOKEN_HIDDEN_SZ = 1536
     KV_PROJ_SZ = 512
     KV_GROUP_SZ = TOKEN_HIDDEN_SZ // KV_PROJ_SZ
     RANK = 64
     N = RANK * 3
     K = TOKEN_HIDDEN_SZ
-    WG_NUM = 7
+    WG_NUM = 8
     SG_SZ = 16
     # Run in parallel in 8 Xecores.
     # RANK and input hidden_size should be multiple of subgroup_size
     assert RANK % SG_SZ == 0 and RANK//SG_SZ >= 1, f"'Rank'  {RANK} is not multiple of SG_SIZE {SG_SZ}"
+    # 256 is max number of each EU run with 1 thread. Maybe 1024? keep 256 for now.
     assert N <=256, f"'N'  {N} exceeds max value 256"
     assert K % SG_SZ == 0, f"'hidden_size' {K} is not multiple of SG_SIZE {SG_SZ}"
 
@@ -200,9 +224,11 @@ def test_lora():
     USE_RANDINT = 1
     # gemmb used 8 EUs per Xecore to balance the workload between Xecores(3, 4, 7, 8 Xecores can has)
     GEMMB_LOCAL_SIZE = 128
+    assert (TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2) % GEMMB_LOCAL_SIZE == 0, f"GEMMB: 'global size' {(TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2)} is not multiple of 'local size' {GEMMB_LOCAL_SIZE}"
+
     # Each Xecore should share the same [1,RANK] input for gemmb.If  KV_PROJ_SZ % GEMMB_LOCAL_SIZE, means  Xecore  would use 2 different inputs.
-    USE_SLM_GEMMB = 1 if KV_PROJ_SZ % GEMMB_LOCAL_SIZE == 0 else 0
-    # USE_SLM_GEMMB = 1
+    GEMMB_USE_SLM = 1 if KV_PROJ_SZ % GEMMB_LOCAL_SIZE == 0 else 0
+    GEMMA_USE_SLM = 1
     # np.random.seed(0)
     if USE_RANDINT:
         vRANGE = 2
@@ -236,25 +262,25 @@ def test_lora():
     tOutputA = cl.tensor([WG_NUM, N], np.dtype(np.float16))
     toutputA_Reduce = cl.tensor([1, N], np.dtype(np.float16))
     tOutputB = cl.tensor([1, TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2], np.dtype(np.float16))
-
     ref_ker = kernel_cache(reference, options=f"-DTOKEN_HIDDEN_SZ={TOKEN_HIDDEN_SZ} -DKV_PROJ_SZ={KV_PROJ_SZ}")
     ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG)
     ref_ker.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[KV_PROJ_SZ], tOutputA_Ref, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB_Ref, RANK)
     cl.finish()
-    # Each WG would ouput [1, RANK]
-    #tC = cl.tensor([1, N], np.dtype(np.float16))
-    #ref_ker.enqueue("gemmA_with_split_wei", [1, N],[1, RANK], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tC, RANK, K, N)
-    # cl.finish()
-    #compare(tOutputA_Ref.numpy(), tC.numpy())
 
-    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={WG_NUM} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ} -DUSE_SLM_GEMMB={USE_SLM_GEMMB}")
-    # N columns in one WG. The WG_NUM would separate K.
+    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={WG_NUM} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_PROJ_SZ={KV_PROJ_SZ} -DKV_GROUP_SZ={KV_GROUP_SZ} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM}")
+    # N columns in one WG. K is divided by WG_NUM. K/WG_NUM accumulated  in each WG.
+    inputA_copy = np.random.randint(-vRANGE, vRANGE, [1, K]).astype(np.float16)
     opt_kernel.enqueue("gemmA", [N*WG_NUM],[N], tInput, tWeiA_Q, tWeiA_K, tWeiA_V, tOutputA, N, K)
-    # ref_ker.enqueue("reduceA", [N],[N], tOutputA, toutputA_Reduce, N, WG_NUM)
     opt_kernel.enqueue("gemmB", [TOKEN_HIDDEN_SZ+KV_PROJ_SZ*2],[GEMMB_LOCAL_SIZE], tOutputA, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB, N)
     cl.finish()
-    # compare(tOutputA_Ref.numpy(), toutputA_Reduce.numpy())
-    compare(tOutputB_Ref.numpy(), tOutputB.numpy())
+    if CHECK_RES:
+        # reduce A kernel is used to check gemmA result.
+        ref_ker.enqueue("reduceA", [N],[N], tOutputA, toutputA_Reduce, N, WG_NUM)
+        cl.finish()
+        compare(tOutputA_Ref.numpy(), toutputA_Reduce.numpy())
+        print(" GEMMA OK!")
+        compare(tOutputB_Ref.numpy(), tOutputB.numpy())
+        print(" GEMMB OK!")
 
 # C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]
 def test_FMA_basic():
