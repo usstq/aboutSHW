@@ -786,15 +786,21 @@ struct AMXQKVLinearKernel {
         blk_bk.reset_size(K, CACHE_BLK_K);
 
         auto nthr = omp_get_max_threads();
-        blk_bn.reset_cnt(N[0] + N[1] + N[2], REG_BLK_N, nthr);
+
+        bool b_small_weights = ((N[0] + N[1] + N[2]) / nthr) < 256;
+        if (b_small_weights) {
+            blk_bn.reset_size(N[0] + N[1] + N[2], 256);
+        } else {
+            blk_bn.reset_cnt(N[0] + N[1] + N[2], REG_BLK_N, nthr);
+        }
 
         // DEBUG_LOG(blk_bk);
         // DEBUG_LOG(nthr, blk_bn);
 
         w_buff = alloc_cache_aligned<int8_t>((N[0] + N[1] + N[2]) * K * (w_is_int8 ? 1 : 2));
+        auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
 
         // following loop determines blocking layout
-        auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
         blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
             blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
                 auto* pdst0 = pdst_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
@@ -820,14 +826,70 @@ struct AMXQKVLinearKernel {
         }
     };
 
+    uint32_t * get_ctemp(size_t count) {
+        thread_local scratch_buff<uint32_t> ctemp_per_thread;
+        ctemp_per_thread.ensure_size(count);
+        return ctemp_per_thread.buff.get();
+    }
+
     // input bf16 / int8
     void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
         // w_buff
         auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
         auto nthr = omp_get_max_threads();
-        ASSERT(blk_bn.size() == nthr);
+        bool also_split_on_M_dim = blk_bn.size() < nthr;
 
+        //ASSERT(blk_bn.size() == nthr, blk_bn.size(), " != ", nthr);
         constexpr int BM = 256;
+
+        if (also_split_on_M_dim) {
+            // split both on M & N
+            auto nblkN = blk_bn.size();
+            auto nblkM = (M + BM - 1) / BM;
+
+            nthr = omp_get_max_threads();
+            #pragma omp parallel
+            {
+                int ithr = omp_get_thread_num();
+                int64_t i0, i1;
+                splitter(static_cast<int64_t>(nblkN * nblkM), nthr, ithr, i0, i1);
+                for (int64_t i = i0; i < i1; i++) {
+                    int64_t m0, m1;
+                    m0 = (i % nblkM) * BM;
+                    m1 = std::min(m0 + BM, M);
+
+                    auto blk_n = i / nblkM;
+                    int n0 = blk_bn.blks[blk_n].off0;
+                    int n1 = blk_bn.blks[blk_n].off1;
+                    //DEBUG_LOG(m0, m1, n0, n1)
+
+                    auto strideC = (n1 - n0) * sizeof(float);
+                    if ((strideC % 128) == 0)
+                        strideC += 64;
+                    auto* pC = get_ctemp((BM) * strideC / sizeof(float));
+
+                    blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+                        auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
+                        auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        auto pfetchB = pB;
+                        if (k1 < K) {
+                            pfetchB += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        }
+                        amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
+                    });
+
+                    // post-ops
+                    split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                        auto stride_dst = stride_y[idx];
+                        auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * stride_dst;
+                        auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
+                        (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                    });
+                }
+            }
+            return;
+        }
+
         int m_prefetch_Blines = 0;
         if (BM) {
             // next block size: 32 * N * sizeof(ov::bfloat16),
@@ -839,21 +901,17 @@ struct AMXQKVLinearKernel {
 
         blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
             // DEBUG_LOG(n0, n1);
-            thread_local scratch_buff<uint32_t> ctemp;
             // optimization : Tip 6: Avoid Leading Dimensions that are Multiples of 256
             // https://www.intel.com/content/www/us/en/developer/articles/technical/a-simple-example-to-measure-the-performance-of-an-intel-mkl-function.html
             auto strideC = (n1 - n0) * sizeof(float);
             if ((strideC % 128) == 0)
                 strideC += 64;
-            ctemp.ensure_size(BM * strideC / sizeof(float));
+            auto* pC = get_ctemp(BM * strideC / sizeof(float));
 
             // compute-bound case
             for (int64_t m0 = 0; m0 < M; m0 += BM) {
                 auto m1 = std::min(m0 + BM, M);
                 auto valid_m = m1 - m0;
-
-                // auto strideC = (n1 - n0) * sizeof(float);
-                auto* pC = ctemp.buff.get();
 
                 if (valid_m <= 16) {
                     // memory-bound case: special looping order
