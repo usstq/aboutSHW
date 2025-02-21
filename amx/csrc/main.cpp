@@ -51,9 +51,7 @@ inline bool initXTILE() {
         return false;
 
     // XFEATURE_XTILEDATA set successfully, TMUL usage is allowed
-    printf("\e[33m"
-           "initXTILE success!\n"
-           "\e[0m");
+    printf("\e[33m initXTILE success!\e[0m \n");
     return true;
 }
 
@@ -870,7 +868,7 @@ struct AMXQKVLinearKernel {
                         auto* pB0 = pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048;
                         blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
                             // DEBUG_LOG(ibn, ibk, n, k0, k1);
-                            args.pA = p_x + k0 * (w_is_int8 ? 1 : 2);
+                            args.pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
                             args.pB = pB0 + (n - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
                             args.k_tiles = (k1 - k0) / REG_BLK_K;
                             args.do_accumulation = 0;
@@ -898,7 +896,7 @@ struct AMXQKVLinearKernel {
                 // post-ops
                 split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
                     auto stride_dst = stride_y[idx];
-                    auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * strideC;
+                    auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * stride_dst;
                     auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
                     (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
                 });

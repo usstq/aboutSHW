@@ -4,7 +4,32 @@ import numpy as np
 import time, sys
 import numa
 
-
+class Colors:
+    """ ANSI color codes """
+    BLACK = "\033[0;30m"
+    RED = "\033[0;31m"
+    GREEN = "\033[0;32m"
+    BROWN = "\033[0;33m"
+    BLUE = "\033[0;34m"
+    PURPLE = "\033[0;35m"
+    CYAN = "\033[0;36m"
+    LIGHT_GRAY = "\033[0;37m"
+    DARK_GRAY = "\033[1;30m"
+    LIGHT_RED = "\033[1;31m"
+    LIGHT_GREEN = "\033[1;32m"
+    YELLOW = "\033[1;33m"
+    LIGHT_BLUE = "\033[1;34m"
+    LIGHT_PURPLE = "\033[1;35m"
+    LIGHT_CYAN = "\033[1;36m"
+    LIGHT_WHITE = "\033[1;37m"
+    BOLD = "\033[1m"
+    FAINT = "\033[2m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
+    BLINK = "\033[5m"
+    NEGATIVE = "\033[7m"
+    CROSSED = "\033[9m"
+    END = "\033[0m"
 # clear && numactl -C48-95 -m1 python test.py
 
 def test_amx_repack_B():
@@ -90,7 +115,7 @@ class testcase:
     def dtname(self, dt):
         return str(dt).replace("torch","").replace("bfloat16","bf16").replace("float32","fp32")
 
-    def test(self, nthr, layers = 1):
+    def test(self, nthr, layers, expect_latency_ms = 0):
         csrc.set_nthr(nthr)
         t0 = time.time()
         qkv_projs = [csrc.AMXQKVLinear(self.W0, self.W1, self.W2) for _ in range(layers)]
@@ -107,7 +132,11 @@ class testcase:
         mem_bw_GB = (self.W0.nbytes + self.W1.nbytes + self.W2.nbytes) * 1e-6 / min_latency
         GFLOPS = self.M * self.K * np.sum(self.N) * 2 * 1e-6 / min_latency
         tag = f"{self.dtname(self.x_dtype)}{self.dtname(self.w_dtype)}{self.dtname(self.o_dtype)},t{nthr}M{self.M}K{self.K}N{self.N}L{layers}"
-        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:min{min_latency : .2f}+SD{std_latency:.2f}ms   {mem_bw_GB:.2f} GB/s   {GFLOPS/nthr:.2f} GFLOPS/core")
+        ColorsCode = Colors.GREEN
+        if expect_latency_ms > 0:
+            if min_latency > expect_latency_ms:
+                ColorsCode = Colors.RED
+        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:{ColorsCode}min{min_latency : .2f}{Colors.END}+SD{std_latency:.2f}ms   {mem_bw_GB:.2f} GB/s   {GFLOPS/nthr:.2f} GFLOPS/core")
         return self
 
 
@@ -133,10 +162,14 @@ def testall(layers = 100):
 numa.schedule.run_on_nodes(1)
 numa.memory.set_membind_nodes(1)
 
-testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(48, 100)
-testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(48, 100)
-testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(48, 100)
-testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(48, 100)
+testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(48, 100, 1.1)
+testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(48, 100, 0.7)
+sys.exit(0)
+
+testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(48, 100, 0.3)
+testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(48, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(48, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(48, 100, 0.7)
 
 sys.exit(0)
 
