@@ -61,6 +61,11 @@ static bool init_once = initXTILE();
 
 #pragma message "Recompiling ..."
 
+static constexpr int DTYPE_INT32 = 1;
+static constexpr int DTYPE_FP32 = 2;
+static constexpr int DTYPE_FP16 = 3;
+static constexpr int DTYPE_BF16 = 4;
+static constexpr int DTYPE_INT8 = 5;
 ////////////////////////////////////////////////////////////////////////////
 // all jit-based/performance-aware function should be a functor/callable because:
 //   - it needs to hold reference to kernel (to save build time & resources)
@@ -95,9 +100,8 @@ public:
     }
 };
 
-// make_cacheable():
-//  create any object with internal cache to optimize functor's compilation-time
-//      cargs :compile-time
+// make_cacheable(): create const object with internal cache with constructor-args as the key
+// this helps reduces construction time overhead, and perfectly suitable for functor/callable.
 template <class T, typename... CArgs>
 std::shared_ptr<const T> make_cacheable(CArgs... cargs) {
     std::shared_ptr<const T> sptr;
@@ -111,12 +115,12 @@ std::shared_ptr<const T> make_cacheable(CArgs... cargs) {
         sptr = wptr.lock();
         if (!sptr) {
             sptr = std::make_shared<T>(cargs...);
-            ECOUT("make_cacheable constructed: ", typeid(T).name(), "(", cargs..., ")");
+            // ECOUT("make_cacheable re-constructed: ", typeid(T).name(), "(", cargs..., ")");
             wptr = sptr;
         }
     } else {
         sptr = std::make_shared<T>(cargs...);
-        ECOUT("make_cacheable constructed: ", typeid(T).name(), "(", cargs..., ")");
+        // ECOUT("make_cacheable constructed: ", typeid(T).name(), "(", cargs..., ")");
         cache.emplace(std::make_pair(key, std::weak_ptr<const T>(sptr)));
     }
     return sptr;
@@ -186,8 +190,8 @@ class func_amx {
         uint8_t palette_id = 1;
         uint8_t startRow = 0;
         uint8_t reserved[14] = {0};
-        uint16_t cols[16];
-        uint8_t rows[16];
+        uint16_t cols[16] = {0};
+        uint8_t rows[16] = {0};
         void set(int tmm_id, uint8_t r, uint16_t c) {
             rows[tmm_id] = r;
             cols[tmm_id] = c;
@@ -196,10 +200,16 @@ class func_amx {
     config_t tile_cfgs[32];
 
     std::shared_ptr<SIMDJit> jit_tile_configer;
-    std::shared_ptr<SIMDJit> jit_amx_mm;
+    std::shared_ptr<SIMDJit> jit_amx_mm2x2;
+    std::shared_ptr<SIMDJit> jit_amx_mm1x2;
 
     func_amx_repack_Btile amx_repack_Btile;
 
+    int m_prefetch_Blines = 0;
+
+    TMUL_TYPE tmul_type;
+
+public:
     struct call_args {
         const uint8_t* pA;  // bfloat16/int8
         int64_t strideA;    // in bytes
@@ -213,11 +223,7 @@ class func_amx {
 
     const int REG_BLK_N = 32;
     const int REG_BLK_K;
-    int m_prefetch_Blines = 0;
 
-    TMUL_TYPE tmul_type;
-
-public:
     using Ptr = std::shared_ptr<const func_amx>;
     static constexpr int TMUL_FP16 = 1;  // FP16 => FP32
     static constexpr int TMUL_BF16 = 2;  // BF16 => FP32
@@ -276,7 +282,47 @@ public:
             m_prefetch_Blines = 32768 * sizeof(uint16_t) / 64 / M_hint;
         }
 
-        jit_amx_mm = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+        jit_amx_mm1x2 = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+            // auto dump = jit->get_disasm(true);
+
+            SReg reg_A_addr, reg_A_stride, reg_B_addr, reg_C_addr, reg_C_stride;
+            SReg reg_prefetch, reg_ktiles, reg_B_stride, reg_flag;
+            reg_A_addr.load(pargs + offsetof(call_args, pA));
+            reg_A_stride.load(pargs + offsetof(call_args, strideA));
+            reg_B_addr.load(pargs + offsetof(call_args, pB));
+            reg_C_addr.load(pargs + offsetof(call_args, pC));
+            reg_C_stride.load(pargs + offsetof(call_args, strideC));
+            reg_prefetch.load(pargs + offsetof(call_args, prefetch));
+            reg_ktiles.load(pargs + offsetof(call_args, k_tiles));
+            reg_flag.load(pargs + offsetof(call_args, do_accumulation));
+
+            TReg tmmC00(0), tmmC01(1);
+            TReg tmmA0(4), tmmB0(6), tmmB1(7);
+            jit->if_(reg_flag & 1, [&] {
+                jit->tilezero(tmmC00);
+                jit->tilezero(tmmC01);
+            });
+            reg_B_stride = 64;
+            jit->do_while_(reg_ktiles > 0, [&] {
+                tmmA0.load(reg_A_addr + reg_A_stride);
+                tmmB0.load(reg_B_addr + reg_B_stride);
+                reg_B_addr = reg_B_addr + 1024;
+                jit->tmul(tmmC00, tmmA0, tmmB0, tmul_type);
+
+                tmmB1.load(reg_B_addr + reg_B_stride);
+                jit->tmul(tmmC01, tmmA0, tmmB1, tmul_type);
+
+                reg_A_addr = reg_A_addr + 64;
+                reg_B_addr = reg_B_addr + 1024;
+                reg_ktiles--;
+            });
+            jit->if_(reg_flag & 2, [&] {
+                tmmC00.store(reg_C_addr + reg_C_stride);
+                tmmC01.store(reg_C_addr + reg_C_stride + 64);
+            });
+        });
+
+        jit_amx_mm2x2 = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
             SReg reg_A_addr, reg_A_stride, reg_B_addr, reg_C_addr, reg_C_stride;
             SReg reg_prefetch, reg_ktiles, reg_A1_addr, reg_B_stride;
             reg_A_addr.load(pargs + offsetof(call_args, pA));
@@ -319,7 +365,7 @@ public:
 
             reg_B_stride = 64;
             auto const_A_steps = 64;
-            jit->while_(reg_ktiles > 0, [&] {
+            jit->do_while_(reg_ktiles > 0, [&] {
                 //                B: 1x2 tiles
                 // A : 2x1 tiles  C: 2x2 tiles
                 tmmA0.load(reg_A_addr + reg_A_stride);
@@ -386,6 +432,14 @@ public:
         }
     }
 
+    void matmul_1x2(call_args* arg) const {
+        (*jit_amx_mm1x2)(arg);
+    }
+
+    void config_tile(int i) const {
+        (*jit_tile_configer)(i < 0 ? nullptr : &tile_cfgs[i]);
+    }
+
     // B matrix has been prepacked
     void matmul(int M,
                 int N,
@@ -404,9 +458,9 @@ public:
 
         auto config_tile_M = [&](int valid_m) {
             // valid_m : [1 ~ 32]
-            auto cfg_id = valid_m % 32;
+            auto cfg_id = valid_m < 0 ? valid_m : (valid_m % 32);
             if (cur_tile_cfg_id != cfg_id) {
-                (*jit_tile_configer)(cfg_id < 0 ? nullptr : &tile_cfgs[cfg_id]);
+                config_tile(cfg_id);
                 cur_tile_cfg_id = cfg_id;
             }
         };
@@ -424,17 +478,84 @@ public:
         auto* pB = reinterpret_cast<const uint8_t*>(pvB);
         auto* pC = reinterpret_cast<uint8_t*>(pvC);
         // accumulate [m0~m1, k0~k1] x [k0~k1, n0~n1] => [m0~m1, n0~n1]
-        for (int64_t m = 0; m + 32 <= M; m += 32, pC += 32 * strideC, pA += 32 * strideA) {
+        for (int64_t m = 0; m < M; m += 32, pC += 32 * strideC, pA += 32 * strideA) {
             auto valid_m = std::min(M - m, (int64_t)32);
             config_tile_M(valid_m);
             args.pB = pB;
             args.pA = pA;
             for (int n = 0; n < N; n += REG_BLK_N) {
                 args.pC = pC + n * sizeof(float);
-                (*jit_amx_mm)(&args);
+                (*jit_amx_mm2x2)(&args);
                 args.pB += args.k_tiles * 2048;
                 args.prefetch += prefetch_step;
             }
+        }
+    }
+};
+
+class func_cvt_output {
+    std::shared_ptr<SIMDJit> jit;
+    struct call_args {
+        const uint8_t* psrc;
+        uint8_t* pdst;
+        uint8_t* prefetch;
+        int64_t count;  // number of 32bit elements
+    };
+
+public:
+    using Ptr = std::shared_ptr<const func_cvt_output>;
+
+    func_cvt_output(int i_dtype, int o_dtype) {
+        // fp32 => fp16 or bf16
+        ASSERT(i_dtype == DTYPE_FP32 || i_dtype == DTYPE_INT32);
+        jit = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+            SReg psrc, pdst, prefetch, count, i;
+            VReg d0, d1;
+            psrc.load(pargs + offsetof(call_args, psrc));
+            pdst.load(pargs + offsetof(call_args, pdst));
+            prefetch.load(pargs + offsetof(call_args, prefetch));
+            count.load(pargs + offsetof(call_args, count));
+            i = 0;
+            auto simdw = jit->vmm_width<uint32_t>();
+            jit->do_while_(i < count, [&] {
+                d0.load(psrc + i * sizeof(float));
+                d1.load(psrc + i * sizeof(float) + simdw * sizeof(float));
+                if (o_dtype == DTYPE_FP16) {
+                    ASSERT(i_dtype == DTYPE_FP32);
+                    jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t)], d0, 0x4);
+                    jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t) + simdw * sizeof(uint16_t)],
+                                   d1,
+                                   0x4);
+                    jit->prefetchwt1(jit->ptr[prefetch.r64() + i.r64() * sizeof(uint16_t)]);
+                } else if (o_dtype == DTYPE_BF16) {
+                    ASSERT(i_dtype == DTYPE_FP32);
+                    VReg d2;
+                    jit->vcvtne2ps2bf16(d2, d1, d0);
+                    jit->prefetchwt1(jit->ptr[prefetch.r64() + i.r64() * sizeof(uint16_t)]);
+                    d2.store(pdst + i * 2);
+                } else if (o_dtype == i_dtype) {
+                    // both in & out are 32bit
+                    d0.store(pdst + i * sizeof(float));
+                    d1.store(pdst + i * sizeof(float) + simdw * sizeof(float));
+                    jit->prefetchwt1(jit->ptr[prefetch.r64() + i.r64() * sizeof(float)]);
+                } else {
+                    ASSERT(false);
+                }
+                i = i + simdw * 2;
+            });
+        });
+    }
+    void operator()(int M, int N, const void* psrc, size_t stride_src, void* pdst, size_t stride_dst) const {
+        call_args args;
+        args.psrc = reinterpret_cast<const uint8_t*>(psrc);
+        args.pdst = reinterpret_cast<uint8_t*>(pdst);
+        args.count = N;
+
+        for (int m = 0; m < M; m++) {
+            args.prefetch = (m + 2 < M) ? (args.pdst + 2 * stride_dst) : args.pdst;
+            (*jit)(&args);
+            args.psrc += stride_src;
+            args.pdst += stride_dst;
         }
     }
 };
@@ -579,15 +700,14 @@ struct AMXQKVLinearKernel {
 
     blocking_1d blk_bk;
     blocking_1d blk_bn;
-    blocking_1d blk_rn;
 
     // AMX B-matrix pair size 32x32(bf16/f16) or 64x32(int8)
     int REG_BLK_N = 32;
     int REG_BLK_K;
     int CACHE_BLK_K = 256;
 
-    func_amx_repack_Btile::Ptr amx_repack_B = make_cacheable<func_amx_repack_Btile>();
     func_amx::Ptr amx_mm;
+    func_cvt_output::Ptr cvt_output;
 
     template <class F>
     void split_N3(int64_t n0, int64_t n1, const F& f) {
@@ -620,17 +740,34 @@ struct AMXQKVLinearKernel {
               size_t _N2,
               size_t stride_w2,
               size_t _K,
-              char w_format,  // 'b' int8 or 'e' fp16
-              int ttype) {
+              int w_dtype) {
         N[0] = _N0;
         N[1] = _N1;
         N[2] = _N2;
         K = _K;
-        // jit_amx_mm = get_amx_32x32_kernel(tmul_type);
-        // amx_mm = build_amx_mm_kernel(256, ttype);
-        amx_mm = make_cacheable<func_amx>(256, ttype);
 
-        w_is_int8 = (w_format == 'b');
+        int tmul_type;
+        int acc_dtype;
+        switch(w_dtype) {
+            case DTYPE_BF16:
+                tmul_type = func_amx::TMUL_BF16;
+                acc_dtype = DTYPE_FP32;
+                break;
+            case DTYPE_FP16:
+                tmul_type = func_amx::TMUL_FP16;
+                acc_dtype = DTYPE_FP32;
+                break;
+            case DTYPE_INT8:
+                tmul_type = func_amx::TMUL_SSD;
+                acc_dtype = DTYPE_INT32;
+                break;
+            default:
+                ASSERT(0);
+        }
+        amx_mm = make_cacheable<func_amx>(256, tmul_type);
+        cvt_output = make_cacheable<func_cvt_output>(acc_dtype, acc_dtype);
+
+        w_is_int8 = (w_dtype == DTYPE_INT8);
 
         const int8_t* pw[3];
         size_t stride_w[3];
@@ -654,38 +791,21 @@ struct AMXQKVLinearKernel {
         blk_bn.reset_cnt(N[0] + N[1] + N[2], REG_BLK_N, nthr);
 
         // DEBUG_LOG(blk_bk);
-        // DEBUG_LOG(blk_bn);
+        // DEBUG_LOG(nthr, blk_bn);
 
         w_buff = alloc_cache_aligned<int8_t>((N[0] + N[1] + N[2]) * K * (w_is_int8 ? 1 : 2));
 
         // following loop determines blocking layout
         auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
-
         blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
             blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-#if 1
                 auto* pdst0 = pdst_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
                 split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
                     auto stride = stride_w[idx];
-                    auto* psrc = pw[idx] + (ns0 - base_n) * stride + (k0 / REG_BLK_K * 64);
-                    auto* pdst1 = pdst0 + (ns0 - n0) * K / (REG_BLK_N * REG_BLK_K) * 2048;
+                    auto* psrc = pw[idx] + (ns0 - base_n) * stride + k0 * (w_is_int8 ? 1 : 2);
+                    auto* pdst1 = pdst0 + (ns0 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
                     amx_mm->repack_B(ns1 - ns0, k1 - k0, psrc, stride, pdst1);
                 });
-#else
-                auto* pdst = pdst_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                for (int n = n0; n < n1; n += REG_BLK_N) {
-                    auto& loc = rb2loc[n / REG_BLK_N];
-                    auto stride_src = stride_w[loc.id];
-                    auto* psrc0 = pw[loc.id] + loc.n_off * stride_src + (k0 / REG_BLK_K * 64);
-                    auto* psrc1 = psrc0 + 16 * stride_src;
-                    for (int k = k0; k < k1; k += REG_BLK_K, psrc0 += 64, psrc1 += 64) {
-                        // DEBUG_LOG(k, n, pdst-pdst_base);
-                        (*amx_repack_B)(psrc0, stride_src, pdst);
-                        (*amx_repack_B)(psrc1, stride_src, pdst + 1024);
-                        pdst += 2048;
-                    }
-                }
-#endif
             });
         });
     }
@@ -701,33 +821,6 @@ struct AMXQKVLinearKernel {
             }
         }
     };
-
-    void convert_to_dst(const void* pv_src, size_t stride_src, void* pv_dst, size_t stride_dst, int rows, int cols) {
-        static auto cvt_kernel = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg pdst, SReg prefetch_dst, SReg size) {
-            // size : how many int32/float
-            SReg i;
-            VReg d0, d1;
-            i = 0;
-            auto simdw = jit->vmm_width<uint32_t>();
-            jit->do_while_(i < size, [&] {
-                d0.load(psrc + i * sizeof(float));
-                d1.load(psrc + i * sizeof(float) + simdw * sizeof(float));
-                jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t)], d0, 0x4);
-                jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t) + simdw * sizeof(uint16_t)], d1, 0x4);
-                jit->prefetchwt1(jit->ptr[prefetch_dst.r64() + i.r64() * sizeof(uint16_t)]);
-                i = i + simdw * 2;
-            });
-        });
-
-        auto* psrc = reinterpret_cast<const uint8_t*>(pv_src);
-        auto* pdst = reinterpret_cast<uint8_t*>(pv_dst);
-        for (int m = 0; m < rows; m++) {
-            auto* pfetch = pdst + stride_dst;
-            (*cvt_kernel)(psrc, stride_src, pdst, stride_dst, pfetch, cols);
-            psrc += stride_src;
-            pdst += stride_dst;
-        }
-    }
 
     // input bf16 / int8
     void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
@@ -745,81 +838,72 @@ struct AMXQKVLinearKernel {
             // sizeof(ov::bfloat16) / M
             m_prefetch_Blines = 32768 * sizeof(uint16_t) / 64 / BM;
         }
-        for (int64_t m0 = 0; m0 < M; m0 += BM) {
-            auto m1 = std::min(m0 + BM, M);
-            blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
-                thread_local scratch_buff<uint32_t> ctemp;
-                ctemp.ensure_size(BM * (n1 - n0));
 
-                // which output we belong to ?
-                int idx = 0;
-                int n_off = 0;
-                if (n0 >= N[0] + N[1]) {
-                    idx = 2;
-                    n_off = n0 - (N[0] + N[1]);
-                } else if (n0 >= N[0]) {
-                    idx = 1;
-                    n_off = n0 - (N[0]);
+        blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
+            // DEBUG_LOG(n0, n1);
+            thread_local scratch_buff<uint32_t> ctemp;
+            // optimization : Tip 6: Avoid Leading Dimensions that are Multiples of 256
+            // https://www.intel.com/content/www/us/en/developer/articles/technical/a-simple-example-to-measure-the-performance-of-an-intel-mkl-function.html
+            auto strideC = (n1 - n0) * sizeof(float);
+            if ((strideC % 128) == 0)
+                strideC += 64;
+            ctemp.ensure_size(BM * strideC / sizeof(float));
+
+            // compute-bound case
+            for (int64_t m0 = 0; m0 < M; m0 += BM) {
+                auto m1 = std::min(m0 + BM, M);
+                auto valid_m = m1 - m0;
+
+                // auto strideC = (n1 - n0) * sizeof(float);
+                auto* pC = ctemp.buff.get();
+
+                if (valid_m <= 16) {
+                    // memory-bound case: special looping order
+                    amx_mm->config_tile(valid_m);
+                    func_amx::call_args args;
+                    args.strideA = stride_x;
+                    args.strideC = strideC;
+
+                    for (int n = n0; n < n1; n += REG_BLK_N) {
+                        args.pC = reinterpret_cast<uint8_t*>(pC + n - n0);
+
+                        auto* pB0 = pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+                            // DEBUG_LOG(ibn, ibk, n, k0, k1);
+                            args.pA = p_x + k0 * (w_is_int8 ? 1 : 2);
+                            args.pB = pB0 + (n - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            args.k_tiles = (k1 - k0) / REG_BLK_K;
+                            args.do_accumulation = 0;
+                            if (k0 == 0)
+                                args.do_accumulation |= 1;
+                            if (k1 == K)
+                                args.do_accumulation |= 2;
+                            amx_mm->matmul_1x2(&args);
+                            pB0 += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        });
+                    }
                 } else {
-                    idx = 0;
-                    n_off = n0;
-                }
-                auto strideC = stride_y[idx];
-                auto* pC = ptr_y[idx] + n_off * sizeof(int32_t) + m0 * strideC;
-                blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-                    auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
-                    auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-
-                    amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pB);
-                });
-#if 0
-                tcfg.set(0);
-                args.strideA = stride_x;
-                args.prefetch = pw_base;
-
-                int64_t m1 = std::min(m0 + BM, M);
-                blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-                    auto* pw0 = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                    args.k_tiles = (k1 - k0) / REG_BLK_K;
-                    auto prefetch_step = m_prefetch_Blines * 64 * args.k_tiles;
-                    args.prefetch = pw0;
-                    if (k1 < K) {
-                        args.prefetch = pw0 + (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                    }
-                    args.do_accumulation = k0 > 0;
-                    // accumulate [m0~m1, k0~k1] x [k0~k1, n0~n1] => [m0~m1, n0~n1]
-                    for (int64_t m = m0; m + 32 <= m1; m += 32) {
-                        auto valid_m = std::min(m1 - m, (int64_t)32);
-                        tcfg.set(valid_m);
-                        args.pB = pw0;
-                        args.pA = p_x + m * args.strideA + k0 * (w_is_int8 ? 1 : 2);
-
-                        for (int n = n0; n < n1; n += REG_BLK_N) {
-                            // 32x32
-                            // auto& loc = rb2loc[n / REG_BLK_N];
-                            // args.strideC = stride_y[loc.id];
-                            // args.pC = reinterpret_cast<uint32_t*>(ptr_y[loc.id] + loc.n_off * sizeof(int32_t) + m *
-                            // args.strideC);
-                            args.strideC = (n1 - n0) * sizeof(float);
-                            args.pC = ctemp.buff.get() + (m * (n1 - n0) + n - n0);
-                            (*jit_amx_mm)(&args);
-                            args.pB += args.k_tiles * 2048;
-                            args.prefetch += prefetch_step;
+                    // compute-bound case
+                    blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+                        auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
+                        auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        auto pfetchB = pB;
+                        if (k1 < K) {
+                            pfetchB += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
                         }
-                    }
-                });
-                // now convert Ctemp to destination buffer
-                for (auto& task : obtasks[ibn].tasks) {
-                    convert_to_dst(ctemp.buff.get() + task.src_off - n0,
-                                   (n1 - n0) * sizeof(float),
-                                   ptr_y[task.dst_id] + task.dst_off * sizeof(uint16_t),
-                                   stride_y[task.dst_id],
-                                   m1 - m0,
-                                   task.n);
+                        amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
+                    });
                 }
-#endif
-            });
-        }
+
+                // post-ops
+                split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                    auto stride_dst = stride_y[idx];
+                    auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * strideC;
+                    auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
+                    (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                });
+            }
+        });
     }
 };
 
@@ -834,14 +918,30 @@ struct AMXQKVLinear {
     AMXQKVLinearKernel kernel;
 
     AMXQKVLinear(const py::array& w0, const py::array& w1, const py::array& w2) {
-        ASSERT(w0.dtype().char_() == 'e' || w0.dtype().char_() == 'b');  // fp16 or int8
+        // https://docs.python.org/3/library/array.html#module-array
+        auto pyarray_type_code = w0.dtype().char_();
+        ASSERT(pyarray_type_code == 'h' || pyarray_type_code == 'e' || pyarray_type_code == 'b');  // fp16 or int8
         ASSERT(w0.ndim() == 2);
         ASSERT(w1.ndim() == 2);
         ASSERT(w2.ndim() == 2);
         ASSERT(w1.shape(1) == w0.shape(1));
         ASSERT(w2.shape(1) == w0.shape(1));
 
-        auto w_format = w0.dtype().char_();
+        int w_dtype = 0;
+        switch (pyarray_type_code) {
+            case 'h':
+                w_dtype = DTYPE_BF16;
+            break;
+            case 'e':
+                w_dtype = DTYPE_FP16;
+            break;
+            case 'b':
+                w_dtype = DTYPE_INT8;
+            break;
+            default:
+                ASSERT(0);
+        }
+
         kernel.init(w0.data(),
                     w0.shape(0),
                     w0.strides(0),
@@ -852,9 +952,9 @@ struct AMXQKVLinear {
                     w2.shape(0),
                     w2.strides(0),
                     w0.shape(1),
-                    w_format,
-                    w_format == 'e' ? func_amx::TMUL_BF16 : func_amx::TMUL_SSD);
+                    w_dtype);
     }
+
     void forward(const py::array& x, py::array& y0, py::array& y1, py::array& y2) {
         // w_buff
         auto M = x.shape(0);
@@ -876,6 +976,11 @@ struct AMXQKVLinear {
     }
 };
 
+void set_nthr(int nthr) {
+    omp_set_dynamic(0);         // Explicitly disable dynamic teams
+    omp_set_num_threads(nthr);  // Use 4 threads for all consecutive parallel regions
+}
+
 PYBIND11_MODULE(PACKAGE_NAME, m) {
     m.doc() = R"pbdoc(
     )pbdoc";
@@ -885,6 +990,7 @@ PYBIND11_MODULE(PACKAGE_NAME, m) {
         .def("forward", &AMXQKVLinear::forward);
 
     m.def("test_amx_repack_B", test_amx_repack_B);
+    m.def("set_nthr", set_nthr);
 
     m.def("simd_test_basic", simd_test_basic);
     m.def("simd_test_tput", simd_test_tput);
