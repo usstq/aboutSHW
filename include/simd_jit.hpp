@@ -19,6 +19,7 @@ static const bool use_avx512 = false;
 using XbyakSReg64 = Xbyak::Reg64;
 using XbyakSReg32 = Xbyak::Reg32;
 using XbyakVReg = Xbyak::Xmm;
+using XbyakTReg = Xbyak::Tmm;
 using XbyakLabel = Xbyak::Label;
 
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
@@ -38,7 +39,7 @@ struct jit_generator : public Xbyak::CodeGenerator {
     const char* m_kernel_name;
 
     struct jcout {
-        Xbyak::CodeGenerator * jit;
+        Xbyak::CodeGenerator* jit;
         std::vector<Xbyak::Reg64> preserved_regs;
         std::vector<Xbyak::Xmm> preserved_vmms;
         int vmm_size_byte;
@@ -125,8 +126,8 @@ struct jit_generator : public Xbyak::CodeGenerator {
             auto rsi = jit->rsi;
             auto rdi = jit->rdi;
             int rbp_disp = -1;
-            for(int i = 0; i < preserved_vmms.size(); i++) {
-                //printf(">>>>>>>>> [%d/%d] %d\n",i, preserved_vmms.size(), preserved_vmms[i].getIdx());
+            for (int i = 0; i < preserved_vmms.size(); i++) {
+                // printf(">>>>>>>>> [%d/%d] %d\n",i, preserved_vmms.size(), preserved_vmms[i].getIdx());
                 if (value.getIdx() == preserved_vmms[i].getIdx()) {
                     rbp_disp = ((preserved_vmms.size() - 1) - i) * vmm_size_byte;
                     break;
@@ -137,30 +138,31 @@ struct jit_generator : public Xbyak::CodeGenerator {
 
             jit->mov(rsi, 0);
             jit->lea(rdi, jit->ptr[rbp + rbp_disp]);
-            jit->mov(jit->esi, value.getBit()/32);
+            jit->mov(jit->esi, value.getBit() / 32);
             if (m_jout_opt == jout_options::as_f32) {
                 jit->call(reinterpret_cast<const void*>(printf_vec_float));
             } else if (m_jout_opt == jout_options::as_i32) {
                 jit->call(reinterpret_cast<const void*>(printf_vec_i32));
             } else if (m_jout_opt == jout_options::as_hex8) {
-                jit->mov(jit->esi, value.getBit()/8);
+                jit->mov(jit->esi, value.getBit() / 8);
                 jit->call(reinterpret_cast<const void*>(printf_vec_hex8));
             } else if (m_jout_opt == jout_options::as_i8) {
-                jit->mov(jit->esi, value.getBit()/8);
+                jit->mov(jit->esi, value.getBit() / 8);
                 jit->call(reinterpret_cast<const void*>(printf_vec_i8));
             } else if (m_jout_opt == jout_options::as_i16) {
-                jit->mov(jit->esi, value.getBit()/16);
+                jit->mov(jit->esi, value.getBit() / 16);
                 jit->call(reinterpret_cast<const void*>(printf_vec_i16));
             }
         }
         void _jit_cout(Xbyak::Reg64 value) {
-            const char * fmt_r64 = "0x%llx";
+            const char* fmt_r64 = "0x%llx";
             // load reg from snapshot on the stack
             jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt_r64));
             bool found = false;
-            for(int i = 0; i < preserved_regs.size(); i++) {
+            for (int i = 0; i < preserved_regs.size(); i++) {
                 if (value.getIdx() == preserved_regs[i].getIdx()) {
-                    jit->mov(jit->rsi, jit->ptr[jit->rbp + (preserved_regs.size() - i)*8 - preserved_regs.size()*8]);
+                    jit->mov(jit->rsi,
+                             jit->ptr[jit->rbp + (preserved_regs.size() - i) * 8 - preserved_regs.size() * 8]);
                     found = true;
                     break;
                 }
@@ -168,14 +170,14 @@ struct jit_generator : public Xbyak::CodeGenerator {
             assert(found);
             jit->call(reinterpret_cast<const void*>(printf));
         }
-        void _jit_cout(const char * value) {
-            const char * fmt_cstr = "%s";
+        void _jit_cout(const char* value) {
+            const char* fmt_cstr = "%s";
             jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt_cstr));
             jit->mov(jit->rsi, reinterpret_cast<uintptr_t>(value));
             jit->call(reinterpret_cast<const void*>(printf));
         }
         void _jit_cout(int64_t value) {
-            const char * fmt = "%lld";
+            const char* fmt = "%lld";
             jit->mov(jit->rdi, reinterpret_cast<uintptr_t>(fmt));
             jit->mov(jit->rsi, value);
             jit->call(reinterpret_cast<const void*>(printf));
@@ -183,21 +185,21 @@ struct jit_generator : public Xbyak::CodeGenerator {
         template <typename... Args>
         void operator()(Args... args) {
             // setup frames
-            // rbp, rsp, rax, 
+            // rbp, rsp, rax,
             auto rbp = jit->rbp;
             auto rsp = jit->rsp;
             auto r15 = jit->r15;
             jit->push(rbp);
-            jit->mov(rbp, rsp); // rbp points to preserved_regs, start with rbp, rsp's value is (rbp - 8)
+            jit->mov(rbp, rsp);  // rbp points to preserved_regs, start with rbp, rsp's value is (rbp - 8)
             jit->add(rbp, 8);
-            jit->push(rbp); // this is the rsp before calling jit_cout
+            jit->push(rbp);  // this is the rsp before calling jit_cout
             jit->sub(rbp, 8);
-            for(int i = 2; i < preserved_regs.size(); i++)
+            for (int i = 2; i < preserved_regs.size(); i++)
                 jit->push(preserved_regs[i]);
 
-            for(int i = 0; i < preserved_vmms.size(); i++) {
+            for (int i = 0; i < preserved_vmms.size(); i++) {
                 auto& vmm = preserved_vmms[i];
-                jit->vmovdqu(jit->ptr[rsp - (i + 1)*(vmm_size_byte)], vmm);
+                jit->vmovdqu(jit->ptr[rsp - (i + 1) * (vmm_size_byte)], vmm);
             }
             jit->sub(rsp, preserved_vmms.size() * vmm_size_byte);
 
@@ -211,12 +213,12 @@ struct jit_generator : public Xbyak::CodeGenerator {
             _jit_cout("\n");
 
             jit->mov(rsp, r15);
-            jit->add(rsp, preserved_vmms.size() * preserved_vmms[0].getBit()/8);
-            for(int i = 0; i < preserved_vmms.size(); i++) {
+            jit->add(rsp, preserved_vmms.size() * preserved_vmms[0].getBit() / 8);
+            for (int i = 0; i < preserved_vmms.size(); i++) {
                 auto& vmm = preserved_vmms[i];
-                jit->vmovdqu(vmm, jit->ptr[rsp - (i + 1)*(vmm_size_byte)]);
+                jit->vmovdqu(vmm, jit->ptr[rsp - (i + 1) * (vmm_size_byte)]);
             }
-            for(int i = preserved_regs.size() - 1; i >= 2 ; i--)
+            for (int i = preserved_regs.size() - 1; i >= 2; i--)
                 jit->pop(preserved_regs[i]);
             jit->pop(rbp);
             jit->pop(rbp);
@@ -226,10 +228,16 @@ struct jit_generator : public Xbyak::CodeGenerator {
     uint32_t vreg_bits() {
         return use_avx512 ? 512 : 256;
     }
-    jit_generator(const char* name) : m_kernel_name(name), sreg_pool("sreg_pool"), vreg_pool("vreg_pool"), jcout(this) {
+    jit_generator(const char* name)
+        : m_kernel_name(name),
+          sreg_pool("sreg_pool"),
+          vreg_pool("vreg_pool"),
+          treg_pool("treg_pool"),
+          jcout(this) {
         vreg_pool.add_range(0, 15);
         if (use_avx512)
             vreg_pool.add_range(16, 31);
+        treg_pool.add_range(0, 7);
 #    ifdef _WIN32
         sreg_pool.add_range(std::vector<int>({Xbyak::Operand::RCX,
                                               Xbyak::Operand::RDX,
@@ -280,16 +288,33 @@ struct jit_generator : public Xbyak::CodeGenerator {
         return _jdbg;
     }
 
-    static const size_t num_abi_save_gpr_regs = sizeof(abi_save_gpr_regs) / sizeof(abi_save_gpr_regs[0]);
+    struct reg_preserve_status {
+        bool is_preserved;
+        int offset;
+    };
+    std::map<int, reg_preserve_status> regs_on_stack;
+    int regs_preserve_stack_size;
+
+    static const int num_abi_save_gpr_regs = sizeof(abi_save_gpr_regs) / sizeof(abi_save_gpr_regs[0]);
+
     void preamble() {
-        for (size_t i = 0; i < num_abi_save_gpr_regs; ++i) {
-            push(XbyakSReg64(abi_save_gpr_regs[i]));
+        // regs_on_stack[i]: if i'th register is preserved on stack
+        push(rbp);
+        mov(rbp, rsp);  // setup stack-frame
+        regs_preserve_stack_size = 0;
+        for (int i = 0; i < num_abi_save_gpr_regs; ++i) {
+            auto reg_idx = static_cast<int>(abi_save_gpr_regs[i]);
             if (abi_save_gpr_regs[i] == Xbyak::Operand::RBP) {
-                // Stack magic: save rsp into rbp state to be able to unwind stack.
-                mov(rbp, rsp);
+                regs_on_stack[reg_idx] = reg_preserve_status{true, i * 8};
+            } else {
+                regs_on_stack[reg_idx] = reg_preserve_status{false, i * 8};
+                regs_preserve_stack_size += 8;  // increase space
             }
         }
+        // lazy preserve: reserve stack space only
+        sub(rsp, regs_preserve_stack_size);
     }
+
     void uni_vzeroupper() {
         // if (mayiuse(avx))
         vzeroupper();
@@ -297,8 +322,15 @@ struct jit_generator : public Xbyak::CodeGenerator {
     bool is_post_amble_called = false;
     void postamble() {
         is_post_amble_called = true;
-        for (size_t i = 0; i < num_abi_save_gpr_regs; ++i)
-            pop(XbyakSReg64(abi_save_gpr_regs[num_abi_save_gpr_regs - 1 - i]));
+        for (size_t i = 0; i < num_abi_save_gpr_regs; ++i) {
+            auto reg_idx = static_cast<int>(abi_save_gpr_regs[i]);
+            auto& status = regs_on_stack[reg_idx];
+            if (abi_save_gpr_regs[i] != Xbyak::Operand::RBP && status.is_preserved) {
+                mov(XbyakSReg64(reg_idx), ptr[rsp + status.offset]);
+            }
+        }
+        add(rsp, regs_preserve_stack_size);
+        pop(rbp);
         uni_vzeroupper();
         ret();
     }
@@ -329,16 +361,28 @@ struct jit_generator : public Xbyak::CodeGenerator {
         jit_kernel_code = getCode();
         if (ov::intel_cpu::SIMDJIT_DEBUG > 10) {
             ov::intel_cpu::jit_dump_asm(m_kernel_name, jit_kernel_code, this->getSize());
-        }        
+        }
         return (jit_kernel_code) ? 0 : -1;
     }
 
 protected:
     ov::intel_cpu::reg_pool sreg_pool;
     ov::intel_cpu::reg_pool vreg_pool;
+    ov::intel_cpu::reg_pool treg_pool;
 
     std::shared_ptr<XbyakSReg64> alloc_reg64(int index) {
         auto reg_index = sreg_pool.allocate(index);
+
+        auto it = regs_on_stack.find(reg_index);
+        if (it != regs_on_stack.end()) {
+            // lazy preserve sreg on stack according to ABI
+            auto& status = it->second;
+            if (!status.is_preserved) {
+                status.is_preserved = true;
+                mov(ptr[rsp + status.offset], XbyakSReg64(reg_index));
+            }
+        }
+
         return std::shared_ptr<XbyakSReg64>(new XbyakSReg64(reg_index), [this, reg_index](XbyakSReg64* preg) {
             if (preg) {
                 sreg_pool.free(reg_index);
@@ -360,6 +404,14 @@ protected:
                 delete preg;
             });
         }
+    }
+
+    std::shared_ptr<XbyakTReg> alloc_treg(int index) {
+        auto reg_index = treg_pool.allocate(index);
+        return std::shared_ptr<XbyakTReg>(new Xbyak::Tmm(reg_index), [this, reg_index](Xbyak::Tmm* preg) {
+            treg_pool.free(reg_index);
+            delete preg;
+        });
     }
 };
 #endif
@@ -505,7 +557,7 @@ class SIMDJit;
 class SRegExpr;
 
 struct default_simd_jit_t {
-    SIMDJit * cur;
+    SIMDJit* cur;
     static default_simd_jit_t& get() {
         static default_simd_jit_t inst;
         return inst;
@@ -547,6 +599,8 @@ public:
     inline void operator--() const;
     inline void operator++(int) const;
     inline void operator--(int) const;
+    inline void load(SRegExpr&& addr) const;
+    inline void store(SRegExpr&& addr) const;
     friend class SIMDJit;
     friend class SRegExpr;
 };
@@ -579,6 +633,29 @@ public:
     inline void load(const float brdf32) const;
     inline void load(const void* pv) const;
     inline void load(const VReg& rhs) const;
+    inline void load(SRegExpr&& addr) const;
+    inline void store(SRegExpr&& addr) const;
+};
+
+// AMX Tile register
+class TReg {
+private:
+    SIMDJit* jit = nullptr;
+    std::shared_ptr<XbyakTReg> reg;
+
+public:
+    TReg(SIMDJit* jit, std::shared_ptr<XbyakTReg> reg) : jit(jit), reg(reg) {}
+    TReg(int id = -1);
+    TReg(const TReg& rhs) = default;
+    bool empty() const {
+        return !static_cast<bool>(reg);
+    }
+    operator XbyakTReg&() {
+        return *reg;
+    }
+    operator const XbyakTReg&() const {
+        return *reg;
+    }
     inline void load(SRegExpr&& addr) const;
     inline void store(SRegExpr&& addr) const;
 };
@@ -655,9 +732,9 @@ public:
                     paddr.reset(new Addressing(-1, pimpl->lhs->data, pimpl->rhs->data, 0));
             }
         } else if (pimpl->is_op("+") && pimpl->rhs->is_leaf()) {
-            //std::cout << "pimpl->is_swapped = " << pimpl->is_swapped << std::endl;
-            //std::cout << "lhs.paddr = " << (lhs.paddr ? lhs.paddr->to_string() : "N/A") << std::endl;
-            //std::cout << "rhs.paddr = " << (rhs.paddr ? rhs.paddr->to_string() : "N/A") << std::endl;
+            // std::cout << "pimpl->is_swapped = " << pimpl->is_swapped << std::endl;
+            // std::cout << "lhs.paddr = " << (lhs.paddr ? lhs.paddr->to_string() : "N/A") << std::endl;
+            // std::cout << "rhs.paddr = " << (rhs.paddr ? rhs.paddr->to_string() : "N/A") << std::endl;
 
             if (pimpl->is_swapped) {
                 paddr = std::move(rhs.paddr);
@@ -666,7 +743,7 @@ public:
             }
             if (paddr) {
                 // merge addressing mode: only (+base) or (+disp) is allowed
-                //std::cout << "paddr = " << paddr->to_string() << std::endl;
+                // std::cout << "paddr = " << paddr->to_string() << std::endl;
                 // update pattern
                 if (pimpl->rhs->is_imm()) {
                     paddr->disp += pimpl->rhs->data;
@@ -685,7 +762,7 @@ public:
                 }
             }
         }
-        //show("SRegExpr constructed:");
+        // show("SRegExpr constructed:");
     }
 
     void show(std::string title) const {
@@ -694,31 +771,31 @@ public:
             std::cout << "\tAddressing:" << paddr->to_string() << std::endl;
         }
         if (pimpl)
-        pimpl->for_each_op([&](RegExprImpl* p) {
-            std::cout << "\t" << p->name() << " = " << p->lhs->name() << " " << p->op << " "
-                      << (p->rhs ? p->rhs->name() : std::string("( )"));
+            pimpl->for_each_op([&](RegExprImpl* p) {
+                std::cout << "\t" << p->name() << " = " << p->lhs->name() << " " << p->op << " "
+                          << (p->rhs ? p->rhs->name() : std::string("( )"));
 #ifdef __aarch64__
-            if (p->shift_type != RegExprImpl::SHIFT_TYPE::NONE) {
-                auto shift_amount = static_cast<int>(p->shift_amount);
-                switch (p->shift_type) {
-                case RegExprImpl::SHIFT_TYPE::ASR:
-                    std::cout << " >>(A) " << shift_amount;
-                    break;
-                case RegExprImpl::SHIFT_TYPE::LSR:
-                    std::cout << " >>(L) " << shift_amount;
-                    break;
-                case RegExprImpl::SHIFT_TYPE::LSL:
-                    std::cout << " <<(L) " << shift_amount;
-                    break;
-                case RegExprImpl::SHIFT_TYPE::ROR:
-                    std::cout << " >>(R) " << shift_amount;
-                    break;
+                if (p->shift_type != RegExprImpl::SHIFT_TYPE::NONE) {
+                    auto shift_amount = static_cast<int>(p->shift_amount);
+                    switch (p->shift_type) {
+                    case RegExprImpl::SHIFT_TYPE::ASR:
+                        std::cout << " >>(A) " << shift_amount;
+                        break;
+                    case RegExprImpl::SHIFT_TYPE::LSR:
+                        std::cout << " >>(L) " << shift_amount;
+                        break;
+                    case RegExprImpl::SHIFT_TYPE::LSL:
+                        std::cout << " <<(L) " << shift_amount;
+                        break;
+                    case RegExprImpl::SHIFT_TYPE::ROR:
+                        std::cout << " >>(R) " << shift_amount;
+                        break;
+                    }
                 }
-            }
 #endif
-            std::cout << std::endl;
-            return true;
-        });
+                std::cout << std::endl;
+                return true;
+            });
     }
 };
 
@@ -827,7 +904,7 @@ struct remove_class<R (C::*)(A...) const> {
     using type = R(A...);
 };
 
-
+enum class TMUL_TYPE { SSD = 1, USD = 2, SUD = 3, UUD = 4, FP16 = 5, BF16 = 6 };
 
 //=========================================================================================
 class SIMDJit : public jit_generator {
@@ -835,7 +912,7 @@ public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(SIMDJit);
 
     template <typename Func, typename Return, typename... Args>
-    static std::shared_ptr<SIMDJit> _create(Func &&f, Return (*)(SIMDJit*, Args...)) {
+    static std::shared_ptr<SIMDJit> _create(Func&& f, Return (*)(SIMDJit*, Args...)) {
         auto jit = std::make_shared<SIMDJit>();
         default_simd_jit_t::get().cur = jit.get();
         // https://stackoverflow.com/questions/68882421/using-a-pack-expansion-with-an-index-is-it-ub
@@ -849,7 +926,7 @@ public:
     template <typename Func>
     static std::shared_ptr<SIMDJit> create(Func&& f) {
         using fsig = typename remove_class<decltype(&Func::operator())>::type;
-        return _create(f, (fsig *)(nullptr));
+        return _create(f, (fsig*)(nullptr));
     }
 
     std::shared_ptr<void> get_disasm(int enable) {
@@ -877,8 +954,8 @@ public:
 
     int m_arg_id = 0;
     SReg get_arg(int idx = -1) {
-
-        if (idx < 0) idx = m_arg_id++;
+        if (idx < 0)
+            idx = m_arg_id++;
 
         auto ret = SReg(this, alloc_reg64(idx));
 #ifdef __x86_64__
@@ -901,6 +978,10 @@ public:
 
     VReg get_vreg() {
         return VReg(this, alloc_vreg(-1));
+    }
+
+    TReg get_treg(int id) {
+        return TReg(this, alloc_treg(id));
     }
 
     std::vector<VReg> get_vregs(size_t num_vregs) {
@@ -977,6 +1058,28 @@ public:
     void simd_cvtepi32_ps(XbyakVReg vmm_dst, XbyakVReg vmm_src) {
         vcvtdq2ps(vmm_dst, vmm_src);
     }
+    void tmul(const XbyakTReg& x1, const XbyakTReg& x2, const XbyakTReg& x3, TMUL_TYPE type) {
+        switch (type) {
+        case TMUL_TYPE::SSD:
+            tdpbssd(x1, x2, x3);
+            break;
+        case TMUL_TYPE::USD:
+            tdpbusd(x1, x2, x3);
+            break;
+        case TMUL_TYPE::SUD:
+            tdpbsud(x1, x2, x3);
+            break;
+        case TMUL_TYPE::UUD:
+            tdpbuud(x1, x2, x3);
+            break;
+        case TMUL_TYPE::FP16:
+            tdpfp16ps(x1, x2, x3);
+            break;
+        case TMUL_TYPE::BF16:
+            tdpbf16ps(x1, x2, x3);
+            break;
+        }
+    }
 #endif
 
     //***********************************************
@@ -1034,6 +1137,14 @@ inline VReg::VReg() {
         // allocate sreg
         jit = cur_jit;
         reg = cur_jit->get_vreg().reg;
+    }
+}
+inline TReg::TReg(int id) {
+    auto* cur_jit = default_simd_jit_t::get().cur;
+    if (cur_jit) {
+        // allocate sreg
+        jit = cur_jit;
+        reg = cur_jit->get_treg(id).reg;
     }
 }
 //========================================================================================================
@@ -1336,7 +1447,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             p->data = new_scratch_reg_sn;
             return true;
         }
-        
+
         // insert 'dst = lhs' in lhs data-path (when there is no 3-OP instruction)
         // space op " " means simply move lhs to dst `dst = lhs`
         std::unique_ptr<RegExprImpl> pmov(new RegExprImpl(" ", p->lhs));
@@ -1424,7 +1535,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
     // emmit code
     pimpl->for_each_op([&](RegExprImpl* p) {
         auto dst = XbyakSReg64(p->data);
-        expr_stat.ops_cnt ++;
+        expr_stat.ops_cnt++;
         if (p->is_op(" ")) {
             if (p->lhs->is_imm())
                 mov(dst, p->lhs->as_imm32());
@@ -1643,6 +1754,22 @@ inline void VReg::load(SRegExpr&& addr) const {
 inline void VReg::store(SRegExpr&& addr) const {
     ASSERT(addr.paddr);
     jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+}
+inline void SReg::load(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->mov(*reg, jit->ptr[addr.paddr->to_addr()]);
+}
+inline void SReg::store(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->mov(jit->ptr[addr.paddr->to_addr()], *reg);
+}
+inline void TReg::load(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->tileloadd(*reg, jit->ptr[addr.paddr->to_addr()]);
+}
+inline void TReg::store(SRegExpr&& addr) const {
+    ASSERT(addr.paddr);
+    jit->tilestored(jit->ptr[addr.paddr->to_addr()], *reg);
 }
 #endif
 // https://courses.cs.washington.edu/courses/cse469/19wi/arm64.pdf
@@ -1864,7 +1991,7 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 return true;
             }
             if (imm32 == 0 && (p->is_op("|") || p->is_op("^") || p->is_op("*"))) {
-                p->op = "NOP"; // "NOP" : pass-through (dst = lhs)
+                p->op = "NOP";  // "NOP" : pass-through (dst = lhs)
             }
         }
         if (p->lhs->is_op("NOP")) {
@@ -1967,9 +2094,9 @@ inline void SIMDJit::evaluate(SRegExpr& expr,
                 int num_bit_switch = 0;
                 uint32_t last_bit = temp_imm & 1;
                 for (int i = 1; i < 32; i++) {
-                    uint32_t cur_bit = temp_imm & (1<<i);
+                    uint32_t cur_bit = temp_imm & (1 << i);
                     if (last_bit != cur_bit)
-                        num_bit_switch ++;
+                        num_bit_switch++;
                 }
                 ASSERT(num_bit_switch > 0);
                 if (num_bit_switch == 1 || num_bit_switch == 2) {
