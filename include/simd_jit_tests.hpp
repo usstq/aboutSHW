@@ -352,6 +352,7 @@ static void args_test() {
     };
     for(int i = 0; i < 14; i++) {
         test_arg(i);
+        std::cout << "args_test args " << i << "/14" << std::endl;
     }
 }
 

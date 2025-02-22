@@ -308,8 +308,8 @@ struct jit_generator : public Xbyak::CodeGenerator {
                 regs_on_stack[reg_idx] = reg_preserve_status{true, i * 8};
             } else {
                 regs_on_stack[reg_idx] = reg_preserve_status{false, i * 8};
-                regs_preserve_stack_size += 8;  // increase space
             }
+            regs_preserve_stack_size += 8;  // increase space
         }
         // lazy preserve: reserve stack space only
         sub(rsp, regs_preserve_stack_size);
