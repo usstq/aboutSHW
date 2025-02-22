@@ -98,8 +98,9 @@ public:
     }
 };
 
-// make_cacheable(): create const object with internal cache with constructor-args as the key
-// this helps reduces construction time overhead, and perfectly suitable for functor/callable.
+// create const object with internal cache with constructor-args as the key
+// this helps reduces construction time overhead, and perfectly suitable
+// for caching functor/callable.
 template <class T, typename... CArgs>
 std::shared_ptr<const T> make_cacheable(CArgs... cargs) {
     std::shared_ptr<const T> sptr;
@@ -574,22 +575,19 @@ inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_e
     n_end += n_start;
 }
 
-struct blocking_1d {
+class blocking_1d {
     int64_t total_size;
     int64_t block_size;
-    struct blk_info {
-        int64_t off0;
-        int64_t off1;
-    };
-    std::vector<blk_info> blks;
+    std::vector<std::pair<int64_t, int64_t>> blks;
 
+public:
     // non-uniform size blocking
     void reset_blks(const std::vector<int64_t>& blk_sizes) {
         int off = 0;
         blks.clear();
         for (int i = 0; i < blk_sizes.size(); i++) {
             auto size = blk_sizes[i];
-            blks.emplace_back(blk_info{off, off + size});
+            blks.emplace_back(off, off + size);
             off += size;
         }
         total_size = off;
@@ -603,7 +601,7 @@ struct blocking_1d {
         blks.clear();
         for (int64_t i0 = 0; i0 < total_size; i0 += block_size) {
             int64_t i1 = std::min(i0 + block_size, total_size);
-            blks.emplace_back(blk_info{i0, i1});
+            blks.emplace_back(i0, i1);
         }
     }
 
@@ -620,12 +618,16 @@ struct blocking_1d {
             splitter(work_groups, _block_cnt, i, n0, n1);
             n0 *= atom_size;
             n1 *= atom_size;
-            blks.emplace_back(blk_info{n0, n1});
+            blks.emplace_back(n0, n1);
         }
     }
 
     size_t size() {
         return blks.size();
+    }
+
+    std::pair<int64_t, int64_t>& operator[](int i) {
+        return blks[i];
     }
 
     // overload support parallel
@@ -642,7 +644,7 @@ struct blocking_1d {
                 if (end > start) {
                     for (int i = start; i < end; i++) {
                         auto& bi = blks[i];
-                        f(i, bi.off0, bi.off1);
+                        f(i, bi.first, bi.second);
                     }
                 }
             }
@@ -653,35 +655,17 @@ struct blocking_1d {
     void for_each_blk(const F& f) {
         for (int i = 0; i < blks.size(); i++) {
             auto& bi = blks[i];
-            f(i, bi.off0, bi.off1);
+            f(i, bi.first, bi.second);
         }
     }
-
-    // return block id & updated offset
-    int blk_offet(int& offset) {
-        if (block_size > 0) {
-            auto i = offset / block_size;
-            offset -= i * block_size;
-            return i;
-        }
-        int i;
-        for (i = 0; i < blks.size(); i++) {
-            auto& bi = blks[i];
-            if (offset >= bi.off0 && offset < bi.off1) {
-                offset -= bi.off0;
-                return i;
-            }
-        }
-        offset -= blks.back().off0;
-        return i;
-    }
+    friend std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs);
 };
 
 std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
     os << "blocking_1d(" << rhs.total_size << "," << rhs.block_size << ", {";
     const char* sep = "";
     for (auto& bi : rhs.blks) {
-        os << sep << bi.off0 << "+" << bi.off1 - bi.off0;
+        os << sep << bi.first << "+" << bi.second - bi.first;
         sep = ",";
     }
     os << "})";
@@ -746,21 +730,21 @@ struct AMXQKVLinearKernel {
 
         int tmul_type;
         int acc_dtype;
-        switch(w_dtype) {
-            case DTYPE_BF16:
-                tmul_type = func_amx::TMUL_BF16;
-                acc_dtype = DTYPE_FP32;
-                break;
-            case DTYPE_FP16:
-                tmul_type = func_amx::TMUL_FP16;
-                acc_dtype = DTYPE_FP32;
-                break;
-            case DTYPE_INT8:
-                tmul_type = func_amx::TMUL_SSD;
-                acc_dtype = DTYPE_INT32;
-                break;
-            default:
-                ASSERT(0);
+        switch (w_dtype) {
+        case DTYPE_BF16:
+            tmul_type = func_amx::TMUL_BF16;
+            acc_dtype = DTYPE_FP32;
+            break;
+        case DTYPE_FP16:
+            tmul_type = func_amx::TMUL_FP16;
+            acc_dtype = DTYPE_FP32;
+            break;
+        case DTYPE_INT8:
+            tmul_type = func_amx::TMUL_SSD;
+            acc_dtype = DTYPE_INT32;
+            break;
+        default:
+            ASSERT(0);
         }
         amx_mm = make_cacheable<func_amx>(256, tmul_type);
         cvt_output = make_cacheable<func_cvt_output>(acc_dtype, acc_dtype);
@@ -826,7 +810,7 @@ struct AMXQKVLinearKernel {
         }
     };
 
-    uint32_t * get_ctemp(size_t count) {
+    uint32_t* get_ctemp(size_t count) {
         thread_local scratch_buff<uint32_t> ctemp_per_thread;
         ctemp_per_thread.ensure_size(count);
         return ctemp_per_thread.buff.get();
@@ -834,21 +818,22 @@ struct AMXQKVLinearKernel {
 
     // input bf16 / int8
     void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
+        static int amxcfg = getenv("amxcfg", 0);
         // w_buff
         auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
         auto nthr = omp_get_max_threads();
         bool also_split_on_M_dim = blk_bn.size() < nthr;
 
-        //ASSERT(blk_bn.size() == nthr, blk_bn.size(), " != ", nthr);
+        // ASSERT(blk_bn.size() == nthr, blk_bn.size(), " != ", nthr);
         constexpr int BM = 256;
 
-        if (also_split_on_M_dim) {
+        if (also_split_on_M_dim || amxcfg == 1) {
             // split both on M & N
             auto nblkN = blk_bn.size();
             auto nblkM = (M + BM - 1) / BM;
 
             nthr = omp_get_max_threads();
-            #pragma omp parallel
+#pragma omp parallel
             {
                 int ithr = omp_get_thread_num();
                 int64_t i0, i1;
@@ -859,14 +844,14 @@ struct AMXQKVLinearKernel {
                     m1 = std::min(m0 + BM, M);
 
                     auto blk_n = i / nblkM;
-                    int n0 = blk_bn.blks[blk_n].off0;
-                    int n1 = blk_bn.blks[blk_n].off1;
-                    //DEBUG_LOG(m0, m1, n0, n1)
+                    int n0 = blk_bn[blk_n].first;
+                    int n1 = blk_bn[blk_n].second;
+                    // DEBUG_LOG(m0, m1, n0, n1)
 
                     auto strideC = (n1 - n0) * sizeof(float);
                     if ((strideC % 128) == 0)
                         strideC += 64;
-                    auto* pC = get_ctemp((BM) * strideC / sizeof(float));
+                    auto* pC = get_ctemp((BM)*strideC / sizeof(float));
 
                     blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
                         auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
@@ -985,17 +970,17 @@ struct AMXQKVLinear {
 
         int w_dtype = 0;
         switch (pyarray_type_code) {
-            case 'h':
-                w_dtype = DTYPE_BF16;
+        case 'h':
+            w_dtype = DTYPE_BF16;
             break;
-            case 'e':
-                w_dtype = DTYPE_FP16;
+        case 'e':
+            w_dtype = DTYPE_FP16;
             break;
-            case 'b':
-                w_dtype = DTYPE_INT8;
+        case 'b':
+            w_dtype = DTYPE_INT8;
             break;
-            default:
-                ASSERT(0);
+        default:
+            ASSERT(0);
         }
 
         kernel.init(w0.data(),
