@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import time, sys
 import numa
+import inspect
 
 class Colors:
     """ ANSI color codes """
@@ -43,11 +44,17 @@ def test_amx_repack_B():
         print(dst)
         assert False, "amx_repack_B failed!"
 
+## compute bound is set according to
+## https://github.com/usstq/mm_amx?tab=readme-ov-file#with-ab-sub-block-prefetched-amx-mm
+sys_cap_mem_bw_GBPS = 250
+sys_cap_amx_core_GFLOPS = {2:1242, 1:1242*2}  # item-size 2(bf16/fp16) 1(int8)
+
 class testcase:
     def __init__(self, x_dtype, w_dtype,  M, K, N) -> None:
         self.N = N
         self.M = M
         self.K = K
+        torch.manual_seed(0)
         self.W0 = torch.randint(low=-1, high=2, size=(N[0], K)).to(dtype = w_dtype).detach() # -1, 0, 1
         self.W1 = torch.randint(low=-1, high=2, size=(N[1], K)).to(dtype = w_dtype).detach() # -1, 0, 1
         self.W2 = torch.randint(low=-1, high=2, size=(N[2], K)).to(dtype = w_dtype).detach() # -1, 0, 1
@@ -136,7 +143,10 @@ class testcase:
         if expect_latency_ms > 0:
             if min_latency > expect_latency_ms:
                 ColorsCode = Colors.RED
-        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:{ColorsCode}min{min_latency : .2f}{Colors.END}+SD{std_latency:.2f}ms   {mem_bw_GB:.2f} GB/s   {GFLOPS/nthr:.2f} GFLOPS/core")
+
+        peak_GFLOPS = sys_cap_amx_core_GFLOPS[self.w_dtype.itemsize]
+        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:{ColorsCode}min{min_latency : .2f}{Colors.END}+SD{std_latency:.2f}ms "
+              f"  {mem_bw_GB:.2f} GB/s ({mem_bw_GB*100/sys_cap_mem_bw_GBPS:.0f}%)   {GFLOPS/nthr:.2f} GFLOPS/core ({GFLOPS*100/nthr/peak_GFLOPS:.0f}%)")
         return self
 
 
@@ -153,40 +163,42 @@ def test_perf_with_ncores():
         ttt.test(48, layers)
         ttt.test(nthr, layers)
 
-def testall(layers = 100):
-    testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(24, layers)
-    testcase(torch.int8, torch.int8, 8, 4096, [4096, 4096, 4096]).test(24, layers)
-    testcase(torch.int8, torch.int8, 16, 4096, [4096, 4096, 4096]).test(24, layers)
-    testcase(torch.int8, torch.int8, 32, 4096, [4096, 4096, 4096]).test(24, layers)
+ncores = 0
 
-numa.schedule.run_on_nodes(1)
-numa.memory.set_membind_nodes(1)
+def numactl(target_node):
+    global ncores
+    numa.schedule.run_on_nodes(target_node)
+    numa.memory.set_membind_nodes(target_node)
+    node_num_cpus = len(numa.info.node_to_cpus(target_node))
+    ncores = node_num_cpus//2
+    print(f"numactl ncores {ncores} on node {target_node} with {node_num_cpus} cpus")
 
-ncores = 48
+numactl(1)
 
-for i in range(100):
-    #testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
-    #testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
-    testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
-    testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+def test_mem_bounds():
+    print(f"======================{inspect.currentframe().f_code.co_name}======================")
+    # need to repeat to see if memory bound can reach due to random system mem-accessing noise
+    for i in range(5):
+        testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
+        testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+
+def test_compute_bounds():
+    print(f"======================{inspect.currentframe().f_code.co_name}======================")
+    for i in range(5):
+        testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+        testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.7)
+
+def test_compute_bounds_bigM():
+    print(f"======================{inspect.currentframe().f_code.co_name}======================")
+    for i in range(5):
+        testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+        testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+
+
+test_mem_bounds()
+test_compute_bounds()
+test_compute_bounds_bigM()
 
 sys.exit(0)
 
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
-
-testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
-testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.7)
-
-sys.exit(0)
-
-#testall();sys.exit(0)
 test_perf_with_ncores(); sys.exit(0)

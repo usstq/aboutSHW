@@ -490,6 +490,58 @@ public:
             }
         }
     }
+
+    // a series of weight blocks with possible different K but same N
+    void matmulx(int M,
+                 int N,
+                 const std::vector<int>& Ks,
+                 const uint8_t* pA,
+                 size_t strideA,
+                 const uint8_t* pB,
+                 void* pC,
+                 size_t strideC) const {
+        int itembytes = (tmul_type == TMUL_TYPE::BF16 || tmul_type == TMUL_TYPE::FP16) ? 2 : 1;
+        // DEBUG_LOG(itembytes, M, N, Ks.size());
+        if (M <= 16) {
+            // memory-bound case: special looping order
+            config_tile(M);
+            call_args args;
+            args.strideA = strideA;
+            args.strideC = strideC;
+            args.pC = reinterpret_cast<uint8_t*>(pC);
+            for (int n = 0; n < N; n += REG_BLK_N) {
+                auto* pB0 = pB;
+                args.pA = pA;
+                for (int i = 0; i < Ks.size(); i++) {
+                    auto& k_size = Ks[i];
+                    args.pB = pB0 + n * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
+                    args.k_tiles = k_size / REG_BLK_K;
+                    args.do_accumulation = 0;
+                    if (i == 0)
+                        args.do_accumulation |= 1;
+                    if (i == Ks.size() - 1)
+                        args.do_accumulation |= 2;
+                    (*jit_amx_mm1x2)(&args);
+                    pB0 += N * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
+                    args.pA += k_size * itembytes;
+                }
+                args.pC += REG_BLK_N * sizeof(uint32_t);
+            }
+        } else {
+            // compute-bound case
+            for (int i = 0; i < Ks.size(); i++) {
+                auto& k_size = Ks[i];
+                auto pfetchB = pB;
+                if (i < Ks.size() - 1) {
+                    // prefetch next B block
+                    pfetchB += N * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
+                }
+                matmul(M, N, k_size, i > 0, pA, strideA, pB, pC, strideC, pfetchB);
+                pA += k_size * itembytes;
+                pB += (N * k_size) / (REG_BLK_N * REG_BLK_K) * 2048;
+            }
+        }
+    }
 };
 
 class func_cvt_output {
@@ -579,15 +631,18 @@ class blocking_1d {
     int64_t total_size;
     int64_t block_size;
     std::vector<std::pair<int64_t, int64_t>> blks;
+    std::vector<int> blk_sizes;
 
 public:
     // non-uniform size blocking
-    void reset_blks(const std::vector<int64_t>& blk_sizes) {
+    void reset_blks(const std::vector<int64_t>& block_sizes) {
         int off = 0;
         blks.clear();
-        for (int i = 0; i < blk_sizes.size(); i++) {
-            auto size = blk_sizes[i];
+        blk_sizes.clear();
+        for (int i = 0; i < block_sizes.size(); i++) {
+            auto size = block_sizes[i];
             blks.emplace_back(off, off + size);
+            blk_sizes.emplace_back(static_cast<int>(size));
             off += size;
         }
         total_size = off;
@@ -599,9 +654,11 @@ public:
         total_size = _total_size;
         block_size = _block_size;
         blks.clear();
+        blk_sizes.clear();
         for (int64_t i0 = 0; i0 < total_size; i0 += block_size) {
             int64_t i1 = std::min(i0 + block_size, total_size);
             blks.emplace_back(i0, i1);
+            blk_sizes.emplace_back(i1 - i0);
         }
     }
 
@@ -610,6 +667,7 @@ public:
         total_size = _total_size;
         block_size = 0;
         blks.clear();
+        blk_sizes.clear();
         blks.reserve(_block_cnt);
         for (int64_t i = 0; i < _block_cnt; i++) {
             int64_t n0;
@@ -619,6 +677,7 @@ public:
             n0 *= atom_size;
             n1 *= atom_size;
             blks.emplace_back(n0, n1);
+            blk_sizes.emplace_back(n1 - n0);
         }
     }
 
@@ -628,6 +687,10 @@ public:
 
     std::pair<int64_t, int64_t>& operator[](int i) {
         return blks[i];
+    }
+
+    const std::vector<int>& sizes() const {
+        return blk_sizes;
     }
 
     // overload support parallel
@@ -853,44 +916,14 @@ struct AMXQKVLinearKernel {
                         strideC += 64;
                     auto* pC = get_ctemp((BM)*strideC / sizeof(float));
 
-                    auto valid_m = m1 - m0;
-                    if (valid_m <= 16) {
-                        // memory-bound case: special looping order
-                        amx_mm->config_tile(valid_m);
-                        func_amx::call_args args;
-                        args.strideA = stride_x;
-                        args.strideC = strideC;
-
-                        for (int n = n0; n < n1; n += REG_BLK_N) {
-                            args.pC = reinterpret_cast<uint8_t*>(pC + n - n0);
-
-                            auto* pB0 = pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048;
-                            blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-                                // DEBUG_LOG(ibn, ibk, n, k0, k1);
-                                args.pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
-                                args.pB = pB0 + (n - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                                args.k_tiles = (k1 - k0) / REG_BLK_K;
-                                args.do_accumulation = 0;
-                                if (k0 == 0)
-                                    args.do_accumulation |= 1;
-                                if (k1 == K)
-                                    args.do_accumulation |= 2;
-                                amx_mm->matmul_1x2(&args);
-                                pB0 += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                            });
-                        }
-                    } else {
-                        // compute-bound case
-                        blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-                            auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
-                            auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                            auto pfetchB = pB;
-                            if (k1 < K) {
-                                pfetchB += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                            }
-                            amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
-                        });
-                    }
+                    amx_mm->matmulx(m1 - m0,
+                                    n1 - n0,
+                                    blk_bk.sizes(),
+                                    p_x + m0 * stride_x,
+                                    stride_x,
+                                    pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048,
+                                    pC,
+                                    strideC);
 
                     // post-ops
                     split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
@@ -926,7 +959,6 @@ struct AMXQKVLinearKernel {
             for (int64_t m0 = 0; m0 < M; m0 += BM) {
                 auto m1 = std::min(m0 + BM, M);
                 auto valid_m = m1 - m0;
-
                 if (valid_m <= 16) {
                     // memory-bound case: special looping order
                     amx_mm->config_tile(valid_m);
@@ -964,7 +996,6 @@ struct AMXQKVLinearKernel {
                         amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
                     });
                 }
-
                 // post-ops
                 split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
                     auto stride_dst = stride_y[idx];
