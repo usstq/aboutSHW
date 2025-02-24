@@ -240,6 +240,7 @@ def test_separate_lora():
         C[n_idx] = sum;
     }
     '''
+
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemmA(__global half * A, __global half *B,  __global half *temp_res, int K) {
@@ -255,6 +256,19 @@ def test_separate_lora():
         __local half *sg_buffer_ptr = sgs_sum_buff + sgid * N;
         __global half *C_ptr = temp_res + N * gid;
 
+#define GEMMA_USE_SLM 1
+#if GEMMA_USE_SLM
+        //Workgroup share same input activation and each subgroup would access all the elements of the shared intput.Put it into SLM.
+        __local half local_input[K_PER_WG];
+        //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
+        __attribute__((opencl_unroll_hint))
+        for (int offset = sgid * SG_SZ; offset < (k_end_grp - k_start_grp); offset += SG_SZ * SG_NUM ) {
+            __global half *input_ptr = A + k_start_grp + offset;
+            half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
+            local_input[offset + lid] = copy_val;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+#endif
         int k_start_sg = k_start_grp + sgid * K_PER_SG;
         __global half *A_ptr_sg = A + k_start_sg;
         __global half *B_ptr_sg = B + k_start_sg * N;
@@ -268,7 +282,11 @@ def test_separate_lora():
                 __global half *B_ptr = B_ptr_sg + nblk * SG_SZ;
                 half sum = 0.f;
                 for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
-                    ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr));
+#if GEMMA_USE_SLM
+                    ushort input = intel_sub_group_block_read_us((const __local ushort*)(local_input + sgid * (int)(K_PER_SG) + kk));
+#else
+                    ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr + kk));
+#endif
                     __attribute__((opencl_unroll_hint))
                     for (int j = 0; j < SG_SZ; j++) {
                         half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
@@ -276,7 +294,6 @@ def test_separate_lora():
                         sum = fma(aa, bb, sum);
                         B_ptr += N;
                     }
-                    A_ptr += SG_SZ;
                 }
                 *(sg_buffer_ptr + nblk * SG_SZ + lid) = sum;
             }
@@ -297,9 +314,9 @@ def test_separate_lora():
     }
     '''
     N = 64
-    K = 1536
-    WG_NUM = 7
-    SG_NUM = 16
+    K = 1024
+    WG_NUM = 4
+    SG_NUM = 4
     SG_SZ = 16
     assert K % SG_SZ == 0, f"'input state' {K} is not multiple of SG_SZ {SG_SZ}"
     assert N % SG_SZ == 0, f"'RANK' {N} is not multiple of SG_SZ {SG_SZ}"
@@ -320,7 +337,8 @@ def test_separate_lora():
     tA = cl.tensor(A)
     tB = cl.tensor(B)
     SG_SZ = 16
-    kernel = kernel_cache(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DSG_NUM={SG_NUM} -DN={N} -DK_PER_SG={K_PER_SG}")
+    GEMMA_USE_SLM = 0
+    kernel = kernel_cache(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DSG_NUM={SG_NUM} -DN={N} -DK_PER_SG={K_PER_SG} -DGEMMA_USE_SLM={GEMMA_USE_SLM}")
     kernel_ref =  kernel_cache(ref_src)
     tC_temp = cl.tensor([1*WG_NUM, N], np.dtype(np.float16))
     tC = cl.tensor([1, N], np.dtype(np.float16))
