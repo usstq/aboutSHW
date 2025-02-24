@@ -818,7 +818,6 @@ struct AMXQKVLinearKernel {
 
     // input bf16 / int8
     void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
-        static int amxcfg = getenv("amxcfg", 0);
         // w_buff
         auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
         auto nthr = omp_get_max_threads();
@@ -827,7 +826,7 @@ struct AMXQKVLinearKernel {
         // ASSERT(blk_bn.size() == nthr, blk_bn.size(), " != ", nthr);
         constexpr int BM = 256;
 
-        if (also_split_on_M_dim || amxcfg == 1) {
+        if (1) {
             // split both on M & N
             auto nblkN = blk_bn.size();
             auto nblkM = (M + BM - 1) / BM;
@@ -840,6 +839,7 @@ struct AMXQKVLinearKernel {
                 splitter(static_cast<int64_t>(nblkN * nblkM), nthr, ithr, i0, i1);
                 for (int64_t i = i0; i < i1; i++) {
                     int64_t m0, m1;
+                    // allocate task reusing same sub-weight to same thread
                     m0 = (i % nblkM) * BM;
                     m1 = std::min(m0 + BM, M);
 
@@ -853,15 +853,44 @@ struct AMXQKVLinearKernel {
                         strideC += 64;
                     auto* pC = get_ctemp((BM)*strideC / sizeof(float));
 
-                    blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
-                        auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
-                        auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                        auto pfetchB = pB;
-                        if (k1 < K) {
-                            pfetchB += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                    auto valid_m = m1 - m0;
+                    if (valid_m <= 16) {
+                        // memory-bound case: special looping order
+                        amx_mm->config_tile(valid_m);
+                        func_amx::call_args args;
+                        args.strideA = stride_x;
+                        args.strideC = strideC;
+
+                        for (int n = n0; n < n1; n += REG_BLK_N) {
+                            args.pC = reinterpret_cast<uint8_t*>(pC + n - n0);
+
+                            auto* pB0 = pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+                                // DEBUG_LOG(ibn, ibk, n, k0, k1);
+                                args.pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
+                                args.pB = pB0 + (n - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                                args.k_tiles = (k1 - k0) / REG_BLK_K;
+                                args.do_accumulation = 0;
+                                if (k0 == 0)
+                                    args.do_accumulation |= 1;
+                                if (k1 == K)
+                                    args.do_accumulation |= 2;
+                                amx_mm->matmul_1x2(&args);
+                                pB0 += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            });
                         }
-                        amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
-                    });
+                    } else {
+                        // compute-bound case
+                        blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+                            auto pA = p_x + m0 * stride_x + k0 * (w_is_int8 ? 1 : 2);
+                            auto pB = pw_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            auto pfetchB = pB;
+                            if (k1 < K) {
+                                pfetchB += (n1 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            }
+                            amx_mm->matmul(m1 - m0, n1 - n0, k1 - k0, k0 > 0, pA, stride_x, pB, pC, strideC, pfetchB);
+                        });
+                    }
 
                     // post-ops
                     split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
@@ -874,7 +903,7 @@ struct AMXQKVLinearKernel {
             }
             return;
         }
-
+#if 0
         int m_prefetch_Blines = 0;
         if (BM) {
             // next block size: 32 * N * sizeof(ov::bfloat16),
@@ -945,6 +974,7 @@ struct AMXQKVLinearKernel {
                 });
             }
         });
+#endif
     }
 };
 

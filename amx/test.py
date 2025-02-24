@@ -162,20 +162,29 @@ def testall(layers = 100):
 numa.schedule.run_on_nodes(1)
 numa.memory.set_membind_nodes(1)
 
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(47, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(47, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(47, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(48, 100, 0.45)
+ncores = 48
+
+for i in range(100):
+    #testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+    #testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+    testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
+    testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+
 sys.exit(0)
 
-testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(48, 100, 0.3)
-testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(48, 100, 0.45)
-testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(48, 100, 0.7)
+testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.50)
+testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
+
+testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
+testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.7)
 
 sys.exit(0)
 
