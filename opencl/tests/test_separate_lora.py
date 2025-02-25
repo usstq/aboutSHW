@@ -9,7 +9,7 @@ from clops import compare
 from clops.utils import *
 
     
-def test_upping():
+def test_gemmA():
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemm(__global half * A, __global half *BQ, __global half *BK,__global half *BV,  __global half *C) {
@@ -108,7 +108,7 @@ def test_upping():
     cl.finish()
     compare(tRef.numpy(), tRes.numpy())
 
-def test_lowering():
+def test_gemmB():
     ref_src = r'''
     __kernel void gemm(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk) {
 #if 1
@@ -202,10 +202,9 @@ def test_lowering():
     cl.finish()
     compare(tC_ref.numpy(), tC.numpy())
 
-
-def test_separate_lora():
+def test_single_lora():
     ref_src = r'''
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk) {
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, __global half * alpha, int N, int K, int k_blk) {
 #if 1
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
         int n_idx = get_global_id(0);
@@ -223,7 +222,7 @@ def test_separate_lora():
             }
             sum += sub_sum;
         }
-        CC[n_idx] = sum;
+        CC[n_idx] = sum * alpha[0];
 #else
         int n_idx = get_global_id(0);
         half sum = 0.f;
@@ -239,6 +238,14 @@ def test_separate_lora():
             sum += temp_C[i*N + n_idx];
         C[n_idx] = sum;
     }
+    
+    __kernel void gemmB(__global half * A, __global half *B,  __global half *CC, int N, int K) {
+        int n_idx = get_global_id(0);
+        half sum = 0.f;
+        for (int i = 0; i < K; i++)
+            sum = fma(A[i], B[i*N+n_idx], sum);
+        CC[n_idx] = sum;
+    }
     '''
 
     src =  r'''
@@ -252,11 +259,10 @@ def test_separate_lora():
         int k_end_grp = (k_start_grp + K_PER_WG) > K ?  (K): (k_start_grp+K_PER_WG);
 
         // store each sg accumulation result into SLM. Will sum sg result into wg result. 
-        __local half sgs_sum_buff[SG_NUM * N];
-        __local half *sg_buffer_ptr = sgs_sum_buff + sgid * N;
-        __global half *C_ptr = temp_res + N * gid;
+        __local half sgs_sum_buff[SG_NUM * RANK];
+        __local half *sg_buffer_ptr = sgs_sum_buff + sgid * RANK;
+        __global half *C_ptr = temp_res + RANK * gid;
 
-#define GEMMA_USE_SLM 1
 #if GEMMA_USE_SLM
         //Workgroup share same input activation and each subgroup would access all the elements of the shared intput.Put it into SLM.
         __local half local_input[K_PER_WG];
@@ -271,13 +277,13 @@ def test_separate_lora():
 #endif
         int k_start_sg = k_start_grp + sgid * K_PER_SG;
         __global half *A_ptr_sg = A + k_start_sg;
-        __global half *B_ptr_sg = B + k_start_sg * N;
+        __global half *B_ptr_sg = B + k_start_sg * RANK;
 
         //The sg is needs to accumulate. Otherwise, sg not needed. sg diverge here.
         if (k_start_sg <  k_end_grp) {
             int klen_sg = ((k_start_sg + K_PER_SG) > k_end_grp) ? (k_end_grp-k_start_sg): K_PER_SG;
 
-            for (int nblk = 0; nblk < N / SG_SZ; nblk++) {
+            for (int nblk = 0; nblk < RANK / SG_SZ; nblk++) {
                 __global half *A_ptr = A_ptr_sg;
                 __global half *B_ptr = B_ptr_sg + nblk * SG_SZ;
                 half sum = 0.f;
@@ -292,7 +298,7 @@ def test_separate_lora():
                         half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
                         half aa = as_half(intel_sub_group_broadcast(input, j));
                         sum = fma(aa, bb, sum);
-                        B_ptr += N;
+                        B_ptr += RANK;
                     }
                 }
                 *(sg_buffer_ptr + nblk * SG_SZ + lid) = sum;
@@ -303,61 +309,135 @@ def test_separate_lora():
         int sg_offset = sgid * SG_SZ;
         //Each SG would try updating data.
          __attribute__((opencl_unroll_hint))
-        for (int base = 0; (sg_offset  + base ) < N; base += SG_SZ * SG_NUM ) {
+        for (int base = 0; (sg_offset  + base ) < RANK; base += SG_SZ * SG_NUM ) {
             half sum = 0.f;
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < SG_NUM; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(sgs_sum_buff + i * N + sg_offset)));
+                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(sgs_sum_buff + i * RANK + sg_offset)));
             }
             intel_sub_group_block_write_us((const __global ushort*)(C_ptr + sg_offset), as_short(sum));
         }
     }
+
+
+    __attribute__((intel_reqd_sub_group_size(SG_SZ)))
+    __kernel void gemmB(__global half * A,  __global half *B,  __global half *CC, __global half * alpha, int N) {
+        int wg_id = get_group_id(0);
+        int sg_id = get_sub_group_id();
+        int sg_num = get_num_sub_groups();
+        int sg_idx = wg_id * sg_num  +  sg_id;
+        int id_sg_local = get_sub_group_local_id();
+#if GEMMB_USE_SLM
+        __local half reduce[RANK];
+#else
+        half reduce[RANK] = {0.f};
+#endif
+
+        __global half *C_ptr = CC + sg_idx * SG_SZ;
+        __global half *A_ptr = A;
+        __global half *B_ptr = B + sg_idx * SG_SZ;
+
+        //1. Reduce
+#if GEMMB_USE_SLM
+        //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
+        int local_sz = get_local_size(0);
+        //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
+        __attribute__((opencl_unroll_hint))
+        for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
+            __global half *subA_ptr = A_ptr + offset;
+            __attribute__((opencl_unroll_hint))
+            for (int part_idx = 0; part_idx < PART_NUM; part_idx++) {
+                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)subA_ptr));
+                reduce[offset + id_sg_local] += partial_val;
+                subA_ptr += RANK;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+#else
+        //Each work item would reduce the input activation.
+        for (int i = 0; i < PART_NUM; i++) {
+            __attribute__((opencl_unroll_hint))
+            for (int j = 0; j < RANK; j++) {
+                reduce[j] += A_ptr[i * RANK + j];
+            }
+        }
+#endif
+        //2.  GEMMB
+        half sum = 0;
+        for (int kk = 0; kk < RANK; kk += SG_SZ) {
+#if GEMMB_USE_SLM
+            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + kk)));
+#else
+            half input = reduce[id_sg_local + kk];
+#endif
+            input *= alpha[0];
+            __attribute__((opencl_unroll_hint))
+            for (int j = 0; j < SG_SZ; j++) {
+                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
+                half aa = as_half(intel_sub_group_broadcast(as_ushort(input), j));
+                sum = fma(aa, bb, sum);
+                B_ptr += N;
+            }
+        }
+        intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum));
+    }
     '''
-    N = 64
-    K = 1024
+    RANK = 64
+    INPUT_STATE = 1536
+    OUTPUT_STATE = INPUT_STATE
     WG_NUM = 4
     SG_NUM = 4
     SG_SZ = 16
-    assert K % SG_SZ == 0, f"'input state' {K} is not multiple of SG_SZ {SG_SZ}"
-    assert N % SG_SZ == 0, f"'RANK' {N} is not multiple of SG_SZ {SG_SZ}"
+    GEMMB_LOCAL_SIZE = 128
+    assert INPUT_STATE % SG_SZ == 0, f"'input state' {INPUT_STATE} is not multiple of SG_SZ {SG_SZ}"
+    assert RANK % SG_SZ == 0, f"'RANK' {RANK} is not multiple of SG_SZ {SG_SZ}"
+    assert OUTPUT_STATE % SG_SZ == 0, f"'output state' {OUTPUT_STATE} is not multiple of SG_SZ {SG_SZ}"
+    assert (OUTPUT_STATE) % GEMMB_LOCAL_SIZE == 0, f"GEMMB: 'global size' {OUTPUT_STATE} is not multiple of 'local size' {GEMMB_LOCAL_SIZE}"
 
-    K_SG_NUM = K // SG_SZ
-    K_PER_WG = ((K_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
-    KBLKS_PER_WG = K_PER_WG / SG_SZ
+    INPUT_STATE_SG_NUM = INPUT_STATE // SG_SZ
+    INPUT_STATE_PER_WG = ((INPUT_STATE_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
+    INPUT_STATE_BLKS_PER_WG = INPUT_STATE_PER_WG / SG_SZ
     # assert( KBLKS_PER_WG > 0, f"Can't satisfy at least 1 KBLK(16) for one WG")
-    
     # can't ensure each sg can be assigned the workload. sg maybe diverge.
-    KBLKS_PER_SG = (KBLKS_PER_WG + SG_NUM - 1) // SG_NUM
-    K_PER_SG = KBLKS_PER_SG * SG_SZ
+    INPUT_STATE_BLKS_PER_SG = (INPUT_STATE_BLKS_PER_WG + SG_NUM - 1) // SG_NUM
+    INPUT_STATE_PER_SG = INPUT_STATE_BLKS_PER_SG * SG_SZ
     vRANGE = 2
     np.random.seed(0)
-    A = np.random.randint(-vRANGE, vRANGE+1, [1, K]).astype(np.float16)
-    B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
+    A = np.random.randint(-vRANGE, vRANGE+1, [1, INPUT_STATE]).astype(np.float16)
+    weiA = np.random.randint(-vRANGE, vRANGE, [INPUT_STATE, RANK]).astype(np.float16)
+    weiB = np.random.randint(-vRANGE, vRANGE, [RANK, OUTPUT_STATE]).astype(np.float16)
+    B_output = np.random.randint(-vRANGE, vRANGE, [1, OUTPUT_STATE]).astype(np.float16)
+    alpha = np.random.rand(1).astype(np.float16)
+    tAlpha = cl.tensor(alpha)
 
     tA = cl.tensor(A)
-    tB = cl.tensor(B)
+    tweiA = cl.tensor(weiA)
+    tweiB = cl.tensor(weiB)
+    tB_output = cl.tensor(B_output)
+
     SG_SZ = 16
-    GEMMA_USE_SLM = 0
-    kernel = kernel_cache(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={K_PER_WG} -DSG_NUM={SG_NUM} -DN={N} -DK_PER_SG={K_PER_SG} -DGEMMA_USE_SLM={GEMMA_USE_SLM}")
+    GEMMA_USE_SLM = 1
+    kernel_opt = kernel_cache(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG} -DSG_NUM={SG_NUM} -DRANK={RANK} -DK_PER_SG={INPUT_STATE_PER_SG} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DPART_NUM={WG_NUM}")
     kernel_ref =  kernel_cache(ref_src)
-    tC_temp = cl.tensor([1*WG_NUM, N], np.dtype(np.float16))
-    tC = cl.tensor([1, N], np.dtype(np.float16))
+    tA_output = cl.tensor([1*WG_NUM, RANK], np.dtype(np.float16))
+    tA_reduce = cl.tensor([1, RANK], np.dtype(np.float16))
 
-    tC_ref = cl.tensor([1, N], np.dtype(np.float16))
-    kernel_ref.enqueue("gemmA", [N],[N], tA, tB, tC_ref, N, K, K_PER_WG)
+    tC_ref = cl.tensor([1, RANK], np.dtype(np.float16))
+    tResult_ref = cl.tensor([1, OUTPUT_STATE], np.dtype(np.float16))
+    kernel_ref.enqueue("gemmA", [RANK],[RANK], tA, tweiA, tC_ref, tAlpha, RANK, INPUT_STATE, INPUT_STATE_PER_WG)
+    REF_LOCAL_SIZE = 128
+    assert OUTPUT_STATE % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {OUTPUT_STATE} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
+    kernel_ref.enqueue("gemmB", [OUTPUT_STATE],[REF_LOCAL_SIZE], tC_ref, tweiB, tResult_ref, OUTPUT_STATE, RANK)
     cl.finish()
+    kernel_opt.enqueue("gemmA", [SG_SZ * WG_NUM * SG_NUM],[SG_SZ * SG_NUM], tA, tweiA, tA_output, INPUT_STATE)
+    kernel_opt.enqueue("gemmB", [OUTPUT_STATE],[GEMMB_LOCAL_SIZE], tA_output, tweiB, tB_output, tAlpha, OUTPUT_STATE)
+    cl.finish()
+    # compare(tC_ref.numpy(), tA_reduce.numpy())
+    compare(tResult_ref.numpy(), tB_output.numpy())
 
-    kernel.enqueue("gemmA", [SG_SZ * WG_NUM * SG_NUM],[SG_SZ * SG_NUM], tA, tB, tC_temp, K)
-    cl.finish()
-    kernel_ref.enqueue("reduce", [N],[N], tC_temp, tC, N, WG_NUM)
-    cl.finish()
-    compare(tC_ref.numpy(), tC.numpy())
 
 
 cl.profiling(True)
-# test_lora()
-# test_FMA_basic()
-# test_upping()
-# test_lowering()
-test_separate_lora()
-print("-------------------------")
+# test_gemmA()
+# test_gemmB()
+test_single_lora()
