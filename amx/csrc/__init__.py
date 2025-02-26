@@ -48,8 +48,8 @@ target_compile_definitions(cppmodule
         file.write(cmake_src)
 
     build_path = os.path.join(dir_path, "build")
-    subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, "-DCMAKE_BUILD_TYPE=Debug"], shell=False)
-    subprocess.check_output(["cmake", "--build", build_path, "--config", "Debug"], shell=False)
+    subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, "-DCMAKE_BUILD_TYPE=RelWithDebInfo"], shell=False)
+    subprocess.check_output(["cmake", "--build", build_path, "--config", "RelWithDebInfo"], shell=False)
 
 build_with_cmake()
 from .cppmodule import *

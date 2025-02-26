@@ -68,7 +68,7 @@ class testcase:
             o_dtype = torch.int32
         if x_dtype == torch.float16 or x_dtype == torch.bfloat16:
             acc_dtype = torch.float32
-            o_dtype = torch.float32
+            o_dtype = x_dtype
 
         self.x_dtype = x_dtype
         self.w_dtype = w_dtype
@@ -77,8 +77,8 @@ class testcase:
         self.Y = []
         self.Z = []
         for i, N in enumerate(Ns):
-            YRef = self.X.to(dtype=acc_dtype) @ self.W[i].transpose(0,1).to(dtype=o_dtype)
-            self.Y.append(self.to_numpy(YRef))
+            YRef = (self.X.to(dtype=acc_dtype) @ self.W[i].transpose(0,1).to(dtype=acc_dtype)).to(dtype=o_dtype)
+            self.Y.append(YRef)
             self.Z.append(self.to_numpy(torch.zeros([M, N], dtype=o_dtype)))
             self.W[i] = self.to_numpy(self.W[i])
 
@@ -97,10 +97,11 @@ class testcase:
 
     def check(self):
         for i, (Y, Z) in enumerate(zip(self.Y, self.Z)):
-            if not np.allclose(Y, Z):
+            Z = self.to_torch(Z)
+            if not torch.allclose(Y, Z):
                 print(Y)
                 print(Z)
-                print(np.where((Y != Z)))
+                print(torch.nonzero(Y != Z))
                 #assert False, f"Y{i} != Z{i}"
                 return False
         return True
@@ -181,8 +182,8 @@ def test_compute_bounds_bigM():
         testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.45)
 
 #ncores = 4
-#testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
-#testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [11008*2]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [11008*2]).test(ncores, 100, 0.45)
 testcase(torch.bfloat16, torch.bfloat16, 256, 11008, [4096]).test(ncores, 100, 0.45)
 testcase(torch.bfloat16, torch.bfloat16, 256, 11008, [4096]).test(ncores, 100, 0.45)
 testcase(torch.bfloat16, torch.bfloat16, 256, 11008, [4096]).test(ncores, 100, 0.45)
