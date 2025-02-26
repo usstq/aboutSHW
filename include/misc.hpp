@@ -96,9 +96,6 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
     }
     if (func) tag = tag + func + "()";
 
-    std::stringstream ss;
-    int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
-    (void)(dummy);
     auto dt_value = get_delta_ms();
     std::string dt_unit = "ms";
     if (dt_value > 1000.0f) {
@@ -109,7 +106,12 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
             dt_unit = "min";
         }
     }
-    std::cout << " \033[37;100m+" << std::fixed << std::setprecision(3) << dt_value << " " << dt_unit << "\033[36;40m " << tag << " \033[0m " << ss.str() << "" << std::endl;
+    std::stringstream ss;
+    ss << " \033[37;100m+" << std::fixed << std::setprecision(3) << dt_value << " " << dt_unit << "\033[36;40m " << tag << " \033[0m ";
+    int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
+    (void)(dummy);
+    ss << std::endl;
+    std::cout << ss.str();
 }
 
 #define ECOUT(...) easy_cout(__FILE__, __func__, __LINE__, __VA_ARGS__)

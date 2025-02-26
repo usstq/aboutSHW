@@ -1,6 +1,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
+#include <atomic>
 #include <mutex>
 
 #include "misc.hpp"
@@ -201,8 +203,6 @@ class func_amx {
     std::shared_ptr<SIMDJit> jit_tile_configer;
     std::shared_ptr<SIMDJit> jit_amx_mm2x2;
     std::shared_ptr<SIMDJit> jit_amx_mm1x2;
-
-    func_amx_repack_Btile amx_repack_Btile;
 
     int m_prefetch_Blines = 0;
 
@@ -415,6 +415,7 @@ public:
     }
 
     // functor can have many functions, but all of them have to be const
+    /*
     void repack_B(int N, int K, const void* pvsrc, size_t stride_src, void* pvdst) const {
         auto* pdst = reinterpret_cast<uint8_t*>(pvdst);
         ASSERT((N % REG_BLK_N) == 0);
@@ -430,6 +431,7 @@ public:
             }
         }
     }
+    */
 
     void matmul_1x2(call_args* arg) const {
         (*jit_amx_mm1x2)(arg);
@@ -494,7 +496,8 @@ public:
     // a series of weight blocks with possible different K but same N
     void matmulx(int M,
                  int N,
-                 const std::vector<int>& Ks,
+                 const int* first_K,
+                 const int* last_K,
                  const uint8_t* pA,
                  size_t strideA,
                  const uint8_t* pB,
@@ -512,14 +515,14 @@ public:
             for (int n = 0; n < N; n += REG_BLK_N) {
                 auto* pB0 = pB;
                 args.pA = pA;
-                for (int i = 0; i < Ks.size(); i++) {
-                    auto& k_size = Ks[i];
+                for (auto* ik = first_K; ik != last_K; ik++) {
+                    auto k_size = *ik;
                     args.pB = pB0 + n * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
                     args.k_tiles = k_size / REG_BLK_K;
                     args.do_accumulation = 0;
-                    if (i == 0)
+                    if (ik == first_K)
                         args.do_accumulation |= 1;
-                    if (i == Ks.size() - 1)
+                    if (ik == last_K - 1)
                         args.do_accumulation |= 2;
                     (*jit_amx_mm1x2)(&args);
                     pB0 += N * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
@@ -529,14 +532,14 @@ public:
             }
         } else {
             // compute-bound case
-            for (int i = 0; i < Ks.size(); i++) {
-                auto& k_size = Ks[i];
+            for (auto* ik = first_K; ik != last_K; ik++) {
+                auto& k_size = *ik;
                 auto pfetchB = pB;
-                if (i < Ks.size() - 1) {
+                if (ik != last_K - 1) {
                     // prefetch next B block
                     pfetchB += N * k_size / (REG_BLK_N * REG_BLK_K) * 2048;
                 }
-                matmul(M, N, k_size, i > 0, pA, strideA, pB, pC, strideC, pfetchB);
+                matmul(M, N, k_size, ik != first_K, pA, strideA, pB, pC, strideC, pfetchB);
                 pA += k_size * itembytes;
                 pB += (N * k_size) / (REG_BLK_N * REG_BLK_K) * 2048;
             }
@@ -611,6 +614,53 @@ public:
     }
 };
 
+class func_reduce2 {
+    std::shared_ptr<SIMDJit> jit;
+
+public:
+    using Ptr = std::shared_ptr<const func_reduce2>;
+    static constexpr int SUM_FP32 = 1;
+    static constexpr int SUM_INT32 = 2;
+
+    func_reduce2(int type) {
+        jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc0, SReg psrc1, SReg pdst, SReg count) {
+            VReg d0, d1;
+            SReg i;
+            i = 0;
+            auto simdw = jit->vmm_width<uint32_t>();
+            jit->do_while_(i < count, [&] {
+                d0.load(psrc0 + i*sizeof(uint32_t));
+                d1.load(psrc1 + i*sizeof(uint32_t));
+                if (type == SUM_INT32)
+                    jit->vpaddd(d0, d0, d1);
+                if (type == SUM_FP32)
+                    jit->vaddps(d0, d0, d1);
+                d0.store(pdst + i*sizeof(uint32_t));
+                i = i + simdw;
+            });
+        });
+    }
+
+    void operator()(const void* pvsrc0,
+                    size_t stride_src0,
+                    const void* pvsrc1,
+                    size_t stride_src1,
+                    void* pvdst,
+                    size_t stride_dst,
+                    int M,
+                    int N) const {
+        auto* psrc0 = reinterpret_cast<const uint8_t*>(pvsrc0);
+        auto* psrc1 = reinterpret_cast<const uint8_t*>(pvsrc1);
+        auto* pdst = reinterpret_cast<uint8_t*>(pvdst);
+        for (int m = 0; m < M; m++) {
+            (*jit)(psrc0, psrc1, pdst, static_cast<int64_t>(N));
+            psrc0 += stride_src0;
+            psrc1 += stride_src1;
+            pdst += stride_dst;
+        }
+    }
+};
+
 template <typename T, typename Q>
 inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
     if (team <= 1 || n == 0) {
@@ -625,6 +675,17 @@ inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_e
     }
 
     n_end += n_start;
+}
+
+template <typename F>
+void parallel_nt_static(int nthr, const F& func) {
+    if (nthr == 0)
+        nthr = omp_get_max_threads();
+#pragma omp parallel
+    {
+        int ithr = omp_get_thread_num();
+        func(ithr, nthr);
+    }
 }
 
 class blocking_1d {
@@ -695,23 +756,17 @@ public:
 
     // overload support parallel
     template <class F>
-    void for_each_blk(int nthr, const F& f) {
-        if (nthr == 0)
-            nthr = omp_get_max_threads();
-#pragma omp parallel
-        {
-            int ithr = omp_get_thread_num();
+    void for_each_blk(int nthreads, const F& f) {
+        parallel_nt_static(nthreads, [&](int ithr, int nthr) {
             size_t start, end;
-            if (ithr < nthr) {
-                splitter(blks.size(), nthr, ithr, start, end);
-                if (end > start) {
-                    for (int i = start; i < end; i++) {
-                        auto& bi = blks[i];
-                        f(i, bi.first, bi.second);
-                    }
+            splitter(blks.size(), nthr, ithr, start, end);
+            if (end > start) {
+                for (int i = start; i < end; i++) {
+                    auto& bi = blks[i];
+                    f(i, bi.first, bi.second);
                 }
             }
-        }
+        });
     }
 
     template <class F>
@@ -736,7 +791,7 @@ std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
 }
 
 // blocked QKV weight memory
-struct AMXQKVLinearKernel {
+struct AMXLinearKernel {
     std::shared_ptr<int8_t> w_buff;
     bool w_is_int8;  // weight is int8 or fp16/bf16
 
@@ -753,6 +808,9 @@ struct AMXQKVLinearKernel {
 
     func_amx::Ptr amx_mm;
     func_cvt_output::Ptr cvt_output;
+    func_amx_repack_Btile::Ptr amx_repack_Btile;
+    func_reduce2::Ptr reduce2_fp32;
+    func_reduce2::Ptr reduce2_int32;
 
     template <class F>
     void split_N3(int64_t n0, int64_t n1, const F& f) {
@@ -775,20 +833,32 @@ struct AMXQKVLinearKernel {
         f(2, N[0] + N[1], n0, n1);
     }
 
-    void init(const void* pv_w0,
-              size_t _N0,
-              size_t stride_w0,
-              const void* pv_w1,
-              size_t _N1,
-              size_t stride_w1,
-              const void* pv_w2,
-              size_t _N2,
-              size_t stride_w2,
+    static constexpr int OP_TYPE_QKV = 1;
+    static constexpr int OP_TYPE_GATEUP = 2;
+    static constexpr int OP_TYPE_DOWN = 3;
+    int op_type;
+
+    struct kgroup {
+        std::shared_ptr<std::atomic<int>> step;
+        void* pC[2];
+        kgroup() {
+            step = std::make_shared<std::atomic<int>>();
+        }
+    };
+    std::vector<kgroup> ksyncs;
+    int k_group_workers = 1;
+
+    void init(int _op_type,
+              const std::vector<const void*>& pw,
+              const std::vector<ssize_t>& Ns,
+              const std::vector<ssize_t>& stride_w,
               size_t _K,
               int w_dtype) {
-        N[0] = _N0;
-        N[1] = _N1;
-        N[2] = _N2;
+        op_type = _op_type;
+        N[0] = Ns[0];
+        N[1] = Ns.size() > 1 ? Ns[1] : 0;
+        N[2] = Ns.size() > 2 ? Ns[2] : 0;
+
         K = _K;
 
         int tmul_type;
@@ -811,38 +881,39 @@ struct AMXQKVLinearKernel {
         }
         amx_mm = make_cacheable<func_amx>(256, tmul_type);
         cvt_output = make_cacheable<func_cvt_output>(acc_dtype, acc_dtype);
+        amx_repack_Btile = make_cacheable<func_amx_repack_Btile>();
+        reduce2_fp32 = make_cacheable<func_reduce2>(func_reduce2::SUM_FP32);
+        reduce2_int32 = make_cacheable<func_reduce2>(func_reduce2::SUM_INT32);
 
         w_is_int8 = (w_dtype == DTYPE_INT8);
-
-        const int8_t* pw[3];
-        size_t stride_w[3];
-        pw[0] = reinterpret_cast<const int8_t*>(pv_w0);
-        pw[1] = reinterpret_cast<const int8_t*>(pv_w1);
-        pw[2] = reinterpret_cast<const int8_t*>(pv_w2);
-
-        stride_w[0] = stride_w0;
-        stride_w[1] = stride_w1;
-        stride_w[2] = stride_w2;
-
-        // DEBUG_LOG(N0, N1, N2, K);
 
         REG_BLK_N = 16 * 2;
         REG_BLK_K = 16 * (w_is_int8 ? 4 : 2);
         CACHE_BLK_K = 256;
 
+        // DEBUG_LOG(N0, N1, N2, K);
         blk_bk.reset_size(K, CACHE_BLK_K);
-
         auto nthr = omp_get_max_threads();
-
         bool b_small_weights = ((N[0] + N[1] + N[2]) / nthr) < 256;
-        if (b_small_weights) {
+        ksyncs.clear();
+        k_group_workers = 1;
+        if (op_type == OP_TYPE_DOWN && (nthr > 3)) {
+            // prior knowledge, down proj has small N & big K, so we split along K dimension by 2
+            // each 2 worker threads coorperate as a group, if there are odd number of workers
+            // the unpaired worker will have nothing to do, so this method is only enabled when nthr is big enough.
+            k_group_workers = 2;
+            auto thr_groups = nthr / k_group_workers;
+            blk_bn.reset_cnt(N[0] + N[1] + N[2], REG_BLK_N, thr_groups);
+            // threads within same group share a single synchronization primitives
+            ksyncs.resize(thr_groups);
+        } else if (b_small_weights) {
             blk_bn.reset_size(N[0] + N[1] + N[2], 256);
         } else {
             blk_bn.reset_cnt(N[0] + N[1] + N[2], REG_BLK_N, nthr);
         }
 
         // DEBUG_LOG(blk_bk);
-        // DEBUG_LOG(nthr, blk_bn);
+        //DEBUG_LOG(nthr, k_group_workers, blk_bn);
 
         w_buff = alloc_cache_aligned<int8_t>((N[0] + N[1] + N[2]) * K * (w_is_int8 ? 1 : 2));
         auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
@@ -851,12 +922,28 @@ struct AMXQKVLinearKernel {
         blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
             blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
                 auto* pdst0 = pdst_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
-                    auto stride = stride_w[idx];
-                    auto* psrc = pw[idx] + (ns0 - base_n) * stride + k0 * (w_is_int8 ? 1 : 2);
-                    auto* pdst1 = pdst0 + (ns0 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
-                    amx_mm->repack_B(ns1 - ns0, k1 - k0, psrc, stride, pdst1);
-                });
+                if (op_type == OP_TYPE_QKV || op_type == OP_TYPE_DOWN) {
+                    split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                        auto stride = stride_w[idx];
+                        auto* psrc = reinterpret_cast<const uint8_t*>(pw[idx]) + (ns0 - base_n) * stride +
+                                     k0 * (w_is_int8 ? 1 : 2);
+                        auto* pdst = pdst0 + (ns0 - n0) * (k1 - k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+
+                        for (int n = 0; n < ns1 - ns0; n += REG_BLK_N) {
+                            auto* psrc0 = psrc + n * stride;
+                            auto* psrc1 = psrc0 + 16 * stride;
+                            for (int k = k0; k < k1; k += REG_BLK_K, psrc0 += 64, psrc1 += 64) {
+                                // DEBUG_LOG(k, n, pdst-pdst_base);
+                                (*amx_repack_Btile)(psrc0, stride, pdst);
+                                (*amx_repack_Btile)(psrc1, stride, pdst + 1024);
+                                pdst += 2048;
+                            }
+                        }
+                    });
+                }
+                if (op_type == OP_TYPE_GATEUP) {
+                    // to make post-ops easier, interleave gate & up in N(OC) dimension in unit of 16
+                }
             });
         });
     }
@@ -881,61 +968,275 @@ struct AMXQKVLinearKernel {
 
     // input bf16 / int8
     void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
-        // w_buff
+        execute(M, p_x, stride_x, [&](int64_t m0, int64_t m1, int64_t n0, int64_t n1, void* pvC, int64_t strideC) {
+            auto* pC = reinterpret_cast<uint32_t*>(pvC);
+            if (op_type == OP_TYPE_QKV || op_type == OP_TYPE_DOWN) {
+                split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                    auto stride_dst = stride_y[idx];
+                    auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * stride_dst;
+                    auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
+                    (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                });
+            }
+            if (op_type == OP_TYPE_GATEUP) {
+            }
+        });
+    }
+#if 0
+    void execute_down(int64_t M,
+                      const uint8_t* p_x,
+                      int64_t stride_x) {
         auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
         auto nthr = omp_get_max_threads();
-        bool also_split_on_M_dim = blk_bn.size() < nthr;
-
-        // ASSERT(blk_bn.size() == nthr, blk_bn.size(), " != ", nthr);
         constexpr int BM = 256;
+        auto group_size = 2;
 
-        if (1) {
-            // split both on M & N
-            auto nblkN = blk_bn.size();
-            auto nblkM = (M + BM - 1) / BM;
+        for(int m0 = 0; m0 < M; m0 += BM) {
+            auto m1 = std::min(m0 + BM, M);
+            ksync.reset(blk_bn.size());
 
-            nthr = omp_get_max_threads();
-#pragma omp parallel
+#    pragma omp parallel
             {
                 int ithr = omp_get_thread_num();
+                // a group will work on BM & BN task together
+                // split K dimension among group-member
+                int igroup = ithr / group_size;
+                int groupi = ithr % group_size;
                 int64_t i0, i1;
-                splitter(static_cast<int64_t>(nblkN * nblkM), nthr, ithr, i0, i1);
+                splitter(static_cast<int64_t>(blk_bn.size()), ngroups, igroup, i0, i1);
                 for (int64_t i = i0; i < i1; i++) {
-                    int64_t m0, m1;
-                    // allocate task reusing same sub-weight to same thread
-                    m0 = (i % nblkM) * BM;
-                    m1 = std::min(m0 + BM, M);
-
-                    auto blk_n = i / nblkM;
-                    int n0 = blk_bn[blk_n].first;
-                    int n1 = blk_bn[blk_n].second;
-                    // DEBUG_LOG(m0, m1, n0, n1)
-
+                    int n0 = blk_bn[i].first;
+                    int n1 = blk_bn[i].second;
                     auto strideC = (n1 - n0) * sizeof(float);
                     if ((strideC % 128) == 0)
                         strideC += 64;
                     auto* pC = get_ctemp((BM)*strideC / sizeof(float));
 
+                    int64_t bk0, bk1;
+                    splitter(static_cast<int64_t>(blk_bk.size()), group_size, groupi, bk0, bk1);
+
                     amx_mm->matmulx(m1 - m0,
                                     n1 - n0,
-                                    blk_bk.sizes(),
+                                    bk1 - bk0,
+                                    p_x + m0 * stride_x,
+                                    stride_x,
+                                    pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048,
+                                    pC,
+                                    strideC);
+                    
+                    if (ksyncs[igroup].fetch_add(1) & 1) {
+                        // both part completed
+                        
+                    }
+                    // special post-ops which combined reduce function
+                    // here we only need 
+                    // https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html
+                    // this will wait for reduce to be done，others(not the one doing reduce) would wait
+                    // for the one to finish reducing (using the data).
+                    bool is_the_one = ginfo[igroup].reduce(pC, strideC, m1 - m0, n1 - n0);
+                    if (is_the_one) {
+                        // doing post-ops
+                        for(int m = m0; m < m1; m++) {
+                            for(int n = 0;)
+                        }
+                        post_ops(m0, m1, n0, n1, pC, strideC);
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+    // this is a general matmul between src & prepacked weight, post_ops are memory based
+    void execute(int64_t M,
+                 const uint8_t* p_x,
+                 int64_t stride_x,
+                 const std::function<void(int64_t, int64_t, int64_t, int64_t, void*, int64_t)>& post_ops) {
+        // w_buff
+        auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
+        auto nthr = omp_get_max_threads();
+        constexpr int BM = 256;
+        const auto& Ks = blk_bk.sizes();
+
+        if (k_group_workers > 1) {
+            auto n_groups = static_cast<int>(ksyncs.size());
+            auto khalf = 0;
+            for (int j = 0; j < Ks.size() / 2; j++)
+                khalf += Ks[j];
+            
+            // special blocking on K dim
+            for (int64_t m0 = 0; m0 < M; m0 += BM) {
+                auto m1 = std::min(m0 + BM, M);
+                parallel_nt_static(0, [&](int ithr, int nthr) {
+                    auto group_id = ithr / k_group_workers;
+                    auto group_off = ithr % k_group_workers;
+                    auto& sync = ksyncs[group_id];
+
+                    int64_t i0, i1;
+                    splitter(static_cast<int64_t>(blk_bn.size()), n_groups, group_id, i0, i1);
+                    for (int64_t i = i0; i < i1; i++) {
+                        int n0 = blk_bn[i].first;
+                        int n1 = blk_bn[i].second;
+
+                        auto strideC = (n1 - n0) * sizeof(float);
+                        if ((strideC % 128) == 0)
+                            strideC += 64;
+                        auto* pC = get_ctemp((m1 - m0)*strideC / sizeof(float));
+                        sync.pC[group_off] = pC;
+
+                        //DEBUG_LOG(ithr, nthr, i, group_id, group_off, pC);
+                        auto* ik0 = &Ks[0];
+                        auto* ik1 = &Ks[Ks.size() / 2];
+                        auto* pw = pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048;
+                        auto* px = p_x + m0 * stride_x;
+                        if (group_off) {
+                            ik0 = &Ks[Ks.size() / 2];
+                            ik1 = &Ks[Ks.size()];
+                            pw += khalf * (n1 - n0) / (REG_BLK_N * REG_BLK_K) * 2048;
+                            px += khalf * (w_is_int8 ? 1 : 2);
+                        }
+                        amx_mm->matmulx(m1 - m0, n1 - n0, ik0, ik1, px, stride_x, pw, pC, strideC);
+
+                        if (sync.step->fetch_add(1) & 1) {
+                            // all others have done their work, reduce & post-ops
+                            auto* pC2 = sync.pC[1 - group_off];
+                            if (w_is_int8)
+                                (*reduce2_int32)(pC, strideC, pC2, strideC, pC, strideC, m1 - m0, n1 - n0);
+                            else
+                                (*reduce2_fp32)(pC, strideC, pC2, strideC, pC, strideC, m1 - m0, n1 - n0);
+                            sync.step->store(0);
+                            post_ops(m0, m1, n0, n1, pC, strideC);
+                        } else {
+                            // wait for peer to finish
+                            while(sync.step->load() > 0);
+                        }
+                    }
+                });
+            }
+            return;
+        }
+#if 0
+        // split both on K, M & N
+        //
+        // if K is to be split, it's a special kind of parallel
+        // because it requires extra reducing step and reducing
+        // requires all participants sync-wait until the reducing
+        // is done before continue to another task (or exit)
+        //
+        auto nblkN = blk_bn.size();
+        auto nblkM = (M + BM - 1) / BM;
+        if (nblkN * nblkM < nthr && blk_bk.size() > 16) {
+            // split K dimension to increase the number of tasks
+            //
+            auto group_size = 2;
+            // DEBUG_LOG(nthr, nblkN * nblkM, nKsplits);
+            int ngroups = nthr / group_size;
+
+            struct group_info {
+                int group_size;
+                bool is_int32;
+                std::atomic<int64_t> ready_count{0};
+                group_info(int group_size, bool is_int32) : group_size(group_size), is_int32(is_int32) {}
+                bool reduce(void* pC, size_t stride, int rows, int cols) {
+                    // possible reduce data type on INT32 or FP32
+                    auto count_before_add = ready_count.fetch_add(1);
+                    if (count_before_add == group_size - 1) {
+                        // do reduce
+
+                        // reset ready_count
+                        ready_count = 0;
+                        return true;
+                    } else {
+                        // wait
+                        while (ready_count > 0) {
+                        }
+                    }
+                    return false;
+                }
+            };
+            std::vector<group_info> ginfo(ngroups, group_info(group_size, false));
+
+#    pragma omp parallel
+            {
+                int ithr = omp_get_thread_num();
+                // a group will work on BM & BN task together
+                // split K dimension among group-member
+                int igroup = ithr / group_size;
+                int groupi = ithr % group_size;
+                int64_t i0, i1;
+                splitter(static_cast<int64_t>(nblkN * nblkM), ngroups, igroup, i0, i1);
+                for (int64_t i = i0; i < i1; i++) {
+                    int64_t m0, m1;
+                    m0 = (i % nblkM) * BM;
+                    m1 = std::min(m0 + BM, M);
+                    auto blk_n = i / nblkM;
+                    int n0 = blk_bn[blk_n].first;
+                    int n1 = blk_bn[blk_n].second;
+                    auto strideC = (n1 - n0) * sizeof(float);
+                    if ((strideC % 128) == 0)
+                        strideC += 64;
+                    auto* pC = get_ctemp((BM)*strideC / sizeof(float));
+
+                    int64_t bk0, bk1;
+                    splitter(static_cast<int64_t>(blk_bk.size()), group_size, groupi, bk0, bk1);
+
+                    amx_mm->matmulx(m1 - m0,
+                                    n1 - n0,
+                                    bk1 - bk0,
                                     p_x + m0 * stride_x,
                                     stride_x,
                                     pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048,
                                     pC,
                                     strideC);
 
-                    // post-ops
-                    split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
-                        auto stride_dst = stride_y[idx];
-                        auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int32_t) + m0 * stride_dst;
-                        auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
-                        (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
-                    });
+                    // https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html
+                    // this will wait for reduce to be done，others(not the one doing reduce) would wait
+                    // for the one to finish reducing (using the data).
+                    bool is_the_one = ginfo[igroup].reduce(pC, strideC, m1 - m0, n1 - n0);
+                    if (is_the_one) {
+                        // doing post-ops
+                        post_ops(m0, m1, n0, n1, pC, strideC);
+                    }
                 }
             }
-            return;
         }
+#endif
+        auto nblkN = blk_bn.size();
+        auto nblkM = (M + BM - 1) / BM;
+        parallel_nt_static(0, [&](int ithr, int nthr) {
+            int64_t i0, i1;
+            splitter(static_cast<int64_t>(nblkN * nblkM), nthr, ithr, i0, i1);
+            for (int64_t i = i0; i < i1; i++) {
+                int64_t m0, m1;
+                // allocate task reusing same sub-weight to same thread
+                m0 = (i % nblkM) * BM;
+                m1 = std::min(m0 + BM, M);
+
+                auto blk_n = i / nblkM;
+                int n0 = blk_bn[blk_n].first;
+                int n1 = blk_bn[blk_n].second;
+                // DEBUG_LOG(m0, m1, n0, n1)
+
+                auto strideC = (n1 - n0) * sizeof(float);
+                if ((strideC % 128) == 0)
+                    strideC += 64;
+                auto* pC = get_ctemp((BM)*strideC / sizeof(float));
+
+                amx_mm->matmulx(m1 - m0,
+                                n1 - n0,
+                                &Ks[0],
+                                &Ks[Ks.size()],
+                                p_x + m0 * stride_x,
+                                stride_x,
+                                pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048,
+                                pC,
+                                strideC);
+
+                // post-ops
+                post_ops(m0, m1, n0, n1, pC, strideC);
+            }
+        });
+        return;
 #if 0
         int m_prefetch_Blines = 0;
         if (BM) {
@@ -1017,17 +1318,18 @@ py::array_t<float> test_amx_repack_B(const py::array_t<float>& src) {
 }
 
 struct AMXQKVLinear {
-    AMXQKVLinearKernel kernel;
+    AMXLinearKernel kernel;
 
-    AMXQKVLinear(const py::array& w0, const py::array& w1, const py::array& w2) {
+    AMXQKVLinear(std::vector<py::array> ws) {
         // https://docs.python.org/3/library/array.html#module-array
-        auto pyarray_type_code = w0.dtype().char_();
+        auto pyarray_type_code = ws[0].dtype().char_();
         ASSERT(pyarray_type_code == 'h' || pyarray_type_code == 'e' || pyarray_type_code == 'b');  // fp16 or int8
-        ASSERT(w0.ndim() == 2);
-        ASSERT(w1.ndim() == 2);
-        ASSERT(w2.ndim() == 2);
-        ASSERT(w1.shape(1) == w0.shape(1));
-        ASSERT(w2.shape(1) == w0.shape(1));
+        ASSERT(ws[0].ndim() == 2);
+        for (int i = 0; i < ws.size(); i++) {
+            ASSERT(ws[i].ndim() == 2);
+            ASSERT(ws[i].shape(1) == ws[0].shape(1));
+            ASSERT(ws[i].dtype().char_() == pyarray_type_code);
+        }
 
         int w_dtype = 0;
         switch (pyarray_type_code) {
@@ -1043,21 +1345,30 @@ struct AMXQKVLinear {
         default:
             ASSERT(0);
         }
+        std::vector<const void*> pw;
+        std::vector<ssize_t> Ns;
+        std::vector<ssize_t> stride_w;
+        for (int i = 0; i < ws.size(); i++) {
+            pw.push_back(ws[i].data());
+            Ns.push_back(ws[i].shape(0));
+            stride_w.push_back(ws[i].strides(0));
+        }
 
-        kernel.init(w0.data(),
-                    w0.shape(0),
-                    w0.strides(0),
-                    w1.data(),
-                    w1.shape(0),
-                    w1.strides(0),
-                    w2.data(),
-                    w2.shape(0),
-                    w2.strides(0),
-                    w0.shape(1),
-                    w_dtype);
+        int op_type = 0;
+        if (ws.size() == 1) {
+            op_type = AMXLinearKernel::OP_TYPE_DOWN;
+        }
+        if (ws.size() == 2) {
+            op_type = AMXLinearKernel::OP_TYPE_GATEUP;
+        }
+        if (ws.size() == 3) {
+            op_type = AMXLinearKernel::OP_TYPE_QKV;
+        }
+
+        kernel.init(op_type, pw, Ns, stride_w, ws[0].shape(1), w_dtype);
     }
 
-    void forward(const py::array& x, py::array& y0, py::array& y1, py::array& y2) {
+    void forward(const py::array& x, std::vector<py::array> ys) {
         // w_buff
         auto M = x.shape(0);
         /*
@@ -1066,13 +1377,16 @@ struct AMXQKVLinear {
         py::array_t<int32_t> y1({M, kernel.N1});
         py::array_t<int32_t> y2({M, kernel.N2});
         */
-        uint8_t* ptr_y[3] = {
-            reinterpret_cast<uint8_t*>(y0.mutable_data()),
-            reinterpret_cast<uint8_t*>(y1.mutable_data()),
-            reinterpret_cast<uint8_t*>(y2.mutable_data()),
-        };
-        int64_t stride_y[3] = {y0.strides(0), y1.strides(0), y2.strides(0)};
+        auto i0 = 0;
+        auto i1 = std::min(1, static_cast<int>(ys.size() - 1));
+        auto i2 = std::min(2, static_cast<int>(ys.size() - 1));
 
+        uint8_t* ptr_y[3] = {
+            reinterpret_cast<uint8_t*>(ys[i0].mutable_data()),
+            reinterpret_cast<uint8_t*>(ys[i1].mutable_data()),
+            reinterpret_cast<uint8_t*>(ys[i2].mutable_data()),
+        };
+        int64_t stride_y[3] = {ys[i0].strides(0), ys[i1].strides(0), ys[i2].strides(0)};
         kernel.execute(M, reinterpret_cast<const uint8_t*>(x.data()), x.strides(0), ptr_y, stride_y);
         return;
     }
@@ -1088,7 +1402,7 @@ PYBIND11_MODULE(PACKAGE_NAME, m) {
     )pbdoc";
 
     py::class_<AMXQKVLinear>(m, "AMXQKVLinear")
-        .def(py::init<const py::array&, const py::array&, const py::array&>())
+        .def(py::init<std::vector<py::array>>())
         .def("forward", &AMXQKVLinear::forward);
 
     m.def("test_amx_repack_B", test_amx_repack_B);
