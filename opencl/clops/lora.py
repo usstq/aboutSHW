@@ -181,15 +181,21 @@ cl_kernel_sources = r'''
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum+m_input));
     }
     '''
+
+
+GEMMB_USE_SLM = 0
+GEMMA_USE_SLM = 0
+GEMMA_WGS = 0
+GEMMA_SGS_PER_WG = 0
+VERBOSE=False
+
 class LORA:
-    def __init__(self, rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, gemma_slm = True, gemmb_slm = True, use_ref = False):
+    def __init__(self, rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, use_ref = False):
         self.rank = rank
         self.input_state = input_state
         self.output_state = output_state
         self.gemmb_local_sz = 128
         self.sg_sz = 16
-        self.gemma_slm = gemma_slm
-        self.gemmb_slm = gemmb_slm
         self.use_ref = use_ref
         self.gemma_wgs = gemma_wgs
         self.gemma_sgs_per_wg = gemma_sgs_per_wg
@@ -207,7 +213,7 @@ class LORA:
         input_state_per_sg = INPUT_STATE_BLKS_PER_SG * self.sg_sz
         
         options = f'-DSG_SZ={self.sg_sz} -DK_PER_WG={self.input_state_per_wg} -DSG_NUM={gemma_sgs_per_wg} -DRANK={rank} \
-                    -DK_PER_SG={input_state_per_sg} -DGEMMA_USE_SLM={gemma_slm} -DGEMMB_USE_SLM={gemmb_slm} -DPART_NUM={gemma_wgs}'
+                    -DK_PER_SG={input_state_per_sg} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={gemma_wgs}'
         self.cl_kernels_opt = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
@@ -238,20 +244,18 @@ class LORA:
         # cl.finish()
         return tRes
 
-def test(input_state, rank, output_state, check_acc = False, gemma_wgs=8, gemma_sgs_per_wg=8):
+def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS, gemma_sgs_per_wg=GEMMA_SGS_PER_WG):
     cl.profiling(True)
-    rank = 64
-    input_state = 1536
     SG_SZ = 16
     vRANGE = 2
-    REPEAT = 10
+    REPEAT = 4
     stateA_list= [np.random.randint(-vRANGE, vRANGE, [input_state, rank]).astype(np.float16)for _ in range(REPEAT)]
     alpha_list = [np.random.rand(rank).astype(np.float16)for _ in range(REPEAT)]
     stateB_list = [np.random.randint(-vRANGE, vRANGE, [rank, output_state]).astype(np.float16)for _ in range(REPEAT)]
     loraInput_list = [np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)for _ in range(REPEAT)]
     mainInput_list = [np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float16)for _ in range(REPEAT)]
-    ref = LORA(rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, False, False, True)
-    opt = LORA(rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, True, True, False)
+    ref = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, True)
+    opt = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, False)
     if check_acc:
         res_ref = ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0])
         res_opt = opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0])
@@ -264,21 +268,33 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=8, gemma_
         profiling_data  = cl.finish()
         flops_a = rank*input_state*2
         flops_b = rank*output_state*2
-        # how many CPU memory loaded into GPU memory
-        rd_bytes_a = (rank*input_state+input_state)*2
-        #gemma output intermedia result should reside in GPU memory
+        # how many CPU memory loaded into GPU memory, stateA + duplicate input activation. duplicate would be in GPU global cache?
+        rd_bytes_a = (rank*input_state+input_state*GEMMA_WGS)*2
+        # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input
         rd_bytes_b = (rank*output_state+output_state+rank)*2
-        for i in range(0, REPEAT):
-            latency_a = profiling_data[i*2]
-            latency_b = profiling_data[i*2 + 1]
-            print(latency_a+latency_b)
+        print(f'----------------------------------------------------------------------------------------------------------------------------------')
+        print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} perf:')
+        print(f'----------------------------------------------------------------------------------------------------------------------------------')
+        for i in range(1, REPEAT):
+            ns_a = profiling_data[i*2]
+            ns_b = profiling_data[i*2 + 1]
+            if VERBOSE:
+                print(f"[GEMMA]: {flops_a*1e-6:.1f} Mflop/{ns_a*1e-3:.1f} us = {flops_a/ns_a*1e-3:.3f} TFlops/s  {rd_bytes_a/1e6:.1f} MB/{ns_a*1e-3:.1f} us = {rd_bytes_a/ns_a:.1f} GB/s ,\
+ [GEMMB]: {flops_b*1e-6:.1f} Mflop/{ns_b*1e-3:.1f} us = {flops_b/ns_b*1e-3:.3f} TFlops/s  {rd_bytes_b/1e6:.1f} MB/{ns_b*1e-3:.1f} us = {rd_bytes_b/ns_b:.1f} GB/s ,\
+ [total]: {(ns_a+ns_b)*1e-3:.1f}us")
+            else:
+                print(f'[total]: {(ns_a+ns_b)*1e-3:.1f}us')
         
 if __name__ == "__main__":
-    # for rank in [16, 32, 64]: 
-    #     for out_state in [512, 1536, 3840]:
-    #         test(1536, rank, out_state, True)
-    #         test(1536, rank, out_state)
-    test(1536, 64, 1536)
-
+    GEMMB_USE_SLM = 1
+    GEMMA_USE_SLM = 1
+    GEMMA_WGS = 8
+    GEMMA_SGS_PER_WG = 16
+    # VERBOSE=True
+    # for rank in [16, 32, 64]:
+    for rank in [64]:
+        for out_state in [512, 1536, 3840]:
+            # test(1536, rank, out_state, True)
+            test(1536, rank, out_state)
 
 
