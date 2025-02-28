@@ -183,12 +183,6 @@ cl_kernel_sources = r'''
     '''
 
 
-GEMMB_USE_SLM = 0
-GEMMA_USE_SLM = 0
-GEMMA_WGS = 0
-GEMMA_SGS_PER_WG = 0
-VERBOSE=False
-
 class LORA:
     def __init__(self, rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, use_ref = False):
         self.rank = rank
@@ -244,6 +238,14 @@ class LORA:
         # cl.finish()
         return tRes
 
+
+# Global for tests
+GEMMB_USE_SLM = 0
+GEMMA_USE_SLM = 0
+GEMMA_WGS = 0
+GEMMA_SGS_PER_WG = 0
+VERBOSE=False
+
 def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS, gemma_sgs_per_wg=GEMMA_SGS_PER_WG):
     cl.profiling(True)
     SG_SZ = 16
@@ -279,18 +281,18 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
             ns_a = profiling_data[i*2]
             ns_b = profiling_data[i*2 + 1]
             if VERBOSE:
-                print(f"[GEMMA]: {flops_a*1e-6:.1f} Mflop/{ns_a*1e-3:.1f} us = {flops_a/ns_a*1e-3:.3f} TFlops/s  {rd_bytes_a/1e6:.1f} MB/{ns_a*1e-3:.1f} us = {rd_bytes_a/ns_a:.1f} GB/s ,\
- [GEMMB]: {flops_b*1e-6:.1f} Mflop/{ns_b*1e-3:.1f} us = {flops_b/ns_b*1e-3:.3f} TFlops/s  {rd_bytes_b/1e6:.1f} MB/{ns_b*1e-3:.1f} us = {rd_bytes_b/ns_b:.1f} GB/s ,\
+                print(f"[GEMMA]: {flops_a*1e-6:.1f} Mflop/{ns_a*1e-3:.1f} us = {flops_a/ns_a:.3f} GFlops/s  {rd_bytes_a/1e6:.1f} MB/{ns_a*1e-3:.1f} us = {rd_bytes_a/ns_a:.1f} GB/s ,\
+ [GEMMB]: {flops_b*1e-6:.1f} Mflop/{ns_b*1e-3:.1f} us = {flops_b/ns_b:.3f} GFlops/s  {rd_bytes_b/1e6:.1f} MB/{ns_b*1e-3:.1f} us = {rd_bytes_b/ns_b:.1f} GB/s ,\
  [total]: {(ns_a+ns_b)*1e-3:.1f}us")
             else:
-                print(f'[total]: {(ns_a+ns_b)*1e-3:.1f}us')
+                print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
         
 if __name__ == "__main__":
     GEMMB_USE_SLM = 1
     GEMMA_USE_SLM = 1
     GEMMA_WGS = 8
     GEMMA_SGS_PER_WG = 16
-    # VERBOSE=True
+    VERBOSE=True
     # for rank in [16, 32, 64]:
     for rank in [64]:
         for out_state in [512, 1536, 3840]:
