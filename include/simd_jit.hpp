@@ -13,8 +13,8 @@
 //=========================================================================================
 #ifdef __x86_64__
 #    include "../thirdparty/xbyak/xbyak/xbyak.h"
+#    include "../thirdparty/xbyak/xbyak/xbyak_util.h"
 #    define DECLARE_CPU_JIT_AUX_FUNCTIONS(x)
-static const bool use_avx512 = false;
 
 using XbyakSReg64 = Xbyak::Reg64;
 using XbyakSReg32 = Xbyak::Reg32;
@@ -36,7 +36,9 @@ constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
 };
 
 struct jit_generator : public Xbyak::CodeGenerator {
+    static inline const Xbyak::util::Cpu cpu;
     const char* m_kernel_name;
+    const bool use_avx512;
 
     struct jcout {
         Xbyak::CodeGenerator* jit;
@@ -230,6 +232,7 @@ struct jit_generator : public Xbyak::CodeGenerator {
     }
     jit_generator(const char* name)
         : m_kernel_name(name),
+          use_avx512(cpu.has(Xbyak::util::Cpu::tAVX512F)),
           sreg_pool("sreg_pool"),
           vreg_pool("vreg_pool"),
           treg_pool("treg_pool"),
@@ -391,19 +394,22 @@ protected:
         });
     }
 
-    std::shared_ptr<XbyakVReg> alloc_vreg(int index) {
+    // explicitly allocate register as required width or allocate the best width
+    std::shared_ptr<XbyakVReg> alloc_vreg(int index, int bits = 0) {
         auto reg_index = vreg_pool.allocate(index);
-        if (use_avx512) {
+        if ((bits == 0 && use_avx512) || (bits == 512)) {
             return std::shared_ptr<XbyakVReg>(new Xbyak::Zmm(reg_index), [this, reg_index](Xbyak::Zmm* preg) {
                 vreg_pool.free(reg_index);
                 delete preg;
             });
-        } else {
+        }
+        if ((bits == 0 && !use_avx512) || (bits == 256)) {
             return std::shared_ptr<XbyakVReg>(new Xbyak::Ymm(reg_index), [this, reg_index](Xbyak::Ymm* preg) {
                 vreg_pool.free(reg_index);
                 delete preg;
             });
         }
+        ASSERT(false);
     }
 
     std::shared_ptr<XbyakTReg> alloc_treg(int index) {
@@ -606,13 +612,13 @@ public:
 };
 
 class VReg {
-private:
+protected:
     SIMDJit* jit = nullptr;
     std::shared_ptr<XbyakVReg> reg;
 
 public:
     VReg(SIMDJit* jit, std::shared_ptr<XbyakVReg> reg) : jit(jit), reg(reg) {}
-    VReg();
+    VReg(int bits = 0);
     VReg(const VReg& rhs) = default;
     bool empty() const {
         return !static_cast<bool>(reg);
@@ -622,6 +628,9 @@ public:
     }
     operator const XbyakVReg&() const {
         return *reg;
+    }
+    Xbyak::Zmm zmm() const {
+        return Xbyak::Zmm(reg->getIdx());
     }
     Xbyak::Ymm ymm() const {
         return Xbyak::Ymm(reg->getIdx());
@@ -635,6 +644,16 @@ public:
     inline void load(const VReg& rhs) const;
     inline void load(SRegExpr&& addr) const;
     inline void store(SRegExpr&& addr) const;
+};
+
+class Ymm : public VReg {
+public:
+    Ymm();
+};
+
+class Zmm : public VReg {
+public:
+    Zmm();
 };
 
 // AMX Tile register
@@ -976,8 +995,8 @@ public:
         return SReg(this, alloc_reg64(-1));
     }
 
-    VReg get_vreg() {
-        return VReg(this, alloc_vreg(-1));
+    VReg get_vreg(int bits = 0) {
+        return VReg(this, alloc_vreg(-1, bits));
     }
 
     TReg get_treg(int id) {
@@ -1113,7 +1132,7 @@ public:
                          const XbyakLabel& label = {});
 
     template <typename DT>
-    static int vmm_width() {
+    int vmm_width() const {
 #ifdef __x86_64__
         return (use_avx512 ? 512 : 256) / (sizeof(DT) * 8);
 #endif
@@ -1131,14 +1150,21 @@ inline SReg::SReg() {
         reg = cur_jit->get_sreg().reg;
     }
 }
-inline VReg::VReg() {
+inline VReg::VReg(int bits) {
     auto* cur_jit = default_simd_jit_t::get().cur;
     if (cur_jit) {
         // allocate sreg
         jit = cur_jit;
-        reg = cur_jit->get_vreg().reg;
+        reg = cur_jit->get_vreg(bits).reg;
     }
 }
+
+inline Ymm::Ymm() : VReg(256) {
+}
+
+inline Zmm::Zmm() : VReg(512){
+}
+
 inline TReg::TReg(int id) {
     auto* cur_jit = default_simd_jit_t::get().cur;
     if (cur_jit) {
@@ -1749,11 +1775,19 @@ inline void VReg::load(const VReg& rhs) const {
 
 inline void VReg::load(SRegExpr&& addr) const {
     ASSERT(addr.paddr);
-    jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+    if (jit->use_avx512) {
+        jit->vmovdqu32(*reg, jit->ptr[addr.paddr->to_addr()]);
+    } else {
+        jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+    }
 }
 inline void VReg::store(SRegExpr&& addr) const {
     ASSERT(addr.paddr);
-    jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+    if (jit->use_avx512) {
+        jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()], *reg);
+    } else {
+        jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+    }
 }
 inline void SReg::load(SRegExpr&& addr) const {
     ASSERT(addr.paddr);

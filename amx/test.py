@@ -36,18 +36,22 @@ class Colors:
 
 def test_amx_repack_B():
     np.random.seed(0)
-    src = np.random.randint(low=-100, high=100, size=(160, 160)).astype(np.float32)
+    src = np.random.randint(low=-100, high=100, size=(16, 16)).astype(np.float32)
     dst = csrc.test_amx_repack_B(src)
     dst = csrc.test_amx_repack_B(src)
     dst = csrc.test_amx_repack_B(src)
+    
     if (dst != np.transpose(src[:16, :16])).any():
-        print(src)
+        np.set_printoptions(linewidth=200)
+        print(src[:16, :16])
         print(dst)
         assert False, "amx_repack_B failed!"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-n', '--ncores', type=int, default=0)
 parser.add_argument('-N', '--node', type=int, default=1)
+parser.add_argument('-b', '--batch-size', type=int, default=256)
+parser.add_argument('-r', '--repeat', type=int, default=5)
 args = parser.parse_args()
 
 
@@ -172,30 +176,30 @@ def numactl(target_node, cores):
 
 numactl(args.node, args.ncores)
 
-def test_mem_bounds():
+def test_mem_bounds(repeat):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
     # need to repeat to see if memory bound can reach due to random system mem-accessing noise
-    for i in range(5):
+    for i in range(repeat):
         testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
         testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
 
-def test_compute_bounds():
+def test_compute_bounds(repeat, batch_size):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
-    for i in range(5):
-        testcase(torch.int8, torch.int8, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.43)
-        testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.68)
+    for i in range(repeat):
+        testcase(torch.int8, torch.int8, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.43)
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.68)
 
-def test_compute_bounds_bigM():
+def test_compute_bounds_bigM(repeat):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
-    for i in range(5):
+    for i in range(repeat):
         testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.48)
         testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.42)
 
-def test_k_groups():
+def test_k_groups(repeat, batch_size):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
-    for i in range(5):
-        testcase(torch.bfloat16, torch.bfloat16, 256, 11008, [4096]).test(ncores, 100, 0.58)
-        testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096]).test(ncores, 100, 0.28)
+    for i in range(repeat):
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 11008, [4096]).test(ncores, 100, 0.58)
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096]).test(ncores, 100, 0.28)
 
 #ncores = 4
 #testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
@@ -203,10 +207,12 @@ def test_k_groups():
 #sys.exit(0)
 #test_k_groups(); sys.exit(0)
 
-test_mem_bounds()
-test_compute_bounds()
-test_compute_bounds_bigM()
-test_k_groups()
+#test_amx_repack_B(); sys.exit(0)
+
+test_mem_bounds(args.repeat)
+test_compute_bounds(args.repeat, args.batch_size)
+test_compute_bounds_bigM(args.repeat)
+test_k_groups(args.repeat,args.batch_size)
 
 sys.exit(0)
 

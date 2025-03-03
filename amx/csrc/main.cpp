@@ -16,6 +16,8 @@ using ov::intel_cpu::SReg;
 using ov::intel_cpu::TMUL_TYPE;
 using ov::intel_cpu::TReg;
 using ov::intel_cpu::VReg;
+using ov::intel_cpu::Ymm;
+using ov::intel_cpu::Zmm;
 
 namespace py = pybind11;
 
@@ -138,8 +140,8 @@ public:
     func_amx_repack_Btile() : stride_dst(64) {
         // compile-time work
         jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg stride_src, SReg pdst) {
-            VReg t[8];
-            VReg tt[8];
+            Ymm t[8];
+            Ymm tt[8];
 
             for (int i = 0; i < 8; i += 2) {
                 tt[i].load(psrc);
@@ -660,6 +662,50 @@ public:
         }
     }
 };
+#if 0
+class func_quantize {
+    std::shared_ptr<SIMDJit> jit;
+
+public:
+    using Ptr = std::shared_ptr<const func_reduce2>;
+
+    // quantize bf16/fp16 into int8 sym
+    func_quantize(int x_dtype) {
+        ASSERT(x_dtype == DTYPE_FP16 || x_dtype == DTYPE_BF16);
+        jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg pdst, SReg count) {
+            Ymm d0, d1;
+            SReg i;
+            i = 0;
+            auto simdw = jit->vmm_width<int16_t>();
+            jit->do_while_(i < count, [&] {
+                d0.load(psrc + i * sizeof(int16_t));
+                
+                d0.store(pdst + i * sizeof(int16_t));
+                i = i + simdw;
+            });
+        });
+    }
+
+    // src : bf16/fp16, dst : int8, scale : float
+    void operator()(const void* pvsrc,
+                    size_t stride_src,
+                    int8_t* pvdst,
+                    size_t stride_dst,
+                    float* scale_dst,
+                    int M,
+                    int N) const {
+        auto* psrc0 = reinterpret_cast<const uint8_t*>(pvsrc0);
+        auto* psrc1 = reinterpret_cast<const uint8_t*>(pvsrc1);
+        auto* pdst = reinterpret_cast<uint8_t*>(pvdst);
+        for (int m = 0; m < M; m++) {
+            (*jit)(psrc0, psrc1, pdst, static_cast<int64_t>(N));
+            psrc0 += stride_src0;
+            psrc1 += stride_src1;
+            pdst += stride_dst;
+        }
+    }
+};
+#endif
 
 template <typename T, typename Q>
 inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
@@ -820,44 +866,17 @@ struct AMXLinearKernel {
     std::vector<kgroup_t> ksyncs;
     int k_group_workers = 1;
 
-    int tmul_type;
-    int acc_dtype;
-    int o_type;
-    int o_type_bytes;
-
     // weight may be bf16/fp16/int8
     template <class F>
-    void init(size_t _K, size_t _N, int w_dtype, const F& get_weight) {
+    void init(size_t _K, size_t _N, int tmul_type, const F& get_weight) {
         K = _K;
         N = _N;
 
-        switch (w_dtype) {
-        case DTYPE_BF16:
-            tmul_type = func_amx::TMUL_BF16;
-            acc_dtype = DTYPE_FP32;
-            o_type = DTYPE_BF16;
-            o_type_bytes = 2;
-            break;
-        case DTYPE_FP16:
-            tmul_type = func_amx::TMUL_FP16;
-            acc_dtype = DTYPE_FP32;
-            o_type = DTYPE_FP16;
-            o_type_bytes = 2;
-            break;
-        case DTYPE_INT8:
-            tmul_type = func_amx::TMUL_SSD;
-            acc_dtype = DTYPE_INT32;
-            o_type = DTYPE_INT32;
-            o_type_bytes = 4;
-            break;
-        default:
-            ASSERT(0);
-        }
         amx_mm = make_cacheable<func_amx>(256, tmul_type);
         amx_repack_Btile = make_cacheable<func_amx_repack_Btile>();
         reduce2_fp32 = make_cacheable<func_reduce2>(func_reduce2::SUM_FP32);
         reduce2_int32 = make_cacheable<func_reduce2>(func_reduce2::SUM_INT32);
-        w_is_int8 = (w_dtype == DTYPE_INT8);
+        w_is_int8 = (tmul_type == func_amx::TMUL_SSD);
 
         REG_BLK_N = 16 * 2;
         REG_BLK_K = 16 * (w_is_int8 ? 4 : 2);
@@ -1023,11 +1042,21 @@ struct AMXLinearKernel {
     }
 };
 
-// blocked QKV weight memory
-struct AMXLinearKernelLLM : public AMXLinearKernel {
-    std::shared_ptr<int8_t> w_buff;
-    bool w_is_int8;  // weight is int8 or fp16/bf16
 
+py::array_t<float> test_amx_repack_B(const py::array_t<float>& src) {
+    auto func = make_cacheable<func_amx_repack_Btile>();
+    py::array_t<float> dst({16, 16});
+    (*func)(src.data(), src.strides(0), dst.mutable_data());
+    return dst;
+}
+
+// QKV (normal-linear is a special case while both N[1] and N[2] are 0):
+//
+//               weight_fp16 x 3 + IO_bf16/fp16
+//   dyn-quant:  weight_int8 x 3(per-OC scales) + IO_bf16/fp16
+//
+struct AMXQKVLinear {
+    AMXLinearKernel linear;
     int64_t Ns[3];
 
     func_cvt_output::Ptr cvt_output;
@@ -1053,52 +1082,51 @@ struct AMXLinearKernelLLM : public AMXLinearKernel {
         f(2, Ns[0] + Ns[1], n0, n1);
     }
 
-    static constexpr int OP_TYPE_QKV = 1;
-    static constexpr int OP_TYPE_GATEUP = 2;
-    static constexpr int OP_TYPE_DOWN = 3;
-    int op_type;
-
-    struct kgroup_t {
-        std::shared_ptr<std::atomic<int>> step;
-        void* pC;
-        kgroup_t() {
-            step = std::make_shared<std::atomic<int>>();
-        }
-    };
-    std::vector<kgroup_t> ksyncs;
-    int k_group_workers = 1;
-
     int tmul_type;
     int acc_dtype;
     int o_type;
     int o_type_bytes;
 
-    void init(int _op_type,
-              const std::vector<const void*>& pw,
-              const std::vector<ssize_t>& _Ns,
-              const std::vector<ssize_t>& stride_w,
-              size_t _K,
-              int w_dtype) {
-        op_type = _op_type;
-        Ns[0] = _Ns[0];
-        Ns[1] = _Ns.size() > 1 ? _Ns[1] : 0;
-        Ns[2] = _Ns.size() > 2 ? _Ns[2] : 0;
+    AMXQKVLinear(std::vector<py::array> ws) {
+        // https://docs.python.org/3/library/array.html#module-array
+        auto pyarray_type_code = ws[0].dtype().char_();
+        auto K = ws[0].shape(1);
+        ASSERT(pyarray_type_code == 'h' || pyarray_type_code == 'e' || pyarray_type_code == 'b');  // fp16 or int8
 
-        switch (w_dtype) {
-        case DTYPE_BF16:
+        const uint8_t* pw[3];
+        ssize_t stride_w[3];
+        for (int i = 0; i < 3; i++) {
+            Ns[i] = 0;
+            pw[i] = nullptr;
+            stride_w[i] = 0;
+            if (i < ws.size()) {
+                ASSERT(ws[i].ndim() == 2);
+                ASSERT(ws[i].shape(1) == K);
+                ASSERT(ws[i].dtype().char_() == pyarray_type_code);
+                Ns[i] = ws[i].shape(0);
+                pw[i] = reinterpret_cast<const uint8_t*>(ws[i].data());
+                stride_w[i] = ws[i].strides(0);
+            }
+        }
+        int w_dtype = 0;
+        switch (pyarray_type_code) {
+        case 'h':
             tmul_type = func_amx::TMUL_BF16;
+            w_dtype = DTYPE_BF16;
             acc_dtype = DTYPE_FP32;
             o_type = DTYPE_BF16;
             o_type_bytes = 2;
             break;
-        case DTYPE_FP16:
+        case 'e':
             tmul_type = func_amx::TMUL_FP16;
+            w_dtype = DTYPE_FP16;
             acc_dtype = DTYPE_FP32;
             o_type = DTYPE_FP16;
             o_type_bytes = 2;
             break;
-        case DTYPE_INT8:
+        case 'b':
             tmul_type = func_amx::TMUL_SSD;
+            w_dtype = DTYPE_INT8;
             acc_dtype = DTYPE_INT32;
             o_type = DTYPE_INT32;
             o_type_bytes = 4;
@@ -1107,117 +1135,29 @@ struct AMXLinearKernelLLM : public AMXLinearKernel {
             ASSERT(0);
         }
         cvt_output = make_cacheable<func_cvt_output>(acc_dtype, o_type);
-        if (op_type == OP_TYPE_QKV || op_type == OP_TYPE_DOWN) {
-            auto w_dtype_size = w_dtype == DTYPE_INT8 ? 1 : 2;
-            auto N0 = Ns[0];
-            auto N01 = Ns[0] + Ns[1];
-            auto N012 = Ns[0] + Ns[1] + Ns[2];
-            AMXLinearKernel::init(_K, N012, w_dtype, [&](int k, int n, size_t& stride) -> const void* {
-                //
-                int id = 0;
-                if (n >= N01) {
-                    id = 2;
-                    n -= N01;
-                } else if (n >= N0) {
-                    id = 1;
-                    n -= N0;
-                }
-                // DEBUG_LOG(id, N0, N01, k, n);
-                stride = stride_w[id];
-                return reinterpret_cast<const uint8_t*>(pw[id]) + k * w_dtype_size + n * stride;
-            });
-        } else {
-        }
+        auto w_dtype_size = w_dtype == DTYPE_INT8 ? 1 : 2;
+        auto N0 = Ns[0];
+        auto N01 = Ns[0] + Ns[1];
+        auto N012 = Ns[0] + Ns[1] + Ns[2];
+
+        linear.init(K, N012, tmul_type, [&](int k, int n, size_t& stride) -> const void* {
+            int id = 0;
+            if (n >= N01) {
+                id = 2;
+                n -= N01;
+            } else if (n >= N0) {
+                id = 1;
+                n -= N0;
+            }
+            // DEBUG_LOG(id, N0, N01, k, n);
+            stride = stride_w[id];
+            return pw[id] + k * w_dtype_size + n * stride;
+        });
     }
-
-    // input bf16 / int8
-    void execute(int64_t M, const uint8_t* p_x, int64_t stride_x, uint8_t* (&ptr_y)[3], int64_t (&stride_y)[3]) {
-        AMXLinearKernel::execute(M,
-                                 p_x,
-                                 stride_x,
-                                 [&](int64_t m0, int64_t m1, int64_t n0, int64_t n1, void* pvC, int64_t strideC) {
-                                     auto* pC = reinterpret_cast<uint32_t*>(pvC);
-                                     if (op_type == OP_TYPE_QKV || op_type == OP_TYPE_DOWN) {
-                                         split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
-                                             auto stride_dst = stride_y[idx];
-                                             auto* pdst = ptr_y[idx] + (ns0 - base_n) * o_type_bytes + m0 * stride_dst;
-                                             auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
-                                             (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
-                                         });
-                                     }
-                                     if (op_type == OP_TYPE_GATEUP) {
-                                         // special post-ops
-                                     }
-                                 });
-    }
-};
-
-py::array_t<float> test_amx_repack_B(const py::array_t<float>& src) {
-    auto func = make_cacheable<func_amx_repack_Btile>();
-    py::array_t<float> dst({16, 16});
-    (*func)(src.data(), src.strides(0), dst.mutable_data());
-    return dst;
-}
-
-struct AMXQKVLinear {
-    AMXLinearKernelLLM kernel;
-
-    AMXQKVLinear(std::vector<py::array> ws) {
-        // https://docs.python.org/3/library/array.html#module-array
-        auto pyarray_type_code = ws[0].dtype().char_();
-        ASSERT(pyarray_type_code == 'h' || pyarray_type_code == 'e' || pyarray_type_code == 'b');  // fp16 or int8
-        ASSERT(ws[0].ndim() == 2);
-        for (int i = 0; i < ws.size(); i++) {
-            ASSERT(ws[i].ndim() == 2);
-            ASSERT(ws[i].shape(1) == ws[0].shape(1));
-            ASSERT(ws[i].dtype().char_() == pyarray_type_code);
-        }
-
-        int w_dtype = 0;
-        switch (pyarray_type_code) {
-        case 'h':
-            w_dtype = DTYPE_BF16;
-            break;
-        case 'e':
-            w_dtype = DTYPE_FP16;
-            break;
-        case 'b':
-            w_dtype = DTYPE_INT8;
-            break;
-        default:
-            ASSERT(0);
-        }
-        std::vector<const void*> pw;
-        std::vector<ssize_t> Ns;
-        std::vector<ssize_t> stride_w;
-
-        for (int i = 0; i < ws.size(); i++) {
-            pw.push_back(ws[i].data());
-            Ns.push_back(ws[i].shape(0));
-            stride_w.push_back(ws[i].strides(0));
-        }
-
-        int op_type = 0;
-        if (ws.size() == 1) {
-            op_type = AMXLinearKernelLLM::OP_TYPE_DOWN;
-        }
-        if (ws.size() == 2) {
-            op_type = AMXLinearKernelLLM::OP_TYPE_GATEUP;
-        }
-        if (ws.size() == 3) {
-            op_type = AMXLinearKernelLLM::OP_TYPE_QKV;
-        }
-
-        kernel.init(op_type, pw, Ns, stride_w, ws[0].shape(1), w_dtype);
-    }
-
-    void forward(const py::array& x, std::vector<py::array> ys) {
-        // - x/ys are always of same type, bf16/fp16
-        // - weight is always fp16 or INT8(with per-OC scale)
-        // -
-        // but weight can be bf16/fp16 INT8
-        // dynamic quantization case:  while weights are INT8,
-
+#if 0
+    // dynamic quantize
+    void forward_dyn_quant_i8(const py::array& x, std::vector<py::array> ys, std::vector<py::array> w_scales) {
+        // weight-dequantization scale is also provided (suppose weight is INT8)
         auto M = x.shape(0);
         auto i0 = 0;
         auto i1 = std::min(1, static_cast<int>(ys.size() - 1));
@@ -1229,7 +1169,51 @@ struct AMXQKVLinear {
             reinterpret_cast<uint8_t*>(ys[i2].mutable_data()),
         };
         int64_t stride_y[3] = {ys[i0].strides(0), ys[i1].strides(0), ys[i2].strides(0)};
-        kernel.execute(M, reinterpret_cast<const uint8_t*>(x.data()), x.strides(0), ptr_y, stride_y);
+        auto p_x = reinterpret_cast<const uint8_t*>(x.data());
+        auto stride_x = x.strides(0);
+        // per-token quantize input into int8
+
+        // post-ops will convert int32 to fp32, dequantize then store to destination buffer
+        linear.execute(M,
+                       p_x,
+                       stride_x,
+                       [&](int64_t m0, int64_t m1, int64_t n0, int64_t n1, void* pvC, int64_t strideC) {
+                           auto* pC = reinterpret_cast<uint32_t*>(pvC);
+                           split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                               auto stride_dst = stride_y[idx];
+                               auto* pdst = ptr_y[idx] + (ns0 - base_n) * o_type_bytes + m0 * stride_dst;
+                               auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
+                               (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                           });
+                       });
+    }
+#endif
+    void forward(const py::array& x, std::vector<py::array> ys) {
+        auto M = x.shape(0);
+        auto i0 = 0;
+        auto i1 = std::min(1, static_cast<int>(ys.size() - 1));
+        auto i2 = std::min(2, static_cast<int>(ys.size() - 1));
+
+        uint8_t* ptr_y[3] = {
+            reinterpret_cast<uint8_t*>(ys[i0].mutable_data()),
+            reinterpret_cast<uint8_t*>(ys[i1].mutable_data()),
+            reinterpret_cast<uint8_t*>(ys[i2].mutable_data()),
+        };
+        int64_t stride_y[3] = {ys[i0].strides(0), ys[i1].strides(0), ys[i2].strides(0)};
+        auto p_x = reinterpret_cast<const uint8_t*>(x.data());
+        auto stride_x = x.strides(0);
+        linear.execute(M,
+                       p_x,
+                       stride_x,
+                       [&](int64_t m0, int64_t m1, int64_t n0, int64_t n1, void* pvC, int64_t strideC) {
+                           auto* pC = reinterpret_cast<uint32_t*>(pvC);
+                           split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                               auto stride_dst = stride_y[idx];
+                               auto* pdst = ptr_y[idx] + (ns0 - base_n) * o_type_bytes + m0 * stride_dst;
+                               auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
+                               (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                           });
+                       });
         return;
     }
 };
