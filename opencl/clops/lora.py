@@ -144,7 +144,7 @@ cl_kernel_sources = r'''
                 sum += partial_val;
                 subA_ptr += RANK;
             }
-            reduce[offset + id_sg_local] += sum;
+            reduce[offset + id_sg_local] = sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 #else
@@ -218,7 +218,10 @@ class LORA:
         tloraInput = cl.tensor(loraInput)
         t_stateA = cl.tensor(stataA)
         t_stateB = cl.tensor(stateB)
-        tA_output = cl.tensor([self.gemma_wgs, self.rank], np.dtype(np.float16))
+        
+        #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
+        A_output = np.zeros([self.gemma_wgs, self.rank]).astype(np.float16)
+        tA_output = cl.tensor(A_output)
         tRes =  cl.tensor([1, self.output_state], np.dtype(np.float16))
 
         if self.use_ref:
@@ -250,7 +253,7 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
     cl.profiling(True)
     SG_SZ = 16
     vRANGE = 2
-    REPEAT = 4
+    REPEAT = 40
     stateA_list= [np.random.randint(-vRANGE, vRANGE, [input_state, rank]).astype(np.float16)for _ in range(REPEAT)]
     alpha_list = [np.random.rand(rank).astype(np.float16)for _ in range(REPEAT)]
     stateB_list = [np.random.randint(-vRANGE, vRANGE, [rank, output_state]).astype(np.float16)for _ in range(REPEAT)]
@@ -270,10 +273,10 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
         profiling_data  = cl.finish()
         flops_a = rank*input_state*2
         flops_b = rank*output_state*2
-        # how many CPU memory loaded into GPU memory, stateA + duplicate input activation. duplicate would be in GPU global cache?
-        rd_bytes_a = (rank*input_state+input_state*GEMMA_WGS)*2
-        # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input
-        rd_bytes_b = (rank*output_state+output_state+rank)*2
+        # how many CPU memory loaded into GPU memory, stateA + input activation. duplicate input activation would be in GPU global cache?
+        rd_bytes_a = (rank*input_state+input_state)*2
+        # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input + output
+        rd_bytes_b = (rank*output_state+output_state*2+rank)*2
         print(f'----------------------------------------------------------------------------------------------------------------------------------')
         print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} perf:')
         print(f'----------------------------------------------------------------------------------------------------------------------------------')
@@ -296,7 +299,6 @@ if __name__ == "__main__":
     # for rank in [16, 32, 64]:
     for rank in [64]:
         for out_state in [512, 1536, 3840]:
-            # test(1536, rank, out_state, True)
             test(1536, rank, out_state)
 
 

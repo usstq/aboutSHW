@@ -182,7 +182,7 @@ def test_lora_fused_qkv():
                 sum += partial_val;
                 subA_ptr += A_stride;
             }
-            reduce[offset + id_sg_local] += sum;
+            reduce[offset + id_sg_local] = sum;
 
         }
         barrier(CLK_LOCAL_MEM_FENCE);
@@ -285,7 +285,8 @@ def test_lora_fused_qkv():
     tMainInput = cl.tensor(mainInput)
 
     tOutputB_Ref = cl.tensor([1, QKV_OUTPUT_STATE], np.dtype(np.float16))
-    tOutputA = cl.tensor([WG_NUM, N], np.dtype(np.float16))
+    #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
+    tOutputA = cl.tensor(np.zeros([WG_NUM, N]).astype(np.float16))
     toutputA_Reduce = cl.tensor([1, N], np.dtype(np.float16))
     tOutputB = cl.tensor([1, QKV_OUTPUT_STATE], np.dtype(np.float16))
     ref_ker = kernel_cache(reference, options=f"-DQ_OUTPUT_STATE={Q_OUTPUT_STATE} -DKV_OUTPUT_STATE={KV_OUTPUT_STATE}")
@@ -343,6 +344,7 @@ def test_FMA_basic():
     kernel.enqueue("gemm", [N],[N], tA, tB, C, N, K)
     cl.finish()
     compare(C_ref, C.numpy())
+
 cl.profiling(True)
 test_lora_fused_qkv()
 # test_FMA_basic()
