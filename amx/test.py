@@ -34,6 +34,20 @@ class Colors:
     END = "\033[0m"
 # clear && numactl -C48-95 -m1 python test.py
 
+np.set_printoptions(linewidth=400)
+torch.set_printoptions(linewidth=400)
+
+def to_torch(n):
+    t = torch.from_numpy(n)
+    if t.dtype == torch.int16:
+        t = t.view(dtype = torch.bfloat16)
+    return t
+
+def to_numpy(t):
+    if t.dtype == torch.bfloat16:
+        return t.detach().view(dtype=torch.int16).numpy()
+    return t.detach().numpy()
+
 def test_amx_repack_B():
     np.random.seed(0)
     src = np.random.randint(low=-100, high=100, size=(16, 16)).astype(np.float32)
@@ -42,10 +56,21 @@ def test_amx_repack_B():
     dst = csrc.test_amx_repack_B(src)
     
     if (dst != np.transpose(src[:16, :16])).any():
-        np.set_printoptions(linewidth=200)
         print(src[:16, :16])
         print(dst)
         assert False, "amx_repack_B failed!"
+
+def test_quant_i8(dtype):
+    np.random.seed(0)
+    src = torch.randint(low=-100, high=100, size=(16, 32)).to(dtype = dtype).detach()
+    q, scale = csrc.test_quant_i8(to_numpy(src))
+    print(q)
+    print(scale)
+    deq = to_torch(q*scale).to(dtype)
+    print(src)
+    print((deq-src).abs())
+
+#test_quant_i8(torch.bfloat16); sys.exit(0)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-n', '--ncores', type=int, default=0)
@@ -90,25 +115,16 @@ class testcase:
         for i, N in enumerate(Ns):
             YRef = (self.X.to(dtype=acc_dtype) @ self.W[i].transpose(0,1).to(dtype=acc_dtype)).to(dtype=o_dtype)
             self.Y.append(YRef)
-            self.Z.append(self.to_numpy(torch.zeros([M, N], dtype=o_dtype)))
-            self.W[i] = self.to_numpy(self.W[i])
+            self.Z.append(to_numpy(torch.zeros([M, N], dtype=o_dtype)))
+            self.W[i] = to_numpy(self.W[i])
 
-        self.X = self.to_numpy(self.X)
+        self.X = to_numpy(self.X)
 
-    def to_torch(self, n):
-        t = torch.from_numpy(n)
-        if t.dtype == torch.int16:
-            t = t.view(dtype = torch.bfloat16)
-        return t
 
-    def to_numpy(self, t):
-        if t.dtype == torch.bfloat16:
-            return t.detach().view(dtype=torch.int16).numpy()
-        return t.detach().numpy()
 
     def check(self):
         for i, (Y, Z) in enumerate(zip(self.Y, self.Z)):
-            Z = self.to_torch(Z)
+            Z = to_torch(Z)
             if not torch.allclose(Y, Z):
                 print(Y)
                 print(Z)

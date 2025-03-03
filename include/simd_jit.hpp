@@ -45,7 +45,7 @@ struct jit_generator : public Xbyak::CodeGenerator {
         std::vector<Xbyak::Reg64> preserved_regs;
         std::vector<Xbyak::Xmm> preserved_vmms;
         int vmm_size_byte;
-        jcout(Xbyak::CodeGenerator* jit) : jit(jit) {
+        jcout(Xbyak::CodeGenerator* jit, bool use_avx512) : jit(jit) {
             preserved_regs = {jit->rbp,
                               jit->rsp,
                               jit->rax,
@@ -62,8 +62,14 @@ struct jit_generator : public Xbyak::CodeGenerator {
                               jit->r13,
                               jit->r14,
                               jit->r15};
-            for (int i = 0; i < 16; i++) {
-                preserved_vmms.push_back(Xbyak::Ymm(i));
+            if (use_avx512) {
+                for (int i = 0; i < 32; i++) {
+                    preserved_vmms.push_back(Xbyak::Zmm(i));
+                }
+            } else {
+                for (int i = 0; i < 16; i++) {
+                    preserved_vmms.push_back(Xbyak::Ymm(i));
+                }
             }
             vmm_size_byte = preserved_vmms[0].getBit() / 8;
         }
@@ -201,7 +207,11 @@ struct jit_generator : public Xbyak::CodeGenerator {
 
             for (int i = 0; i < preserved_vmms.size(); i++) {
                 auto& vmm = preserved_vmms[i];
-                jit->vmovdqu(jit->ptr[rsp - (i + 1) * (vmm_size_byte)], vmm);
+                if (vmm.getBit() == 512) {
+                    jit->vmovdqu32(jit->ptr[rsp - (i + 1) * (vmm_size_byte)], vmm);
+                } else {
+                    jit->vmovdqu(jit->ptr[rsp - (i + 1) * (vmm_size_byte)], vmm);
+                }
             }
             jit->sub(rsp, preserved_vmms.size() * vmm_size_byte);
 
@@ -218,7 +228,11 @@ struct jit_generator : public Xbyak::CodeGenerator {
             jit->add(rsp, preserved_vmms.size() * preserved_vmms[0].getBit() / 8);
             for (int i = 0; i < preserved_vmms.size(); i++) {
                 auto& vmm = preserved_vmms[i];
-                jit->vmovdqu(vmm, jit->ptr[rsp - (i + 1) * (vmm_size_byte)]);
+                if (vmm.getBit() == 512) {
+                    jit->vmovdqu32(vmm, jit->ptr[rsp - (i + 1) * (vmm_size_byte)]);
+                } else {
+                    jit->vmovdqu(vmm, jit->ptr[rsp - (i + 1) * (vmm_size_byte)]);
+                }
             }
             for (int i = preserved_regs.size() - 1; i >= 2; i--)
                 jit->pop(preserved_regs[i]);
@@ -236,7 +250,7 @@ struct jit_generator : public Xbyak::CodeGenerator {
           sreg_pool("sreg_pool"),
           vreg_pool("vreg_pool"),
           treg_pool("treg_pool"),
-          jcout(this) {
+          jcout(this, use_avx512) {
         vreg_pool.add_range(0, 15);
         if (use_avx512)
             vreg_pool.add_range(16, 31);
@@ -638,12 +652,41 @@ public:
     Xbyak::Xmm xmm() const {
         return Xbyak::Xmm(reg->getIdx());
     }
+
+    inline void zero() const;
     inline void load(const int32_t brdi32) const;
+    inline void load(const uint32_t brdi32) const;
     inline void load(const float brdf32) const;
     inline void load(const void* pv) const;
     inline void load(const VReg& rhs) const;
-    inline void load(SRegExpr&& addr) const;
-    inline void store(SRegExpr&& addr) const;
+
+    enum class LDST_TYPE {
+        packed_int = 0,
+        packed_fp32,
+        scalar_fp32,
+        packed_bf16_fp32,
+        packed_fp16_fp32,
+        packed_i8_i32,
+    };
+
+    inline void load(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_int) const;
+    inline void store(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_int) const;
+
+    template <class T>
+    int lanes() const {
+        return reg->getBit() / (8 * sizeof(T));
+    }
+
+    int bits() const {
+        return reg->getBit();
+    }
+
+    // this will overwrite content of source vreg, so better be a member of VReg
+    template <class F>
+    void reduce_ps(const F& uni_op);
+
+    template <class T>
+    static int simd_lanes();
 };
 
 class Ymm : public VReg {
@@ -1159,10 +1202,41 @@ inline VReg::VReg(int bits) {
     }
 }
 
-inline Ymm::Ymm() : VReg(256) {
+inline Ymm::Ymm() : VReg(256) {}
+
+inline Zmm::Zmm() : VReg(512) {}
+
+template <class T>
+int VReg::simd_lanes() {
+    auto* cur_jit = default_simd_jit_t::get().cur;
+    return cur_jit->vmm_width<T>();
 }
 
-inline Zmm::Zmm() : VReg(512){
+// each lane of result SIMD register contains same value
+// which is reduced from all values from input lanes:
+// for example:
+// vreg.reduce_ps([&](const VReg& vdst, const VReg& vsrc0, const VReg& vsrc1) {
+//        jit->vmaxps(vdst, vsrc0, vsrc1);
+// });
+template <class F>
+void VReg::reduce_ps(const F& uni_op) {
+    auto vreg_bits = bits();
+    VReg vaux(vreg_bits);
+    if (vreg_bits == 512) {
+        jit->vshuff32x4(vaux.zmm(), zmm(), zmm(), 0x4E);
+        uni_op(*this, *this, vaux);
+        jit->vshuff32x4(vaux.zmm(), zmm(), zmm(), 0xB1);
+        uni_op(*this, *this, vaux);
+    } else if (vreg_bits == 256) {
+        jit->vperm2i128(vaux.ymm(), ymm(), ymm(), 0x01);
+        uni_op(*this, *this, vaux);
+    } else {
+        assert(!"unsupported isa");
+    }
+    jit->vshufps(vaux, *reg, *reg, 0x4E);
+    uni_op(*this, *this, vaux);
+    jit->vshufps(vaux, *reg, *reg, 0xB1);
+    uni_op(*this, *this, vaux);
 }
 
 inline TReg::TReg(int id) {
@@ -1737,9 +1811,28 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
     }
 }
 
+inline void VReg::zero() const {
+    if (bits() == 512) {
+        jit->vpxord(*reg, *reg, *reg);
+    } else {
+        jit->vpxor(*reg, *reg, *reg);
+    }
+}
+
 inline void VReg::load(const int32_t brdi32) const {
     if (brdi32 == 0) {
-        jit->vpxor(*reg, *reg, *reg);
+        zero();
+    } else {
+        auto s = jit->get_sreg();
+        jit->mov(s, brdi32);
+        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
+        jit->vpbroadcastd(*reg, Xbyak::Xmm(reg->getIdx()));
+    }
+}
+
+inline void VReg::load(const uint32_t brdi32) const {
+    if (brdi32 == 0) {
+        zero();
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, brdi32);
@@ -1750,7 +1843,7 @@ inline void VReg::load(const int32_t brdi32) const {
 
 inline void VReg::load(const float brdf32) const {
     if (brdf32 == 0) {
-        jit->vpxor(*reg, *reg, *reg);
+        zero();
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, reinterpret_cast<const uint32_t&>(brdf32));
@@ -1761,7 +1854,7 @@ inline void VReg::load(const float brdf32) const {
 
 inline void VReg::load(const void* pv) const {
     if (pv == nullptr) {
-        jit->vpxor(*reg, *reg, *reg);
+        zero();
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, reinterpret_cast<uintptr_t>(pv));
@@ -1773,22 +1866,82 @@ inline void VReg::load(const VReg& rhs) const {
     jit->vmovdqa(*reg, rhs);
 }
 
-inline void VReg::load(SRegExpr&& addr) const {
+inline void VReg::load(SRegExpr&& addr, LDST_TYPE type) const {
     ASSERT(addr.paddr);
-    if (jit->use_avx512) {
-        jit->vmovdqu32(*reg, jit->ptr[addr.paddr->to_addr()]);
-    } else {
-        jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+    auto rbits = bits();
+    switch (type) {
+    case LDST_TYPE::packed_int:
+        if (rbits == 512) {
+            jit->vmovdqu32(*reg, jit->ptr[addr.paddr->to_addr()]);
+        } else {
+            jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+        }
+        break;
+    case LDST_TYPE::packed_fp32:
+        jit->vmovups(*reg, jit->ptr[addr.paddr->to_addr()]);
+        break;
+    case LDST_TYPE::packed_bf16_fp32: {
+        auto v_ymm = ymm();
+        jit->vmovdqu(v_ymm, jit->ptr[addr.paddr->to_addr()]);
+        jit->vpmovzxwd(*reg, v_ymm);
+        jit->vpslld(*reg, *reg, 16);
+    } break;
+    case LDST_TYPE::packed_fp16_fp32:
+        jit->vmovdqu(ymm(), jit->ptr[addr.paddr->to_addr()]);
+        jit->vcvtph2ps(*reg, ymm());
+        break;
+    case LDST_TYPE::scalar_fp32:
+        jit->vmovss(xmm(), jit->ptr[addr.paddr->to_addr()]);
+        break;
+    case LDST_TYPE::packed_i8_i32:
+        jit->vpmovzxbd(*reg, jit->ptr[addr.paddr->to_addr()]);
+        break;
+    default:
+        assert(0);
+        break;
     }
 }
-inline void VReg::store(SRegExpr&& addr) const {
+
+inline void VReg::store(SRegExpr&& addr, LDST_TYPE type) const {
     ASSERT(addr.paddr);
-    if (jit->use_avx512) {
-        jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()], *reg);
-    } else {
-        jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+    auto rbits = bits();
+    switch (type) {
+    case LDST_TYPE::packed_int:
+        if (rbits == 512) {
+            jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()], *reg);
+        } else {
+            jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+        }
+        break;
+    case LDST_TYPE::packed_fp32:
+        jit->vmovups(jit->ptr[addr.paddr->to_addr()], *reg);
+        break;
+    case LDST_TYPE::packed_bf16_fp32:
+        // vcvtne2ps2bf16 requires two fp32 regs
+        ASSERT(0);
+        break;
+    case LDST_TYPE::packed_fp16_fp32:
+        jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()], *reg, 0x4);
+        break;
+    case LDST_TYPE::scalar_fp32:
+        jit->vmovss(jit->ptr[addr.paddr->to_addr()], xmm());
+        break;
+    case LDST_TYPE::packed_i8_i32:
+        if (rbits == 512) {
+            jit->vpmovsdb(jit->ptr[addr.paddr->to_addr()], *reg);
+        } else {
+            jit->vpackssdw(*reg, *reg, *reg);
+            jit->vpermq(ymm(), ymm(), 0x08);
+            jit->vpacksswb(*reg, *reg, *reg);
+            jit->vmovq(jit->ptr[addr.paddr->to_addr()], *reg);
+        }
+        break;
+    default:
+        assert(0);
+        break;
     }
 }
+
 inline void SReg::load(SRegExpr&& addr) const {
     ASSERT(addr.paddr);
     jit->mov(*reg, jit->ptr[addr.paddr->to_addr()]);

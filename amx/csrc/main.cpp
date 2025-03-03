@@ -572,16 +572,18 @@ public:
             prefetch.load(pargs + offsetof(call_args, prefetch));
             count.load(pargs + offsetof(call_args, count));
             i = 0;
-            auto simdw = jit->vmm_width<uint32_t>();
+            auto simdw = d0.lanes<uint32_t>();
             jit->do_while_(i < count, [&] {
                 d0.load(psrc + i * sizeof(float));
                 d1.load(psrc + i * sizeof(float) + simdw * sizeof(float));
                 if (o_dtype == DTYPE_FP16) {
                     ASSERT(i_dtype == DTYPE_FP32);
-                    jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t)], d0, 0x4);
-                    jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t) + simdw * sizeof(uint16_t)],
-                                   d1,
-                                   0x4);
+                    d0.store(pdst + i * sizeof(uint16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                    d1.store(pdst + i * sizeof(uint16_t) + simdw * sizeof(uint16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                    // jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t)], d0, 0x4);
+                    // jit->vcvtps2ph(jit->ptr[pdst.r64() + i.r64() * sizeof(uint16_t) + simdw * sizeof(uint16_t)],
+                    //                d1,
+                    //                0x4);
                     jit->prefetchwt1(jit->ptr[prefetch.r64() + i.r64() * sizeof(uint16_t)]);
                 } else if (o_dtype == DTYPE_BF16) {
                     ASSERT(i_dtype == DTYPE_FP32);
@@ -629,7 +631,7 @@ public:
             VReg d0, d1;
             SReg i;
             i = 0;
-            auto simdw = jit->vmm_width<uint32_t>();
+            auto simdw = d0.lanes<uint32_t>();
             jit->do_while_(i < count, [&] {
                 d0.load(psrc0 + i * sizeof(uint32_t));
                 d1.load(psrc1 + i * sizeof(uint32_t));
@@ -662,25 +664,59 @@ public:
         }
     }
 };
-#if 0
+
 class func_quantize {
     std::shared_ptr<SIMDJit> jit;
 
 public:
-    using Ptr = std::shared_ptr<const func_reduce2>;
+    using Ptr = std::shared_ptr<const func_quantize>;
 
     // quantize bf16/fp16 into int8 sym
     func_quantize(int x_dtype) {
         ASSERT(x_dtype == DTYPE_FP16 || x_dtype == DTYPE_BF16);
-        jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg pdst, SReg count) {
-            Ymm d0, d1;
+        jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg pdst, SReg pscale, SReg count) {
+            VReg d0, d1;
+            VReg vmax, sign_bit_mask, vscale, vdscale;
             SReg i;
+
+            auto simdw = d0.lanes<int32_t>();
+
+            sign_bit_mask.load(0x80000000);
+            vmax.load(0);
             i = 0;
-            auto simdw = jit->vmm_width<int16_t>();
-            jit->do_while_(i < count, [&] {
-                d0.load(psrc + i * sizeof(int16_t));
-                
-                d0.store(pdst + i * sizeof(int16_t));
+            jit->while_(i < count, [&] {
+                if (x_dtype == DTYPE_FP16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                else if (x_dtype == DTYPE_BF16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                jit->vandnps(d0, sign_bit_mask, d0);  // clear sign bit
+                jit->vmaxps(vmax, vmax, d0);
+                i = i + simdw;
+            });
+
+            vmax.reduce_ps([&](const VReg& vdst, const VReg& vsrc0, const VReg& vsrc1) {
+                jit->vmaxps(vdst, vsrc0, vsrc1);
+            });
+
+            VReg v_q_max;
+            v_q_max.load(127.0f);
+            //jit->vbroadcastss(vscale, vmax.xmm());
+            jit->vdivps(vdscale, vmax, v_q_max);
+            jit->vdivps(vscale, v_q_max, vmax);
+
+            jit->jcout("vmax=", jit->jcout.as_f32, vmax);
+
+            vdscale.store(pscale, VReg::LDST_TYPE::scalar_fp32);
+
+            i = 0;
+            jit->while_(i < count, [&] {
+                if (x_dtype == DTYPE_FP16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                else if (x_dtype == DTYPE_BF16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                jit->vmulps(d0, d0, vscale);
+                jit->vcvtps2dq(d0, d0);
+                d0.store(pdst + i * sizeof(int8_t), VReg::LDST_TYPE::packed_i8_i32);
                 i = i + simdw;
             });
         });
@@ -694,18 +730,38 @@ public:
                     float* scale_dst,
                     int M,
                     int N) const {
-        auto* psrc0 = reinterpret_cast<const uint8_t*>(pvsrc0);
-        auto* psrc1 = reinterpret_cast<const uint8_t*>(pvsrc1);
+        auto* psrc = reinterpret_cast<const uint8_t*>(pvsrc);
         auto* pdst = reinterpret_cast<uint8_t*>(pvdst);
         for (int m = 0; m < M; m++) {
-            (*jit)(psrc0, psrc1, pdst, static_cast<int64_t>(N));
-            psrc0 += stride_src0;
-            psrc1 += stride_src1;
+            (*jit)(psrc, pdst, scale_dst + m, static_cast<int64_t>(N));
+            psrc += stride_src;
             pdst += stride_dst;
         }
     }
 };
-#endif
+
+
+int DTYPE_of(const py::array& src) {
+    switch(src.dtype().char_()) {
+        case 'h': return DTYPE_BF16;
+        case 'e': return DTYPE_FP16;
+        case 'b': return DTYPE_INT8;
+        case 'f': return DTYPE_FP32;
+        default:
+            ASSERT(0, "unknown dtype char : ", src.dtype().char_())
+    }
+    return DTYPE_FP32;
+}
+
+std::pair<py::array_t<int8_t>, py::array_t<float>> test_quant_i8(const py::array& src) {
+    auto func = make_cacheable<func_quantize>(DTYPE_of(src));
+    auto M = src.shape(0);
+    auto K = src.shape(1);
+    py::array_t<int8_t> dst({M, K});
+    py::array_t<float> scale({M, M*0 + 1});
+    (*func)(src.data(), src.strides(0), dst.mutable_data(), dst.strides(0), scale.mutable_data(), M, K);
+    return {dst, scale};
+}
 
 template <typename T, typename Q>
 inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
@@ -1042,7 +1098,6 @@ struct AMXLinearKernel {
     }
 };
 
-
 py::array_t<float> test_amx_repack_B(const py::array_t<float>& src) {
     auto func = make_cacheable<func_amx_repack_Btile>();
     py::array_t<float> dst({16, 16});
@@ -1232,6 +1287,7 @@ PYBIND11_MODULE(PACKAGE_NAME, m) {
         .def("forward", &AMXQKVLinear::forward);
 
     m.def("test_amx_repack_B", test_amx_repack_B);
+    m.def("test_quant_i8", test_quant_i8);
     m.def("set_nthr", set_nthr);
 
     m.def("simd_test_basic", simd_test_basic);
