@@ -211,35 +211,24 @@ class LORA:
         self.cl_kernels_opt = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
-    def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB):
-
-        tAlpha = cl.tensor(stateAlpha)
-        tmainInput = cl.tensor(mainInput)
-        tloraInput = cl.tensor(loraInput)
-        t_stateA = cl.tensor(stataA)
-        t_stateB = cl.tensor(stateB)
-        
-        #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
-        A_output = np.zeros([self.gemma_wgs, self.rank]).astype(np.float16)
-        tA_output = cl.tensor(A_output)
-        tRes =  cl.tensor([1, self.output_state], np.dtype(np.float16))
+    def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB, Aoutput, result):
 
         if self.use_ref:
             tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float16))
-            self.cl_kernels_ref.enqueue("gemmA", [self.rank],[self.rank], tloraInput, t_stateA,
-                                        tA_output_ref, tAlpha, self.rank, self.input_state, self.input_state_per_wg)
+            self.cl_kernels_ref.enqueue("gemmA", [self.rank],[self.rank], loraInput, stataA,
+                                        tA_output_ref, stateAlpha, self.rank, self.input_state, self.input_state_per_wg)
             REF_LOCAL_SIZE = 128
             assert self.output_state % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {self.output_state} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
             self.cl_kernels_ref.enqueue("gemmB", [self.output_state],[REF_LOCAL_SIZE],
-                                        tmainInput, tA_output_ref, t_stateB, tRes, self.output_state, self.rank)
+                                        mainInput, tA_output_ref, stateB, result, self.output_state, self.rank)
         else:
             cl_kernels = self.cl_kernels_opt
             cl_kernels.enqueue("gemmA", [self.sg_sz * self.gemma_wgs * self.gemma_sgs_per_wg],[self.sg_sz * self.gemma_sgs_per_wg], 
-                                        tloraInput, t_stateA, tA_output, self.input_state)
+                                        loraInput, stataA, Aoutput, self.input_state)
             cl_kernels.enqueue("gemmB", [self.output_state],[self.gemmb_local_sz], 
-                                        tmainInput, tA_output, t_stateB, tRes, tAlpha, self.output_state)
+                                        mainInput, Aoutput, stateB, result, stateAlpha, self.output_state)
         # cl.finish()
-        return tRes
+        return result
 
 
 # Global for tests
@@ -254,22 +243,28 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
     SG_SZ = 16
     vRANGE = 2
     REPEAT = 40
-    stateA_list= [np.random.randint(-vRANGE, vRANGE, [input_state, rank]).astype(np.float16)for _ in range(REPEAT)]
-    alpha_list = [np.random.rand(rank).astype(np.float16)for _ in range(REPEAT)]
-    stateB_list = [np.random.randint(-vRANGE, vRANGE, [rank, output_state]).astype(np.float16)for _ in range(REPEAT)]
-    loraInput_list = [np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)for _ in range(REPEAT)]
-    mainInput_list = [np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float16)for _ in range(REPEAT)]
+    stateA_list= [cl.tensor(np.random.randint(-vRANGE, vRANGE, [input_state, rank]).astype(np.float16))for _ in range(REPEAT)]
+    alpha_list = [cl.tensor(np.random.rand(rank).astype(np.float16))for _ in range(REPEAT)]
+    stateB_list = [cl.tensor(np.random.randint(-vRANGE, vRANGE, [rank, output_state]).astype(np.float16))for _ in range(REPEAT)]
+    loraInput_list = [cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16))for _ in range(REPEAT)]
+    mainInput_list = [cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float16))for _ in range(REPEAT)]
+    #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
+    A_output_list = [cl.tensor(np.zeros([gemma_wgs, rank]).astype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
+
     ref = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, True)
     opt = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, False)
+
+    
     if check_acc:
-        res_ref = ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0])
-        res_opt = opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0])
+        res_opt = opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
+        res_ref = ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
         cl.finish()
         compare(res_ref.numpy(), res_opt.numpy())
         print(f'INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} ACC PASS!')
     else:
         for i in range(0, REPEAT):
-            opt(mainInput_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i])
+            opt(mainInput_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i],  A_output_list[i], res_list[i])
         profiling_data  = cl.finish()
         flops_a = rank*input_state*2
         flops_b = rank*output_state*2
@@ -279,6 +274,8 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
         rd_bytes_b = (rank*output_state+output_state*2+rank)*2
         print(f'----------------------------------------------------------------------------------------------------------------------------------')
         print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} perf:')
+        print(f'| [GEMMA]: GWS:{SG_SZ *GEMMA_WGS * GEMMA_SGS_PER_WG}, LWS:{SG_SZ * GEMMA_SGS_PER_WG}, ')
+        print(f'| [GEMMB]: GWS:{output_state}, LWS:{128}, ')
         print(f'----------------------------------------------------------------------------------------------------------------------------------')
         for i in range(1, REPEAT):
             ns_a = profiling_data[i*2]
@@ -299,6 +296,7 @@ if __name__ == "__main__":
     # for rank in [16, 32, 64]:
     for rank in [64]:
         for out_state in [512, 1536, 3840]:
+        # for out_state in [512]:
             test(1536, rank, out_state)
 
 
