@@ -3,11 +3,11 @@
 std::shared_ptr<SIMDJit> get_i2s8_mkernel() {
     return SIMDJit::create(
         [](SIMDJit* jit, SReg cnt, SReg pa, SReg stride_a, SReg pb, SReg pc, SReg stride_c, SReg do_accumulate) {
-            VReg mask3;
+            Ymm mask3;
             mask3.load(0x03030303);
 
-            VReg vax, vay, vb0, vb1, vbx, vby;
-            VReg vc[8];
+            Ymm vax, vay, vb0, vb1, vbx, vby;
+            Ymm vc[8];
 
             for (int i = 0; i < 8; i++) {
                 jit->vpxor(vc[i], vc[i], vc[i]);
@@ -161,7 +161,7 @@ py::array_t<int32_t> mm_i2s(py::array_t<int8_t> X, py::array_t<uint8_t> PackedW)
 
 py::array_t<uint8_t> pack_i2s(py::array_t<int8_t> W) {
     static auto jit = SIMDJit::create([](SIMDJit* jit, SReg src, SReg src_stride, SReg dst, SReg K) {
-        VReg v0, v1, v2, v3, one, mask3;
+        Ymm v0, v1, v2, v3, one, mask3;
         SReg src2;
         src2 = src + src_stride * 2;
         one.load(0x01010101);

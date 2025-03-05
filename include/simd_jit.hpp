@@ -1196,24 +1196,23 @@ public:
     }
 #endif
 
-    //***********************************************
-    // for_loop(idx, start, stop, step, loop_body) performs following:
-    //    for(int idx=start; idx + step <= stop; idx+=step) {
-    //       loop_body();
-    //    }
-    template <typename Fn, typename START, typename STEP>
-    void for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step, const Fn& loop_body);
-
     template <typename Fn>
     void while_(SRegExpr regcmp, const Fn& loop_body);
 
     template <typename Fn>
     void do_while_(SRegExpr regcmp, const Fn& loop_body);
 
-    // will maintain a mask register according to valid number of elements
-    // kmask contains the valid mask, loop_body should always using the mask
-    template <typename Fn, typename START, typename STEP>
-    void for_with_mask(SReg idx, START start, SReg stop, STEP step, const Fn& loop_body);
+    //***********************************************
+    // for_loop(idx, start, stop, step, loop_body) performs following:
+    //    for(int idx=start; idx + step <= stop; idx+=step) {
+    //       loop_body();
+    //    }
+    //    loop_body(kmask);
+    template <typename START, typename STEP>
+    void for_(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body);
+
+    template <typename START, typename STEP>
+    void for_(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body);
 
     inline void if_(SRegExpr regcmp,
                     const std::function<void()>& then_body,
@@ -1337,17 +1336,27 @@ void SIMDJit::for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step
     sub(idx, step);
 }
 
+template <typename START, typename STEP>
+void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body) {
+    Xbyak::Label loop, exit;
+    mov(idx, start);
+    sub(stop, step);
 
-//  while (i < stop - step) {
-//      loop_body();
-//      i += step;
-//  }
-//
-//  last-part:
-//      i + step >= stop
-//
-template <typename Fn, typename START, typename STEP>
-void SIMDJit::for_with_mask(SReg idx, START start, SReg stop, STEP step, const Fn& loop_body) {
+    align(64, false);
+    L(loop);
+    cmp(idx, stop);
+    jg(exit, T_NEAR);
+    loop_body(); // body w/o mask (k0 is empty mask)
+    add(idx, step);
+    jmp(loop, T_NEAR);
+
+    L(exit);
+    add(stop, step);
+    // tail was not handled
+}
+
+template <typename START, typename STEP>
+void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body) {
     ASSERT(use_avx512);
     if (step > 16) {
         // needs AVX512BW for kmask with more than 16-bits

@@ -408,7 +408,7 @@ PYBIND11_MODULE(lut_gemm, m) {
     tl1_init(m);
     perf_init(m);
 
-    m.def("simd_test_basic", simd_test_basic);
+    m.def("simd_test_basic", simd_test_basic); 
     m.def("simd_test_tput", simd_test_tput);
     m.def("simd_test_printreg", simd_test_printreg);
 

@@ -75,12 +75,12 @@ py::array_t<uint8_t> pack_tl1(py::array_t<int8_t> ternary_w) {
     static auto pack_4x32_to_32_avx2 =
         SIMDJit::create([](SIMDJit* jit, SReg src, SReg K, SReg N, SReg stride_src, SReg dst) {
             SReg psrc0, psrc2, n, k;
-            VReg r0, r1, r2, r3, one;
+            Ymm r0, r1, r2, r3, one;
             one.load(0x01010101);
-            jit->for_loop(n, 0, N, 32, [&] {
+            jit->for_(n, 0, N, 32, [&] {
                 psrc0 = src + n;
                 psrc2 = psrc0 + stride_src * 2;
-                jit->for_loop(k, 0, K, 4, [&] {
+                jit->for_(k, 0, K, 4, [&] {
                     r0.load(psrc0);
                     r1.load(psrc0 + stride_src);
                     r2.load(psrc2);
@@ -137,8 +137,8 @@ py::array_t<uint8_t> pack_tl1(py::array_t<int8_t> ternary_w) {
 
 std::shared_ptr<SIMDJit> get_lut_gemm_mkernel(int K_UNROLL = 16) {
     return SIMDJit::create([&](SIMDJit* jit, SReg pa, SReg pb, SReg pc, SReg K) {
-        VReg maskF;
-        VReg acc[4];
+        Ymm maskF;
+        Ymm acc[4];
         maskF.load(0x0F0F0F0F);
 
         acc[0].load(0);
@@ -148,7 +148,7 @@ std::shared_ptr<SIMDJit> get_lut_gemm_mkernel(int K_UNROLL = 16) {
         jit->do_while_(K > 0, [&] {
             // we can accumulate results into int16 w/o overflow up to 256 times
             //
-            VReg vec_c0, vec_c1;
+            Ymm vec_c0, vec_c1;
             vec_c0.load(0);
             vec_c1.load(0);
             SReg K_inner;
@@ -158,10 +158,10 @@ std::shared_ptr<SIMDJit> get_lut_gemm_mkernel(int K_UNROLL = 16) {
                 constexpr int UNROLL = 2;
                 for(int unroll = 0; unroll < UNROLL; unroll++) {
                     // inner-most kernel does: [1x4] @ [4x32]
-                    VReg vec_lut01_lo, vec_lut01_hi;
-                    VReg vec_lut23_lo, vec_lut23_hi;
+                    Ymm vec_lut01_lo, vec_lut01_hi;
+                    Ymm vec_lut23_lo, vec_lut23_hi;
                     {
-                        VReg vec_w01, vec_w23;
+                        Ymm vec_w01, vec_w23;
                         jit->vbroadcasti128(vec_lut01_lo.ymm(), jit->ptr[pa.r64() + 16*(unroll*4 + 0)]);
                         jit->vbroadcasti128(vec_lut23_lo.ymm(), jit->ptr[pa.r64() + 16*(unroll*4 + 1)]);
                         jit->vbroadcasti128(vec_lut01_hi.ymm(), jit->ptr[pa.r64() + 16*(unroll*4 + 2)]);
@@ -181,8 +181,8 @@ std::shared_ptr<SIMDJit> get_lut_gemm_mkernel(int K_UNROLL = 16) {
                         jit->vpshufb(vec_lut23_lo, vec_lut23_lo, vec_w23);  // k=2,3
                         jit->vpshufb(vec_lut23_hi, vec_lut23_hi, vec_w23);  // k=2,3
                     }
-                    VReg v01_n0, v01_n1;
-                    VReg v23_n0, v23_n1;
+                    Ymm v01_n0, v01_n1;
+                    Ymm v23_n0, v23_n1;
                     jit->vpunpcklbw(v01_n0, vec_lut01_lo, vec_lut01_hi);
                     jit->vpunpckhbw(v01_n1, vec_lut01_lo, vec_lut01_hi);
                     jit->vpunpcklbw(v23_n0, vec_lut23_lo, vec_lut23_hi);
@@ -199,7 +199,7 @@ std::shared_ptr<SIMDJit> get_lut_gemm_mkernel(int K_UNROLL = 16) {
                 K_inner -= 4*UNROLL;
             });
 
-            VReg vec_i32[4];
+            Ymm vec_i32[4];
             jit->vpmovsxwd(vec_i32[0], vec_c0.xmm());
             jit->vextracti128(vec_i32[1].xmm(), vec_c0.ymm(), 1);
             jit->vpmovsxwd(vec_i32[1], vec_i32[1].xmm());
@@ -261,9 +261,9 @@ py::array_t<int32_t> mm_tl1(py::array_t<int8_t> x, py::array_t<uint8_t> packedW,
     }
 
     static auto precomput_lut = SIMDJit::create([](SIMDJit* jit, SReg src, SReg dst, SReg K) {
-        VReg lut_w_tl1, ones, vx;
-        VReg lut01, lut23, lut_bias;
-        VReg unpack_map, vtmp;
+        Ymm lut_w_tl1, ones, vx;
+        Ymm lut01, lut23, lut_bias;
+        Ymm unpack_map, vtmp;
 
         // [0,1][0,1]... repeat 16 times
         lut_w_tl1.load(TL1_plus1);

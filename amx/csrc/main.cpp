@@ -723,7 +723,7 @@ public:
             sign_bit_mask.load(0x80000000);
             vmax.load(0);
 
-            jit->for_with_mask(i, 0, count, simdw, [&](KReg kmask){
+            jit->for_(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
                     d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)
@@ -743,11 +743,9 @@ public:
             jit->vdivps(vdscale, vmax, v_q_max);
             jit->vdivps(vscale, v_q_max, vmax);
 
-            //jit->jcout("vmax=", jit->jcout.as_f32, vmax);
-
             vdscale.store(pscale, VReg::LDST_TYPE::scalar_fp32);
 
-            jit->for_with_mask(i, 0, count, simdw, [&](KReg kmask){
+            jit->for_(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
                     d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)

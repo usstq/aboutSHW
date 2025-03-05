@@ -10,5 +10,5 @@
 using ov::intel_cpu::SIMDJit;
 using ov::intel_cpu::SReg;
 using ov::intel_cpu::VReg;
-
+using ov::intel_cpu::Ymm;
 namespace py = pybind11;

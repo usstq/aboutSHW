@@ -2,7 +2,7 @@ import subprocess
 import numpy as np
 
 # make csrc & import lib
-subprocess.check_output(["cmake", "-B", "build"], shell=False)
+subprocess.check_output(["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug"], shell=False)
 subprocess.check_output(["cmake", "--build", "build", "--config", "Debug"], shell=False)
 from build import lut_gemm
 
