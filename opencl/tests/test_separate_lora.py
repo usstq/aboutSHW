@@ -193,7 +193,7 @@ def test_single_lora():
     RANK = 64
     INPUT_STATE = 1536
     OUTPUT_STATE = INPUT_STATE
-    WG_NUM = 4
+    K_WGS = 4
     SG_NUM = 4
     SG_SZ = 16
     GEMMB_LOCAL_SIZE = 128
@@ -203,7 +203,7 @@ def test_single_lora():
     assert (OUTPUT_STATE) % GEMMB_LOCAL_SIZE == 0, f"GEMMB: 'global size' {OUTPUT_STATE} is not multiple of 'local size' {GEMMB_LOCAL_SIZE}"
 
     INPUT_STATE_SG_NUM = INPUT_STATE // SG_SZ
-    INPUT_STATE_PER_WG = ((INPUT_STATE_SG_NUM + WG_NUM - 1) // WG_NUM) * SG_SZ
+    INPUT_STATE_PER_WG = ((INPUT_STATE_SG_NUM + K_WGS - 1) // K_WGS) * SG_SZ
     INPUT_STATE_BLKS_PER_WG = INPUT_STATE_PER_WG / SG_SZ
     # assert( KBLKS_PER_WG > 0, f"Can't satisfy at least 1 KBLK(16) for one WG")
     # can't ensure each sg can be assigned the workload. sg maybe diverge.
@@ -225,10 +225,10 @@ def test_single_lora():
 
     SG_SZ = 16
     GEMMA_USE_SLM = 1
-    kernel_opt = kernel_cache(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG} -DSG_NUM={SG_NUM} -DRANK={RANK} -DK_PER_SG={INPUT_STATE_PER_SG} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DPART_NUM={WG_NUM}")
+    kernel_opt = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG} -DSG_NUM={SG_NUM} -DRANK={RANK} -DK_PER_SG={INPUT_STATE_PER_SG} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DPART_NUM={K_WGS}")
     kernel_ref =  kernel_cache(ref_src)
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
-    tA_output = cl.tensor(np.zeros([WG_NUM, RANK]).astype(np.float16))
+    tA_output = cl.tensor(np.zeros([K_WGS, RANK]).astype(np.float16))
     tA_reduce = cl.tensor([1, RANK], np.dtype(np.float16))
 
     tC_ref = cl.tensor([1, RANK], np.dtype(np.float16))
@@ -238,7 +238,7 @@ def test_single_lora():
     assert OUTPUT_STATE % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {OUTPUT_STATE} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
     kernel_ref.enqueue("gemmB", [OUTPUT_STATE],[REF_LOCAL_SIZE], tC_ref, tweiB, tResult_ref, OUTPUT_STATE, RANK)
     cl.finish()
-    kernel_opt.enqueue("gemmA", [SG_SZ * WG_NUM * SG_NUM],[SG_SZ * SG_NUM], tA, tweiA, tA_output, INPUT_STATE)
+    kernel_opt.enqueue("gemmA", [SG_SZ * K_WGS * SG_NUM],[SG_SZ * SG_NUM], tA, tweiA, tA_output, INPUT_STATE)
     kernel_opt.enqueue("gemmB", [OUTPUT_STATE],[GEMMB_LOCAL_SIZE], tA_output, tweiB, tB_output, tAlpha, OUTPUT_STATE)
     cl.finish()
     # compare(tC_ref.numpy(), tA_reduce.numpy())
@@ -247,7 +247,7 @@ def test_single_lora():
 
 def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_acc=False):
     ref_src = r'''
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, __global half * alpha, int N, int K, int k_blk) {
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk) {
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
         int n_idx = get_global_id(0);
         size_t blk_num = (K + k_blk -1 )/ k_blk;
@@ -265,7 +265,6 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
             }
             sum += sub_sum;
         }
-        //CC[n_idx] = sum * alpha[n_idx];
         CC[n_idx] = sum;
 
     }
@@ -304,14 +303,17 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
         //Workgroup share same input activation and each subgroup would access all the elements of the shared intput.Put it into SLM.
         __local half local_input[K_PER_WG];
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
+        int local_sz = get_local_size(1);
         __attribute__((opencl_unroll_hint))
-        for (int offset = sgid * SG_SZ; offset < (k_end_grp - k_start_grp); offset += SG_SZ * GEMMA_SG_NUM ) {
+        for (int offset = sgid * SG_SZ; offset < (k_end_grp - k_start_grp); offset += local_sz ) {
             __global half *input_ptr = A + k_start_grp + offset;
             half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
             local_input[offset + lid] = copy_val;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 #endif
+        if (n_idx >= RANK)
+            return;
         __global half *A_ptr = A + k_start_grp;
         __global half *B_ptr = B + n_idx * K + gid_K * K_PER_WG;
         half sum = 0.f;
@@ -344,7 +346,7 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
 
         int id_sg_local = get_sub_group_local_id();
 #if GEMMB_USE_SLM
-        __local half reduce[16*1024];
+        __local half reduce[RANK];
 #else
         half reduce[RANK] = {0.f};
 #endif
@@ -418,20 +420,17 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     OUTPUT_STATE = output_state
     SG_SZ = 16
 
-    #OUTPUT_STATE = INPUT_STATE
-    MAX_GEMMA_WG_SZ = 1024
-    if (RANK * SG_SZ <= MAX_GEMMA_WG_SZ ):
+    MAX_GEMMA_SG_NUM = 64
+    if (RANK <= MAX_GEMMA_SG_NUM ):
         GEMMA_SG_NUM = RANK
-        COLUMN_WGS = 1
+        N_WGS = 1
     else:
-        # It would be 
-        assert (RANK) % (MAX_GEMMA_WG_SZ//SG_SZ) == 0, f"rank {RANK} is not multiple of MAX_GEMMA_WG_SZ {MAX_GEMMA_WG_SZ//SG_SZ}"
-        GEMMA_SG_NUM = MAX_GEMMA_WG_SZ // SG_SZ
-        COLUMN_WGS = RANK*SG_SZ // MAX_GEMMA_WG_SZ
-
+        # When RANK % GEMMA_SG_NUM != 0, maybe try to lower down `GEMMA_SG_NUM = GEMMA_SG_NUM / factor` to ensure  RANK % GEMMA_SG_NUM == 0?
+        GEMMA_SG_NUM = MAX_GEMMA_SG_NUM
+        N_WGS = (RANK*SG_SZ+ GEMMA_SG_NUM - 1) // GEMMA_SG_NUM
     GEMMA_USE_SLM = 1
     GEMMB_USE_SLM = 1
-    WG_NUM = 16
+    K_WGS = 8
     GEMMB_LOCAL_SIZE = 128
     GEMMA_UNROLL_NUM = 4
     assert INPUT_STATE % (SG_SZ * GEMMA_UNROLL_NUM) == 0, f"'input state' {INPUT_STATE} is not multiple of SG_SZ {SG_SZ}"
@@ -440,7 +439,7 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
 
     INPUT_STATE_BLK_SZ = SG_SZ * GEMMA_UNROLL_NUM
     INPUT_STATE_BLK_NUM = INPUT_STATE // INPUT_STATE_BLK_SZ
-    INPUT_STATE_PER_WG = ((INPUT_STATE_BLK_NUM + WG_NUM - 1) // WG_NUM) * INPUT_STATE_BLK_SZ
+    INPUT_STATE_PER_WG = ((INPUT_STATE_BLK_NUM + K_WGS - 1) // K_WGS) * INPUT_STATE_BLK_SZ
     # assert( KBLKS_PER_WG > 0, f"Can't satisfy at least 1 KBLK(16) for one WG")
     # can't ensure each sg can be assigned the workload. sg maybe diverge.
     vRANGE = 1
@@ -453,31 +452,32 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     alpha_list_np = [np.random.randint(-1, 2, [RANK]).astype(np.float16) for _ in range(rep)]
     alpha_list = [cl.tensor(np.multiply(alpha, 0.5)) for alpha in alpha_list_np]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
-    gemmA_output_list = [cl.tensor(np.zeros([WG_NUM, RANK]).astype(np.float16)) for _ in range(rep)]
+    gemmA_output_list = [cl.tensor(np.zeros([K_WGS, RANK]).astype(np.float16)) for _ in range(rep)]
 
-    MAX_LWS = 512
-    if (OUTPUT_STATE * SG_SZ  > MAX_LWS):
-        GEMMB_LWS = MAX_LWS
-        GEMMB_GWS = (OUTPUT_STATE *SG_SZ + MAX_LWS - 1) // MAX_LWS * MAX_LWS
-        GEMMB_WGS = GEMMB_GWS // GEMMB_LWS
-    else:
+    MAX_GEMMB_SG_NUM = 64
+    if (OUTPUT_STATE <= MAX_GEMMB_SG_NUM):
         GEMMB_LWS = OUTPUT_STATE * SG_SZ
         GEMMB_GWS = OUTPUT_STATE * SG_SZ
-        GEMMB_WGS = GEMMB_GWS // GEMMB_LWS
-    kernel_opt = cl.kernels(src, options=f"-DWG_NUM={WG_NUM} -DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG}  -DRANK={RANK} -DGEMMA_SG_NUM={GEMMA_SG_NUM} -DGEMMA_UNROLL_NUM={GEMMA_UNROLL_NUM}\
-                              -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={WG_NUM}")
+    elif OUTPUT_STATE == 512 or OUTPUT_STATE == 1536:
+        GEMMB_LWS = MAX_GEMMB_SG_NUM * SG_SZ
+        GEMMB_GWS = OUTPUT_STATE * SG_SZ
+    elif OUTPUT_STATE == 3840:
+        GEMMB_LWS = 60 * SG_SZ
+        GEMMB_GWS = OUTPUT_STATE * SG_SZ
+    else:
+        GEMMB_LWS = MAX_GEMMB_SG_NUM * SG_SZ
+        GEMMB_GWS = (OUTPUT_STATE + MAX_GEMMB_SG_NUM - 1) // MAX_GEMMB_SG_NUM * MAX_GEMMB_SG_NUM * SG_SZ
+
+    kernel_opt = cl.kernels(src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG}  -DRANK={RANK} -DGEMMA_UNROLL_NUM={GEMMA_UNROLL_NUM}\
+                              -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={K_WGS}")
     kernel_ref =  cl.kernels(ref_src)
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
     print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
-    
-    [WG_NUM, COLUMN_WGS, SG_SZ * GEMMA_SG_NUM], [1, 1, SG_SZ * GEMMA_SG_NUM],
-    
-    
-    print(f'| [GEMMA]: GWS[{WG_NUM}, {COLUMN_WGS}, {SG_SZ * GEMMA_SG_NUM}], LWS:[1, 1 {SG_SZ * GEMMA_SG_NUM}] ')
+    print(f'| [GEMMA]: GWS[{K_WGS}, {N_WGS*SG_SZ * GEMMA_SG_NUM}], LWS:[1, {SG_SZ * GEMMA_SG_NUM}] ')
     print(f'| [GEMMB]: GWS:[{GEMMB_GWS}], LWS:[{GEMMB_LWS}], ')
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
     flops_a = rank*input_state*2
-    flops_b = rank*output_state*2
+    flops_b = rank*output_state*2+ rank + output_state
     # how many CPU memory loaded into GPU memory, stateA + input activation. duplicate input activation would be in GPU global cache?
     rd_bytes_a = (rank*input_state+input_state)*2
     # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input + output
@@ -488,18 +488,16 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     for i in range(0, rep):
         tA_reduce = cl.tensor([1, RANK], np.dtype(np.float16))
         # print(f'GEMMB_LWS={GEMMB_LWS}, GEMMB_GWS={GEMMB_GWS}')
-        kernel_opt.enqueue("gemmA", [WG_NUM, COLUMN_WGS, SG_SZ * GEMMA_SG_NUM], [1, 1, SG_SZ * GEMMA_SG_NUM], lora_input_list[i], stateA_list[i], gemmA_output_list[i], INPUT_STATE)
+        kernel_opt.enqueue("gemmA", [K_WGS, N_WGS * SG_SZ * GEMMA_SG_NUM], [1, SG_SZ * GEMMA_SG_NUM], lora_input_list[i], stateA_list[i], gemmA_output_list[i], INPUT_STATE)
         kernel_opt.enqueue("gemmB", [GEMMB_GWS],[GEMMB_LWS], main_input_list[i], gemmA_output_list[i], stateB_list[i], res_list[i], alpha_list[i], OUTPUT_STATE)
     profiling_data = cl.finish()
     for i in range(0, rep):
         if check_acc:
             tA_output_ref = cl.tensor([1, RANK], np.dtype(np.float16))
             tResult_ref = cl.tensor([1, OUTPUT_STATE], np.dtype(np.float16))
-            kernel_ref.enqueue("gemmA", [RANK],[RANK], lora_input_list[i], stateA_list[i], tA_output_ref, alpha_list[i], RANK, INPUT_STATE, INPUT_STATE_PER_WG)
-            REF_LOCAL_SIZE = 64
-            assert OUTPUT_STATE % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {OUTPUT_STATE} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
-            kernel_ref.enqueue("gemmB", [OUTPUT_STATE],[REF_LOCAL_SIZE], main_input_list[i],  tA_output_ref, stateB_list[i], tResult_ref, alpha_list[i],  RANK)
-            kernel_ref.enqueue("reduce", [RANK],[RANK], gemmA_output_list[i], tA_reduce, RANK, WG_NUM)
+            kernel_ref.enqueue("gemmA", [RANK],[1], lora_input_list[i], stateA_list[i], tA_output_ref, RANK, INPUT_STATE, INPUT_STATE_PER_WG)
+            kernel_ref.enqueue("gemmB", [OUTPUT_STATE],[16], main_input_list[i],  tA_output_ref, stateB_list[i], tResult_ref, alpha_list[i],  RANK)
+            kernel_ref.enqueue("reduce", [RANK],[RANK], gemmA_output_list[i], tA_reduce, RANK, K_WGS)
             cl.finish()
             compare(tA_output_ref.numpy(), tA_reduce.numpy())
             compare(tResult_ref.numpy(), res_list[i].numpy())
@@ -515,11 +513,10 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
 cl.profiling(True)
 # test_single_lora()
 #Check accuray
-# for rank in [16, 32, 64, 128, 192]:
-#     for out_state in [512, 1536, 3840]:
-#         test_single_lora_transposeB(rank, 1536, out_state, 1, True)
+for rank in [16, 32, 64, 80, 128, 192]:
+    for out_state in [512, 528, 1536, 3840]:
+        test_single_lora_transposeB(rank, 1536, out_state, 1, True)
 #Check perf
-for rank in [192]:
-    # for out_state in [1536]:
-    for out_state in [2560]:
+for rank in [64]:
+    for out_state in [512, 1536, 3840]:
         test_single_lora_transposeB(rank, 1536, out_state, 40)
