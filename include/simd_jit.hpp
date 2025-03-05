@@ -652,6 +652,26 @@ public:
     friend class SRegExpr;
 };
 
+class KReg {
+private:
+    SIMDJit* jit = nullptr;
+    std::shared_ptr<XbyakKReg> reg;
+
+public:
+    KReg(SIMDJit* jit, std::shared_ptr<XbyakKReg> reg) : jit(jit), reg(reg) {}
+    KReg();
+    KReg(const KReg& rhs) = default;
+    bool empty() const {
+        return !static_cast<bool>(reg);
+    }
+    operator XbyakKReg&() {
+        return *reg;
+    }
+    operator const XbyakKReg&() const {
+        return *reg;
+    }
+};
+
 class VReg {
 protected:
     SIMDJit* jit = nullptr;
@@ -688,7 +708,7 @@ public:
     inline void load(const VReg& rhs) const;
 
     enum class LDST_TYPE {
-        packed_int = 0,
+        packed_i32 = 0,
         packed_fp32,
         scalar_fp32,
         packed_bf16_fp32,
@@ -696,8 +716,8 @@ public:
         packed_i8_i32,
     };
 
-    inline void load(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_int) const;
-    inline void store(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_int) const;
+    inline void load(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_i32, const KReg& kmask = {nullptr, nullptr}) const;
+    inline void store(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_i32, const KReg& kmask = {nullptr, nullptr}) const;
 
     template <class T>
     int lanes() const {
@@ -747,26 +767,6 @@ public:
     }
     inline void load(SRegExpr&& addr) const;
     inline void store(SRegExpr&& addr) const;
-};
-
-class KReg {
-private:
-    SIMDJit* jit = nullptr;
-    std::shared_ptr<XbyakKReg> reg;
-
-public:
-    KReg(SIMDJit* jit, std::shared_ptr<XbyakKReg> reg) : jit(jit), reg(reg) {}
-    KReg(int id = -1);
-    KReg(const KReg& rhs) = default;
-    bool empty() const {
-        return !static_cast<bool>(reg);
-    }
-    operator XbyakKReg&() {
-        return *reg;
-    }
-    operator const XbyakKReg&() const {
-        return *reg;
-    }
 };
 
 class SRegExpr {
@@ -1305,12 +1305,12 @@ inline TReg::TReg(int id) {
     }
 }
 
-inline KReg::KReg(int id) {
+inline KReg::KReg() {
     auto* cur_jit = default_simd_jit_t::get().cur;
     if (cur_jit) {
         // allocate sreg
         jit = cur_jit;
-        reg = cur_jit->get_kreg(id).reg;
+        reg = cur_jit->get_kreg(-1).reg;
     }
 }
 
@@ -1338,11 +1338,13 @@ void SIMDJit::for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step
 }
 
 
-//  while (i + step <= stop) {
+//  while (i < stop - step) {
 //      loop_body();
 //      i += step;
 //  }
-//  
+//
+//  last-part:
+//      i + step >= stop
 //
 template <typename Fn, typename START, typename STEP>
 void SIMDJit::for_with_mask(SReg idx, START start, SReg stop, STEP step, const Fn& loop_body) {
@@ -1354,50 +1356,43 @@ void SIMDJit::for_with_mask(SReg idx, START start, SReg stop, STEP step, const F
 
     Xbyak::Label loop, exit;
     mov(idx, start);
+    sub(stop, step);
 
     align(64, false);
     L(loop);
-    add(idx, step);
     cmp(idx, stop);
-    jg(exit, T_NEAR);
-    sub(idx, step);
-    // body w/o mask (k0 is empty mask)
-    loop_body(kreg0);
+    jge(exit, T_NEAR);
+    loop_body(kreg0); // body w/o mask (k0 is empty mask)
     add(idx, step);
-
     jmp(loop, T_NEAR);
+
     L(exit);
-    // at exit, idx is pointing to tail
-    sub(idx, step);
+    // i + step >= stop
+    add(stop, step);
 
     // handling tail with kmask
-    if_(idx < stop, [&]{
-        KReg kmask;
-        {
-            SReg tmp;
-            tmp = (1 << (stop - idx)) - 1;
-
-            switch(step) {
-                case 8:
-                    kmovb(kmask, tmp.r32());
-                    break;
-                case 16:
-                    kmovw(kmask, tmp.r32());
-                    break;
-                case 32:
-                    kmovd(kmask, tmp.r32());
-                    break;
-                case 64:
-                    kmovq(kmask, tmp.r64());
-                    break;
-                default:
-                    ASSERT(0);
-            }
+    KReg kmask;
+    {
+        SReg tmp;
+        tmp = (1 << (stop - idx)) - 1;
+        switch(step) {
+            case 8:
+                kmovb(kmask, tmp.r32());
+                break;
+            case 16:
+                kmovw(kmask, tmp.r32());
+                break;
+            case 32:
+                kmovd(kmask, tmp.r32());
+                break;
+            case 64:
+                kmovq(kmask, tmp.r64());
+                break;
+            default:
+                ASSERT(0);
         }
-
-        loop_body(kmask);
-    });
-
+    }
+    loop_body(kmask);
 }
 
 template <typename Fn>
@@ -2030,35 +2025,48 @@ inline void VReg::load(const VReg& rhs) const {
     jit->vmovdqa(*reg, rhs);
 }
 
-inline void VReg::load(SRegExpr&& addr, LDST_TYPE type) const {
+inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const {
     ASSERT(addr.paddr);
     auto rbits = bits();
+    bool support_opmask = (rbits == 512);
+    XbyakKReg kreg = jit->k0;
+    if (!kmask.empty()) {
+        kreg = kmask;
+    }
     switch (type) {
-    case LDST_TYPE::packed_int:
-        if (rbits == 512) {
-            jit->vmovdqu32(*reg, jit->ptr[addr.paddr->to_addr()]);
+    case LDST_TYPE::packed_i32:
+        if (support_opmask) {
+            jit->vmovdqu32(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
         } else {
             jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
         }
         break;
     case LDST_TYPE::packed_fp32:
-        jit->vmovups(*reg, jit->ptr[addr.paddr->to_addr()]);
+        if (support_opmask) {
+            jit->vmovups(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+        } else {
+            jit->vmovups(*reg, jit->ptr[addr.paddr->to_addr()]);
+        }
         break;
     case LDST_TYPE::packed_bf16_fp32: {
         auto v_ymm = ymm();
-        jit->vmovdqu(v_ymm, jit->ptr[addr.paddr->to_addr()]);
+        jit->vmovdqu16(v_ymm | kreg, jit->ptr[addr.paddr->to_addr()]);
         jit->vpmovzxwd(*reg, v_ymm);
         jit->vpslld(*reg, *reg, 16);
     } break;
     case LDST_TYPE::packed_fp16_fp32:
-        jit->vmovdqu(ymm(), jit->ptr[addr.paddr->to_addr()]);
+        jit->vmovdqu16(ymm() | kreg, jit->ptr[addr.paddr->to_addr()]);
         jit->vcvtph2ps(*reg, ymm());
         break;
     case LDST_TYPE::scalar_fp32:
         jit->vmovss(xmm(), jit->ptr[addr.paddr->to_addr()]);
         break;
     case LDST_TYPE::packed_i8_i32:
-        jit->vpmovzxbd(*reg, jit->ptr[addr.paddr->to_addr()]);
+        if (support_opmask) {
+            jit->vpmovzxbd(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+        } else {
+            jit->vpmovzxbd(*reg, jit->ptr[addr.paddr->to_addr()]);
+        }
         break;
     default:
         assert(0);
@@ -2066,33 +2074,46 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type) const {
     }
 }
 
-inline void VReg::store(SRegExpr&& addr, LDST_TYPE type) const {
+inline void VReg::store(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const {
     ASSERT(addr.paddr);
     auto rbits = bits();
+    bool support_opmask = (rbits == 512);
+    XbyakKReg kreg = jit->k0;
+    if (!kmask.empty()) {
+        kreg = kmask;
+    }
     switch (type) {
-    case LDST_TYPE::packed_int:
-        if (rbits == 512) {
-            jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()], *reg);
+    case LDST_TYPE::packed_i32:
+        if (support_opmask) {
+            jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
         } else {
             jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
         }
         break;
     case LDST_TYPE::packed_fp32:
-        jit->vmovups(jit->ptr[addr.paddr->to_addr()], *reg);
+        if (support_opmask) {
+            jit->vmovups(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
+        } else {
+            jit->vmovups(jit->ptr[addr.paddr->to_addr()], *reg);
+        }
         break;
     case LDST_TYPE::packed_bf16_fp32:
         // vcvtne2ps2bf16 requires two fp32 regs
         ASSERT(0);
         break;
     case LDST_TYPE::packed_fp16_fp32:
-        jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()], *reg, 0x4);
+        if (support_opmask) {
+            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()] | kreg, *reg, 0x4);
+        } else {
+            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()], *reg, 0x4);
+        }
         break;
     case LDST_TYPE::scalar_fp32:
         jit->vmovss(jit->ptr[addr.paddr->to_addr()], xmm());
         break;
     case LDST_TYPE::packed_i8_i32:
-        if (rbits == 512) {
-            jit->vpmovsdb(jit->ptr[addr.paddr->to_addr()], *reg);
+        if (support_opmask) {
+            jit->vpmovsdb(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
         } else {
             jit->vpackssdw(*reg, *reg, *reg);
             jit->vpermq(ymm(), ymm(), 0x08);

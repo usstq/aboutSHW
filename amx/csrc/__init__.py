@@ -1,7 +1,7 @@
 import subprocess
 import os
 
-def build_with_cmake(proj_name = None, dir_path = None):
+def build_with_cmake(proj_name = None, dir_path = None, debug=False):
     if dir_path is None:
         dir_path = os.path.dirname(os.path.realpath(__file__))
     if proj_name is None:
@@ -48,8 +48,11 @@ target_compile_definitions(cppmodule
         file.write(cmake_src)
 
     build_path = os.path.join(dir_path, "build")
-    subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, "-DCMAKE_BUILD_TYPE=RelWithDebInfo"], shell=False)
-    subprocess.check_output(["cmake", "--build", build_path, "--config", "RelWithDebInfo"], shell=False)
+    btype = "RelWithDebInfo"
+    if debug:
+        btype = "Debug"
+    subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}"], shell=False)
+    subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
 
-build_with_cmake()
+build_with_cmake(debug = 0)
 from .cppmodule import *

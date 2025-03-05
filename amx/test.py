@@ -220,7 +220,7 @@ numactl(args.node, args.ncores)
 def test_quant_i8(dtype):
     csrc.set_nthr(ncores)
     torch.manual_seed(0)
-    src = torch.randint(low=-100, high=100, size=(256, 4096)).to(dtype = dtype).detach()
+    src = torch.randint(low=-100, high=100, size=(256, 4096+15)).to(dtype = dtype).detach()
     npsrc = to_numpy(src)
     layers = 100
     all_src = [npsrc.copy() for _ in range(layers)]
@@ -239,10 +239,10 @@ def test_quant_i8(dtype):
     min_latency = float(np.amin(latency_ms))
     std_latency = float(np.std(latency_ms[1:]))
 
-    print(q)
-    print(scale[:16, :])
+    #print(q)
+    #print(scale[:16, :])
     deq = to_torch(q*scale).to(dtype)
-    print(src)
+    #print(src)
     abs_diff = (deq-src).abs()
     max_abs_diff = float(abs_diff.max())
     mean_abs_diff = float(abs_diff.mean())
@@ -252,6 +252,7 @@ def test_quant_i8(dtype):
 
 if args.quanti8:
     test_quant_i8(torch.bfloat16)
+    test_quant_i8(torch.float16)
     sys.exit(0)
 
 

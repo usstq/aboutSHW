@@ -722,27 +722,17 @@ public:
 
             sign_bit_mask.load(0x80000000);
             vmax.load(0);
-#if 1
+
             jit->for_with_mask(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32, kmask);
+
                 jit->vandnps(d0, sign_bit_mask, d0);  // clear sign bit
                 jit->vmaxps(vmax, vmax, d0);
             });
-#else
-            i = 0;
-            jit->while_(i < count, [&] {
-                if (x_dtype == DTYPE_FP16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
-                else if (x_dtype == DTYPE_BF16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
-                jit->vandnps(d0, sign_bit_mask, d0);  // clear sign bit
-                jit->vmaxps(vmax, vmax, d0);
-                i = i + simdw;
-            });
-#endif
+
             vmax.reduce_ps([&](const VReg& vdst, const VReg& vsrc0, const VReg& vsrc1) {
                 jit->vmaxps(vdst, vsrc0, vsrc1);
             });
@@ -757,17 +747,16 @@ public:
 
             vdscale.store(pscale, VReg::LDST_TYPE::scalar_fp32);
 
-            i = 0;
-            jit->while_(i < count, [&] {
+            jit->for_with_mask(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)
-                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32, kmask);
                 jit->vmulps(d0, d0, vscale);
                 jit->vcvtps2dq(d0, d0);
-                d0.store(pdst + i * sizeof(int8_t), VReg::LDST_TYPE::packed_i8_i32);
-                i = i + simdw;
+                d0.store(pdst + i * sizeof(int8_t), VReg::LDST_TYPE::packed_i8_i32, kmask);
             });
+
         });
     }
 
