@@ -19,6 +19,7 @@
 using XbyakSReg64 = Xbyak::Reg64;
 using XbyakSReg32 = Xbyak::Reg32;
 using XbyakVReg = Xbyak::Xmm;
+using XbyakKReg = Xbyak::Opmask;
 using XbyakTReg = Xbyak::Tmm;
 using XbyakLabel = Xbyak::Label;
 
@@ -250,11 +251,19 @@ struct jit_generator : public Xbyak::CodeGenerator {
           sreg_pool("sreg_pool"),
           vreg_pool("vreg_pool"),
           treg_pool("treg_pool"),
+          kreg_pool("kreg_pool"),
           jcout(this, use_avx512) {
         vreg_pool.add_range(0, 15);
+
         if (use_avx512)
             vreg_pool.add_range(16, 31);
-        treg_pool.add_range(0, 7);
+
+        if (cpu.has(Xbyak::util::Cpu::tAMX_TILE))
+            treg_pool.add_range(0, 7);
+
+        if (use_avx512) {
+            kreg_pool.add_range(0, 7);
+        }
 #    ifdef _WIN32
         sreg_pool.add_range(std::vector<int>({Xbyak::Operand::RCX,
                                               Xbyak::Operand::RDX,
@@ -385,9 +394,16 @@ struct jit_generator : public Xbyak::CodeGenerator {
 protected:
     ov::intel_cpu::reg_pool sreg_pool;
     ov::intel_cpu::reg_pool vreg_pool;
+    ov::intel_cpu::reg_pool kreg_pool;
     ov::intel_cpu::reg_pool treg_pool;
 
     std::shared_ptr<XbyakSReg64> alloc_reg64(int index) {
+        if (index >= 0) {
+            // specified register has been used, return null
+            if (sreg_pool.is_used(index))
+                return nullptr;
+        }
+
         auto reg_index = sreg_pool.allocate(index);
 
         auto it = regs_on_stack.find(reg_index);
@@ -430,6 +446,14 @@ protected:
         auto reg_index = treg_pool.allocate(index);
         return std::shared_ptr<XbyakTReg>(new Xbyak::Tmm(reg_index), [this, reg_index](Xbyak::Tmm* preg) {
             treg_pool.free(reg_index);
+            delete preg;
+        });
+    }
+
+    std::shared_ptr<XbyakKReg> alloc_kreg(int index) {
+        auto reg_index = kreg_pool.allocate(index);
+        return std::shared_ptr<XbyakKReg>(new Xbyak::Opmask(reg_index), [this, reg_index](Xbyak::Opmask* preg) {
+            kreg_pool.free(reg_index);
             delete preg;
         });
     }
@@ -609,6 +633,9 @@ public:
     const XbyakSReg64& r64() const {
         return *reg;
     }
+    XbyakSReg32 r32() const {
+        return reg->cvt32();
+    }
 
     inline const SReg& operator=(const SReg& reg) const;
     inline const SReg& operator=(SRegExpr&& expr) const;
@@ -720,6 +747,26 @@ public:
     }
     inline void load(SRegExpr&& addr) const;
     inline void store(SRegExpr&& addr) const;
+};
+
+class KReg {
+private:
+    SIMDJit* jit = nullptr;
+    std::shared_ptr<XbyakKReg> reg;
+
+public:
+    KReg(SIMDJit* jit, std::shared_ptr<XbyakKReg> reg) : jit(jit), reg(reg) {}
+    KReg(int id = -1);
+    KReg(const KReg& rhs) = default;
+    bool empty() const {
+        return !static_cast<bool>(reg);
+    }
+    operator XbyakKReg&() {
+        return *reg;
+    }
+    operator const XbyakKReg&() const {
+        return *reg;
+    }
 };
 
 class SRegExpr {
@@ -1001,7 +1048,8 @@ public:
         return nullptr;
     }
 
-    SIMDJit(const char* name = "") : jit_generator(name) {
+    KReg kreg0; // special one
+    SIMDJit(const char* name = "") : jit_generator(name), kreg0(get_kreg(0)) {
         preamble();
     }
 
@@ -1034,8 +1082,8 @@ public:
 
     // find a free register, note argument registers are also allocatable, make sure
     // allocate argument registers before any local register-var
-    SReg get_sreg() {
-        return SReg(this, alloc_reg64(-1));
+    SReg get_sreg(int id = -1) {
+        return SReg(this, alloc_reg64(id));
     }
 
     VReg get_vreg(int bits = 0) {
@@ -1044,6 +1092,10 @@ public:
 
     TReg get_treg(int id) {
         return TReg(this, alloc_treg(id));
+    }
+
+    KReg get_kreg(int id) {
+        return KReg(this, alloc_kreg(id));
     }
 
     std::vector<VReg> get_vregs(size_t num_vregs) {
@@ -1158,6 +1210,11 @@ public:
     template <typename Fn>
     void do_while_(SRegExpr regcmp, const Fn& loop_body);
 
+    // will maintain a mask register according to valid number of elements
+    // kmask contains the valid mask, loop_body should always using the mask
+    template <typename Fn, typename START, typename STEP>
+    void for_with_mask(SReg idx, START start, SReg stop, STEP step, const Fn& loop_body);
+
     inline void if_(SRegExpr regcmp,
                     const std::function<void()>& then_body,
                     const std::function<void()>& else_body = {});
@@ -1190,7 +1247,7 @@ inline SReg::SReg() {
     if (cur_jit) {
         // allocate sreg
         jit = cur_jit;
-        reg = cur_jit->get_sreg().reg;
+        reg = cur_jit->get_sreg(-1).reg;
     }
 }
 inline VReg::VReg(int bits) {
@@ -1247,6 +1304,16 @@ inline TReg::TReg(int id) {
         reg = cur_jit->get_treg(id).reg;
     }
 }
+
+inline KReg::KReg(int id) {
+    auto* cur_jit = default_simd_jit_t::get().cur;
+    if (cur_jit) {
+        // allocate sreg
+        jit = cur_jit;
+        reg = cur_jit->get_kreg(id).reg;
+    }
+}
+
 //========================================================================================================
 #ifdef __x86_64__
 template <typename Fn, typename START, typename STEP>
@@ -1268,6 +1335,69 @@ void SIMDJit::for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step
     L(exit);
     // at exit, idx is pointing to tail
     sub(idx, step);
+}
+
+
+//  while (i + step <= stop) {
+//      loop_body();
+//      i += step;
+//  }
+//  
+//
+template <typename Fn, typename START, typename STEP>
+void SIMDJit::for_with_mask(SReg idx, START start, SReg stop, STEP step, const Fn& loop_body) {
+    ASSERT(use_avx512);
+    if (step > 16) {
+        // needs AVX512BW for kmask with more than 16-bits
+        ASSERT(cpu.has(Xbyak::util::Cpu::tAVX512BW));
+    }
+
+    Xbyak::Label loop, exit;
+    mov(idx, start);
+
+    align(64, false);
+    L(loop);
+    add(idx, step);
+    cmp(idx, stop);
+    jg(exit, T_NEAR);
+    sub(idx, step);
+    // body w/o mask (k0 is empty mask)
+    loop_body(kreg0);
+    add(idx, step);
+
+    jmp(loop, T_NEAR);
+    L(exit);
+    // at exit, idx is pointing to tail
+    sub(idx, step);
+
+    // handling tail with kmask
+    if_(idx < stop, [&]{
+        KReg kmask;
+        {
+            SReg tmp;
+            tmp = (1 << (stop - idx)) - 1;
+
+            switch(step) {
+                case 8:
+                    kmovb(kmask, tmp.r32());
+                    break;
+                case 16:
+                    kmovw(kmask, tmp.r32());
+                    break;
+                case 32:
+                    kmovd(kmask, tmp.r32());
+                    break;
+                case 64:
+                    kmovq(kmask, tmp.r64());
+                    break;
+                default:
+                    ASSERT(0);
+            }
+        }
+
+        loop_body(kmask);
+    });
+
 }
 
 template <typename Fn>
@@ -1668,15 +1798,49 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
             if (p->rhs->is_imm())
                 sar(dst, p->rhs->as_imm32());
             else {
-                // only cl register supportted, we need allocate cl
-                ASSERT(false);  // sar(dst, p->rhs->as_r64());
+                // only cl register supportted
+                auto rhs_reg = p->rhs->as_r64<XbyakSReg64>();
+                if (rhs_reg.getIdx() == rcx.getIdx()) {
+                    sar(dst, cl);
+                } else {
+                    auto tmp_rcx = get_sreg(rcx.getIdx());
+                    if (!tmp_rcx.empty()) {
+                        // rcx is free to use w/o preserve
+                        mov(rcx, rhs_reg);
+                        sar(dst, cl);
+                    } else {
+                        // preserve rcx for shl
+                        auto tmp2 = get_sreg(-1);
+                        mov(tmp2, rcx);
+                        mov(rcx, rhs_reg);
+                        sar(dst, cl);
+                        mov(rcx, tmp2);
+                    }
+                }
             }
         } else if (p->is_op("<<")) {
             if (p->rhs->is_imm())
                 shl(dst, p->rhs->as_imm32());
             else {
                 // only cl register supportted, we need allocate cl
-                ASSERT(false);  // shl(dst, p->rhs->as_r64());
+                auto rhs_reg = p->rhs->as_r64<XbyakSReg64>();
+                if (rhs_reg.getIdx() == rcx.getIdx()) {
+                    shl(dst, cl);
+                } else {
+                    auto tmp_rcx = get_sreg(rcx.getIdx());
+                    if (!tmp_rcx.empty()) {
+                        // rcx is free to use w/o preserve
+                        mov(rcx, rhs_reg);
+                        shl(dst, cl);
+                    } else {
+                        // preserve rcx for shl
+                        auto tmp2 = get_sreg(-1);
+                        mov(tmp2, rcx);
+                        mov(rcx, rhs_reg);
+                        shl(dst, cl);
+                        mov(rcx, tmp2);
+                    }
+                }
             }
         } else if (p->is_op("&")) {
             if (p->rhs->is_imm())

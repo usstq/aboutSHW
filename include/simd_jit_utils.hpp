@@ -60,6 +60,11 @@ public:
         }
     }
 
+    bool is_used(int slot_index) {
+        ASSERT(static_cast<size_t>(slot_index) < m_reg_status.size(), slot_index, " > ", m_reg_status.size());
+        return m_reg_status[slot_index] & mark_used;
+    }
+
     int allocate(int slot_index = -1) {
         // allocate register with specific slot index
         if (slot_index >= 0) {

@@ -60,16 +60,6 @@ def test_amx_repack_B():
         print(dst)
         assert False, "amx_repack_B failed!"
 
-def test_quant_i8(dtype):
-    np.random.seed(0)
-    src = torch.randint(low=-100, high=100, size=(16, 32)).to(dtype = dtype).detach()
-    q, scale = csrc.test_quant_i8(to_numpy(src))
-    print(q)
-    print(scale)
-    deq = to_torch(q*scale).to(dtype)
-    print(src)
-    print((deq-src).abs())
-
 #test_quant_i8(torch.bfloat16); sys.exit(0)
 
 parser = argparse.ArgumentParser()
@@ -77,6 +67,8 @@ parser.add_argument('-n', '--ncores', type=int, default=0)
 parser.add_argument('-N', '--node', type=int, default=1)
 parser.add_argument('-b', '--batch-size', type=int, default=256)
 parser.add_argument('-r', '--repeat', type=int, default=5)
+parser.add_argument('-q', '--quanti8', action="store_true")
+
 args = parser.parse_args()
 
 
@@ -119,8 +111,6 @@ class testcase:
             self.W[i] = to_numpy(self.W[i])
 
         self.X = to_numpy(self.X)
-
-
 
     def check(self):
         for i, (Y, Z) in enumerate(zip(self.Y, self.Z)):
@@ -190,7 +180,6 @@ def numactl(target_node, cores):
         ncores = node_num_cpus//2
     print(f"numactl ncores {ncores} on node {target_node} with {node_num_cpus} cpus")
 
-numactl(args.node, args.ncores)
 
 def test_mem_bounds(repeat):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
@@ -224,6 +213,48 @@ def test_k_groups(repeat, batch_size):
 #test_k_groups(); sys.exit(0)
 
 #test_amx_repack_B(); sys.exit(0)
+
+numactl(args.node, args.ncores)
+
+
+def test_quant_i8(dtype):
+    csrc.set_nthr(ncores)
+    torch.manual_seed(0)
+    src = torch.randint(low=-100, high=100, size=(256, 4096)).to(dtype = dtype).detach()
+    npsrc = to_numpy(src)
+    layers = 100
+    all_src = [npsrc.copy() for _ in range(layers)]
+    q = to_numpy(torch.randint(low=-100, high=100, size=src.shape).to(dtype = torch.int8).detach())
+    scale = to_numpy(torch.randint(low=-100, high=100, size=(src.shape[0], 1)).to(dtype = torch.float32).detach())
+    # warm-up    
+    for s in all_src:
+        csrc.test_quant_i8(s, q, scale)
+
+    latency_ms = []
+    for r in range(5):
+        t0 = time.time()
+        for s in all_src:
+            csrc.test_quant_i8(s, q, scale)
+        latency_ms.append((time.time() - t0)/layers * 1e3)
+    min_latency = float(np.amin(latency_ms))
+    std_latency = float(np.std(latency_ms[1:]))
+
+    print(q)
+    print(scale[:16, :])
+    deq = to_torch(q*scale).to(dtype)
+    print(src)
+    abs_diff = (deq-src).abs()
+    max_abs_diff = float(abs_diff.max())
+    mean_abs_diff = float(abs_diff.mean())
+    print(f" diff_max:{max_abs_diff:.2f} diff_mean:{mean_abs_diff:.2f} min_latency:{min_latency:.2f} + std{std_latency:.2f}ms")
+
+
+
+if args.quanti8:
+    test_quant_i8(torch.bfloat16)
+    sys.exit(0)
+
+
 
 test_mem_bounds(args.repeat)
 test_compute_bounds(args.repeat, args.batch_size)

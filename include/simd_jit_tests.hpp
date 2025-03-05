@@ -1,5 +1,13 @@
 #include "simd_jit.hpp"
 
+using ov::intel_cpu::SIMDJit;
+using ov::intel_cpu::SReg;
+using ov::intel_cpu::TMUL_TYPE;
+using ov::intel_cpu::TReg;
+using ov::intel_cpu::VReg;
+using ov::intel_cpu::Ymm;
+using ov::intel_cpu::Zmm;
+
 std::vector<std::function<void(void)>> test_exprs;
 
 void unit_tests() {
@@ -120,6 +128,12 @@ ExprKPI complex_expression(int id, T& dst, T& a, T& b, T& c, T& d, T& e, T& f) {
     case 8:
         dst = ((a > 1) || (b < 2)) && (!(f == 0));
         return ExprKPI_AARCH64(1, 6) ExprKPI_X64(1, 9);
+    case 9:
+        dst = (1 << (f - b)) - 1;
+        return ExprKPI_AARCH64(1, 6) ExprKPI_X64(1, 9);
+    case 10:
+        dst = (1024 >> (f - b)) - 1;
+        return ExprKPI_AARCH64(1, 6) ExprKPI_X64(1, 9);
     default:
         ASSERT(false, "not supported expression id : ", id);
     }
@@ -171,7 +185,7 @@ void expr_tests() {
         return jit;
     };
     // do_test(0);
-    for (int i = 0; i < 9; i++)
+    for (int i = 0; i < 11; i++)
         do_test(i);
 }
 
@@ -385,124 +399,107 @@ void simd_test_tput(const char* op_name, const int UNROLL) {
     LinuxSimplePerf p({{"C", 0}, {"I", 0}});
 
     auto get_tput_kernel = [](std::string op, const int UNROLL) {
-        auto jit = std::make_shared<ov::intel_cpu::SIMDJit>("tput");
-        auto cnt = jit->get_arg(0);
-        auto idx = jit->get_sreg();
+        return ov::intel_cpu::SIMDJit::create([&](SIMDJit* jit, SReg cnt) {
+            SReg idx;
 
-        auto vr0 = jit->get_vreg();
-        auto vr1 = jit->get_vreg();
-        auto vr2 = jit->get_vreg();
-        auto vr3 = jit->get_vreg();
+            Ymm vr0, vr1, vr2, vr3;
+            Ymm vr4, vr5, vr6, vr7;
+            Ymm vr8, vr9, vra, vrb;
+            Ymm vrc, vrd, vre, vrf;
 
-        auto vr4 = jit->get_vreg();
-        auto vr5 = jit->get_vreg();
-        auto vr6 = jit->get_vreg();
-        auto vr7 = jit->get_vreg();
+            XbyakVReg v0 = vr0;
+            XbyakVReg v1 = vr1;
+            XbyakVReg v2 = vr2;
+            XbyakVReg v3 = vr3;
+            XbyakVReg v4 = vr4;
+            XbyakVReg v5 = vr5;
+            XbyakVReg v6 = vr6;
+            XbyakVReg v7 = vr7;
 
-        XbyakVReg v0 = vr0;
-        XbyakVReg v1 = vr1;
-        XbyakVReg v2 = vr2;
-        XbyakVReg v3 = vr3;
-        XbyakVReg v4 = vr4;
-        XbyakVReg v5 = vr5;
-        XbyakVReg v6 = vr6;
-        XbyakVReg v7 = vr7;
+    #ifdef __x86_64__
+            jit->vpxor(vr0, vr0, vr0);
+            jit->vpxor(vr1, vr1, vr1);
+            jit->vpxor(vr2, vr2, vr2);
+            jit->vpxor(vr3, vr3, vr3);
 
-        auto vr8 = jit->get_vreg();
-        auto vr9 = jit->get_vreg();
-        auto vra = jit->get_vreg();
-        auto vrb = jit->get_vreg();
+            jit->vpxor(vr4, vr4, vr4);
+            jit->vpxor(vr5, vr5, vr5);
+            jit->vpxor(vr6, vr6, vr6);
+            jit->vpxor(vr7, vr7, vr7);
 
-        auto vrc = jit->get_vreg();
-        auto vrd = jit->get_vreg();
-        auto vre = jit->get_vreg();
-        auto vrf = jit->get_vreg();
-#ifdef __x86_64__
-        jit->vpxor(vr0, vr0, vr0);
-        jit->vpxor(vr1, vr1, vr1);
-        jit->vpxor(vr2, vr2, vr2);
-        jit->vpxor(vr3, vr3, vr3);
+            jit->vpxor(vr8, vr8, vr8);
+            jit->vpxor(vr9, vr9, vr9);
+            jit->vpxor(vra, vra, vra);
+            jit->vpxor(vrb, vrb, vrb);
+            jit->vpxor(vrc, vrc, vrc);
+            jit->vpxor(vrd, vrd, vrd);
+            jit->vpxor(vre, vre, vre);
+            jit->vpxor(vrf, vrf, vrf);
+    #endif
+            idx = 0;
+            jit->do_while_(idx < cnt, [&] {
+                for (int i = 0; i < UNROLL; i++) {
+    #ifdef __x86_64__
+                    if (op == "fabs") {
+                        jit->vpabsd(v0, v0);
+                        jit->vpabsd(v1, v1);
+                        jit->vpabsd(v2, v2);
+                        jit->vpabsd(v3, v3);
+                    }
+                    if (op == "fma") {
+                        jit->vfmadd231ps(v1, v0, v0);
+                        jit->vfmadd231ps(v3, v2, v2);
+                        jit->vfmadd231ps(v5, v4, v4);
+                        jit->vfmadd231ps(v7, v6, v6);
 
-        jit->vpxor(vr4, vr4, vr4);
-        jit->vpxor(vr5, vr5, vr5);
-        jit->vpxor(vr6, vr6, vr6);
-        jit->vpxor(vr7, vr7, vr7);
+                        jit->vfmadd231ps(vr9, vr8, vr8);
+                        jit->vfmadd231ps(vrb, vra, vra);
+                        jit->vfmadd231ps(vrd, vrc, vrc);
+                        jit->vfmadd231ps(vrf, vre, vre);
+                    }
+                    if (op == "vnni") {
+                        jit->vpdpbusd(v1, v0, v0, Xbyak::VexEncoding);
+                        jit->vpdpbusd(v3, v2, v2, Xbyak::VexEncoding);
+                        jit->vpdpbusd(v5, v4, v4, Xbyak::VexEncoding);
+                        jit->vpdpbusd(v7, v6, v6, Xbyak::VexEncoding);
 
-        jit->vpxor(vr8, vr8, vr8);
-        jit->vpxor(vr9, vr9, vr9);
-        jit->vpxor(vra, vra, vra);
-        jit->vpxor(vrb, vrb, vrb);
-        jit->vpxor(vrc, vrc, vrc);
-        jit->vpxor(vrd, vrd, vrd);
-        jit->vpxor(vre, vre, vre);
-        jit->vpxor(vrf, vrf, vrf);
-#endif
-        idx = 0;
-        jit->do_while_(idx < cnt, [&] {
-            for (int i = 0; i < UNROLL; i++) {
-#ifdef __x86_64__
-                if (op == "fabs") {
-                    jit->vpabsd(v0, v0);
-                    jit->vpabsd(v1, v1);
-                    jit->vpabsd(v2, v2);
-                    jit->vpabsd(v3, v3);
+                        jit->vpdpbusd(vr9, vr8, vr8, Xbyak::VexEncoding);
+                        jit->vpdpbusd(vrb, vra, vra, Xbyak::VexEncoding);
+                        jit->vpdpbusd(vrd, vrc, vrc, Xbyak::VexEncoding);
+                        jit->vpdpbusd(vrf, vre, vre, Xbyak::VexEncoding);
+                    }
+                    if (op == "fadd") {
+                        jit->vaddps(v1, v1, v1);
+                        jit->vaddps(v2, v2, v2);
+                        jit->vaddps(v3, v3, v3);
+                        jit->vaddps(v4, v4, v4);
+                    }
+    #endif
+
+    #ifdef __aarch64__
+                    if (op == "fabs") {
+                        jit->fabs(v1.s4, v0.s4);
+                        jit->fabs(v3.s4, v2.s4);
+                        jit->fabs(v5.s4, v4.s4);
+                        jit->fabs(v7.s4, v6.s4);
+                    }
+                    if (op == "fmla") {
+                        jit->fmla(v1.s4, v0.s4, v0.s4);
+                        jit->fmla(v3.s4, v2.s4, v2.s4);
+                        jit->fmla(v5.s4, v4.s4, v4.s4);
+                        jit->fmla(v7.s4, v6.s4, v6.s4);
+                    }
+                    if (op == "fadd") {
+                        jit->fadd(v1.s4, v1.s4, v1.s4);
+                        jit->fadd(v2.s4, v2.s4, v2.s4);
+                        jit->fadd(v3.s4, v3.s4, v3.s4);
+                        jit->fadd(v4.s4, v4.s4, v4.s4);
+                    }
+    #endif
                 }
-                if (op == "fma") {
-                    jit->vfmadd231ps(v1, v0, v0);
-                    jit->vfmadd231ps(v3, v2, v2);
-                    jit->vfmadd231ps(v5, v4, v4);
-                    jit->vfmadd231ps(v7, v6, v6);
-
-                    jit->vfmadd231ps(vr9, vr8, vr8);
-                    jit->vfmadd231ps(vrb, vra, vra);
-                    jit->vfmadd231ps(vrd, vrc, vrc);
-                    jit->vfmadd231ps(vrf, vre, vre);
-                }
-                if (op == "vnni") {
-                    jit->vpdpbusd(v1, v0, v0, Xbyak::VexEncoding);
-                    jit->vpdpbusd(v3, v2, v2, Xbyak::VexEncoding);
-                    jit->vpdpbusd(v5, v4, v4, Xbyak::VexEncoding);
-                    jit->vpdpbusd(v7, v6, v6, Xbyak::VexEncoding);
-
-                    jit->vpdpbusd(vr9, vr8, vr8, Xbyak::VexEncoding);
-                    jit->vpdpbusd(vrb, vra, vra, Xbyak::VexEncoding);
-                    jit->vpdpbusd(vrd, vrc, vrc, Xbyak::VexEncoding);
-                    jit->vpdpbusd(vrf, vre, vre, Xbyak::VexEncoding);
-                }
-                if (op == "fadd") {
-                    jit->vaddps(v1, v1, v1);
-                    jit->vaddps(v2, v2, v2);
-                    jit->vaddps(v3, v3, v3);
-                    jit->vaddps(v4, v4, v4);
-                }
-#endif
-
-#ifdef __aarch64__
-                if (op == "fabs") {
-                    jit->fabs(v1.s4, v0.s4);
-                    jit->fabs(v3.s4, v2.s4);
-                    jit->fabs(v5.s4, v4.s4);
-                    jit->fabs(v7.s4, v6.s4);
-                }
-                if (op == "fmla") {
-                    jit->fmla(v1.s4, v0.s4, v0.s4);
-                    jit->fmla(v3.s4, v2.s4, v2.s4);
-                    jit->fmla(v5.s4, v4.s4, v4.s4);
-                    jit->fmla(v7.s4, v6.s4, v6.s4);
-                }
-                if (op == "fadd") {
-                    jit->fadd(v1.s4, v1.s4, v1.s4);
-                    jit->fadd(v2.s4, v2.s4, v2.s4);
-                    jit->fadd(v3.s4, v3.s4, v3.s4);
-                    jit->fadd(v4.s4, v4.s4, v4.s4);
-                }
-#endif
-            }
-            idx++;
+                idx++;
+            });
         });
-        jit->return_();
-        jit->finalize();
-        return jit;
     };
 
     auto do_test = [&](std::string op, const int UNROLL) {
@@ -604,11 +601,11 @@ void simd_test_printreg() {
 
     jit->vbroadcastss(v0, jit->ptr[s0.r64()]);
     //jit->vmovdqu(v0, jit->ptr[s0.r64()]);
-    jit->vmovdqu(v2, jit->ptr[s0.r64()]);
+    v2.load(s0);
 
 
     jit->mov(s0, reinterpret_cast<uintptr_t>(&ivalues));
-    jit->vmovdqu(v1, jit->ptr[s0.r64()]);
+    v1.load(s0);
 
     jit->mov(jit->rax, jit->rsp);
     //jit->jcout(__FILE__, ":", __LINE__, " rsp=", jit->rsp, " arg0=", arg0,", arg1=", arg1, ", arg2=", arg2, ", arg3=", arg3);

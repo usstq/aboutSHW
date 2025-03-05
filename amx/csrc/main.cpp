@@ -13,6 +13,7 @@
 
 using ov::intel_cpu::SIMDJit;
 using ov::intel_cpu::SReg;
+using ov::intel_cpu::KReg;
 using ov::intel_cpu::TMUL_TYPE;
 using ov::intel_cpu::TReg;
 using ov::intel_cpu::VReg;
@@ -128,6 +129,44 @@ std::shared_ptr<const T> make_cacheable(CArgs... cargs) {
     }
     return sptr;
 }
+
+template <typename T, typename Q>
+inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
+    if (team <= 1 || n == 0) {
+        n_start = 0;
+        n_end = n;
+    } else {
+        T n1 = (n + (T)team - 1) / (T)team;
+        T n2 = n1 - 1;
+        T T1 = n - n2 * (T)team;
+        n_end = (T)tid < T1 ? n1 : n2;
+        n_start = (T)tid <= T1 ? tid * n1 : T1 * n1 + ((T)tid - T1) * n2;
+    }
+
+    n_end += n_start;
+}
+
+template <typename F>
+void parallel_nt_static(int nthr, const F& func) {
+    if (nthr == 0)
+        nthr = omp_get_max_threads();
+#pragma omp parallel
+    {
+        int ithr = omp_get_thread_num();
+        func(ithr, nthr);
+    }
+}
+
+template <typename T0, typename F>
+void parallel_for(const T0& D0, const F& func) {
+    parallel_nt_static(0, [&](int ithr, int nthr) {
+        T0 n_start, n_end;
+        splitter(D0, nthr, ithr, n_start, n_end);
+        func(n_start, n_end);
+    });
+}
+
+
 ////////////////////////////////////////////////////////////////////////////
 class func_amx_repack_Btile {
     std::shared_ptr<SIMDJit> jit;
@@ -683,6 +722,16 @@ public:
 
             sign_bit_mask.load(0x80000000);
             vmax.load(0);
+#if 1
+            jit->for_with_mask(i, 0, count, simdw, [&](KReg kmask){
+                if (x_dtype == DTYPE_FP16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                else if (x_dtype == DTYPE_BF16)
+                    d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                jit->vandnps(d0, sign_bit_mask, d0);  // clear sign bit
+                jit->vmaxps(vmax, vmax, d0);
+            });
+#else
             i = 0;
             jit->while_(i < count, [&] {
                 if (x_dtype == DTYPE_FP16)
@@ -693,7 +742,7 @@ public:
                 jit->vmaxps(vmax, vmax, d0);
                 i = i + simdw;
             });
-
+#endif
             vmax.reduce_ps([&](const VReg& vdst, const VReg& vsrc0, const VReg& vsrc1) {
                 jit->vmaxps(vdst, vsrc0, vsrc1);
             });
@@ -704,7 +753,7 @@ public:
             jit->vdivps(vdscale, vmax, v_q_max);
             jit->vdivps(vscale, v_q_max, vmax);
 
-            jit->jcout("vmax=", jit->jcout.as_f32, vmax);
+            //jit->jcout("vmax=", jit->jcout.as_f32, vmax);
 
             vdscale.store(pscale, VReg::LDST_TYPE::scalar_fp32);
 
@@ -753,41 +802,18 @@ int DTYPE_of(const py::array& src) {
     return DTYPE_FP32;
 }
 
-std::pair<py::array_t<int8_t>, py::array_t<float>> test_quant_i8(const py::array& src) {
+void test_quant_i8(const py::array& src, py::array_t<int8_t> dst, py::array_t<float> scale) {
     auto func = make_cacheable<func_quantize>(DTYPE_of(src));
     auto M = src.shape(0);
     auto K = src.shape(1);
-    py::array_t<int8_t> dst({M, K});
-    py::array_t<float> scale({M, M*0 + 1});
-    (*func)(src.data(), src.strides(0), dst.mutable_data(), dst.strides(0), scale.mutable_data(), M, K);
-    return {dst, scale};
-}
-
-template <typename T, typename Q>
-inline void splitter(const T& n, const Q& team, const Q& tid, T& n_start, T& n_end) {
-    if (team <= 1 || n == 0) {
-        n_start = 0;
-        n_end = n;
-    } else {
-        T n1 = (n + (T)team - 1) / (T)team;
-        T n2 = n1 - 1;
-        T T1 = n - n2 * (T)team;
-        n_end = (T)tid < T1 ? n1 : n2;
-        n_start = (T)tid <= T1 ? tid * n1 : T1 * n1 + ((T)tid - T1) * n2;
-    }
-
-    n_end += n_start;
-}
-
-template <typename F>
-void parallel_nt_static(int nthr, const F& func) {
-    if (nthr == 0)
-        nthr = omp_get_max_threads();
-#pragma omp parallel
-    {
-        int ithr = omp_get_thread_num();
-        func(ithr, nthr);
-    }
+    //py::array_t<int8_t> dst({M, K});
+    //py::array_t<float> scale({M, M*0 + 1});
+    parallel_for(M, [&](int m0, int m1) {
+        auto* psrc = reinterpret_cast<const int8_t*>(src.data()) + m0*src.strides(0);
+        auto* pdst = reinterpret_cast<int8_t*>(dst.mutable_data()) + m0*dst.strides(0);
+        (*func)(psrc, src.strides(0), pdst, dst.strides(0), scale.mutable_data() + m0, m1 - m0, K);
+    });
+    //return {dst, scale};
 }
 
 class blocking_1d {
@@ -1278,6 +1304,19 @@ void set_nthr(int nthr) {
     omp_set_num_threads(nthr);  // Use 4 threads for all consecutive parallel regions
 }
 
+void test() {
+    auto jit = SIMDJit::create([&](SIMDJit* jit, SReg count, SReg i) {
+        SReg temp, x;
+        temp = (1<<(count - i)) - 1;
+        jit->return_(temp);
+    });
+
+    std::cout << (*jit)(120, 120) << std::endl;
+    std::cout << (*jit)(120, 119) << std::endl;
+    std::cout << (*jit)(120, 118) << std::endl;
+    std::cout << (*jit)(120, 117) << std::endl;
+}
+
 PYBIND11_MODULE(PACKAGE_NAME, m) {
     m.doc() = R"pbdoc(
     )pbdoc";
@@ -1285,6 +1324,8 @@ PYBIND11_MODULE(PACKAGE_NAME, m) {
     py::class_<AMXQKVLinear>(m, "AMXQKVLinear")
         .def(py::init<std::vector<py::array>>())
         .def("forward", &AMXQKVLinear::forward);
+
+    m.def("test", test);
 
     m.def("test_amx_repack_B", test_amx_repack_B);
     m.def("test_quant_i8", test_quant_i8);
