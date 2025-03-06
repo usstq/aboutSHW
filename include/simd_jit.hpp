@@ -713,7 +713,9 @@ public:
         scalar_fp32,
         packed_bf16_fp32,
         packed_fp16_fp32,
+        packed_i32_fp32,
         packed_i8_i32,
+        broadcast_fp32,
     };
 
     inline void load(SRegExpr&& addr, LDST_TYPE type = LDST_TYPE::packed_i32, const KReg& kmask = {nullptr, nullptr}) const;
@@ -1315,27 +1317,6 @@ inline KReg::KReg() {
 
 //========================================================================================================
 #ifdef __x86_64__
-template <typename Fn, typename START, typename STEP>
-void SIMDJit::for_loop(XbyakSReg64 idx, START start, XbyakSReg64 stop, STEP step, const Fn& loop_body) {
-    Xbyak::Label loop, exit;
-    mov(idx, start);
-
-    align(64, false);
-    L(loop);
-    add(idx, step);
-    cmp(idx, stop);
-    jg(exit, T_NEAR);
-    sub(idx, step);
-
-    loop_body();
-    add(idx, step);
-
-    jmp(loop, T_NEAR);
-    L(exit);
-    // at exit, idx is pointing to tail
-    sub(idx, step);
-}
-
 template <typename START, typename STEP>
 void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body) {
     Xbyak::Label loop, exit;
@@ -2067,6 +2048,13 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const
         jit->vmovdqu16(ymm() | kreg, jit->ptr[addr.paddr->to_addr()]);
         jit->vcvtph2ps(*reg, ymm());
         break;
+    case LDST_TYPE::packed_i32_fp32:
+        if (support_opmask) {
+            jit->vcvtdq2ps(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+        } else {
+            jit->vcvtdq2ps(*reg, jit->ptr[addr.paddr->to_addr()]);
+        }
+        break;
     case LDST_TYPE::scalar_fp32:
         jit->vmovss(xmm(), jit->ptr[addr.paddr->to_addr()]);
         break;
@@ -2076,6 +2064,9 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const
         } else {
             jit->vpmovzxbd(*reg, jit->ptr[addr.paddr->to_addr()]);
         }
+        break;
+    case LDST_TYPE::broadcast_fp32:
+        jit->vbroadcastss(*reg, jit->ptr[addr.paddr->to_addr()]);
         break;
     default:
         assert(0);
@@ -2108,7 +2099,10 @@ inline void VReg::store(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) cons
         break;
     case LDST_TYPE::packed_bf16_fp32:
         // vcvtne2ps2bf16 requires two fp32 regs
-        ASSERT(0);
+        // vcvtneps2bf16 only support register target
+        ASSERT(support_opmask && rbits == 512);
+        jit->vcvtneps2bf16(ymm(), *reg);
+        jit->vmovdqu16(jit->ptr[addr.paddr->to_addr()] | kreg, ymm());
         break;
     case LDST_TYPE::packed_fp16_fp32:
         if (support_opmask) {

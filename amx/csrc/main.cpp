@@ -777,6 +777,84 @@ public:
 };
 
 
+class func_dequantize {
+    std::shared_ptr<SIMDJit> jit;
+
+public:
+    using Ptr = std::shared_ptr<const func_dequantize>;
+
+    // dequantize int32 into bf16/fp16
+    struct call_args {
+        const int32_t* src; // int32
+        int64_t stride_src;
+        void* dst;          // bf16/fp16
+        int64_t stride_dst;
+        const float* scale_M;
+        const float* scale_N;
+        int64_t M;
+        int64_t N;
+    };
+
+    func_dequantize(int x_dtype) {
+        ASSERT(x_dtype == DTYPE_FP16 || x_dtype == DTYPE_BF16);
+        jit = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+            SReg psrc, stride_src, pdst, stride_dst;
+            SReg pscale_N, pscale_M, M, N, m, n;
+            VReg d0, d1;
+
+            psrc.load(pargs + offsetof(call_args, src));
+            stride_src.load(pargs + offsetof(call_args, stride_src));
+            pdst.load(pargs + offsetof(call_args, dst));
+            stride_dst.load(pargs + offsetof(call_args, stride_dst));
+            pscale_N.load(pargs + offsetof(call_args, scale_N));
+            pscale_M.load(pargs + offsetof(call_args, scale_M));
+            M.load(pargs + offsetof(call_args, M));
+            N.load(pargs + offsetof(call_args, N));
+
+            auto simdw = d0.lanes<int32_t>();
+            jit->for_(m, 0, M, 1, [&] {
+                VReg vscale_m, vscale_n;
+                vscale_m.load(pscale_M + m*sizeof(float), VReg::LDST_TYPE::broadcast_fp32);
+
+                jit->for_(n, 0, N, simdw, [&] {
+                    vscale_n.load(pscale_N + n * sizeof(float), VReg::LDST_TYPE::packed_fp32);
+                    d0.load(psrc + n * sizeof(int32_t), VReg::LDST_TYPE::packed_i32_fp32);
+                    jit->vmulps(d0, d0, vscale_n);
+                    jit->vmulps(d0, d0, vscale_m);
+                    //jit->jcout(jit->jcout.as_f32, m, ",", n, ",", "d0=", d0, " vscale_n=", vscale_n, " vscale_m=", vscale_m);
+                    if (x_dtype == DTYPE_BF16)
+                        d0.store(pdst + n * sizeof(int16_t), VReg::LDST_TYPE::packed_bf16_fp32);
+                    if (x_dtype == DTYPE_FP16)
+                        d0.store(pdst + n * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32);
+                });
+                psrc = psrc + stride_src;
+                pdst = pdst + stride_dst;
+            });
+        });
+    }
+
+    // src : bf16/fp16, dst : int8, scale : float
+    void operator()(const int32_t* psrc,
+                    size_t stride_src,
+                    void* pvdst,
+                    size_t stride_dst,
+                    const float* scale_M,
+                    const float* scale_N,
+                    int M,
+                    int N) const {
+        call_args args;
+        args.src = psrc;
+        args.stride_src = stride_src;
+        args.dst = pvdst;
+        args.stride_dst = stride_dst;
+        args.scale_M = scale_M;
+        args.scale_N = scale_N;
+        args.M = M;
+        args.N = N;
+        (*jit)(&args);
+    }
+};
+
 int DTYPE_of(const py::array& src) {
     switch(src.dtype().char_()) {
         case 'h': return DTYPE_BF16;
@@ -905,6 +983,18 @@ std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
     return os;
 }
 
+template <class T>
+struct scratch_buff {
+    std::shared_ptr<T> buff;
+    size_t cur_count = 0;
+    void ensure_size(size_t count) {
+        if (cur_count < count) {
+            buff = alloc_cache_aligned<T>(count);
+            cur_count = count;
+        }
+    }
+};
+
 struct AMXLinearKernel {
     std::shared_ptr<int8_t> w_buff;
     bool w_is_int8;  // weight is int8 or fp16/bf16
@@ -1005,18 +1095,6 @@ struct AMXLinearKernel {
         });
     }
 
-    template <class T>
-    struct scratch_buff {
-        std::shared_ptr<T> buff;
-        size_t cur_count = 0;
-        void ensure_size(size_t count) {
-            if (cur_count < count) {
-                buff = alloc_cache_aligned<T>(count);
-                cur_count = count;
-            }
-        }
-    };
-
     uint32_t* get_ctemp(size_t count) {
         thread_local scratch_buff<uint32_t> ctemp_per_thread;
         ctemp_per_thread.ensure_size(count);
@@ -1025,10 +1103,11 @@ struct AMXLinearKernel {
 
     // this is a general matmul between src & prepacked weight, post_ops are memory based
     void execute(int64_t M,
-                 const uint8_t* p_x,
+                 const void* p_vx,
                  int64_t stride_x,
                  const std::function<void(int64_t, int64_t, int64_t, int64_t, void*, int64_t)>& post_ops) {
         // w_buff
+        auto* p_x = reinterpret_cast<const uint8_t*>(p_vx);
         auto* pw_base = reinterpret_cast<uint8_t*>(w_buff.get());
         constexpr int BM = 256;
         const auto& Ks = blk_bk.sizes();
@@ -1118,6 +1197,17 @@ py::array_t<float> test_amx_repack_B(const py::array_t<float>& src) {
     return dst;
 }
 
+template<class U, class T>
+void show(const T* src, int N) {
+    auto* sep = "";
+    std::cout << N << "[";
+    for(int n = 0; n < N; n++) {
+        std::cout << sep << static_cast<U>(src[n]);
+        sep = ",";
+    }
+    std::cout << "]";
+}
+
 // QKV (normal-linear is a special case while both N[1] and N[2] are 0):
 //
 //               weight_fp16 x 3 + IO_bf16/fp16
@@ -1128,6 +1218,10 @@ struct AMXQKVLinear {
     int64_t Ns[3];
 
     func_cvt_output::Ptr cvt_output;
+    func_quantize::Ptr quantize_bf16_i8sym;
+    func_quantize::Ptr quantize_fp16_i8sym;
+    func_dequantize::Ptr dequantize_bf16;
+    func_dequantize::Ptr dequantize_fp16;
 
     template <class F>
     void split_N3(int64_t n0, int64_t n1, const F& f) {
@@ -1203,6 +1297,11 @@ struct AMXQKVLinear {
             ASSERT(0);
         }
         cvt_output = make_cacheable<func_cvt_output>(acc_dtype, o_type);
+        quantize_bf16_i8sym = make_cacheable<func_quantize>(DTYPE_BF16);
+        quantize_fp16_i8sym = make_cacheable<func_quantize>(DTYPE_FP16);
+        dequantize_bf16 = make_cacheable<func_dequantize>(DTYPE_BF16);
+        dequantize_fp16 = make_cacheable<func_dequantize>(DTYPE_FP16);
+
         auto w_dtype_size = w_dtype == DTYPE_INT8 ? 1 : 2;
         auto N0 = Ns[0];
         auto N01 = Ns[0] + Ns[1];
@@ -1222,7 +1321,7 @@ struct AMXQKVLinear {
             return pw[id] + k * w_dtype_size + n * stride;
         });
     }
-#if 0
+
     // dynamic quantize
     void forward_dyn_quant_i8(const py::array& x, std::vector<py::array> ys, std::vector<py::array> w_scales) {
         // weight-dequantization scale is also provided (suppose weight is INT8)
@@ -1231,31 +1330,88 @@ struct AMXQKVLinear {
         auto i1 = std::min(1, static_cast<int>(ys.size() - 1));
         auto i2 = std::min(2, static_cast<int>(ys.size() - 1));
 
+        //DEBUG_LOG(M, x.shape(1), ys[0].shape(0), ys[0].shape(1), w_scales[0].shape(0), w_scales[0].shape(1))
+        auto x_dtype = x.dtype().char_();
+        int x_type = 0;
+        switch(x_dtype) {
+            case 'h':
+                x_type = DTYPE_BF16;
+                break;
+            case 'e':
+                x_type = DTYPE_FP16;
+                break;
+            default:
+                ASSERT(0, "Unsupported input dtype");
+        }
         uint8_t* ptr_y[3] = {
             reinterpret_cast<uint8_t*>(ys[i0].mutable_data()),
             reinterpret_cast<uint8_t*>(ys[i1].mutable_data()),
             reinterpret_cast<uint8_t*>(ys[i2].mutable_data()),
         };
         int64_t stride_y[3] = {ys[i0].strides(0), ys[i1].strides(0), ys[i2].strides(0)};
+        const float* ptr_wscales[3] = {
+            reinterpret_cast<const float*>(w_scales[i0].data()),
+            reinterpret_cast<const float*>(w_scales[i1].data()),
+            reinterpret_cast<const float*>(w_scales[i2].data()),
+        };
+
         auto p_x = reinterpret_cast<const uint8_t*>(x.data());
         auto stride_x = x.strides(0);
         // per-token quantize input into int8
 
+        static scratch_buff<int8_t> buff_x_quant;
+        static scratch_buff<float> buff_x_scale;
+
+        buff_x_quant.ensure_size(x.shape(0) * x.shape(1));
+        buff_x_scale.ensure_size(x.shape(0));
+        auto* x_quant = buff_x_quant.buff.get();
+        int x_quant_stride = x.shape(1);
+        auto* x_scale = buff_x_scale.buff.get();
+
+        if (x_type == DTYPE_BF16) {
+            parallel_for(x.shape(0), [&](int m0, int m1) {
+                auto* psrc = reinterpret_cast<const int8_t*>(x.data()) + m0*x.strides(0);
+                auto* pdst = x_quant + m0*x_quant_stride;
+                (*quantize_bf16_i8sym)(psrc, x.strides(0), pdst, x_quant_stride, x_scale + m0, m1 - m0, x.shape(1));
+            });
+            //show<int>(x_quant, 16);
+        }
+        if (x_type == DTYPE_FP16) {
+            parallel_for(x.shape(0), [&](int m0, int m1) {
+                auto* psrc = reinterpret_cast<const int8_t*>(x.data()) + m0*x.strides(0);
+                auto* pdst = x_quant + m0*x_quant_stride;
+                (*quantize_fp16_i8sym)(psrc, x.strides(0), pdst, x_quant_stride, x_scale + m0, m1 - m0, x.shape(1));
+            });
+        }
+        //py::array_t<int8_t> ret({x.shape(0), x.shape(1)}, x_quant);
+
         // post-ops will convert int32 to fp32, dequantize then store to destination buffer
         linear.execute(M,
-                       p_x,
-                       stride_x,
+                       x_quant,
+                       x_quant_stride,
                        [&](int64_t m0, int64_t m1, int64_t n0, int64_t n1, void* pvC, int64_t strideC) {
-                           auto* pC = reinterpret_cast<uint32_t*>(pvC);
+                           auto* pC = reinterpret_cast<int32_t*>(pvC);
                            split_N3(n0, n1, [&](int idx, int base_n, int ns0, int ns1) {
+                               // dequantize int32 acc results & convert to BF16 or FP16
                                auto stride_dst = stride_y[idx];
-                               auto* pdst = ptr_y[idx] + (ns0 - base_n) * o_type_bytes + m0 * stride_dst;
-                               auto* psrc = reinterpret_cast<const uint8_t*>(pC + (ns0 - n0));
-                               (*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
+                               auto* pdst = ptr_y[idx] + (ns0 - base_n) * sizeof(int16_t) + m0 * stride_dst;
+                               auto* pscalew = ptr_wscales[idx] + ns0 - base_n;
+                               if (x_type == DTYPE_FP16) {
+                                    (*dequantize_fp16)(pC + (ns0 - n0), strideC, pdst, stride_dst, x_scale + m0, pscalew,
+                                                       m1 - m0,
+                                                       ns1 - ns0);
+                               }
+                               if (x_type == DTYPE_BF16) {
+                                    (*dequantize_bf16)(pC + (ns0 - n0), strideC, pdst, stride_dst, x_scale + m0, pscalew,
+                                                       m1 - m0,
+                                                       ns1 - ns0);
+                               }
+                               //(*cvt_output)(m1 - m0, ns1 - ns0, psrc, strideC, pdst, stride_dst);
                            });
                        });
+        return;
     }
-#endif
+
     void forward(const py::array& x, std::vector<py::array> ys) {
         auto M = x.shape(0);
         auto i0 = 0;
@@ -1310,7 +1466,8 @@ PYBIND11_MODULE(PACKAGE_NAME, m) {
 
     py::class_<AMXQKVLinear>(m, "AMXQKVLinear")
         .def(py::init<std::vector<py::array>>())
-        .def("forward", &AMXQKVLinear::forward);
+        .def("forward", &AMXQKVLinear::forward)
+        .def("forward_dyn_quant_i8", &AMXQKVLinear::forward_dyn_quant_i8);
 
     m.def("test", test);
 

@@ -68,6 +68,7 @@ parser.add_argument('-N', '--node', type=int, default=1)
 parser.add_argument('-b', '--batch-size', type=int, default=256)
 parser.add_argument('-r', '--repeat', type=int, default=5)
 parser.add_argument('-q', '--quanti8', action="store_true")
+parser.add_argument('-dq', '--dynquant', action="store_true")
 
 args = parser.parse_args()
 
@@ -77,18 +78,41 @@ args = parser.parse_args()
 sys_cap_mem_bw_GBPS = 250
 sys_cap_amx_core_GFLOPS = {2:1242, 1:1242*2}  # item-size 2(bf16/fp16) 1(int8)
 
+def quant_tensor(weight, dim):
+    abs_max = weight.abs().max(dim=dim, keepdim=True).values.to(torch.float32)
+    scale = 127.0/abs_max
+    return (weight * scale).clamp(-128, 127).to(dtype = torch.int8), abs_max/127
+
+def test_quant_tensor():
+    weight = torch.randint(low=-100, high=100, size=(5, 8)).to(dtype = torch.float16).detach()
+    w, s = quant_tensor(weight, 1)
+    print(weight)
+    print(w, s, w.shape, s.shape)
+    print((w * s - weight).abs().max())
+    sys.exit(0)
+
+
 class testcase:
-    def __init__(self, x_dtype, w_dtype, M, K, Ns) -> None:
+    def __init__(self, x_dtype, w_dtype, M, K, Ns, dyn_quant=False) -> None:
         self.Ns = Ns
         self.M = M
         self.K = K
         torch.manual_seed(0)
         
         self.W = []
+        self.Wscales = []
         for N in Ns:
-            self.W.append(torch.randint(low=-1, high=2, size=(N, K)).to(dtype = w_dtype).detach()) # -1, 0, 1
-        self.X = torch.randint(low=-1, high=2, size=(M, K)).to(dtype = x_dtype).detach() # -1, 0, 1
+            weight = torch.randint(low=-1, high=2, size=(N, K)).to(dtype = w_dtype).detach()
+            if dyn_quant:
+                # quantize w into int8-per-OC
+                weight, scale = quant_tensor(weight, 1)
+                self.Wscales.append(scale)
+            self.W.append(weight) # -1, 0, 1
 
+        self.X = torch.randint(low=-1, high=2, size=(M, K)).to(dtype = x_dtype).detach() # -1, 0, 1
+        
+        self.x_quant, self.x_scale = quant_tensor(self.X, 1)
+        
         assert x_dtype == torch.int8 or x_dtype == torch.float16 or x_dtype == torch.bfloat16
 
         if x_dtype == torch.int8:
@@ -105,21 +129,35 @@ class testcase:
         self.Y = []
         self.Z = []
         for i, N in enumerate(Ns):
-            YRef = (self.X.to(dtype=acc_dtype) @ self.W[i].transpose(0,1).to(dtype=acc_dtype)).to(dtype=o_dtype)
+            if dyn_quant:
+                self.Wscales[i] = self.Wscales[i].transpose(0,1)
+                YRef = ((self.x_quant.to(dtype=torch.int32) @ self.W[i].transpose(0,1).to(dtype=torch.int32))\
+                            .to(dtype=torch.float) * self.x_scale * self.Wscales[i])\
+                            .to(dtype=o_dtype)
+            else:
+                YRef = (self.X.to(dtype=acc_dtype) @ self.W[i].transpose(0,1).to(dtype=acc_dtype)).to(dtype=o_dtype)
             self.Y.append(YRef)
             self.Z.append(to_numpy(torch.zeros([M, N], dtype=o_dtype)))
             self.W[i] = to_numpy(self.W[i])
 
         self.X = to_numpy(self.X)
+        self.dyn_quant = dyn_quant
+        self.Wscales = [to_numpy(w) for w in self.Wscales]
 
     def check(self):
         for i, (Y, Z) in enumerate(zip(self.Y, self.Z)):
             Z = to_torch(Z)
             if not torch.allclose(Y, Z):
+                print("refernce: Y ", Y.dtype, Y.shape)
                 print(Y)
+                print("actual: Z ", Z.dtype, Z.shape)
                 print(Z)
+                if self.dyn_quant:
+                    for ws in self.Wscales:
+                        print("ws:", ws)
+                print("diff-location")
                 print(torch.nonzero(Y != Z))
-                #assert False, f"Y{i} != Z{i}"
+                assert False, f"Y{i} != Z{i}"
                 return False
         return True
 
@@ -134,8 +172,12 @@ class testcase:
         latency_ms = []
         for r in range(5):
             t0 = time.time()
-            for qkv in qkv_projs:
-                qkv.forward(self.X, self.Z)
+            if self.dyn_quant:
+                for qkv in qkv_projs:
+                    qkv.forward_dyn_quant_i8(self.X, self.Z, self.Wscales)
+            else:
+                for qkv in qkv_projs:
+                    qkv.forward(self.X, self.Z)
             latency_ms.append((time.time() - t0)/layers * 1e3)
         correct = self.check()
         min_latency = float(np.amin(latency_ms))
@@ -206,6 +248,15 @@ def test_k_groups(repeat, batch_size):
         testcase(torch.bfloat16, torch.bfloat16, batch_size, 11008, [4096]).test(ncores, 100, 0.58)
         testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096]).test(ncores, 100, 0.28)
 
+def test_dyn_quant():
+    print(f"======================{inspect.currentframe().f_code.co_name}======================")
+    for i in range(args.repeat):
+        testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096], dyn_quant=True).test(ncores, 100, 0.45)
+    for i in range(args.repeat):
+        testcase(torch.bfloat16, torch.bfloat16, args.batch_size, 4096, [4096, 4096, 4096], dyn_quant=True).test(ncores, 100, 0.68)
+    for i in range(args.repeat):
+        testcase(torch.bfloat16, torch.bfloat16, args.batch_size, 11008, [4096], dyn_quant=True).test(ncores, 100, 0.58)
+
 #ncores = 4
 #testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
 #testcase(torch.bfloat16, torch.bfloat16, 256, 4096, [11008*2]).test(ncores, 100, 0.45)
@@ -216,6 +267,9 @@ def test_k_groups(repeat, batch_size):
 
 numactl(args.node, args.ncores)
 
+if args.dynquant:
+    test_dyn_quant()
+    sys.exit(0)
 
 def test_quant_i8(dtype):
     csrc.set_nthr(ncores)
@@ -249,6 +303,7 @@ def test_quant_i8(dtype):
     print(f" diff_max:{max_abs_diff:.2f} diff_mean:{mean_abs_diff:.2f} min_latency:{min_latency:.2f} + std{std_latency:.2f}ms")
 
 
+    
 
 if args.quanti8:
     test_quant_i8(torch.bfloat16)
