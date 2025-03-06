@@ -193,7 +193,7 @@ def test_single_lora():
     RANK = 64
     INPUT_STATE = 1536
     OUTPUT_STATE = INPUT_STATE
-    K_WGS = 4
+    K_WGS = 8
     SG_NUM = 4
     SG_SZ = 16
     GEMMB_LOCAL_SIZE = 128
@@ -297,6 +297,7 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
         int k_start_grp = gid_K * K_PER_WG;
         int k_end_grp = (k_start_grp + K_PER_WG) > K ?  (K): (k_start_grp+K_PER_WG);
         __global half *C_ptr = temp_res + RANK * gid_K;
+        //Align up kbloks by workgroups. Maybe would cause some workgroups no workload. 
         if (k_start_grp > K)
             return;
 #if GEMMA_USE_SLM
@@ -312,6 +313,7 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 #endif
+        //Align up n dimension with subgroups in wg. Maybe would cause some subgroups no workload in N dimesnion.
         if (n_idx >= RANK)
             return;
         __global half *A_ptr = A + k_start_grp;
@@ -382,36 +384,27 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
             }
         }
 #endif
-
-#if 0
-        //Debug the SLM sum works as expected
-        if (get_local_linear_id () == 0) {
-            for (int i = 0; i < RANK; i++)
-                reduce_res[wg_id*RANK+i] = reduce[i];
-        }
-#endif
         //2.  GEMMB
-        //if (sg_idx >= N)
-            //return;
-        if (sg_idx < N) {
-            half sum = 0.f;
-            __attribute__((opencl_unroll_hint))
-            for (int subk = 0; subk < RANK; subk += SG_SZ) {
-                half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + subk)));
+        //Aligning up n dimension with subgroups would cause some subgroups no workload in N dimesnion.
+        if (sg_idx >= N)
+            return;
+        half sum = 0.f;
+        __attribute__((opencl_unroll_hint))
+        for (int subk = 0; subk < RANK; subk += SG_SZ) {
+            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + subk)));
 #if GEMMB_USE_SLM
-                half aa = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + subk)));
-                //half aa = reduce[id_sg_local + subk];
+            half aa = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + subk)));
+            //half aa = reduce[id_sg_local + subk];
 #else
-                half aa = reduce[id_sg_local + subk];
+            half aa = reduce[id_sg_local + subk];
 #endif
-                aa *= scale;
-                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr + subk)));
-                sum = fma(aa, bb, sum);
-            }
-            sum = sub_group_reduce_add(sum);
-            if (id_sg_local == 0)
-                CC[sg_idx] = sum + mainInput[sg_idx];
+            aa *= scale;
+            half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr + subk)));
+            sum = fma(aa, bb, sum);
         }
+        sum = sub_group_reduce_add(sum);
+        if (id_sg_local == 0)
+            CC[sg_idx] = sum + mainInput[sg_idx];
     }
     '''
     cl.profiling(True)
@@ -427,7 +420,7 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     else:
         # When RANK % GEMMA_SG_NUM != 0, maybe try to lower down `GEMMA_SG_NUM = GEMMA_SG_NUM / factor` to ensure  RANK % GEMMA_SG_NUM == 0?
         GEMMA_SG_NUM = MAX_GEMMA_SG_NUM
-        N_WGS = (RANK*SG_SZ+ GEMMA_SG_NUM - 1) // GEMMA_SG_NUM
+        N_WGS = (RANK + GEMMA_SG_NUM - 1) // GEMMA_SG_NUM
     GEMMA_USE_SLM = 1
     GEMMB_USE_SLM = 1
     K_WGS = 8
@@ -511,12 +504,29 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
 
 
 cl.profiling(True)
+def test_transposeB_acc():
+    for rank in range(16//16, 256//16):
+        for out_state in range(512//16, 3840//16):
+            #unroll is 4, SG_AZ*4  = 64, input_state%64 == 0
+            for input_state in (1024, 1536, 2048, 2560, 3072):
+                test_single_lora_transposeB(rank*16, input_state, out_state*16, 1, True)
+
+def test_transposeB_perf():
+    #Check perf of cusmtomer minicpm
+    for rank in [64]:
+        for out_state in [512, 1536, 3840]:
+            for input_state in [1536]:
+                test_single_lora_transposeB(rank, 1536, out_state, 20)
+    #Increase workload to ensure memory bound. 
+    for rank in [1536*4]:
+        for out_state in [3840]:
+            for input_state in [1536*2]:
+                test_single_lora_transposeB(rank, 1536, out_state, 20)
+
+# tranposeB = False test
 # test_single_lora()
-#Check accuray
-for rank in [16, 32, 64, 80, 128, 192]:
-    for out_state in [512, 528, 1536, 3840]:
-        test_single_lora_transposeB(rank, 1536, out_state, 1, True)
-#Check perf
-for rank in [64]:
-    for out_state in [512, 1536, 3840]:
-        test_single_lora_transposeB(rank, 1536, out_state, 40)
+
+# tranposeB = True test
+# Check accuray, will take a while.
+# test_transposeB_acc()
+test_transposeB_perf()
