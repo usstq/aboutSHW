@@ -11,6 +11,9 @@
 
 #include "misc.hpp"
 
+//#include "openvino/core/except.hpp"
+//#define ASSERT OPENVINO_ASSERT
+
 namespace ov {
 namespace intel_cpu {
 
@@ -349,6 +352,80 @@ struct RegExprImpl {
         return dst_register_assigned_inplace;
     }
 };
+
+// all jit-based/performance-aware function should be a functor/callable because:
+//   - it needs to hold reference to kernel (to save build time & resources)
+//   - it needs to do other compile time preparation work and hold the relevant
+//     runtime-data-struct (to make runtime faster)
+// to optimze compile-time-workload itself, the functor instance itself should be
+// cached with compile-time parameter as the key.
+//
+// because it's a functor, which supposed to have no states, so cache-factory should
+// always return shared_ptr to constant object, so it won't behave differently when being
+// called by different caller, and this also ensure it's multi-threading safe since it
+// won't modify it's content.
+//
+template <typename... TTypes>
+class tuple_hasher {
+private:
+    typedef std::tuple<TTypes...> Tuple;
+    template <int N>
+    size_t hash(Tuple& value) const {
+        return 0;
+    }
+    template <int N, typename THead, typename... TTail>
+    size_t hash(Tuple& value) const {
+        constexpr int Index = N - sizeof...(TTail) - 1;
+        return std::hash<THead>()(std::get<Index>(value)) ^ hash<N, TTail...>(value);
+    }
+
+public:
+    size_t operator()(Tuple value) const {
+        auto hv = hash<sizeof...(TTypes), TTypes...>(value);
+        return hv;
+    }
+};
+
+// create const object with internal cache with constructor-args as the key
+// this helps reduces construction time overhead, and perfectly suitable
+// for caching functor/callable.
+template <class T, typename... CArgs>
+std::shared_ptr<const T> make_cacheable(CArgs... cargs) {
+    std::shared_ptr<const T> sptr;
+    auto key = std::make_tuple(cargs...);
+    static std::unordered_map<decltype(key), std::weak_ptr<const T>, tuple_hasher<CArgs...>> cache;
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        auto& wptr = it->second;
+        sptr = wptr.lock();
+        if (!sptr) {
+            sptr = std::make_shared<T>(cargs...);
+            // ECOUT("make_cacheable re-constructed: ", typeid(T).name(), "(", cargs..., ")");
+            wptr = sptr;
+        }
+    } else {
+        sptr = std::make_shared<T>(cargs...);
+        // ECOUT("make_cacheable constructed: ", typeid(T).name(), "(", cargs..., ")");
+        cache.emplace(std::make_pair(key, std::weak_ptr<const T>(sptr)));
+    }
+    return sptr;
+}
+
+template<int nbits, typename... Sizes>
+int32_t get_imm8 (Sizes ... args){
+    int v[] = { static_cast<int>(args)... };
+    constexpr auto nargs = sizeof...(args);
+    int32_t imm = 0;
+    int ulimit = (1 << nbits);
+    static_assert(nargs * nbits <= 8);
+    for (int i = 0; i < nargs; i++) {
+        ASSERT(v[i] >= 0 && v[i] <= ulimit);
+        imm |= (v[i] << (i*nbits));
+    }
+    return imm;
+}
 
 }  // namespace intel_cpu
 }  // namespace ov

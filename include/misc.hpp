@@ -333,20 +333,6 @@ void parallel_st(int n_work_items, int n_work_group_size, F f) {
 }
 #endif
 
-template<int nbits, typename... Sizes>
-int32_t get_imm8 (Sizes ... args){
-    int v[] = { static_cast<int>(args)... };
-    constexpr auto nargs = sizeof...(args);
-    int32_t imm = 0;
-    int ulimit = (1 << nbits);
-    static_assert(nargs * nbits <= 8);
-    for (int i = 0; i < nargs; i++) {
-        ASSERT(v[i] >= 0 && v[i] <= ulimit);
-        imm |= (v[i] << (i*nbits));
-    }
-    return imm;
-}
-
 //========================================================================
 // tensorND
 template <typename T, int TENSORND_MAXDIMS=8>
