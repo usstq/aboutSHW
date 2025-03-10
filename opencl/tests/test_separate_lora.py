@@ -461,8 +461,6 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     alpha_list = [cl.tensor(np.multiply(alpha, 0.5)) for alpha in alpha_list_np]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA.
     gemmA_output_list = [cl.tensor(np.zeros([K_WGS, RANK]).astype(np.float16)) for _ in range(rep)]
-
-
     kernel_opt = cl.kernels(src, options=f"-DSG_SZ={SG_SZ} -DK_PER_WG={INPUT_STATE_PER_WG}  -DRANK={RANK} -DGEMMA_UNROLL_NUM={GEMMA_UNROLL_NUM}\
                               -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={K_WGS}")
     kernel_ref =  cl.kernels(ref_src)
@@ -477,7 +475,9 @@ def test_single_lora_transposeB(rank, input_state, output_state, rep=3, check_ac
     rd_bytes_a = (rank*input_state+input_state)*2
     # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input + output
     rd_bytes_b = (rank*output_state+output_state*2+rank)*2
-
+    # Invalid GPU cache.Ensure data is not in cache. Cache size 4MB.
+    tempbuffer =  [cl.tensor(np.zeros([4*1024*1024]).astype(np.float16)) for _ in range(rep)]
+    cl.finish()
     for i in range(0, rep):
         tA_reduce = cl.tensor([1, RANK], np.dtype(np.float16))
         kernel_opt.enqueue("gemmA", [K_WGS, N_WGS * SG_SZ * GEMMA_SG_NUM], [1, SG_SZ * GEMMA_SG_NUM], lora_input_list[i], stateA_list[i], gemmA_output_list[i], INPUT_STATE)
@@ -514,12 +514,12 @@ def test_transposeB_perf():
     for rank in [64]:
         for out_state in [512, 1536, 3840]:
             for input_state in [1536]:
-                test_single_lora_transposeB(rank, 1536, out_state, 20)
+                test_single_lora_transposeB(rank, input_state, out_state, 20)
     #Increase workload to ensure memory bound. 
-    for rank in [1536*4]:
-        for out_state in [3840]:
+    for rank in [1536*2]:
+        for out_state in [2048*4]:
             for input_state in [1536*2]:
-                test_single_lora_transposeB(rank, 1536, out_state, 20)
+                test_single_lora_transposeB(rank, input_state, out_state, 20)
 
 # tranposeB = False test
 # test_single_lora()

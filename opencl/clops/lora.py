@@ -46,66 +46,69 @@ cl_kernel_sources = r'''
     __kernel void gemmA(__global half * A, __global half *B,  __global half *temp_res, int K) {
         int gid =  get_group_id(0);
         int sgid = get_sub_group_id();
+        // For 2nd token, rank is small. sg in one wg would be divided by 2 dimensions to increase threads number in wg.
+        int sg_num_N = RANK / SG_SZ;
+        int sgid_n = sgid % (sg_num_N);
+        int sgid_k = sgid / (sg_num_N);
+
         int lid =  get_sub_group_local_id();
         //How many K is accumulated in the WG.
         int k_start_grp = gid * K_PER_WG;
         int k_end_grp = (k_start_grp + K_PER_WG) > K ?  (K): (k_start_grp+K_PER_WG);
 
         // store each sg accumulation result into SLM. Will sum sg result into wg result. 
-        __local half sgs_sum_buff[SG_NUM * RANK];
-        __local half *sg_buffer_ptr = sgs_sum_buff + sgid * RANK;
+        __local half sgs_sum_buff[SG_NUM_K * RANK];
+        __local half *sg_buffer_ptr = sgs_sum_buff + sgid_k * RANK;
         __global half *C_ptr = temp_res + RANK * gid;
 
 #if GEMMA_USE_SLM
         //Workgroup share same input activation and each subgroup would access all the elements of the shared intput.Put it into SLM.
         __local half local_input[K_PER_WG];
+        int local_sz = get_local_size(1);
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
         __attribute__((opencl_unroll_hint))
-        for (int offset = sgid * SG_SZ; offset < (k_end_grp - k_start_grp); offset += SG_SZ * SG_NUM ) {
+        for (int offset = sgid * SG_SZ; offset < (k_end_grp - k_start_grp); offset += local_sz) {
             __global half *input_ptr = A + k_start_grp + offset;
             half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
             local_input[offset + lid] = copy_val;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 #endif
-        int k_start_sg = k_start_grp + sgid * K_PER_SG;
-        __global half *A_ptr_sg = A + k_start_sg;
-        __global half *B_ptr_sg = B + k_start_sg * RANK;
+        int k_start_sg = k_start_grp + sgid_k * K_PER_K_SG;
+        __global half *A_ptr_base = A + k_start_sg;
+        __global half *B_ptr_base = B + k_start_sg * RANK;
 
-        //The sg is needs to accumulate. Otherwise, sg not needed. sg diverge here.
+        //The sg is needs to accumulate. Otherwise, sg not needed. sg_k diverge here.
         if (k_start_sg <  k_end_grp) {
-            int klen_sg = ((k_start_sg + K_PER_SG) > k_end_grp) ? (k_end_grp-k_start_sg): K_PER_SG;
-
-            for (int nblk = 0; nblk < RANK / SG_SZ; nblk++) {
-                __global half *A_ptr = A_ptr_sg;
-                __global half *B_ptr = B_ptr_sg + nblk * SG_SZ;
-                half sum = 0.f;
-                for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
+            int klen_sg = ((k_start_sg + K_PER_K_SG) > k_end_grp) ? (k_end_grp-k_start_sg): K_PER_K_SG;
+            __global half *A_ptr = A_ptr_base;
+            __global half *B_ptr = B_ptr_base + sgid_n * SG_SZ;
+            half sum = 0.f;
+            for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
 #if GEMMA_USE_SLM
-                    ushort input = intel_sub_group_block_read_us((const __local ushort*)(local_input + sgid * (int)(K_PER_SG) + kk));
+                ushort input = intel_sub_group_block_read_us((const __local ushort*)(local_input + sgid_k * (int)(K_PER_K_SG) + kk));
 #else
-                    ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr + kk));
+                ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr + kk));
 #endif
-                    __attribute__((opencl_unroll_hint))
-                    for (int j = 0; j < SG_SZ; j++) {
-                        half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
-                        half aa = as_half(intel_sub_group_broadcast(input, j));
-                        sum = fma(aa, bb, sum);
-                        B_ptr += RANK;
-                    }
+                __attribute__((opencl_unroll_hint))
+                for (int j = 0; j < SG_SZ; j++) {
+                    half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
+                    half aa = as_half(intel_sub_group_broadcast(input, j));
+                    sum = fma(aa, bb, sum);
+                    B_ptr += RANK;
                 }
-                *(sg_buffer_ptr + nblk * SG_SZ + lid) = sum;
             }
+            *(sg_buffer_ptr + sgid_n * SG_SZ + lid) = sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
         int sg_offset = sgid * SG_SZ;
-        //Each SG would try updating data.
+        //Each SG would try updating data. 
          __attribute__((opencl_unroll_hint))
-        for (int base = 0; (sg_offset  + base ) < RANK; base += SG_SZ * SG_NUM ) {
+        for (int base = 0; (sg_offset  + base ) < RANK; base += SG_SZ * SG_NUM_K ) {
             half sum = 0.f;
             __attribute__((opencl_unroll_hint))
-            for (int i = 0;  i < SG_NUM; i++) {
+            for (int i = 0;  i < SG_NUM_K; i++) {
                 sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(sgs_sum_buff + i * RANK + sg_offset)));
             }
             intel_sub_group_block_write_us((const __global ushort*)(C_ptr + sg_offset), as_short(sum));
@@ -156,6 +159,8 @@ cl_kernel_sources = r'''
             }
         }
 #endif
+        if (sg_idx >= N)
+            return;
         //2.  GEMMB
         __global half *C_ptr = CC + sg_idx * SG_SZ;
         __global half *main_input_ptr = main_input + sg_idx * SG_SZ;
@@ -181,35 +186,50 @@ cl_kernel_sources = r'''
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum+m_input));
     }
     '''
-
+GEMMB_USE_SLM = 1
+GEMMA_USE_SLM = 1
+# distribute GEMMA in K dimension into different GEMMA_WGS.
+GEMMA_WGS = 8
+# distribute GEMMB in N dimension into different GEMMB_WGS.
+GEMMB_WGS = 8
+VERBOSE=True
 
 class LORA:
-    def __init__(self, rank, input_state, output_state, gemma_wgs, gemma_sgs_per_wg, use_ref = False):
+    def __init__(self, rank, input_state, output_state, gemma_wgs, gemma_k_sg_num_per_wg, use_ref = False):
         self.rank = rank
         self.input_state = input_state
         self.output_state = output_state
-        self.gemmb_local_sz = 128
         self.sg_sz = 16
+        # GEMMB divided N across WGs.Try to increase the thread occupancy. Min(1024, output_state/GEMMB_WGS)
+        # It would be better to ensure wg number is multiple of Xecore number.
+        self.gemmb_wg_sz = min((output_state//self.sg_sz)//GEMMB_WGS, 1024//self.sg_sz) * self.sg_sz
         self.use_ref = use_ref
         self.gemma_wgs = gemma_wgs
-        self.gemma_sgs_per_wg = gemma_sgs_per_wg
+        self.gemma_k_sg_num_per_wg = gemma_k_sg_num_per_wg
 
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.rank % self.sg_sz == 0, f"'RANK' {self.rank} is not multiple of SG_SZ {self.sg_sz}"
-        assert self.output_state % self.sg_sz == 0, f"'output state' {self.output_state} is not multiple of SG_SZ {self.sg_sz}"
-        assert (self.output_state) % self.gemmb_local_sz == 0, f"GEMMB: 'global size' {self.output_state} is not multiple of 'local size' {self.gemmb_local_sz}"
+        assert self.gemmb_wg_sz % self.sg_sz == 0, f"'gemmb_wg_sz' {self.gemmb_wg_sz} is not multiple of SG_SZ {self.sg_sz}"
+        # for the N dimension:
+        #                     {rank/sg_size} subgroups are needed.
+        # For the K dimension:
+        #                   one block is self.sg_sz. Based on gemma_wgs, gemma_k_sg_num_per_wg and input_states, deduce how many input state(K) accumulated per k_sg.
+        input_state_blk_num  = self.input_state // self.sg_sz
+        self.input_state_per_wg = ((input_state_blk_num + gemma_wgs - 1) // gemma_wgs) * self.sg_sz
+        input_state_blks_per_wg = self.input_state_per_wg / self.sg_sz
+        input_state_blks_per_k_sg = (input_state_blks_per_wg + gemma_k_sg_num_per_wg - 1) // gemma_k_sg_num_per_wg
+        input_state_per_k_sg = input_state_blks_per_k_sg * self.sg_sz
         
-        INPUT_STATE_SG_NUM  = self.input_state // self.sg_sz
-        self.input_state_per_wg = ((INPUT_STATE_SG_NUM + gemma_wgs - 1) // gemma_wgs) * self.sg_sz
-        # one block is self.sg_sz
-        INPUT_STATE_BLKS_PER_WG = self.input_state_per_wg / self.sg_sz
-        INPUT_STATE_BLKS_PER_SG = (INPUT_STATE_BLKS_PER_WG + gemma_sgs_per_wg - 1) // gemma_sgs_per_wg
-        input_state_per_sg = INPUT_STATE_BLKS_PER_SG * self.sg_sz
-        
-        options = f'-DSG_SZ={self.sg_sz} -DK_PER_WG={self.input_state_per_wg} -DSG_NUM={gemma_sgs_per_wg} -DRANK={rank} \
-                    -DK_PER_SG={input_state_per_sg} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={gemma_wgs}'
+        options = f'-DSG_SZ={self.sg_sz} -DK_PER_WG={self.input_state_per_wg} -DSG_NUM_K={gemma_k_sg_num_per_wg} -DRANK={rank} \
+                    -DK_PER_K_SG={input_state_per_k_sg} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DPART_NUM={gemma_wgs}'
         self.cl_kernels_opt = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
+        if use_ref == False:
+            print(f'----------------------------------------------------------------------------------------------------------------------------------')
+            print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} perf:')
+            print(f'| [GEMMA]: GWS:{[{gemma_wgs}, {self.rank * gemma_k_sg_num_per_wg}]}, LWS:[{self.rank * gemma_k_sg_num_per_wg}] ')
+            print(f'| [GEMMB]: GWS:{output_state}, LWS:{self.gemmb_wg_sz}, ')
+            print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
     def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB, Aoutput, result):
 
@@ -217,32 +237,34 @@ class LORA:
             tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float16))
             self.cl_kernels_ref.enqueue("gemmA", [self.rank],[self.rank], loraInput, stataA,
                                         tA_output_ref, stateAlpha, self.rank, self.input_state, self.input_state_per_wg)
-            REF_LOCAL_SIZE = 128
+            REF_LOCAL_SIZE = 16
             assert self.output_state % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {self.output_state} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
             self.cl_kernels_ref.enqueue("gemmB", [self.output_state],[REF_LOCAL_SIZE],
                                         mainInput, tA_output_ref, stateB, result, self.output_state, self.rank)
         else:
             cl_kernels = self.cl_kernels_opt
-            cl_kernels.enqueue("gemmA", [self.sg_sz * self.gemma_wgs * self.gemma_sgs_per_wg],[self.sg_sz * self.gemma_sgs_per_wg], 
+            # GEMMA: ONE WG would has {self.gemma_k_sg_num_per_wg*self.rank/SG_SZ}subgroups. self.rank/SG_SZ subgroups on N dimension, self.gemma_k_sg_num_per_wg on K dimension
+            # Total {self.gemma_wg} WGS
+            cl_kernels.enqueue("gemmA", [self.gemma_wgs, self.gemma_k_sg_num_per_wg * self.rank],[1, self.gemma_k_sg_num_per_wg * self.rank], 
                                         loraInput, stataA, Aoutput, self.input_state)
-            cl_kernels.enqueue("gemmB", [self.output_state],[self.gemmb_local_sz], 
+            # GEMMB: ONE WG would has {gemmb_wg_sz/SG_SZ}subgroups.
+            # Total {output_state/gemmb_wg_sz} WGS
+            cl_kernels.enqueue("gemmB", [(self.output_state + self.gemmb_wg_sz - 1)//self.gemmb_wg_sz * self.gemmb_wg_sz],[self.gemmb_wg_sz], 
                                         mainInput, Aoutput, stateB, result, stateAlpha, self.output_state)
         # cl.finish()
         return result
 
 
 # Global for tests
-GEMMB_USE_SLM = 0
-GEMMA_USE_SLM = 0
-GEMMA_WGS = 0
-GEMMA_SGS_PER_WG = 0
-VERBOSE=False
 
-def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS, gemma_sgs_per_wg=GEMMA_SGS_PER_WG):
+
+def test(input_state, rank, output_state, check_acc = False):
     cl.profiling(True)
     SG_SZ = 16
     vRANGE = 2
     REPEAT = 40
+    gemma_k_sg_num_per_wg = min(16, 1024//rank)
+    gemma_wgs = GEMMA_WGS
     stateA_list= [cl.tensor(np.random.randint(-vRANGE, vRANGE, [input_state, rank]).astype(np.float16))for _ in range(REPEAT)]
     alpha_list = [cl.tensor(np.random.rand(rank).astype(np.float16))for _ in range(REPEAT)]
     stateB_list = [cl.tensor(np.random.randint(-vRANGE, vRANGE, [rank, output_state]).astype(np.float16))for _ in range(REPEAT)]
@@ -252,8 +274,8 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
     A_output_list = [cl.tensor(np.zeros([gemma_wgs, rank]).astype(np.float16))for _ in range(REPEAT)]
     res_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
 
-    ref = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, True)
-    opt = LORA(rank, input_state, output_state, GEMMA_WGS, GEMMA_SGS_PER_WG, False)
+    ref = LORA(rank, input_state, output_state, gemma_wgs, gemma_k_sg_num_per_wg, True)
+    opt = LORA(rank, input_state, output_state, gemma_wgs, gemma_k_sg_num_per_wg, False)
 
     
     if check_acc:
@@ -272,11 +294,7 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
         rd_bytes_a = (rank*input_state+input_state)*2
         # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input + output
         rd_bytes_b = (rank*output_state+output_state*2+rank)*2
-        print(f'----------------------------------------------------------------------------------------------------------------------------------')
-        print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} perf:')
-        print(f'| [GEMMA]: GWS:{SG_SZ *GEMMA_WGS * GEMMA_SGS_PER_WG}, LWS:{SG_SZ * GEMMA_SGS_PER_WG}, ')
-        print(f'| [GEMMB]: GWS:{output_state}, LWS:{128}, ')
-        print(f'----------------------------------------------------------------------------------------------------------------------------------')
+
         for i in range(1, REPEAT):
             ns_a = profiling_data[i*2]
             ns_b = profiling_data[i*2 + 1]
@@ -288,15 +306,15 @@ def test(input_state, rank, output_state, check_acc = False, gemma_wgs=GEMMA_WGS
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
         
 if __name__ == "__main__":
-    GEMMB_USE_SLM = 1
-    GEMMA_USE_SLM = 1
-    GEMMA_WGS = 8
-    GEMMA_SGS_PER_WG = 16
-    VERBOSE=True
-    # for rank in [16, 32, 64]:
+    for rank in range(16//16, 256//16):
+        for out_state in range(512//16, 3840//16):
+            for input_state in (1024, 1536, 2048, 2560, 3072):
+                test(input_state, rank*16, out_state*16, True)
     for rank in [64]:
         for out_state in [512, 1536, 3840]:
         # for out_state in [512]:
             test(1536, rank, out_state)
-
-
+    # for rank in [1024]:
+    #     for out_state in [4096*2]:
+    #     # for out_state in [512]:
+    #         test(1536, rank, out_state)
