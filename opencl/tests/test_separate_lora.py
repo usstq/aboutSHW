@@ -47,13 +47,13 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
         half sum = 0.f;
         for (int i = 0; i < K; i++)
             sum = fma(A[m_idx * K + i]*alpha[i], B[n_idx*K + i], sum);
-        CC[m_idx * N + n_idx] = sum + mainInput[n_idx];
+        CC[m_idx * N + n_idx] = sum + mainInput[m_idx * N + n_idx];
     }
     '''
 
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *temp_res, int K, M) {
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *temp_res, int K, int M) {
         int gid_M =  get_group_id(0);
         int gid_K =  get_group_id(1);
         int gid_N =  get_group_id(2);
@@ -117,48 +117,56 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
     }
 
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmB(__global half *mainInput, __global half * A,  __global half *B,  __global half *CC, __global half * alpha, int N) {
+    __kernel void gemmB(__global half *mainInput, __global half * A,  __global half *B,  __global half *CC, __global half * alpha, int N, int M) {
         int wgid_M = get_group_id(0);
         int wgid_N = get_group_id(1);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
         int n_idx = wgid_N * sg_num  +  sg_id;
-
+        int m_start_grp = wgid_M * M_BLK;
+        int m_len =  (m_start_grp + M_BLK) > M ? (M - m_start_grp) : M_BLK;
         int id_sg_local = get_sub_group_local_id();
 #if GEMMB_USE_SLM
-        __local half reduce[RANK];
+        __local half reduce[M_BLK * RANK];
 #else
-        half reduce[RANK] = {0.f};
+        half reduce[M_BLK * RANK] = {0.f};
 #endif
-
-        __global half *C_ptr = CC + wgid_M * N + n_idx;
-        __global half *A_ptr = A + wgid_M * RANK * PART_NUM;
+        if (m_start_grp > M)
+            return;
+        __global half *mainInput_ptr = mainInput + m_start_grp * N + n_idx;
+        __global half *C_ptr = CC + m_start_grp * N + n_idx;
+        __global half *A_ptr = A + m_start_grp * RANK * PART_NUM;
         __global half *B_ptr = B + n_idx * RANK;
 
         //1. Reduce
 #if GEMMB_USE_SLM
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
         int local_sz = get_local_size(1);
-        //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
-        for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
-            __global half *subA_ptr = A_ptr + offset;
-            half sum = 0.f;
-            __attribute__((opencl_unroll_hint))
-            for (int part_idx = 0; part_idx < PART_NUM; part_idx++) {
-                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)subA_ptr));
-                sum += partial_val;
-                subA_ptr += RANK;
+        for (int m_idx = 0; m_idx < m_len; m_idx++) {
+            int m_offset = m_idx * RANK * PART_NUM;
+            //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
+            for (int k_offset = sg_id * SG_SZ; k_offset < RANK; k_offset += local_sz) {
+                __global half *subA_ptr = A_ptr + m_offset + k_offset;
+                half sum = 0.f;
+                __attribute__((opencl_unroll_hint))
+                for (int part_idx = 0; part_idx < PART_NUM; part_idx++) {
+                    half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)subA_ptr));
+                    sum += partial_val;
+                    subA_ptr += RANK;
+                }
+                reduce[m_idx * RANK + k_offset + id_sg_local] = sum;
             }
-            reduce[offset + id_sg_local] = sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
         
 #else
         //Each work item would reduce the input activation.
-        for (int i = 0; i < PART_NUM; i++) {
-            __attribute__((opencl_unroll_hint))
-            for (int j = 0; j < RANK; j++) {
-                reduce[j] += A_ptr[i * RANK + j];
+        for (int m_idx = 0; m_idx < m_len; m_idx++) {
+            for (int i = 0; i < PART_NUM; i++) {
+                __attribute__((opencl_unroll_hint))
+                for (int j = 0; j < RANK; j++) {
+                    reduce[m_idx * RANK + j] += A_ptr[m_idx * RANK * PART_NUM + i * RANK + j];
+                }
             }
         }
 #endif
@@ -166,23 +174,26 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
         //Aligning up n dimension with subgroups would cause some subgroups no workload in N dimesnion.
         if (n_idx >= N)
             return;
-        half sum = 0.f;
-        __attribute__((opencl_unroll_hint))
-        for (int subk = 0; subk < RANK; subk += SG_SZ) {
-            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + subk)));
-#if GEMMB_USE_SLM
-            half aa = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + subk)));
-            //half aa = reduce[id_sg_local + subk];
-#else
-            half aa = reduce[id_sg_local + subk];
-#endif
-            aa *= scale;
-            half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr + subk)));
-            sum = fma(aa, bb, sum);
+        for (int m_idx = 0; m_idx < m_len; m_idx++) {
+            int m_offset = m_idx * RANK;
+            half sum = 0.f;
+            __attribute__((opencl_unroll_hint))
+            for (int subk = 0; subk < RANK; subk += SG_SZ) {
+                half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + subk)));
+    #if GEMMB_USE_SLM
+                half aa = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + m_offset + subk)));
+                //half aa = reduce[m_offset + id_sg_local + subk];
+    #else
+                half aa = reduce[m_offset + id_sg_local + subk];
+    #endif
+                aa *= scale;
+                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr + subk)));
+                sum = fma(aa, bb, sum);
+            }
+            sum = sub_group_reduce_add(sum);
+            if (id_sg_local == 0)
+                *(C_ptr + m_idx * N)= sum + *(mainInput_ptr + m_idx * N);
         }
-        sum = sub_group_reduce_add(sum);
-        if (id_sg_local == 0)
-            *C_ptr = sum + mainInput[n_idx];
     }
     '''
     cl.profiling(True)
@@ -209,15 +220,9 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
     if batch == 1:
         K_WGS = 8
         GEMMA_UNROLL_NUM = 4
-        M_WGS = 1
-        M_BLK = 1
     else:
-        K_WGS = 7
-        GEMMA_UNROLL_NUM = 4
-        M_BLK = 7
-        M_WGS = (batch +  M_BLK - 1)// M_BLK
-
-
+        K_WGS = 1
+        GEMMA_UNROLL_NUM = 16
     # GEMMA micro kernel would accumulate GEMMA_UNROLL_NUM * SG_SZ in k dimension.
     assert INPUT_STATE % (SG_SZ * GEMMA_UNROLL_NUM) == 0, f"'input state' {INPUT_STATE} is not multiple of Kblocking {SG_SZ * GEMMA_UNROLL_NUM}"
     assert RANK % SG_SZ == 0, f"'lora_rank' {RANK} is not multiple of SG_SZ {SG_SZ}"
@@ -226,6 +231,15 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
     INPUT_STATE_BLK_NUM = INPUT_STATE // INPUT_STATE_BLK_SZ
     INPUT_STATE_PER_WG = ((INPUT_STATE_BLK_NUM + K_WGS - 1) // K_WGS) * INPUT_STATE_BLK_SZ
     # assert( KBLKS_PER_WG > 0, f"Can't satisfy at least 1 KBLK(16) for one WG")
+
+    SLM_SZ = 64*1024
+    if batch == 1:
+        M_WGS = 1
+        M_BLK = 1
+    else:
+        # M_BLK = SLM_SZ  // (INPUT_STATE_PER_WG *2)
+        M_BLK = 2
+        M_WGS = (batch +  M_BLK - 1)// M_BLK
 
     # GEMMB related setting
     MAX_GEMMB_SG_NUM = 64
@@ -257,7 +271,7 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
                             -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DPART_NUM={K_WGS} -DM_BLK={M_BLK}")
     kernel_ref =  cl.kernels(ref_src)
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
-    print(f'| INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
+    print(f'| BATCH: {batch} INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
     print(f'| [GEMMA]: GWS[{M_WGS}, {K_WGS}, {N_WGS*SG_SZ * GEMMA_SG_NUM}], LWS:[1, 1, {SG_SZ * GEMMA_SG_NUM}] ')
     print(f'| [GEMMB]: GWS:[{M_WGS}, {GEMMB_GWS}], LWS:[{1, GEMMB_LWS}], ')
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
@@ -273,7 +287,7 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
     for i in range(0, rep):
         tA_reduce = cl.tensor([batch, RANK], np.dtype(np.float16))
         kernel_opt.enqueue("gemmA", [M_WGS, K_WGS, N_WGS * SG_SZ * GEMMA_SG_NUM], [1, 1, SG_SZ * GEMMA_SG_NUM], lora_input_list[i], stateA_list[i], gemmA_output_list[i], INPUT_STATE, batch)
-        kernel_opt.enqueue("gemmB", [M_WGS, GEMMB_GWS],[1, GEMMB_LWS], main_input_list[i], gemmA_output_list[i], stateB_list[i], res_list[i], alpha_list[i], OUTPUT_STATE)
+        kernel_opt.enqueue("gemmB", [M_WGS, GEMMB_GWS],[1, GEMMB_LWS], main_input_list[i], gemmA_output_list[i], stateB_list[i], res_list[i], alpha_list[i], OUTPUT_STATE, batch)
     profiling_data = cl.finish()
     for i in range(0, rep):
         if check_acc:
@@ -284,7 +298,7 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
             kernel_ref.enqueue("reduce", [batch, RANK],[1, RANK], gemmA_output_list[i], tA_reduce, RANK, K_WGS)
             cl.finish()
             compare(tA_output_ref.numpy(), tA_reduce.numpy())
-            # compare(tResult_ref.numpy(), res_list[i].numpy())
+            compare(tResult_ref.numpy(), res_list[i].numpy())
         else:
             ns_a = profiling_data[i*2]
             ns_b = profiling_data[i*2+1]
@@ -300,7 +314,7 @@ def test_transposeB_acc():
     #         #unroll is 4, SG_AZ*4  = 64, input_state%64 == 0
     #         for input_state in (1024, 1536, 2048, 2560, 3072):
     #             test_single_lora_transposeB(1, rank*16, input_state, out_state*16, 1, True)
-    for batch in (2, 4,  8, 128):
+    for batch in (2, 4, 11, 128, 1024):
     #  for batch in (1, 2):
         for rank in (16, 64):
             for out_state in range(512, 1536, 3840):
