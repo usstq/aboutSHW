@@ -237,8 +237,7 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
         M_WGS = 1
         M_BLK = 1
     else:
-        # M_BLK = SLM_SZ  // (INPUT_STATE_PER_WG *2)
-        M_BLK = 2
+        M_BLK = SLM_SZ  // (INPUT_STATE_PER_WG *2)
         M_WGS = (batch +  M_BLK - 1)// M_BLK
 
     # GEMMB related setting
@@ -271,18 +270,18 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
                             -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM} -DPART_NUM={K_WGS} -DM_BLK={M_BLK}")
     kernel_ref =  cl.kernels(ref_src)
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
-    print(f'| BATCH: {batch} INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
+    print(f'| BATCH: {batch}, INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
     print(f'| [GEMMA]: GWS[{M_WGS}, {K_WGS}, {N_WGS*SG_SZ * GEMMA_SG_NUM}], LWS:[1, 1, {SG_SZ * GEMMA_SG_NUM}] ')
     print(f'| [GEMMB]: GWS:[{M_WGS}, {GEMMB_GWS}], LWS:[{1, GEMMB_LWS}], ')
     print(f'----------------------------------------------------------------------------------------------------------------------------------')
     flops_a = (rank*input_state*2) * batch
-    flops_b = (rank*output_state*2+ rank + output_state) * batch
+    flops_b = (rank*output_state*2 + rank + output_state) * batch
     # how many CPU memory loaded into GPU memory, stateA + input activation. duplicate input activation would be in GPU global cache?
     rd_bytes_a = (rank*input_state+input_state*batch)*2
     # gemma output intermedia result should reside in GPU memory in assumption,stateB + alpha + main_input + output
     rd_bytes_b = (rank*output_state+output_state*2*batch+rank)*2
     # Invalid GPU cache.Ensure data is not in cache. Cache size 4MB.
-    tempbuffer =  [cl.tensor(np.zeros([4*1024*1024]).astype(np.float16)) for _ in range(rep)]
+    tempbuffer =  cl.tensor(np.zeros([4*1024*1024]).astype(np.float16))
     cl.finish()
     for i in range(0, rep):
         tA_reduce = cl.tensor([batch, RANK], np.dtype(np.float16))
@@ -299,6 +298,12 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
             cl.finish()
             compare(tA_output_ref.numpy(), tA_reduce.numpy())
             compare(tResult_ref.numpy(), res_list[i].numpy())
+            # if 0:
+                # ouputA_N = np.matmul(lora_input_list[i].numpy(), stateA_list[i].numpy().transpose(1,0))
+                # ouputA_N = np.multiply(ouputA_N, alpha_list[i].numpy())
+                # outputB_N = np.matmul(ouputA_N, stateB_list[i].numpy().transpose(1,0))
+                # outputB_N = np.add(outputB_N, main_input_list[i].numpy())
+                # compare(tResult_ref.numpy(), outputB_N)
         else:
             ns_a = profiling_data[i*2]
             ns_b = profiling_data[i*2+1]
@@ -309,32 +314,38 @@ def test_single_lora_transposeB(batch, rank, input_state, output_state, rep=3, c
 
 cl.profiling(True)
 def test_transposeB_acc():
-    # for rank in range(16//16, 256//16):
-    #     for out_state in range(512//16, 3840//16):
-    #         #unroll is 4, SG_AZ*4  = 64, input_state%64 == 0
-    #         for input_state in (1024, 1536, 2048, 2560, 3072):
-    #             test_single_lora_transposeB(1, rank*16, input_state, out_state*16, 1, True)
-    for batch in (2, 4, 11, 128, 1024):
-    #  for batch in (1, 2):
-        for rank in (16, 64):
-            for out_state in range(512, 1536, 3840):
+    for batch in (1, 7, 111, 128, 1024):
+        for rank in [16, 32, 64, 128, 48, 112]:
+            for out_state in(256, 512, 1536, 3840, 1024,2048):
                 #unroll is 4, SG_AZ*4  = 64, input_state%64 == 0
-                for input_state in (1024, 1536):
+                for input_state in (512, 1024, 1536, 2048, 2560, 3072):
                     test_single_lora_transposeB(batch, rank, input_state, out_state, 1, True)
+    # for batch in (2, 4, 11, 128, 127, 1024):
+    #     for rank in (16, 32, 64, 128):
+    #         for out_state in range(512, 1536, 3840):
+    #             #unroll is 4, SG_AZ*4  = 64, input_state%64 == 0
+    #             for input_state in (1024, 1536):
+    #                 test_single_lora_transposeB(batch, rank, input_state, out_state, 1, True)
     # test_single_lora_transposeB(2, 64, 1536, 512, 1, True)
 
 
 def test_transposeB_perf():
+
+    for batch in [512]:
+        for rank in [64]:
+            for out_state in [1536]:
+                for input_state in [1536]:
+                    test_single_lora_transposeB(batch, rank, input_state, out_state, 20)
     #Check perf of cusmtomer minicpm
-    for rank in [64]:
-        for out_state in [512, 1536, 3840]:
-            for input_state in [1536]:
-                test_single_lora_transposeB(1024, rank, input_state, out_state, 20)
+    # for rank in [64]:
+    #     for out_state in [512, 1536, 3840]:
+    #         for input_state in [1536]:
+    #             test_single_lora_transposeB(1, rank, input_state, out_state, 20)
     #Increase workload to ensure memory bound. 
-    for rank in [1536*2]:
-        for out_state in [2048*4]:
-            for input_state in [1536*2]:
-                test_single_lora_transposeB(1, rank, input_state, out_state, 20)
+    # for rank in [1536*2]:
+    #     for out_state in [2048*4]:
+    #         for input_state in [1536*2]:
+    #             test_single_lora_transposeB(1, rank, input_state, out_state, 20)
 
 # tranposeB = False test
 # test_single_lora()
@@ -342,4 +353,4 @@ def test_transposeB_perf():
 # tranposeB = True test
 # Check accuray, will take a while.
 test_transposeB_acc()
-# test_transposeB_perf()
+test_transposeB_perf()
