@@ -62,9 +62,6 @@ def test_FMA_basic(regM, regN):
     assert M % BM == 0 , " M:{M} is not multiple of BM:{BM}"
     assert BK % SG_SZ == 0 , " BK:{BK} is not multiple of SG_SZ:{SG_SZ}"
     assert K % BK == 0 , " BK:{BK} is not multiple of SG_SZ:{SG_SZ}"
-
-
-
     
     kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN}")
     tC = cl.tensor([M, N], np.dtype(np.float16))
@@ -93,8 +90,10 @@ def gen_store_C(regM, regN):
             
     return src
 
+def ALIGN_UP(a, b):
+    return ((a + (b -1)) // b *b)
 def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
-    func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_{M}_N{N}_K{K}'
+    func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
@@ -103,12 +102,15 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
         ''' + f'int regM = {regM};\nint regN = {regN};\n' + r'''
-        __local half lA[BM*BK];
-        __local half lB[BK*BN];
+        //__local half lA[BM*BK];
+        //__local half lB[BK*BN];
         //__local half* ptrA = lA;
         //__local half* ptrB = lB;
         int m_idx = get_group_id(0) * BM  + sgid_M * regM;
         int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
+        if (m_idx > M)
+            return;
+        ''' + f'if (m_idx + regM > M)\n \t\t\tm_idx = M - regM;\n' + r'''
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B + n_idx;
         __global half *ptrC = C + m_idx * N + n_idx;
@@ -143,7 +145,7 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
 
     # np.random.seed(0)
     vRANGE = 1
-    REPEAT = 50
+    REPEAT = 1
     A = np.random.randint(-vRANGE, vRANGE, [M, K]).astype(np.float16)
     B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
     C_ref = np.matmul(A, B)
@@ -155,15 +157,15 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
     BM = regM*sgM
     BN = regN*sgN*SG_SZ
     
-    assert M >= BM
-    assert M % BM == 0 , f'M:{M} is not multiple of BM:{BM}'
+    assert M >= BM , f'M:{M} is smaller than BM:{BM}'
+    # assert M % BM == 0 , f'M:{M} is not multiple of BM:{BM}'
     assert N % BN == 0 , f'N:{N} is not multiple of BN:{BN}'
 
     # assert BK % SG_SZ == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
     # assert K % BK == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
 
     kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
-    GWS = [M//regM, N//(regN)]
+    GWS = [ALIGN_UP(M, BM)//regM , N//(regN)]
     LWS = [sgM, sgN * SG_SZ]
     assert sgM *sgN * SG_SZ <= 1024, f" LWS:{LWS} exceed 1024 limitation"
 
@@ -194,5 +196,9 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
 #         for n in (512,):
 #             test_FMA_blocking(m, n, k, regM=8, regN=2, sgM=16, sgN=1)
 
-test_FMA_blocking(M=1024, N=1536, K=64, regM=16, regN=2, sgM=16, sgN=4)
-test_FMA_blocking(M=1024, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
+for batch in range(129, 512):
+    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4)
+for batch in range(129, 1024):
+    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2)
+for batch in range(65, 512):
+    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
