@@ -1,4 +1,4 @@
-from . import cl
+from .cl import csrc as cl
 import numpy as np
 from .utils import *
 

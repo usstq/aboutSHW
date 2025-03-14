@@ -9,19 +9,19 @@ some highlights in the design:
  - shottened the distance between network-description & implementation optimization
 
 ```bash
-# install on windows
-install.cmd
-# install on linux
-./install.sh
+# need intel compiler to work
+source /opt/intel/oneapi/setvars.sh 
 
-# test llama2/qwen2 inference
-python -m clops.tests.llama -p "What's Oxygen?" -n128 -hf /mnt/llm_irs/models_original/TinyLlama/TinyLlama-1.1B-Chat-v1.0/ -q w4x
-python -m clops.tests.llama -x 16x1024 -n 0 -hf /mnt/llm_irs/models_original/Qwen2-0.5B-Instruct -q f16xmx -r 2
+# run unit test (cmake will be automatically called to reflect the change in csrc)
+python -m clops.linear_f16xmx
+python -m clops.linear_w4x
+...
 
-# save converted model parameters (weights) into a separate pickle file
-$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --save /c/luocheng/glm4-4b/clops-glm4-4b-model
-# using converted model to infer
-$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --load /c/luocheng/glm4-4b/clops-glm4-4b-model -r 4
+# run whole llama like model with w4x quantization type
+python llama.py -hf ../../models/Llama-2-7b-chat-hf/ -q w4x -p "[INST] What's Oxygen? [/INST]"
+python llama.py -hf ../../models/Llama-2-7b-chat-hf/ -q w4x -x 16x1024 -n 0 -r 2
+python llama.py -hf ../../models/Llama-2-7b-chat-hf/ -q w4x -n128 --save clops-llama2-7b-model
+python llama.py -hf ../../models/Llama-2-7b-chat-hf/ -q w4x -n128 --load clops-llama2-7b-model
 
 # profiling with opencl-intercept-layer: build from source
 $ git clone https://github.com/intel/opencl-intercept-layer

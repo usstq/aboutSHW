@@ -430,7 +430,7 @@ static void update_queue() {
 
 void init_ops(py::module_ &m);
 
-PYBIND11_MODULE(cl, m) {
+PYBIND11_MODULE(csrc, m) {
     update_queue();
 
     init_ops(m);

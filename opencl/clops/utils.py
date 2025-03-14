@@ -1,4 +1,4 @@
-from . import cl
+from clops import cl
 import torch
 import numpy as np
 

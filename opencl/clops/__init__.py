@@ -1,15 +1,4 @@
-import os
-if os.name == 'nt':
-    '''
-    according to https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order
-    since python is packaged apps, PATH is not searched when loading DLL (the pybind11 part).
-    we have to explicitly add following path for using SYCL/DPC++
-    '''
-    for path in ["C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin"]:
-        if os.path.exists(path):
-            os.add_dll_directory(path)
+from . import cl
 
 from .ops import *
 from .mha import MHA
