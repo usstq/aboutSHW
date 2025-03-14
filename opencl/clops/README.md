@@ -8,34 +8,6 @@ some highlights in the design:
  - on purpose flattened NN-class & object hierarchy, just like functional-programming
  - shottened the distance between network-description & implementation optimization
 
-```bash
-# install (from parent folder)
-pip install pybind11
-pip install -e .
-
-# test llama2/qwen2 inference
-python -m clops.tests.llama -p "What's Oxygen?" -n 32
-python -m clops.tests.llama -hf /mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/ -x 16x32 -n 1
-
-# profiling with opencl-intercept-layer: build from source
-$ git clone https://github.com/intel/opencl-intercept-layer
-$ mkdir build && cd build
-$ cmake ..
-$ cmake --build . --config RelWithDebInfo --target install
-
-# profiling with opencl-intercept-layer: profiling
-$ cliloader -dv -cdt  --dump-dir ./dump/ python3 -m clops.tests.llama -p "What's Oxygen?" -n 32
-
-# https://github.com/intel/pti-gpu/tree/master/tools/unitrace
-$ pti-gpu/tools/unitrace/build/unitrace --output-dir-path trace -d -h --opencl --chrome-call-logging  --chrome-kernel-logging --chrome-device-logging   python -m clops.tests.llama -p "What's Oxygen"
- 
-# save converted model parameters (weights) into a separate pickle file
-$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --save /c/luocheng/glm4-4b/clops-glm4-4b-model
-# using converted model to infer
-$ python -m clops.tests.llama -hf /c/luocheng/glm4-4b/models-hf -x 1x2048 -q w4x -n128 --load /c/luocheng/glm4-4b/clops-glm4-4b-model -r 4
-
-```
-
 ### References
 
 Hardware:

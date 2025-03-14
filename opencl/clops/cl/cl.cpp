@@ -296,7 +296,7 @@ struct cl_kernels {
                     }
 
                     ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
-                    ss << "build options: " << options << std::endl;
+                    ss << "build options: " << m_options << std::endl;
 
                     ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
                 }
@@ -304,7 +304,9 @@ struct cl_kernels {
             }
         };
 
-        m_options = options + " -cl-std=CL3.0";
+        // C for metal suppport
+        if (options.find("-cmc") == std::string::npos)
+            m_options = options + " -cl-std=CL3.0";
 
         cl_int build_error = CL_SUCCESS;
         const char* strings = source.c_str();

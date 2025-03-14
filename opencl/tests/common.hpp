@@ -12,7 +12,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cassert>
-#include "../include/misc.hpp"
+#include "../../include/misc.hpp"
 #include <filesystem>
 
 static void _flush_cache() {
@@ -69,13 +69,14 @@ struct CLkernels {
                 std::cerr << ansi_color << "[BUILD_LOG]:" << pair.second << ANSI_COLOR_RESET << std::endl;
         };
         try {
-            Program.build("-cl-std=CL3.0");
+            Program.build("-cmc");
             // Program.build("-cl-std=CL3.0 -cl-intel-no-spill");
         }
         catch (...) {
             show_build_info(ANSI_COLOR_ERROR);
             abort();
         }
+        printf("build success\n");
         show_build_info(ANSI_COLOR_INFO);
 
         cl::vector<cl::Kernel> kernels;

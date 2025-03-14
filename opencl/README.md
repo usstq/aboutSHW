@@ -12,10 +12,28 @@ some highlights in the design:
 # need intel compiler to work
 source /opt/intel/oneapi/setvars.sh 
 
+# install clops
+pip install -e .
+
 # run unit test (cmake will be automatically called to reflect the change in csrc)
 python -m clops.linear_f16xmx
 python -m clops.linear_w4x
 ...
+
+# [optional]
+# in case using C-for-metal: build & install cm-compiler  (libclangFEWrapper.so)
+# https://github.com/intel/cm-compiler/blob/cmc_monorepo_110/clang/Readme.md
+cd $ROOT
+git clone https://github.com/intel/cm-compiler.git -b cmc_monorepo_110 llvm-project
+git clone https://github.com/intel/vc-intrinsics.git llvm-project/llvm/projects/vc-intrinsics
+git clone https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git -b llvm_release_110 llvm-project/llvm/projects/SPIRV-LLVM-Translator
+mkdir build && cd build
+cmake -DLLVM_ENABLE_Z3_SOLVER=OFF -DCLANG_ANALYZER_ENABLE_Z3_SOLVER=OFF -DCMAKE_INSTALL_PREFIX=../install -DLLVM_ENABLE_PROJECTS="clang" -DLLVM_TARGETS_TO_BUILD="" ../llvm-project/llvm
+make install
+
+# CM_FE_DIR must contains libclangFEWrapper.so
+$ CM_FE_DIR=/path/to/install/lib/ python ./tests/test_cm.py
+
 
 # run whole llama like model with w4x quantization type
 python llama.py -hf ../../models/Llama-2-7b-chat-hf/ -q w4x -p "[INST] What's Oxygen? [/INST]"
