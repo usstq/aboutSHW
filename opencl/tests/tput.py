@@ -80,25 +80,49 @@ def test_FMA_basic(regM, regN):
 # GWS = [M//regM, N//(regN)]
 # LWS = [sgM, sgN * SG_SZ]
 # GWS:[256, 16], LWS:[16, 16], M:1024/64, N:64/64, K:1536/128
-def gen_store_C(regM, regN):
-    src = r''''''
+def gen_store_C(regM, regN, withscale, withSum):
+    src = ""
+    if withscale:
+        # read all needed scale.
+        src += r'''
+        __global half *alpha_ptr = alpha + n_idx;
+        ''' + "\n\t".join([f'half alpha_{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+        '''
+    elif withSum:
+        src += r'''
+        __global half *main_ptr = mainInput + m_idx * N + n_idx;
+        ''' + "\n\t".join([f'half main_N{n} = 0;' for n in range(regN)]) + r'''
+        '''
+
     for m in range(regM):
+        # read out `regN` mainInput
+        if withSum:
+            src += "\n\t".join([f'main_N{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+                    ''' 
         for n in range(regN):
-            src +=  f"\t\t\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}));\n"
-        if m < regM - 1:
-            src += f"\t\t\tptrC += N;\n\n"
+            if withscale:
+                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}*alpha_{n}));"
+            elif withSum:
+                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}+main_N{n}));"
+            else:
+                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}));"
+        if withSum:
+            src += f"\n\tmain_ptr+= N;"
+        src += f"\n\tptrC += N;\n\n"
+
+
             
     return src
 
 def ALIGN_UP(a, b):
     return ((a + (b -1)) // b *b)
 
-def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
+def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False):
     func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, int M, int N, int K) {
+    ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
@@ -138,21 +162,32 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
             //}
         }
 
-        ''' +  gen_store_C(regM, regN) + r'''
+        ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
-    print(src)
+    # print(src)
     cl.profiling(True)
 
     # np.random.seed(0)
     vRANGE = 1
     REPEAT = 1
-    A = np.random.randint(-vRANGE, vRANGE, [M, K]).astype(np.float16)
+    A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
-    C_ref = np.matmul(A, B)
+    alpha = np.random.rand(N).astype(np.float16)
+    mainInput = np.random.randint(-vRANGE, vRANGE+1, [M, N]).astype(np.float16)
+    if withscale:
+        C_ref = np.multiply(np.matmul(A, B), alpha)
+    elif withSum:
+        C_ref = np.add(np.matmul(A, B), mainInput)
+    else:
+        C_ref = np.matmul(A, B)
+
     tA_list = [cl.tensor(A) for _ in range(REPEAT)]
     tB_list = [cl.tensor(B) for _ in range(REPEAT)]
+    tAlpha_list =  [cl.tensor(alpha) for _ in range(REPEAT)]
     tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
+    tMaininput_list = [cl.tensor(mainInput) for _ in range(REPEAT)]
+
     SG_SZ = 16
     BK= 64
     BM = regM*sgM
@@ -171,7 +206,7 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
     assert sgM *sgN * SG_SZ <= 1024, f" LWS:{LWS} exceed 1024 limitation"
 
     for i in range(0, REPEAT):
-        kernel.enqueue(func, GWS, LWS, tA_list[i], tB_list[i],tC_list[i], M, N, K)
+        kernel.enqueue(func, GWS, LWS, tA_list[i], tB_list[i],tC_list[i], tAlpha_list[i], tMaininput_list[i], M, N, K)
     ns = cl.finish()
     flops = M * N * K * 2
     for time in ns:
@@ -187,21 +222,34 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN):
 # GEMMA rank == 64, use regM, regN for  [8,2] , sgM = 16, sgN = 2, when M >= 2048. 
 # other wise,  choose regM = 4, regN = 1, sgM = ?, sgN = 1/2/8.
 
-
-
 # GEMMB: M < 256 regM=8, regN=2, sgM=16, sgN=4, small M() fits into
 #        M >= 256, regM=16, regN=2, sgM=8, sgN=4
 
+
+# test perf:
 # for k in (64,128,192):
 #     for m in (3072,):
 #         for n in (512,):
 #             test_FMA_blocking(m, n, k, regM=8, regN=2, sgM=16, sgN=1)
 
-# for batch in range(129, 512):
-#     test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4)
-# for batch in range(129, 1024):
-#     test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2)
-# for batch in range(65, 512):
-#     test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
+# test acc:
+for batch in range(129, 512):
+    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4)
+    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=True)
+    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=False, withSum=True)
 
-test_FMA_blocking(65, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
+
+for batch in range(129, 1024):
+    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2)
+    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=True)
+    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=False, withSum=True)
+
+for batch in range(65, 512):
+    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
+    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4, withscale=True)
+    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4,  withscale=False, withSum=True)
+
+
+# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4)
+# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=True)
+# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=False, withSum=True)
