@@ -22,7 +22,7 @@ inline const char* filename(const char* path) {
 }
 
 inline float get_delta_ms() {
-    static auto t0 = std::chrono::high_resolution_clock::now();
+    thread_local auto t0 = std::chrono::high_resolution_clock::now();
     auto t1 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> dt = t1 - t0;
     t0 = t1;
@@ -87,9 +87,6 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
     if (func)
         tag = tag + func + "()";
 
-    std::stringstream ss;
-    int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
-    (void)dummy;
     auto dt_value = get_delta_ms();
     std::string dt_unit = "ms";
     if (dt_value > 1000.0f) {
@@ -101,16 +98,23 @@ void easy_cout(const char* file, const char* func, int line, Ts... args) {
         }
     }
 
-    if (DEBUG_LOG_COLOR > 0)
-        std::cout << " \033[37;100m+";
-    std::cout << "[" << log_id << "] " << std::fixed << std::setprecision(3) << dt_value << " " << dt_unit;
-    if (DEBUG_LOG_COLOR > 0)
-        std::cout << "\033[36;40m";
-    std::cout << " " << tag;
-    if (DEBUG_LOG_COLOR > 0)
-        std::cout << " \033[0m ";
+    std::stringstream ss;
 
-    std::cout << ss.str() << "" << std::endl;
+    if (DEBUG_LOG_COLOR > 0)
+        ss << " \033[37;100m+";
+    ss << "[" << log_id << "] " << std::fixed << std::setprecision(3) << dt_value << " " << dt_unit;
+    if (DEBUG_LOG_COLOR > 0)
+        ss << "\033[36;40m";
+    ss << " " << tag;
+    if (DEBUG_LOG_COLOR > 0)
+        ss << " \033[0m ";
+
+    int dummy[sizeof...(Ts)] = {(ss << args, 0)...};
+    (void)dummy;
+
+    ss << "" << std::endl;
+
+    std::cout << ss.str();
 }
 
 #define DEBUG0(...)        easy_cout(__FILE__, __func__, __LINE__);

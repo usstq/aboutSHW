@@ -425,15 +425,15 @@ protected:
     }
 
     // explicitly allocate register as required width or allocate the best width
-    std::shared_ptr<XbyakVReg> alloc_vreg(int index, int bits = 0) {
+    std::shared_ptr<XbyakVReg> alloc_vreg(int index) {
         auto reg_index = vreg_pool.allocate(index);
-        if ((bits == 0 && use_avx512) || (bits == 512)) {
+        if (use_avx512) {
             return std::shared_ptr<XbyakVReg>(new Xbyak::Zmm(reg_index), [this, reg_index](Xbyak::Zmm* preg) {
                 vreg_pool.free(reg_index);
                 delete preg;
             });
         }
-        if ((bits == 0 && !use_avx512) || (bits == 256)) {
+        if (!use_avx512) {
             return std::shared_ptr<XbyakVReg>(new Xbyak::Ymm(reg_index), [this, reg_index](Xbyak::Ymm* preg) {
                 vreg_pool.free(reg_index);
                 delete preg;
@@ -675,20 +675,25 @@ public:
 class VReg {
 protected:
     SIMDJit* jit = nullptr;
+    // this holds the reference (with counting) of actual register's identity (ymm or zmm)
     std::shared_ptr<XbyakVReg> reg;
 
+    // while the allocated physical register (reg) could be zmm or ymm
+    // (depending on AVX512 or AVX2), role can be zmm/ymm/xmm
+    XbyakVReg role;
+
 public:
-    VReg(SIMDJit* jit, std::shared_ptr<XbyakVReg> reg) : jit(jit), reg(reg) {}
-    VReg(int bits = 0);
+    VReg(SIMDJit* jit, std::shared_ptr<XbyakVReg> reg) : jit(jit), reg(reg), role(*reg) {}
+    VReg();
     VReg(const VReg& rhs) = default;
     bool empty() const {
         return !static_cast<bool>(reg);
     }
     operator XbyakVReg&() {
-        return *reg;
+        return role;
     }
     operator const XbyakVReg&() const {
-        return *reg;
+        return role;
     }
     Xbyak::Zmm zmm() const {
         return Xbyak::Zmm(reg->getIdx());
@@ -698,6 +703,46 @@ public:
     }
     Xbyak::Xmm xmm() const {
         return Xbyak::Xmm(reg->getIdx());
+    }
+
+    Xbyak::Ymm yzmm() const {
+        // some instructions only supports ymm/zmm (no xmm)
+        // the mnemonic provides an overload with ymm type for it
+        switch(bits()) {
+            case 512: return zmm();
+            case 256: return ymm();
+        }
+        ASSERT(false);
+    }
+
+    Xbyak::Xmm vmm(int bits) const {
+        switch(bits) {
+            case 128: return Xbyak::Xmm(reg->getIdx());
+            case 256: return Xbyak::Ymm(reg->getIdx());
+            case 512: return Xbyak::Zmm(reg->getIdx());
+        }
+        ASSERT(false);
+    }
+
+    VReg to_zmm() {
+        ASSERT(reg->getBit() >= 512);
+        VReg ret(*this);
+        ret.role = zmm();
+        return ret;
+    }
+
+    VReg to_ymm() {
+        ASSERT(reg->getBit() >= 256);
+        VReg ret(*this);
+        ret.role = ymm();
+        return ret;
+    }
+
+    VReg to_xmm() {
+        ASSERT(reg->getBit() >= 128);
+        VReg ret(*this);
+        ret.role = xmm();
+        return ret;
     }
 
     inline void zero() const;
@@ -723,29 +768,34 @@ public:
 
     template <class T>
     int lanes() const {
-        return reg->getBit() / (8 * sizeof(T));
+        return bits() / (8 * sizeof(T));
     }
 
     int bits() const {
-        return reg->getBit();
+        return role.getBit();
     }
 
     // this will overwrite content of source vreg, so better be a member of VReg
     template <class F>
     void reduce_ps(const F& uni_op);
-
-    template <class T>
-    static int simd_lanes();
 };
 
 class Ymm : public VReg {
 public:
-    Ymm();
+    Ymm() {
+        if (reg) {
+            role = Xbyak::Ymm(reg->getIdx());
+        }
+    }
 };
 
 class Zmm : public VReg {
 public:
-    Zmm();
+    Zmm() {
+        if (reg) {
+            role = Xbyak::Zmm(reg->getIdx());
+        }
+    }
 };
 
 // AMX Tile register
@@ -828,6 +878,10 @@ public:
     SRegExpr(const char* op, SRegExpr&& lhs, SRegExpr&& rhs) : pimpl(new RegExprImpl(op, lhs.pimpl, rhs.pimpl)) {
         // create Addressing from the first leaf-op when expr pattern is valid:
         if (pimpl->lhs->is_reg() && pimpl->rhs->is_leaf()) {
+            if (pimpl->is_op("-") && pimpl->rhs->is_imm()) {
+                // (base - disp)
+                paddr.reset(new Addressing(pimpl->lhs->data, -1, 0, -pimpl->rhs->data));
+            }
             if (pimpl->is_op("+")) {
                 if (pimpl->rhs->is_reg())
                     // (base + index)
@@ -1088,8 +1142,8 @@ public:
         return SReg(this, alloc_reg64(id));
     }
 
-    VReg get_vreg(int bits = 0) {
-        return VReg(this, alloc_vreg(-1, bits));
+    VReg get_vreg(int id = -1) {
+        return VReg(this, alloc_vreg(id));
     }
 
     TReg get_treg(int id) {
@@ -1251,23 +1305,15 @@ inline SReg::SReg() {
         reg = cur_jit->get_sreg(-1).reg;
     }
 }
-inline VReg::VReg(int bits) {
+inline VReg::VReg() {
     auto* cur_jit = default_simd_jit_t::get().cur;
     if (cur_jit) {
         // allocate sreg
         jit = cur_jit;
-        reg = cur_jit->get_vreg(bits).reg;
+        reg = cur_jit->get_vreg(-1).reg;
+        // initial role is same as reg
+        role = *reg;
     }
-}
-
-inline Ymm::Ymm() : VReg(256) {}
-
-inline Zmm::Zmm() : VReg(512) {}
-
-template <class T>
-int VReg::simd_lanes() {
-    auto* cur_jit = default_simd_jit_t::get().cur;
-    return cur_jit->vmm_width<T>();
 }
 
 // each lane of result SIMD register contains same value
@@ -1279,11 +1325,11 @@ int VReg::simd_lanes() {
 template <class F>
 void VReg::reduce_ps(const F& uni_op) {
     auto vreg_bits = bits();
-    VReg vaux(vreg_bits);
+    VReg vaux;
     if (vreg_bits == 512) {
-        jit->vshuff32x4(vaux.zmm(), zmm(), zmm(), 0x4E);
+        jit->vshuff32x4(vaux.yzmm(), zmm(), zmm(), 0x4E);
         uni_op(*this, *this, vaux);
-        jit->vshuff32x4(vaux.zmm(), zmm(), zmm(), 0xB1);
+        jit->vshuff32x4(vaux.yzmm(), zmm(), zmm(), 0xB1);
         uni_op(*this, *this, vaux);
     } else if (vreg_bits == 256) {
         jit->vperm2i128(vaux.ymm(), ymm(), ymm(), 0x01);
@@ -1291,9 +1337,9 @@ void VReg::reduce_ps(const F& uni_op) {
     } else {
         assert(!"unsupported isa");
     }
-    jit->vshufps(vaux, *reg, *reg, 0x4E);
+    jit->vshufps(vaux, role, role, 0x4E);
     uni_op(*this, *this, vaux);
-    jit->vshufps(vaux, *reg, *reg, 0xB1);
+    jit->vshufps(vaux, role, role, 0xB1);
     uni_op(*this, *this, vaux);
 }
 
@@ -1962,9 +2008,9 @@ inline void SIMDJit::evaluate(SRegExpr& expr, const SReg* pdst, const char assig
 
 inline void VReg::zero() const {
     if (bits() == 512) {
-        jit->vpxord(*reg, *reg, *reg);
+        jit->vpxord(role, role, role);
     } else {
-        jit->vpxor(*reg, *reg, *reg);
+        jit->vpxor(role, role, role);
     }
 }
 
@@ -1974,8 +2020,9 @@ inline void VReg::load(const int32_t brdi32) const {
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, brdi32);
-        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
-        jit->vpbroadcastd(*reg, Xbyak::Xmm(reg->getIdx()));
+        auto xmm0 = xmm();
+        jit->vmovd(xmm0, s.r64().cvt32());
+        jit->vpbroadcastd(role, xmm0);
     }
 }
 
@@ -1985,8 +2032,9 @@ inline void VReg::load(const uint32_t brdi32) const {
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, brdi32);
-        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
-        jit->vpbroadcastd(*reg, Xbyak::Xmm(reg->getIdx()));
+        auto xmm0 = xmm();
+        jit->vmovd(xmm0, s.r64().cvt32());
+        jit->vpbroadcastd(role, xmm0);
     }
 }
 
@@ -1996,8 +2044,9 @@ inline void VReg::load(const float brdf32) const {
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, reinterpret_cast<const uint32_t&>(brdf32));
-        jit->vmovd(Xbyak::Xmm(reg->getIdx()), s.r64().cvt32());
-        jit->vbroadcastss(*reg, Xbyak::Xmm(reg->getIdx()));
+        auto xmm0 = xmm();
+        jit->vmovd(xmm0, s.r64().cvt32());
+        jit->vbroadcastss(role, xmm0);
     }
 }
 
@@ -2007,52 +2056,50 @@ inline void VReg::load(const void* pv) const {
     } else {
         auto s = jit->get_sreg();
         jit->mov(s, reinterpret_cast<uintptr_t>(pv));
-        jit->vmovdqu(*reg, jit->ptr[s.r64()]);
+        jit->vmovdqu(role, jit->ptr[s.r64()]);
     }
 }
 
 inline void VReg::load(const VReg& rhs) const {
-    jit->vmovdqa(*reg, rhs);
+    jit->vmovdqa(role, rhs.role);
 }
 
 inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const {
     ASSERT(addr.paddr);
-    auto rbits = bits();
-    bool support_opmask = (rbits == 512);
+    bool support_opmask = (reg->getBit() == 512);
     XbyakKReg kreg = jit->k0;
     if (!kmask.empty()) {
         kreg = kmask;
     }
+    auto vmm_half = vmm(bits()/2);
     switch (type) {
     case LDST_TYPE::packed_i32:
         if (support_opmask) {
-            jit->vmovdqu32(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vmovdqu32(role | kreg, jit->ptr[addr.paddr->to_addr()]);
         } else {
-            jit->vmovdqu(*reg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vmovdqu(role, jit->ptr[addr.paddr->to_addr()]);
         }
         break;
     case LDST_TYPE::packed_fp32:
         if (support_opmask) {
-            jit->vmovups(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vmovups(role | kreg, jit->ptr[addr.paddr->to_addr()]);
         } else {
-            jit->vmovups(*reg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vmovups(role, jit->ptr[addr.paddr->to_addr()]);
         }
         break;
-    case LDST_TYPE::packed_bf16_fp32: {
-        auto v_ymm = ymm();
-        jit->vmovdqu16(v_ymm | kreg, jit->ptr[addr.paddr->to_addr()]);
-        jit->vpmovzxwd(*reg, v_ymm);
-        jit->vpslld(*reg, *reg, 16);
-    } break;
-    case LDST_TYPE::packed_fp16_fp32:
-        jit->vmovdqu16(ymm() | kreg, jit->ptr[addr.paddr->to_addr()]);
-        jit->vcvtph2ps(*reg, ymm());
+    case LDST_TYPE::packed_bf16_fp32:
+        jit->vmovdqu16(vmm_half | kreg, jit->ptr[addr.paddr->to_addr()]);
+        jit->vpmovzxwd(role, vmm_half);
+        jit->vpslld(role, role, 16);
         break;
+    case LDST_TYPE::packed_fp16_fp32:
+        jit->vmovdqu16(vmm_half | kreg, jit->ptr[addr.paddr->to_addr()]);
+        jit->vcvtph2ps(role, vmm_half);
     case LDST_TYPE::packed_i32_fp32:
         if (support_opmask) {
-            jit->vcvtdq2ps(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vcvtdq2ps(role | kreg, jit->ptr[addr.paddr->to_addr()]);
         } else {
-            jit->vcvtdq2ps(*reg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vcvtdq2ps(role, jit->ptr[addr.paddr->to_addr()]);
         }
         break;
     case LDST_TYPE::scalar_fp32:
@@ -2060,13 +2107,13 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const
         break;
     case LDST_TYPE::packed_i8_i32:
         if (support_opmask) {
-            jit->vpmovzxbd(*reg | kreg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vpmovzxbd(role | kreg, jit->ptr[addr.paddr->to_addr()]);
         } else {
-            jit->vpmovzxbd(*reg, jit->ptr[addr.paddr->to_addr()]);
+            jit->vpmovzxbd(role, jit->ptr[addr.paddr->to_addr()]);
         }
         break;
     case LDST_TYPE::broadcast_fp32:
-        jit->vbroadcastss(*reg, jit->ptr[addr.paddr->to_addr()]);
+        jit->vbroadcastss(role, jit->ptr[addr.paddr->to_addr()]);
         break;
     default:
         assert(0);
@@ -2077,38 +2124,39 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const
 inline void VReg::store(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const {
     ASSERT(addr.paddr);
     auto rbits = bits();
-    bool support_opmask = (rbits == 512);
+    bool support_opmask = (reg->getBit() == 512);
     XbyakKReg kreg = jit->k0;
     if (!kmask.empty()) {
         kreg = kmask;
     }
+    auto vmm_half = vmm(bits()/2);
     switch (type) {
     case LDST_TYPE::packed_i32:
         if (support_opmask) {
-            jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
+            jit->vmovdqu32(jit->ptr[addr.paddr->to_addr()] | kreg, role);
         } else {
-            jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], *reg);
+            jit->vmovdqu(jit->ptr[addr.paddr->to_addr()], role);
         }
         break;
     case LDST_TYPE::packed_fp32:
         if (support_opmask) {
-            jit->vmovups(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
+            jit->vmovups(jit->ptr[addr.paddr->to_addr()] | kreg, role);
         } else {
-            jit->vmovups(jit->ptr[addr.paddr->to_addr()], *reg);
+            jit->vmovups(jit->ptr[addr.paddr->to_addr()], role);
         }
         break;
     case LDST_TYPE::packed_bf16_fp32:
         // vcvtne2ps2bf16 requires two fp32 regs
         // vcvtneps2bf16 only support register target
-        ASSERT(support_opmask && rbits == 512);
-        jit->vcvtneps2bf16(ymm(), *reg);
-        jit->vmovdqu16(jit->ptr[addr.paddr->to_addr()] | kreg, ymm());
+        ASSERT(support_opmask);
+        jit->vcvtneps2bf16(vmm_half, role);
+        jit->vmovdqu16(jit->ptr[addr.paddr->to_addr()] | kreg, vmm_half);
         break;
     case LDST_TYPE::packed_fp16_fp32:
         if (support_opmask) {
-            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()] | kreg, *reg, 0x4);
+            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()] | kreg, role, 0x4);
         } else {
-            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()], *reg, 0x4);
+            jit->vcvtps2ph(jit->ptr[addr.paddr->to_addr()], role, 0x4);
         }
         break;
     case LDST_TYPE::scalar_fp32:
@@ -2116,12 +2164,12 @@ inline void VReg::store(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) cons
         break;
     case LDST_TYPE::packed_i8_i32:
         if (support_opmask) {
-            jit->vpmovsdb(jit->ptr[addr.paddr->to_addr()] | kreg, *reg);
+            jit->vpmovsdb(jit->ptr[addr.paddr->to_addr()] | kreg, role);
         } else {
-            jit->vpackssdw(*reg, *reg, *reg);
-            jit->vpermq(ymm(), ymm(), 0x08);
-            jit->vpacksswb(*reg, *reg, *reg);
-            jit->vmovq(jit->ptr[addr.paddr->to_addr()], *reg);
+            jit->vpackssdw(role, role, role);
+            jit->vpermq(yzmm(), yzmm(), 0x08);
+            jit->vpacksswb(role, role, role);
+            jit->vmovq(jit->ptr[addr.paddr->to_addr()], role);
         }
         break;
     default:
