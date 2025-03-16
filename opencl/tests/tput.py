@@ -165,7 +165,48 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
-    # print(src)
+    
+    cl_kernel_sources_ref = r'''
+    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
+        // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
+        int m_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
+        size_t blk_num = (K + k_blk -1 )/ k_blk;
+        half sum = 0.f;
+        for (int i = 0; i < blk_num; i++) {
+            half sub_sum = 0.f;
+            int k_idx = i*k_blk;
+            // incase K%k_blk != 0;
+            if ((k_idx + k_blk) > K)
+                k_blk = K - k_idx;
+            for (size_t sub_k = 0; sub_k < k_blk; sub_k++) {
+                sub_sum = fma(A[m_idx * K + k_idx], B[k_idx*N+n_idx], sub_sum);
+                k_idx++;
+            }
+            sum += sub_sum;
+        }
+        //CC[m_idx * N + n_idx] = sum * alpha[n_idx];
+        CC[m_idx * N + n_idx] = sum;
+    }
+    __kernel void reduce(__global half * temp_C, __global half *C, int N, int cnt) {
+        int m_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
+        half sum = 0.f;
+        for (int i = 0; i < cnt; i++)
+            sum += temp_C[m_idx*cnt*N + i*N + n_idx];
+        C[m_idx * N + n_idx] = sum;
+    }
+    
+    __kernel void gemmB(__global half * main_input, __global half * A, __global half *B,  __global half *CC, __global half * alpha, int N, int K, int M) {
+        int m_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
+        half sum = 0.f;
+        for (int i = 0; i < K; i++)
+            sum = fma(A[m_idx * K + i] * alpha[i], B[i*N+n_idx], sum);
+        CC[m_idx * N + n_idx] = sum + main_input[m_idx * N + n_idx];
+    }
+'''
+    print(src)
     cl.profiling(True)
 
     # np.random.seed(0)
