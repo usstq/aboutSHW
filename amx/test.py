@@ -69,6 +69,7 @@ parser.add_argument('-b', '--batch-size', type=int, default=256)
 parser.add_argument('-r', '--repeat', type=int, default=5)
 parser.add_argument('-q', '--quanti8', action="store_true")
 parser.add_argument('-dq', '--dynquant', action="store_true")
+parser.add_argument('-e', '--expr', action="store_true")
 
 args = parser.parse_args()
 
@@ -91,6 +92,7 @@ def test_quant_tensor():
     print((w * s - weight).abs().max())
     sys.exit(0)
 
+AMXQKVLinear = csrc.AMXQKVLinear
 
 class testcase:
     def __init__(self, x_dtype, w_dtype, M, K, Ns, dyn_quant=False) -> None:
@@ -148,9 +150,10 @@ class testcase:
         for i, (Y, Z) in enumerate(zip(self.Y, self.Z)):
             Z = to_torch(Z)
             if not torch.allclose(Y, Z):
-                print("refernce: Y ", Y.dtype, Y.shape)
+                return False
+                print(f"refernce: Y[{i}] ", Y.dtype, Y.shape)
                 print(Y)
-                print("actual: Z ", Z.dtype, Z.shape)
+                print(f"actual: Z[{i}] ", Z.dtype, Z.shape)
                 print(Z)
                 if self.dyn_quant:
                     for ws in self.Wscales:
@@ -164,10 +167,10 @@ class testcase:
     def dtname(self, dt):
         return str(dt).replace("torch","").replace("bfloat16","bf16").replace("float32","fp32")
 
-    def test(self, nthr, layers, expect_latency_ms = 0):
+    def test(self, nthr, layers, ms = 0, gbps = 0, gflops=0):
         csrc.set_nthr(nthr)
         t0 = time.time()
-        qkv_projs = [csrc.AMXQKVLinear(self.W) for _ in range(layers)]
+        qkv_projs = [AMXQKVLinear(self.W) for _ in range(layers)]
         build_ms = (time.time() - t0)/layers * 1e3
         latency_ms = []
         for r in range(5):
@@ -185,14 +188,35 @@ class testcase:
         mem_bw_GB = np.sum([w.nbytes for w in self.W]) * 1e-6 / min_latency
         GFLOPS = self.M * self.K * np.sum(self.Ns) * 2 * 1e-6 / min_latency
         tag = f"{self.dtname(self.x_dtype)}{self.dtname(self.w_dtype)}{self.dtname(self.o_dtype)},t{nthr}M{self.M}K{self.K}N{self.Ns}L{layers}"
-        ColorsCode = Colors.GREEN
-        if expect_latency_ms > 0:
-            if min_latency > expect_latency_ms:
-                ColorsCode = Colors.RED
-
+        if ms > 0:
+            if min_latency > ms:
+                min_latency = f"{Colors.RED}min{min_latency : .2f}{Colors.END}"
+            else:
+                min_latency = f"{Colors.GREEN}min{min_latency : .2f}{Colors.END}"
+        else:
+            min_latency = f"min{min_latency : .2f}"
+        
+        gbperc = f"({mem_bw_GB*100/sys_cap_mem_bw_GBPS:.0f}%)"
+        if gbps > 0:
+            if mem_bw_GB > gbps:
+                mem_bw_GB = f"{Colors.GREEN}{mem_bw_GB : .2f}{Colors.END}GB/s {gbperc}"
+            else:
+                mem_bw_GB = f"{Colors.RED}{mem_bw_GB : .2f}{Colors.END}GB/s {gbperc}"
+        else:
+            mem_bw_GB = f"min{mem_bw_GB : .2f}GB/s {gbperc}"
+        
+        GFLOPS = GFLOPS/nthr
         peak_GFLOPS = sys_cap_amx_core_GFLOPS[self.w_dtype.itemsize]
-        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:{ColorsCode}min{min_latency : .2f}{Colors.END}+SD{std_latency:.2f}ms "
-              f"  {mem_bw_GB:.2f} GB/s ({mem_bw_GB*100/sys_cap_mem_bw_GBPS:.0f}%)   {GFLOPS/nthr:.2f} GFLOPS/core ({GFLOPS*100/nthr/peak_GFLOPS:.0f}%) ... {'CORRECT' if correct else 'WRONG'}")
+        GFLOPS_perc = f"({GFLOPS*100/peak_GFLOPS:.0f}%)"
+        if gflops > 0:
+            if GFLOPS > gflops:
+                GFLOPS = f"{Colors.GREEN}{GFLOPS : .2f}{Colors.END}GFLOPS/core {GFLOPS_perc}"
+            else:
+                GFLOPS = f"{Colors.RED}{GFLOPS : .2f}{Colors.END}GFLOPS/core {GFLOPS_perc}"
+        else:
+            GFLOPS = f"{GFLOPS : .2f}GFLOPS/core {GFLOPS_perc}"
+        
+        print(f"{tag:60s} : build-{build_ms : .2f}ms  exec:min{min_latency}+SD{std_latency:.2f}ms {mem_bw_GB}  {GFLOPS} ... {'CORRECT' if correct else 'WRONG'}")
         return self
 
 
@@ -227,26 +251,26 @@ def test_mem_bounds(repeat):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
     # need to repeat to see if memory bound can reach due to random system mem-accessing noise
     for i in range(repeat):
-        testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.3)
-        testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.45)
+        testcase(torch.int8, torch.int8, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, gbps=250)
+        testcase(torch.bfloat16, torch.bfloat16, 1, 4096, [4096, 4096, 4096]).test(ncores, 100, gbps=250)
 
 def test_compute_bounds(repeat, batch_size):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
     for i in range(repeat):
-        testcase(torch.int8, torch.int8, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.43)
-        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, 0.68)
+        testcase(torch.int8, torch.int8, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, gflops=1200)
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096, 4096, 4096]).test(ncores, 100, gflops=800)
 
 def test_compute_bounds_bigM(repeat):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
     for i in range(repeat):
-        testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, 0.48)
-        testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, 0.42)
+        testcase(torch.bfloat16, torch.bfloat16, 2500, 1024, [1024, 1024, 1024]).test(ncores, 100, gflops=700)
+        testcase(torch.bfloat16, torch.bfloat16, 10000, 512, [512, 512, 512]).test(ncores, 100, gflops=900)
 
 def test_k_groups(repeat, batch_size):
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
     for i in range(repeat):
-        testcase(torch.bfloat16, torch.bfloat16, batch_size, 11008, [4096]).test(ncores, 100, 0.58)
-        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096]).test(ncores, 100, 0.28)
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 11008, [4096]).test(ncores, 100, 0.58, gflops=850)
+        testcase(torch.bfloat16, torch.bfloat16, batch_size, 4096, [4096]).test(ncores, 100, 0.28, gflops=650)
 
 def test_dyn_quant():
     print(f"======================{inspect.currentframe().f_code.co_name}======================")
@@ -266,6 +290,13 @@ def test_dyn_quant():
 #test_amx_repack_B(); sys.exit(0)
 
 numactl(args.node, args.ncores)
+
+if args.expr:
+    # experimental tests
+    AMXQKVLinear = csrc.AMXQKVLinear2
+    for i in range(args.repeat):
+        testcase(torch.bfloat16, torch.bfloat16, 10000+16, 512, [512, 512, 512], dyn_quant=False).test(ncores, 100, 0.45)
+    sys.exit(0)
 
 if args.dynquant:
     test_dyn_quant()
@@ -302,15 +333,10 @@ def test_quant_i8(dtype):
     mean_abs_diff = float(abs_diff.mean())
     print(f" diff_max:{max_abs_diff:.2f} diff_mean:{mean_abs_diff:.2f} min_latency:{min_latency:.2f} + std{std_latency:.2f}ms")
 
-
-    
-
 if args.quanti8:
     test_quant_i8(torch.bfloat16)
     test_quant_i8(torch.float16)
     sys.exit(0)
-
-
 
 test_mem_bounds(args.repeat)
 test_compute_bounds(args.repeat, args.batch_size)

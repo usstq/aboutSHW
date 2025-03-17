@@ -191,6 +191,7 @@ class func_amx {
     std::shared_ptr<SIMDJit> jit_tile_configer;
     std::shared_ptr<SIMDJit> jit_amx_mm2x2;
     std::shared_ptr<SIMDJit> jit_amx_mm1x2;
+    std::shared_ptr<SIMDJit> jit_amx_mm2x2_small_K;
 
     int m_prefetch_Blines = 0;
 
@@ -205,6 +206,7 @@ public:
         int64_t strideC;    // in bytes
         const uint8_t* prefetch;
         int64_t k_tiles;  // K / 32
+        int64_t valid_m;
         int64_t do_accumulation;
     };
 
@@ -334,10 +336,9 @@ public:
 
             // reg_A1_addr = reg_A_addr if M <= 16 (to avoid tileloadd segmentfault)
             auto reg_tmp = reg_B_stride;
-            // reg_tmp.load(pargs + offsetof(call_args, M));
-            // jit->if_(reg_tmp <= 16, [&] {
-            //     reg_A1_addr = reg_A_addr;
-            // });
+            reg_tmp.load(pargs + offsetof(call_args, valid_m));
+            jit->cmp(reg_tmp, 16);
+            jit->cmovle(reg_A1_addr, reg_A_addr);
 
             reg_tmp.load(pargs + offsetof(call_args, do_accumulation));
             jit->if_(reg_tmp != 0, [&] {
@@ -400,6 +401,63 @@ public:
             tmmC10.store(reg_C_addr + reg_C_stride);
             tmmC11.store(reg_C_addr + reg_C_stride + 64);
         });
+
+        // small K, no need to prefetch next subB along K dimension
+        jit_amx_mm2x2_small_K = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+            SReg reg_A_addr, reg_A_stride, reg_B_addr, reg_C_addr, reg_C_stride;
+            SReg reg_prefetch, reg_ktiles, reg_A1_addr, reg_B_stride;
+            reg_A_addr.load(pargs + offsetof(call_args, pA));
+            reg_A_stride.load(pargs + offsetof(call_args, strideA));
+            reg_B_addr.load(pargs + offsetof(call_args, pB));
+            reg_C_addr.load(pargs + offsetof(call_args, pC));
+            reg_C_stride.load(pargs + offsetof(call_args, strideC));
+            reg_prefetch.load(pargs + offsetof(call_args, prefetch));
+            reg_ktiles.load(pargs + offsetof(call_args, k_tiles));
+            TReg tmmC00(0), tmmC01(1), tmmC10(2), tmmC11(3);
+            TReg tmmA0(4), tmmA1(5), tmmB0(6), tmmB1(7);
+            jit->tilezero(tmmC00);
+            jit->tilezero(tmmC01);
+            jit->tilezero(tmmC10);
+            jit->tilezero(tmmC11);
+
+            reg_A1_addr = reg_A_addr + reg_A_stride * 8;
+            reg_A1_addr = reg_A1_addr + reg_A_stride * 8;
+
+            reg_B_stride.load(pargs + offsetof(call_args, valid_m));
+            jit->cmp(reg_B_stride, 16);
+            jit->cmovle(reg_A1_addr, reg_A_addr);
+
+            reg_B_stride = 64;
+            auto const_A_steps = 64;
+            jit->do_while_(reg_ktiles > 0, [&] {
+                //                B: 1x2 tiles
+                // A : 2x1 tiles  C: 2x2 tiles
+                tmmA0.load(reg_A_addr + reg_A_stride);
+                tmmB0.load(reg_B_addr + reg_B_stride);
+                reg_B_addr = reg_B_addr + 1024;
+
+                jit->tmul(tmmC00, tmmA0, tmmB0, tmul_type);
+                tmmA1.load(reg_A1_addr + reg_A_stride);
+                jit->tmul(tmmC10, tmmA1, tmmB0, tmul_type);
+                tmmB1.load(reg_B_addr + reg_B_stride);
+                jit->tmul(tmmC01, tmmA0, tmmB1, tmul_type);
+                jit->tmul(tmmC11, tmmA1, tmmB1, tmul_type);
+
+                //reg_prefetch = reg_prefetch + 64 * num_PFB;
+                reg_A_addr = reg_A_addr + const_A_steps;
+                reg_A1_addr = reg_A1_addr + const_A_steps;
+                reg_B_addr = reg_B_addr + 1024;
+                reg_ktiles--;
+            });
+
+            tmmC00.store(reg_C_addr + reg_C_stride);
+            tmmC01.store(reg_C_addr + reg_C_stride + 64);
+            reg_C_addr = reg_C_addr + reg_C_stride * 8;
+            reg_C_addr = reg_C_addr + reg_C_stride * 8;
+            tmmC10.store(reg_C_addr + reg_C_stride);
+            tmmC11.store(reg_C_addr + reg_C_stride + 64);
+        });
+
     }
 
     // functor can have many functions, but all of them have to be const
@@ -426,7 +484,6 @@ public:
         ASSERT((K % REG_BLK_K) == 0, K, "%", REG_BLK_K, " != 0");
 
         int cur_tile_cfg_id = -1;
-
         auto config_tile_M = [&](int valid_m) {
             // valid_m : [1 ~ 32]
             auto cfg_id = valid_m < 0 ? valid_m : (valid_m % 32);
@@ -454,8 +511,10 @@ public:
             config_tile_M(valid_m);
             args.pB = pB;
             args.pA = pA;
+            args.valid_m = valid_m;
             for (int n = 0; n < N; n += REG_BLK_N) {
                 args.pC = pC + n * sizeof(float);
+                //args.pC = pC;
                 (*jit_amx_mm2x2)(&args);
                 args.pB += args.k_tiles * 2048;
                 args.prefetch += prefetch_step;
@@ -501,6 +560,7 @@ public:
                 args.pC += REG_BLK_N * sizeof(uint32_t);
             }
         } else {
+            //printf("==========%p\n", pA);            
             // compute-bound case
             for (auto* ik = first_K; ik != last_K; ik++) {
                 auto& k_size = *ik;
@@ -843,7 +903,12 @@ struct AMXLinearKernel {
         CACHE_BLK_K = 256;
 
         // DEBUG_LOG(N0, N1, N2, K);
-        blk_bk.reset_size(K, CACHE_BLK_K);
+        if (K <= CACHE_BLK_K * 4) {
+            // do not blocking on K dimension
+            blk_bk.reset_size(K, K);
+        } else {
+            blk_bk.reset_size(K, CACHE_BLK_K);
+        }
         auto nthr = omp_get_max_threads();
 
         ksyncs.resize(nthr);
@@ -873,8 +938,12 @@ struct AMXLinearKernel {
             blk_bn.reset_cnt(N, REG_BLK_N, nthr);
         }
 
-        // DEBUG_LOG(blk_bk);
-        // DEBUG_LOG(k_group_workers, blk_bn);
+        static int show_cnt = 5;
+        if (show_cnt) {
+            DEBUG_LOG(blk_bk);
+            DEBUG_LOG(k_group_workers, blk_bn);
+            show_cnt--;
+        }
 
         w_buff = alloc_cache_aligned<int8_t>(N * K * (w_is_int8 ? 1 : 2));
         auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
@@ -954,10 +1023,11 @@ struct AMXLinearKernel {
                 auto* pw = pw_base + (n0 * K + k_off * (n1 - n0)) / (REG_BLK_N * REG_BLK_K) * 2048;
                 auto* px = p_x + m0 * stride_x + k_off * (w_is_int8 ? 1 : 2);
 
+                //DEBUG_LOG(m0, m1);
                 amx_mm->matmulx(m1 - m0,
                                 n1 - n0,
-                                &Ks[ki0],
-                                &Ks[ki1],
+                                Ks.data() + ki0,
+                                Ks.data() + ki1,
                                 px,  // p_x + m0 * stride_x,
                                 stride_x,
                                 pw,  // pw_base + (n0 * K) / (REG_BLK_N * REG_BLK_K) * 2048,
