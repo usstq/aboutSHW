@@ -341,11 +341,8 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
     '''
     return [func, src]
 
-# GEMMA has a big K but small N(rank), GEMMA kernel  would divide K by WGs and K diemsnion SGs.
-# GEMMB only divide N by WGs and SGs because N is big and K(Rank) is small..
-# gemma_sg_BK: the Number of K accumuated in one sg for GEMMA.
-# gemma_sgK: the number of sg in K dimension for GEMMA.
-# gemmb_sgN: the number of sg in N dimension for GEMMBclass
+ #A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
+ #B_regM, B_regN, B_sgM, B_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
 class LORA_1ST:
     def __init__(self, batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN, use_ref = False):
         self.batch = batch
