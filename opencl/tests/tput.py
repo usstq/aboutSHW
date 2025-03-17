@@ -126,16 +126,19 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         int sgid = get_sub_group_id();
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
-        ''' + f'int regM = {regM};\nint regN = {regN};\n' + r'''
+        ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
         //__local half lA[BM*BK];
         //__local half lB[BK*BN];
         //__local half* ptrA = lA;
         //__local half* ptrB = lB;
         int m_idx = get_group_id(0) * BM  + sgid_M * regM;
         int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        if (m_idx > M)
+        if (m_idx >= M || n_idx >=N )
             return;
-        ''' + f'if (m_idx + regM > M)\n \t\t\tm_idx = M - regM;\n' + r'''
+        if (m_idx + regM > M)
+            m_idx = M - regM;
+        if (n_idx + regN * SG_SZ > N)
+            n_idx = N - regN * SG_SZ;
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B + n_idx;
         __global half *ptrC = C + m_idx * N + n_idx;
@@ -206,7 +209,7 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         CC[m_idx * N + n_idx] = sum + main_input[m_idx * N + n_idx];
     }
 '''
-    print(src)
+    # print(src)
     cl.profiling(True)
 
     # np.random.seed(0)
@@ -234,15 +237,15 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
     BM = regM*sgM
     BN = regN*sgN*SG_SZ
     
-    assert M >= BM , f'M:{M} is smaller than BM:{BM}'
-    # assert M % BM == 0 , f'M:{M} is not multiple of BM:{BM}'
-    assert N % BN == 0 , f'N:{N} is not multiple of BN:{BN}'
+    assert M >= regM , f'M:{M} is smaller than regM:{regM}'
+    assert N >= regN*SG_SZ , f'N:{N} is smaller than :regN*SG_SZ {regN*SG_SZ}'
+    assert N % SG_SZ == 0 , f'N:{N} is not multiple of SG_SZ:{SG_SZ}'
 
     # assert BK % SG_SZ == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
     # assert K % BK == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
 
     kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
-    GWS = [ALIGN_UP(M, BM)//regM , N//(regN)]
+    GWS = [ALIGN_UP(M, BM)//regM , ALIGN_UP(N, BN)//(regN)]
     LWS = [sgM, sgN * SG_SZ]
     assert sgM *sgN * SG_SZ <= 1024, f" LWS:{LWS} exceed 1024 limitation"
 
@@ -273,22 +276,23 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
 #         for n in (512,):
 #             test_FMA_blocking(m, n, k, regM=8, regN=2, sgM=16, sgN=1)
 
-# test acc:
-for batch in range(129, 512):
-    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4)
-    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=True)
-    test_FMA_blocking(batch, N=1536, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=False, withSum=True)
+# test acc of M/:
+for batch in range(8, 256):
+    for n_idx in range(2, 32):
+        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4)
+        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=True)
+        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=False, withSum=True)
 
 
-for batch in range(129, 1024):
-    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2)
-    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=True)
-    test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=False, withSum=True)
+# for batch in range(129, 1024):
+#     test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2)
+#     test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=True)
+#     test_FMA_blocking(batch, N=64, K=1536, regM=16, regN=2, sgM=8, sgN=2, withscale=False, withSum=True)
 
-for batch in range(65, 512):
-    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
-    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4, withscale=True)
-    test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4,  withscale=False, withSum=True)
+# for batch in range(65, 512):
+#     test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4)
+#     test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4, withscale=True)
+#     test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4,  withscale=False, withSum=True)
 
 
 # test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4)

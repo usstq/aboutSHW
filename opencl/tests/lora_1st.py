@@ -60,16 +60,19 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         int sgid = get_sub_group_id();
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
-        ''' + f'int regM = {regM};\nint regN = {regN};\n' + r'''
+        ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
         //__local half lA[BM*BK];
         //__local half lB[BK*BN];
         //__local half* ptrA = lA;
         //__local half* ptrB = lB;
         int m_idx = get_group_id(0) * BM  + sgid_M * regM;
         int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        if (m_idx > M)
+        if (m_idx >= M || n_idx >=N )
             return;
-        ''' + f'if (m_idx + regM > M)\n \t\t\tm_idx = M - regM;\n' + r'''
+        if (m_idx + regM > M)
+            m_idx = M - regM;
+        if (n_idx + regN * SG_SZ > N)
+            n_idx = N - regN * SG_SZ;
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B + n_idx;
         __global half *ptrC = C + m_idx * N + n_idx;
@@ -141,7 +144,7 @@ def test_lora_1st(batch, input_state, rank , output_state, A_regM, A_regN, A_sgM
 
     # np.random.seed(0)
     vRANGE = 1
-    REPEAT = 100
+    REPEAT = 1
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
     alpha = np.random.rand(rank).astype(np.float16)
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
@@ -165,10 +168,13 @@ def test_lora_1st(batch, input_state, rank , output_state, A_regM, A_regN, A_sgM
     B_BM = B_regM*B_sgM
     B_BN = B_regN*B_sgN*SG_SZ
     
-    assert batch >= A_BM and batch >=B_BM , f'batch:{batch} is smaller than A_BM/B_BM:{A_BM}/{B_BM}'
+    assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_BM/B_BM:{A_regM}/{B_regM}'
     # assert M % BM == 0 , f'M:{M} is not multiple of BM:{BM}'
-    assert rank % A_BN == 0 , f'rank:{rank} is not multiple of A_BN:{A_BN}'
-    assert output_state % B_BN == 0 , f'output_state:{output_state} is not multiple of B_BN:{B_BN}'
+    assert rank % SG_SZ == 0 , f'rank:{rank} is not multiple of A_BN:{SG_SZ}'
+    assert output_state % SG_SZ == 0 , f'output_state:{output_state} is not multiple of B_BN:{SG_SZ}'
+    assert rank >= A_regN * SG_SZ, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*SG_SZ}'
+    assert output_state >= B_regN * SG_SZ, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*SG_SZ}'
+
 
     ref_res = cl.tensor([batch, output_state], np.dtype(np.float16))
     kernel_ref = kernel_cache(cl_kernel_sources_ref)
@@ -182,13 +188,15 @@ def test_lora_1st(batch, input_state, rank , output_state, A_regM, A_regN, A_sgM
     cl.finish()
 
     kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={SG_SZ}  -DBM={A_BM} -DBN={A_BN} -DsgM={A_sgM} -DsgN={A_sgN}")
-    A_GWS = [ALIGN_UP(batch, A_BM)//A_regM , rank//(A_regN)]
+    A_GWS = [ALIGN_UP(batch, A_BM)//A_regM , ALIGN_UP(rank, A_BN)//(A_regN)]
     A_LWS = [A_sgM, A_sgN * SG_SZ]
     assert A_sgM *A_sgN * SG_SZ <= 1024, f" A_LWS:{A_LWS} exceed 1024 limitation"
+
     kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={SG_SZ}  -DBM={B_BM} -DBN={B_BN} -DsgM={B_sgM} -DsgN={B_sgN}")
-    B_GWS = [ALIGN_UP(batch, B_BM)//B_regM , output_state//(B_regN)]
+    B_GWS = [ALIGN_UP(batch, B_BM)//B_regM , ALIGN_UP(output_state, B_BN)//(B_regN)]
     B_LWS = [B_sgM, B_sgN * SG_SZ]
     assert B_sgM *B_sgN * SG_SZ <= 1024, f" B_LWS:{B_LWS} exceed 1024 limitation"
+
     for i in range(0, REPEAT):
         kernel_opt_gemma.enqueue(gemma_func, A_GWS, A_LWS, loraInput_list[i], stateA_list[i], A_output_list[i], alpha_list[i], mainInput_list[i], batch, rank, input_state)
         kernel_opt_gemmb.enqueue(gemmb_func, B_GWS, B_LWS, A_output_list[i], stateB_list[i], res_list[i], alpha_list[i], mainInput_list[i], batch, output_state, rank)
@@ -198,7 +206,7 @@ def test_lora_1st(batch, input_state, rank , output_state, A_regM, A_regN, A_sgM
     rd_bytes_a = (rank*input_state+input_state*batch+rank)*2
     rd_bytes_b = (rank*output_state+output_state*batch+rank*batch)*2
     print("----------------------------------------------------")
-    for i in range(1, REPEAT):
+    for i in range(0, REPEAT):
         ns_a = profiling_data[i*2]
         ns_b = profiling_data[i*2 + 1]
         print(f"[GEMMA]: {flops_a*1e-6:.1f} Mflop/{ns_a*1e-3:.1f} us = {flops_a/ns_a:.3f} GFlops/s  {rd_bytes_a/1e6:.1f} MB/{ns_a*1e-3:.1f} us = {rd_bytes_a/ns_a:.1f} GB/s ,\
@@ -222,7 +230,8 @@ def test_lora_1st(batch, input_state, rank , output_state, A_regM, A_regN, A_sgM
 # GEMMB: M < 256 regM=8, regN=2, sgM=16, sgN=4, small M() fits into
 #        M >= 256, regM=16, regN=2, sgM=8, sgN=4
 
-for batch in (2111, 3051, 1025, 1777, 137):
+for batch in range(8, 1024):
     for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-        for output_state in(512, 1024, 2048, 1536, 3072, 3840):
-            test_lora_1st(batch, input_state, 64 , output_state, A_regM = 8, A_regN = 2, A_sgM=16, A_sgN = 2, B_regM=16, B_regN=2, B_sgM=8, B_sgN=4)    
+        for output_state in range(256//16, 1024//16):
+            for rank in (16, 32 ,64, 128):
+                test_lora_1st(batch, input_state, rank , output_state*16, A_regM = 8, A_regN = 1, A_sgM=16, A_sgN = 2, B_regM=8, B_regN=1, B_sgM=8, B_sgN=4)    
