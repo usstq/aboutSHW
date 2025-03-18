@@ -180,11 +180,8 @@ def ALIGN_UP(a, b):
 def DIV_UP(a, b):
     return ((a + (b -1)) // b)
 
-# GEMMA has a big K but small N(rank), GEMMA kernel  would divide K by WGs and K diemsnion SGs.
-# GEMMB only divide N by WGs and SGs because N is big and K(Rank) is small..
-# gemma_sg_BK: the Number of K accumuated in one sg for GEMMA.
-# gemma_sgK: the number of sg in K dimension for GEMMA.
-# gemmb_sgN: the number of sg in N dimension for GEMMB
+ #A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
+ #B_regM, B_regN, B_sgM, B_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
 class LORA_2ND:
     def __init__(self, rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN, use_ref = False):
         self.rank = rank
@@ -345,7 +342,7 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
 # GEMMB only divide N by WGs and SGs because N is big and K(Rank) is small..
 # gemma_sg_BK: the Number of K accumuated in one sg for GEMMA.
 # gemma_sgK: the number of sg in K dimension for GEMMA.
-# gemmb_sgN: the number of sg in N dimension for GEMMBclass
+# gemmb_sgN: the number of sg in N dimension for GEMMB
 class LORA_1ST:
     def __init__(self, batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN, use_ref = False):
         self.batch = batch
@@ -428,7 +425,7 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     if check_acc:
         REPEAT = 1
     else:
-        REPEAT = 200
+        REPEAT = 100
     # for GEMMA, K decides how many WGs are needed.
     gemma_wgs = ALIGN_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
@@ -587,26 +584,33 @@ if __name__ == "__main__":
     """
     test 1st acc:
     """
-    if 0:
-        for batch in range(8, 1024):
+    if 1:
+        for batch in range(8, 80, 3):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-                for output_state_idx in range(256//16, 1024//16):
+                for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
                     for rank in (16, 32 ,64, 128):
-                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state_idx*16)
-                        test_lora_1st(batch, rank ,input_state,  output_state_idx*16, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
+                        test_lora_1st(batch, rank ,input_state, out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+        for batch_idx in range(10, 13):
+            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+                for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
+                    for rank in (16, 32 ,64, 128):
+                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch_idx*13, rank, input_state, out_state)
+                        test_lora_1st(batch_idx*130, rank ,input_state, out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                       B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
     
     """
     test 2nd acc:
     """
-    if 0:
-        for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
-            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-                for rank in (16, 32, 64, 128):
-                    # for sgk in range(1, 17):
-                    #     for bk in (16, 32, 48, 64, 80, 96, 112):
-                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+    if 1:
+            for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
+                for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+                    for rank in (16, 32, 64, 128):
+                        # for sgk in range(1, 17):
+                        #     for bk in (16, 32, 48, 64, 80, 96, 112):
+                                gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+                                test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
                             
         # for rank in [64]:
         #     for out_state in [512, 1536, 3840, ]:
@@ -616,7 +620,7 @@ if __name__ == "__main__":
     """
     test perf based on minicpm:
     """
-    if 1:
+    if 0:
         for rank in [64]:
             for out_state in [512, 1536, 3840]:
                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)

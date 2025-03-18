@@ -209,7 +209,7 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         CC[m_idx * N + n_idx] = sum + main_input[m_idx * N + n_idx];
     }
 '''
-    # print(src)
+    print(src)
     cl.profiling(True)
 
     # np.random.seed(0)
@@ -277,11 +277,11 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
 #             test_FMA_blocking(m, n, k, regM=8, regN=2, sgM=16, sgN=1)
 
 # test acc of M/:
-for batch in range(8, 256):
-    for n_idx in range(2, 32):
-        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4)
-        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=True)
-        test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=False, withSum=True)
+# for batch in range(8, 256):
+#     for n_idx in range(2, 32):
+#         test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4)
+#         test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=True)
+#         test_FMA_blocking(batch, N=n_idx*16, K=64, regM=8, regN=2, sgM=16, sgN=4, withscale=False, withSum=True)
 
 
 # for batch in range(129, 1024):
@@ -295,6 +295,6 @@ for batch in range(8, 256):
 #     test_FMA_blocking(batch, N=1536, K=64, regM=4, regN=1, sgM=16, sgN=4,  withscale=False, withSum=True)
 
 
-# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4)
-# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=True)
-# test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=False, withSum=True)
+test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4)
+test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=True)
+test_FMA_blocking(65, N=1536, K=64, regM=4, regN=2, sgM=8, sgN=4, withscale=False, withSum=True)
