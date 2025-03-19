@@ -46,13 +46,7 @@ struct tensor {
         return p_buff.get();
     }
 
-    template <class SizeContainer>
-    void resize(const SizeContainer& dims, py::dtype dtype);
-
-    template <class SizeContainer>
-    tensor(const SizeContainer& dims, py::dtype dtype) {
-        resize(dims, dtype);
-    }
+    void resize(const std::vector<size_t>& dims, py::dtype dtype);
 
     tensor(const py::array& arr) {
         resize(arr);

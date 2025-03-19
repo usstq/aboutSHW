@@ -16,7 +16,7 @@ cwd = os.path.dirname(os.path.realpath(__file__))
 build_path=os.path.join(cwd, "build")
 dir_path = cwd
 btype = "RelWithDebInfo"
-btype = "Debug"
+#btype = "Debug"
 subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}"], shell=False)
 subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
 
