@@ -1,5 +1,6 @@
 import os
 import subprocess
+import pybind11
 if os.name == 'nt':
     '''
     according to https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order
@@ -16,8 +17,9 @@ cwd = os.path.dirname(os.path.realpath(__file__))
 build_path=os.path.join(cwd, "build")
 dir_path = cwd
 btype = "RelWithDebInfo"
+pybind11_dir = pybind11.get_cmake_dir()
 #btype = "Debug"
-subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}"], shell=False)
+subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={pybind11_dir}"], shell=False)
 subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
 
 from .csrc import *
