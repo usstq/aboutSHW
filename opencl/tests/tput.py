@@ -331,131 +331,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
         ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
-
-
-    src = r'''
-        __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void 
-    ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
-        int sgid = get_sub_group_id();
-        int sgid_N = sgid % sgN;
-        int sgid_M = sgid / sgN;
-        int regM = 4;
-        int regN = 2;
-
-        int m_idx = get_group_id(0) * BM  + sgid_M * regM;
-        int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        // Some hack when rows needed to handle in `sg` is not regM.
-        //Less than regM rows to handle in this sg. Move up to padding. Duplicated FMA and storing with same result between  m_sgs.
-        if (m_idx < M && (m_idx + regM) > M)
-            m_idx = M - regM;
-        // Some hack when columns  needed to handle in `sg` is not regN*SG_SZ.
-        //Less than regN*SG_SZ columns to handle in this sg. Move left to padding. Duplicated FMA and storing with same result between  n_sgs.
-        if (n_idx < N && (n_idx + regN * SG_SZ) > N)
-            n_idx = N - regN * SG_SZ;
-        __global half *ptrA = A + m_idx * K;
-        __global half *ptrB = B + n_idx;
-        __global half *ptrC = C + m_idx * N + n_idx;
-
-        __local half lA[BM*BK];
-        __local half lB[BK*BN];
-
-        __local half* lA_ptr_dest = lA + sgid_M * regM *BK;
-        __local half* lB_ptr_dest = lB + sgid_N * regN * SG_SZ;
-
-         half sum0_0 = 0;
-         half sum0_1 = 0;
-         half sum1_0 = 0;
-         half sum1_1 = 0;
-         half sum2_0 = 0;
-         half sum2_1 = 0;
-         half sum3_0 = 0;
-         half sum3_1 = 0;;
-
-        for(int j = 0; j < K; j += BK) {
-            //copy A to SLM.
-            if (m_idx < M) {
-                __attribute__((opencl_unroll_hint))
-                for (int offset_K = sgid_N * SG_SZ; offset_K < BK; offset_K += sgN * SG_SZ) {
-                    ushort tmpA_0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * K + offset_K));
-                    ushort tmpA_1 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 1 * K + offset_K));
-                    ushort tmpA_2 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 2 * K + offset_K));
-                    ushort tmpA_3 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 3 * K + offset_K));
-                    
-                    intel_sub_group_block_write_us((const __local ushort*)(lA_ptr_dest + 0 * BK + offset_K), tmpA_0);
-                    intel_sub_group_block_write_us((const __local ushort*)(lA_ptr_dest + 1 * BK + offset_K), tmpA_1);
-                    intel_sub_group_block_write_us((const __local ushort*)(lA_ptr_dest + 2 * BK + offset_K), tmpA_2);
-                    intel_sub_group_block_write_us((const __local ushort*)(lA_ptr_dest + 3 * BK + offset_K), tmpA_3);
-                }
-            }
-            if (n_idx < N) {
-                //copy B to SLM.
-                __attribute__((opencl_unroll_hint))
-                for (int offset_K = sgid_M; offset_K < BK; offset_K += sgM) {
-                    ushort tmpB_0 = intel_sub_group_block_read_us((const __global ushort*)(ptrB + 0 * SG_SZ + offset_K*N));
-                    ushort tmpB_1 = intel_sub_group_block_read_us((const __global ushort*)(ptrB + 1 * SG_SZ + offset_K*N));
-                    intel_sub_group_block_write_us((const __local ushort*)(lB_ptr_dest + 0 * SG_SZ + offset_K*BN), tmpB_0);
-                    intel_sub_group_block_write_us((const __local ushort*)(lB_ptr_dest + 1 * SG_SZ + offset_K*BN), tmpB_1);
-                }
-            }
-            barrier(CLK_LOCAL_MEM_FENCE);
-            __local half* lA_ptr = lA_ptr_dest;
-            __local half* lB_ptr = lB_ptr_dest;
-            if (m_idx < M && n_idx < N) {
-                // FMA Matmul([BM, BK], [BK, BN]) = [BM, BN]
-                for(int i = 0; i < BK; i+=SG_SZ) {
-                    ushort input0 = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + 0 * BK));
-                    ushort input1 = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + 1 * BK));
-                    ushort input2 = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + 2 * BK));
-                    ushort input3 = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + 3 * BK));
-
-                    //__attribute__((opencl_unroll_hint))
-                    for (int kk = 0; kk < SG_SZ; kk++) {
-                
-                        half bb0 = as_half(intel_sub_group_block_read_us((const __local ushort*)(lB_ptr + 0 * SG_SZ)));
-                            half bb1 = as_half(intel_sub_group_block_read_us((const __local ushort*)(lB_ptr + 1 * SG_SZ)));
-                        half aa0 = as_half(intel_sub_group_broadcast(input0, kk));
-                            half aa1 = as_half(intel_sub_group_broadcast(input1, kk));
-                            half aa2 = as_half(intel_sub_group_broadcast(input2, kk));
-                            half aa3 = as_half(intel_sub_group_broadcast(input3, kk));
-                        sum0_0 = fma(aa0, bb0, sum0_0);
-                            sum0_1 = fma(aa0, bb1, sum0_1);
-                            sum1_0 = fma(aa1, bb0, sum1_0);
-                            sum1_1 = fma(aa1, bb1, sum1_1);
-                            sum2_0 = fma(aa2, bb0, sum2_0);
-                            sum2_1 = fma(aa2, bb1, sum2_1);
-                            sum3_0 = fma(aa3, bb0, sum3_0);
-                            sum3_1 = fma(aa3, bb1, sum3_1);
-                        lB_ptr += BN;
-                    }
-                    lA_ptr +=SG_SZ;
-                }
-            }
-            barrier(CLK_LOCAL_MEM_FENCE);
-            ptrA += BK;
-            ptrB += BK * N;
-        }
-        if (m_idx >= M || n_idx >= N)
-            return;
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 0), as_short(sum0_0));
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 1), as_short(sum0_1));
-        ptrC += N;
-
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 0), as_short(sum1_0));
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 1), as_short(sum1_1));
-        ptrC += N;
-
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 0), as_short(sum2_0));
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 1), as_short(sum2_1));
-        ptrC += N;
-
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 0), as_short(sum3_0));
-        intel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * 1), as_short(sum3_1));
-        ptrC += N;
-    }
-    
-    '''
-    # print(gen_slm_src)
+    print(gen_slm_src)
     cl.profiling(True)
 
     # np.random.seed(0)
@@ -484,10 +360,9 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
     SLM_SZ = 64*1024
     BM = regM*sgM
     BN = regN*sgN*SG_SZ
-    MAX_BK = min(K, ALIGN_DOWN(SLM_SZ // ((BM + BN)*2), SG_SZ))
-    
-    BK =64
-    
+    BK = min(K, ALIGN_DOWN(SLM_SZ // ((BM + BN)*2), SG_SZ))
+    BK = 80
+        
     assert M >= regM , f'M:{M} is smaller than regM:{regM}'
     assert N >= regN*SG_SZ , f'N:{N} is smaller than :regN*SG_SZ {regN*SG_SZ}'
     assert N % SG_SZ == 0 , f'N:{N} is not multiple of SG_SZ:{SG_SZ}'
@@ -551,7 +426,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
 #          for n in (512,1536,3840,):
 #              test_SLM_FMA(m, n, k, regM=16, regN=2, sgM=8, sgN=4)
 
-test_SLM_FMA(3051, N=64, K=1536, regM=8, regN=2, sgM=32, sgN=2)
+test_SLM_FMA(3051, N=64, K=1536, regM=8, regN=2, sgM=16, sgN=2)
 
 # for batch in range(8, 256):
 #     for n_idx in range(2, 32):
