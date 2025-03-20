@@ -1069,8 +1069,6 @@ struct remove_class<R (C::*)(A...) const> {
     using type = R(A...);
 };
 
-enum class TMUL_TYPE { SSD = 1, USD = 2, SUD = 3, UUD = 4, FP16 = 5, BF16 = 6 };
-
 //=========================================================================================
 class SIMDJit : public jit_generator {
 public:
@@ -1228,6 +1226,9 @@ public:
     void simd_cvtepi32_ps(XbyakVReg vmm_dst, XbyakVReg vmm_src) {
         vcvtdq2ps(vmm_dst, vmm_src);
     }
+
+    enum class TMUL_TYPE { SSD = 1, USD = 2, SUD = 3, UUD = 4, FP16 = 5, BF16 = 6 };
+
     void tmul(const XbyakTReg& x1, const XbyakTReg& x2, const XbyakTReg& x3, TMUL_TYPE type) {
         switch (type) {
         case TMUL_TYPE::SSD:
@@ -1265,10 +1266,10 @@ public:
     //    }
     //    loop_body(kmask);
     template <typename START, typename STEP>
-    void for_(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body);
+    void for_loop(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body);
 
     template <typename START, typename STEP>
-    void for_(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body);
+    void for_loop(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body);
 
     inline void if_(SRegExpr regcmp,
                     const std::function<void()>& then_body,
@@ -1364,7 +1365,7 @@ inline KReg::KReg() {
 //========================================================================================================
 #ifdef __x86_64__
 template <typename START, typename STEP>
-void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body) {
+void SIMDJit::for_loop(SReg idx, START start, SReg stop, STEP step, std::function<void()> loop_body) {
     Xbyak::Label loop, exit;
     mov(idx, start);
     sub(stop, step);
@@ -1383,7 +1384,7 @@ void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<vo
 }
 
 template <typename START, typename STEP>
-void SIMDJit::for_(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body) {
+void SIMDJit::for_loop(SReg idx, START start, SReg stop, STEP step, std::function<void(KReg)> loop_body) {
     ASSERT(use_avx512);
     if (step > 16) {
         // needs AVX512BW for kmask with more than 16-bits
@@ -2095,6 +2096,7 @@ inline void VReg::load(SRegExpr&& addr, LDST_TYPE type, const KReg& kmask) const
     case LDST_TYPE::packed_fp16_fp32:
         jit->vmovdqu16(vmm_half | kreg, jit->ptr[addr.paddr->to_addr()]);
         jit->vcvtph2ps(role, vmm_half);
+        break;
     case LDST_TYPE::packed_i32_fp32:
         if (support_opmask) {
             jit->vcvtdq2ps(role | kreg, jit->ptr[addr.paddr->to_addr()]);

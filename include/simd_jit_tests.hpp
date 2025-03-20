@@ -2,7 +2,6 @@
 
 using ov::intel_cpu::SIMDJit;
 using ov::intel_cpu::SReg;
-using ov::intel_cpu::TMUL_TYPE;
 using ov::intel_cpu::TReg;
 using ov::intel_cpu::VReg;
 using ov::intel_cpu::Ymm;
@@ -199,7 +198,7 @@ void ctrlflow_unit_tests() {
             auto b = jit->get_arg(2);
             auto c = jit->get_arg(3);
             auto idx = jit->get_sreg();
-            jit->for_(idx, a, b, c, [&] {
+            jit->for_loop(idx, a, b, c, [&] {
                 dst++;
             });
             jit->return_(dst);
@@ -232,7 +231,7 @@ void ctrlflow_unit_tests() {
             auto b = jit->get_arg(2);
             auto c = jit->get_arg(3);
             auto idx = jit->get_sreg();
-            jit->for_(idx, start, b, step, [&] {
+            jit->for_loop(idx, start, b, step, [&] {
                 dst++;
             });
             jit->return_(dst);

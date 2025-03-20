@@ -1,17 +1,71 @@
 #include <atomic>
 #include <mutex>
 
+#ifdef PACKAGE_NAME
 #include "parallel.hpp"
 #include "simd_jit.hpp"
 
-static constexpr int DTYPE_INT32 = 1;
-static constexpr int DTYPE_FP32 = 2;
-static constexpr int DTYPE_FP16 = 3;
-static constexpr int DTYPE_BF16 = 4;
-static constexpr int DTYPE_INT8 = 5;
+enum class element {
+    bf16,
+    f16,
+    i8
+};
+
+struct PlainTensor: public py::array {
+    element get_precision() const {
+        switch(dtype().char_()) {
+            case 'e':
+                return element::f16;
+            break;
+            case 'h':
+                return element::bf16;
+            break;
+            case 'b':
+                return element::i8;
+            break;
+        }
+        return element::i8;
+    }
+};
+
+#endif
+// this literal lacks of checks on N, make sure id composed of less than 5 chars
+constexpr uint32_t operator "" _dt(const char* id, std::size_t N) {
+    uint32_t a8 = 0;
+    for(int i = 0; i < N; i++) {
+        a8 = (a8 << 8) | (static_cast<uint32_t>(id[i]) & 0xFF);
+    }
+    return a8;
+}
+
+static constexpr auto DTYPE_INT32 = "i32"_dt;
+static constexpr auto DTYPE_FP32 = "fp32"_dt;
+static constexpr auto DTYPE_FP16 = "fp16"_dt;
+static constexpr auto DTYPE_BF16 = "bf16"_dt;
+static constexpr auto DTYPE_INT8 = "i8"_dt;
 
 namespace ov {
 namespace intel_cpu {
+
+template<typename T>
+std::shared_ptr<T> alloc_cache_aligned(int count) {
+    auto ret = std::shared_ptr<T>(
+           reinterpret_cast<T*>(aligned_alloc(64, count * sizeof(T))),
+           [](void * p) { ::free(p); });
+    return ret;
+}
+
+template <class T>
+struct scratch_buff {
+    std::shared_ptr<T> buff;
+    size_t cur_count = 0;
+    void ensure_size(size_t count) {
+        if (cur_count < count) {
+            buff = alloc_cache_aligned<T>(count);
+            cur_count = count;
+        }
+    }
+};
 
 class blocking_1d {
     int64_t total_size;
@@ -104,7 +158,7 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs);
 };
 
-std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
+inline std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
     os << "blocking_1d(" << rhs.total_size << "," << rhs.block_size << ", {";
     const char* sep = "";
     for (auto& bi : rhs.blks) {
@@ -114,6 +168,7 @@ std::ostream& operator<<(std::ostream& os, const blocking_1d& rhs) {
     os << "})";
     return os;
 }
+
 ////////////////////////////////////////////////////////////////////////////
 class func_amx_repack_Btile {
     std::shared_ptr<SIMDJit> jit;
@@ -123,7 +178,7 @@ public:
     // const is required for functor
     using Ptr = std::shared_ptr<const func_amx_repack_Btile>;
 
-    func_amx_repack_Btile() : stride_dst(64) {
+    func_amx_repack_Btile(bool cvt_f16_to_bf16) : stride_dst(64) {
         // compile-time work
         jit = SIMDJit::create([&](SIMDJit* jit, SReg psrc, SReg stride_src, SReg pdst) {
             Ymm t[8];
@@ -158,6 +213,10 @@ public:
             jit->vperm2i128(t[6].ymm(), tt[2].ymm(), tt[6], 0x31);
             jit->vperm2i128(t[7].ymm(), tt[3].ymm(), tt[7], 0x31);
             for (int i = 0; i < 8; i++) {
+                if (cvt_f16_to_bf16) {
+                    jit->vcvtph2ps(t[i].zmm(), t[i]);
+                    jit->vcvtneps2bf16(t[i], t[i].zmm());
+                }
                 t[i].store(pdst + stride_dst * i);
             }
             return jit;
@@ -173,8 +232,8 @@ public:
     }
 };
 
-// AMX based matmul in unit of 32x32(fp16/bf16) 64x32(int8)
-class func_amx {
+
+class amx_tile_configer {
     struct config_t {
         uint8_t palette_id = 1;
         uint8_t startRow = 0;
@@ -187,49 +246,13 @@ class func_amx {
         }
     } __attribute__((__packed__));
     config_t tile_cfgs[32];
-
-    std::shared_ptr<SIMDJit> jit_tile_configer;
-    std::shared_ptr<SIMDJit> jit_amx_mm2x2;
-    std::shared_ptr<SIMDJit> jit_amx_mm1x2;
-    std::shared_ptr<SIMDJit> jit_amx_mm2x2_small_K;
-
-    int m_prefetch_Blines = 0;
-
-    TMUL_TYPE tmul_type;
+    std::shared_ptr<SIMDJit> jit_cfg;
 
 public:
-    struct call_args {
-        const uint8_t* pA;  // bfloat16/int8
-        int64_t strideA;    // in bytes
-        const uint8_t* pB;  // bfloat16/int8
-        uint8_t* pC;        // float32/int32
-        int64_t strideC;    // in bytes
-        const uint8_t* prefetch;
-        int64_t k_tiles;  // K / 32
-        int64_t valid_m;
-        int64_t do_accumulation;
-    };
+    using Ptr = std::shared_ptr<const amx_tile_configer>;
 
-    const int REG_BLK_N = 32;
-    const int REG_BLK_K;
-
-    using Ptr = std::shared_ptr<const func_amx>;
-    static constexpr int TMUL_FP16 = 1;  // FP16 => FP32
-    static constexpr int TMUL_BF16 = 2;  // BF16 => FP32
-    static constexpr int TMUL_SSD = 3;   // INT8 INT8 => FP32
-    func_amx(int M_hint, int type) : REG_BLK_K(16 * ((type < TMUL_SSD) ? 2 : 4)) {
-        switch (type) {
-        case TMUL_FP16:
-            tmul_type = TMUL_TYPE::FP16;
-            break;
-        case TMUL_BF16:
-            tmul_type = TMUL_TYPE::BF16;
-            break;
-        case TMUL_SSD:
-            tmul_type = TMUL_TYPE::SSD;
-            break;
-        }
-        jit_tile_configer = SIMDJit::create([&](SIMDJit* jit, SReg p) {
+    amx_tile_configer() {
+        jit_cfg = SIMDJit::create([&](SIMDJit* jit, SReg p) {
             jit->if_(
                 p == 0,
                 [&] {
@@ -262,7 +285,230 @@ public:
             cfg.set(6, 16, 64);  // B0
             cfg.set(7, 16, 64);  // B1
         }
+    }
+    void operator()(int rows, int* last_rows = nullptr) const {
+        if (rows >= 0) rows = rows % 32;
+        if (last_rows && (*last_rows == rows))
+            return;
+        (*jit_cfg)(rows < 0 ? nullptr : &tile_cfgs[rows]);
+        if (last_rows) *last_rows = rows;
+    }
+};
 
+// AMX based matmul in unit of 32x32(fp16/bf16) 64x32(int8)
+class func_amx2 {
+    std::shared_ptr<SIMDJit> jit_amx_mm2x2_small_K;
+    SIMDJit::TMUL_TYPE tmul_type;
+public:
+    struct call_args {
+        const uint8_t* pA;  // bfloat16/int8
+        int64_t strideA;    // in bytes
+        const uint8_t* pB;  // bfloat16/int8
+        uint8_t* pC;        // float32/int32
+        int64_t valid_m;
+        // the post-ops source & dest
+        uint8_t* pC0;
+        const uint8_t* pdst;
+        int64_t stride_dst;
+        int64_t dst_valid_m;    // how many rows to be copied out
+
+        int64_t k_tiles;  // K / 32
+    };
+
+    const int REG_BLK_N = 32;
+    const int REG_BLK_K;
+
+    using Ptr = std::shared_ptr<const func_amx2>;
+    static constexpr int TMUL_FP16 = 1;  // FP16 => FP32
+    static constexpr int TMUL_BF16 = 2;  // BF16 => FP32
+    static constexpr int TMUL_SSD = 3;   // INT8 INT8 => FP32
+    func_amx2(int K, int type) : REG_BLK_K(16 * ((type < TMUL_SSD) ? 2 : 4)) {
+        switch (type) {
+        case TMUL_FP16:
+            tmul_type = SIMDJit::TMUL_TYPE::FP16;
+            break;
+        case TMUL_BF16:
+            tmul_type = SIMDJit::TMUL_TYPE::BF16;
+            break;
+        case TMUL_SSD:
+            tmul_type = SIMDJit::TMUL_TYPE::SSD;
+            break;
+        }
+        // small K, no need to prefetch next subB along K dimension
+        // in this case, prefetch output buffer instead of weights
+        // because K is small, and we are expecting big M or N,
+        // anyway C matrix would be the biggest one.
+        //
+        jit_amx_mm2x2_small_K = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
+            SReg reg_A_addr, reg_A_stride, reg_B_addr, reg_C_addr, reg_C_stride;
+            SReg reg_dst, reg_ktiles, reg_A1_addr, reg_B_stride;
+            SReg reg_stride_dst, dst_valid_m;
+            reg_A_addr.load(pargs + offsetof(call_args, pA));
+            reg_A_stride.load(pargs + offsetof(call_args, strideA));
+            reg_B_addr.load(pargs + offsetof(call_args, pB));
+            reg_C_addr.load(pargs + offsetof(call_args, pC0));
+            reg_dst.load(pargs + offsetof(call_args, pdst));
+            reg_stride_dst.load(pargs + offsetof(call_args, stride_dst));
+            dst_valid_m.load(pargs + offsetof(call_args, dst_valid_m));
+
+            reg_C_stride = 32*sizeof(float);
+
+            //reg_ktiles.load(pargs + offsetof(call_args, k_tiles));
+            reg_ktiles = K / REG_BLK_K;
+
+            ASSERT(K % REG_BLK_K == 0);
+            TReg tmmC00(0), tmmC01(1), tmmC10(2), tmmC11(3);
+            TReg tmmA0(4), tmmA1(5), tmmB0(6), tmmB1(7);
+            jit->tilezero(tmmC00);
+            jit->tilezero(tmmC01);
+            jit->tilezero(tmmC10);
+            jit->tilezero(tmmC11);
+
+            reg_A1_addr = reg_A_addr + reg_A_stride * 8;
+            reg_A1_addr = reg_A1_addr + reg_A_stride * 8;
+
+            reg_B_stride.load(pargs + offsetof(call_args, valid_m));
+            jit->cmp(reg_B_stride, 16);
+            jit->cmovle(reg_A1_addr, reg_A_addr);
+
+            reg_B_stride = 64;
+            auto const_A_steps = 64;
+            Zmm d0, d1, d2;
+
+            auto loop_cnt = (K / REG_BLK_K);
+            auto post_op_count = (32 + loop_cnt - 1) / loop_cnt;
+
+            ov::intel_cpu::KReg kmask;
+            SReg stemp, zero;
+            zero = 0;
+            stemp = 0xFFFFFFFF;
+            jit->kmovd(kmask, stemp.r32());
+            // dst valid_m is smaller than 32
+            jit->do_while_(reg_ktiles > 0, [&] {
+                //                B: 1x2 tiles
+                // A : 2x1 tiles  C: 2x2 tiles
+                //
+                // this kernel is heavily cache-load-bandwidth bounded
+                // so when interleaving AVX512 post-ops, the zmm-register
+                // loading-part can not run in-parallel.
+                //
+                tmmA0.load(reg_A_addr + reg_A_stride);
+                tmmB0.load(reg_B_addr + reg_B_stride);
+
+                // interleave post-ops with AMX TMUL
+                for(int j = 0; j < post_op_count/2; j++) {
+                    jit->prefetchwt1(jit->ptr[reg_dst.r64() + 2*reg_stride_dst.r64()]);
+                    d0.load(reg_C_addr);
+                    d1.load(reg_C_addr + 64);
+                    if (tmul_type == SIMDJit::TMUL_TYPE::BF16) {
+                        jit->vcvtne2ps2bf16(d2, d1, d0);
+                        d2.store(reg_dst, VReg::LDST_TYPE::packed_i32, kmask);
+                    } else if (tmul_type == SIMDJit::TMUL_TYPE::FP16) {
+                        d0.store(reg_dst, VReg::LDST_TYPE::packed_fp16_fp32, kmask);
+                        d1.store(reg_dst + 32, VReg::LDST_TYPE::packed_fp16_fp32, kmask);
+                    }
+                    dst_valid_m --;
+                    jit->cmovz(stemp, zero);
+                    jit->kmovd(kmask, stemp.r32());
+                    reg_C_addr = reg_C_addr + reg_C_stride;
+                    reg_dst = reg_dst + reg_stride_dst;
+                }
+
+                reg_B_addr = reg_B_addr + 1024;
+
+                jit->tmul(tmmC00, tmmA0, tmmB0, tmul_type);
+                tmmA1.load(reg_A1_addr + reg_A_stride);
+                jit->tmul(tmmC10, tmmA1, tmmB0, tmul_type);
+                tmmB1.load(reg_B_addr + reg_B_stride);
+
+                // interleave post-ops with AMX TMUL
+                for(int j = post_op_count/2; j < post_op_count; j++) {
+                    jit->prefetchwt1(jit->ptr[reg_dst.r64() + 2*reg_stride_dst.r64()]);
+                    d0.load(reg_C_addr);
+                    d1.load(reg_C_addr + 64);
+                    if (tmul_type == SIMDJit::TMUL_TYPE::BF16) {
+                        jit->vcvtne2ps2bf16(d2, d1, d0);
+                        d2.store(reg_dst, VReg::LDST_TYPE::packed_i32, kmask);
+                    } else if (tmul_type == SIMDJit::TMUL_TYPE::FP16) {
+                        d0.store(reg_dst, VReg::LDST_TYPE::packed_fp16_fp32, kmask);
+                        d1.store(reg_dst + 32, VReg::LDST_TYPE::packed_fp16_fp32, kmask);
+                    }
+                    dst_valid_m --;
+                    jit->cmovz(stemp, zero);
+                    jit->kmovd(kmask, stemp.r32());
+                    reg_C_addr = reg_C_addr + reg_C_stride;
+                    reg_dst = reg_dst + reg_stride_dst;
+                }
+
+                jit->tmul(tmmC01, tmmA0, tmmB1, tmul_type);
+                jit->tmul(tmmC11, tmmA1, tmmB1, tmul_type);
+
+                reg_A_addr = reg_A_addr + const_A_steps;
+                reg_A1_addr = reg_A1_addr + const_A_steps;
+                reg_B_addr = reg_B_addr + 1024;
+                reg_ktiles--;
+            });
+
+            reg_C_stride = 32*sizeof(float);
+            reg_C_addr.load(pargs + offsetof(call_args, pC));
+            tmmC00.store(reg_C_addr + reg_C_stride);
+            tmmC01.store(reg_C_addr + reg_C_stride + 64);
+            tmmC10.store(reg_C_addr + reg_C_stride + 32*sizeof(float) * 16);
+            tmmC11.store(reg_C_addr + reg_C_stride + 32*sizeof(float) * 16 + 64);
+        });
+    }
+
+    // functor can have many functions, but all of them have to be const
+    void operator()(call_args* arg) const {
+        (*jit_amx_mm2x2_small_K)(arg);
+    }
+};
+
+// AMX based matmul in unit of 32x32(fp16/bf16) 64x32(int8)
+class func_amx {
+    std::shared_ptr<SIMDJit> jit_amx_mm2x2;
+    std::shared_ptr<SIMDJit> jit_amx_mm1x2;
+    std::shared_ptr<SIMDJit> jit_amx_mm2x2_small_K;
+
+    int m_prefetch_Blines = 0;
+
+    SIMDJit::TMUL_TYPE tmul_type;
+    amx_tile_configer::Ptr tile_configer;
+
+public:
+    struct call_args {
+        const uint8_t* pA;  // bfloat16/int8
+        int64_t strideA;    // in bytes
+        const uint8_t* pB;  // bfloat16/int8
+        uint8_t* pC;        // float32/int32
+        int64_t strideC;    // in bytes
+        const uint8_t* prefetch;
+        int64_t k_tiles;  // K / 32
+        int64_t valid_m;
+        int64_t do_accumulation;
+        int64_t prefetch_stride;
+    };
+
+    const int REG_BLK_N = 32;
+    const int REG_BLK_K;
+
+    using Ptr = std::shared_ptr<const func_amx>;
+    static constexpr int TMUL_FP16 = 1;  // FP16 => FP32
+    static constexpr int TMUL_BF16 = 2;  // BF16 => FP32
+    static constexpr int TMUL_SSD = 3;   // INT8 INT8 => FP32
+    func_amx(int M_hint, int type) : REG_BLK_K(16 * ((type < TMUL_SSD) ? 2 : 4)) {
+        switch (type) {
+        case TMUL_FP16:
+            tmul_type = SIMDJit::TMUL_TYPE::FP16;
+            break;
+        case TMUL_BF16:
+            tmul_type = SIMDJit::TMUL_TYPE::BF16;
+            break;
+        case TMUL_SSD:
+            tmul_type = SIMDJit::TMUL_TYPE::SSD;
+            break;
+        }
+        tile_configer = make_cacheable<amx_tile_configer>();
         if (M_hint) {
             // next block size: 32 * N * sizeof(ov::bfloat16),
             // call number: N / 32 * M / 32
@@ -402,71 +648,11 @@ public:
             tmmC11.store(reg_C_addr + reg_C_stride + 64);
         });
 
-        // small K, no need to prefetch next subB along K dimension
-        jit_amx_mm2x2_small_K = SIMDJit::create([&](SIMDJit* jit, SReg pargs) {
-            SReg reg_A_addr, reg_A_stride, reg_B_addr, reg_C_addr, reg_C_stride;
-            SReg reg_prefetch, reg_ktiles, reg_A1_addr, reg_B_stride;
-            reg_A_addr.load(pargs + offsetof(call_args, pA));
-            reg_A_stride.load(pargs + offsetof(call_args, strideA));
-            reg_B_addr.load(pargs + offsetof(call_args, pB));
-            reg_C_addr.load(pargs + offsetof(call_args, pC));
-            reg_C_stride.load(pargs + offsetof(call_args, strideC));
-            reg_prefetch.load(pargs + offsetof(call_args, prefetch));
-            reg_ktiles.load(pargs + offsetof(call_args, k_tiles));
-            TReg tmmC00(0), tmmC01(1), tmmC10(2), tmmC11(3);
-            TReg tmmA0(4), tmmA1(5), tmmB0(6), tmmB1(7);
-            jit->tilezero(tmmC00);
-            jit->tilezero(tmmC01);
-            jit->tilezero(tmmC10);
-            jit->tilezero(tmmC11);
-
-            reg_A1_addr = reg_A_addr + reg_A_stride * 8;
-            reg_A1_addr = reg_A1_addr + reg_A_stride * 8;
-
-            reg_B_stride.load(pargs + offsetof(call_args, valid_m));
-            jit->cmp(reg_B_stride, 16);
-            jit->cmovle(reg_A1_addr, reg_A_addr);
-
-            reg_B_stride = 64;
-            auto const_A_steps = 64;
-            jit->do_while_(reg_ktiles > 0, [&] {
-                //                B: 1x2 tiles
-                // A : 2x1 tiles  C: 2x2 tiles
-                tmmA0.load(reg_A_addr + reg_A_stride);
-                tmmB0.load(reg_B_addr + reg_B_stride);
-                reg_B_addr = reg_B_addr + 1024;
-
-                jit->tmul(tmmC00, tmmA0, tmmB0, tmul_type);
-                tmmA1.load(reg_A1_addr + reg_A_stride);
-                jit->tmul(tmmC10, tmmA1, tmmB0, tmul_type);
-                tmmB1.load(reg_B_addr + reg_B_stride);
-                jit->tmul(tmmC01, tmmA0, tmmB1, tmul_type);
-                jit->tmul(tmmC11, tmmA1, tmmB1, tmul_type);
-
-                //reg_prefetch = reg_prefetch + 64 * num_PFB;
-                reg_A_addr = reg_A_addr + const_A_steps;
-                reg_A1_addr = reg_A1_addr + const_A_steps;
-                reg_B_addr = reg_B_addr + 1024;
-                reg_ktiles--;
-            });
-
-            tmmC00.store(reg_C_addr + reg_C_stride);
-            tmmC01.store(reg_C_addr + reg_C_stride + 64);
-            reg_C_addr = reg_C_addr + reg_C_stride * 8;
-            reg_C_addr = reg_C_addr + reg_C_stride * 8;
-            tmmC10.store(reg_C_addr + reg_C_stride);
-            tmmC11.store(reg_C_addr + reg_C_stride + 64);
-        });
-
     }
 
     // functor can have many functions, but all of them have to be const
     void matmul_1x2(call_args* arg) const {
         (*jit_amx_mm1x2)(arg);
-    }
-
-    void config_tile(int i) const {
-        (*jit_tile_configer)(i < 0 ? nullptr : &tile_cfgs[i]);
     }
 
     // B matrix has been prepacked
@@ -484,14 +670,6 @@ public:
         ASSERT((K % REG_BLK_K) == 0, K, "%", REG_BLK_K, " != 0");
 
         int cur_tile_cfg_id = -1;
-        auto config_tile_M = [&](int valid_m) {
-            // valid_m : [1 ~ 32]
-            auto cfg_id = valid_m < 0 ? valid_m : (valid_m % 32);
-            if (cur_tile_cfg_id != cfg_id) {
-                config_tile(cfg_id);
-                cur_tile_cfg_id = cfg_id;
-            }
-        };
 
         call_args args;
         args.strideA = strideA;
@@ -508,7 +686,8 @@ public:
         // accumulate [m0~m1, k0~k1] x [k0~k1, n0~n1] => [m0~m1, n0~n1]
         for (int64_t m = 0; m < M; m += 32, pC += 32 * strideC, pA += 32 * strideA) {
             auto valid_m = std::min(M - m, (int64_t)32);
-            config_tile_M(valid_m);
+            (*tile_configer)(valid_m, &cur_tile_cfg_id);
+
             args.pB = pB;
             args.pA = pA;
             args.valid_m = valid_m;
@@ -532,11 +711,11 @@ public:
                  const uint8_t* pB,
                  void* pC,
                  size_t strideC) const {
-        int itembytes = (tmul_type == TMUL_TYPE::BF16 || tmul_type == TMUL_TYPE::FP16) ? 2 : 1;
+        int itembytes = (tmul_type == SIMDJit::TMUL_TYPE::BF16 || tmul_type == SIMDJit::TMUL_TYPE::FP16) ? 2 : 1;
         // DEBUG_LOG(itembytes, M, N, Ks.size());
         if (M <= 16) {
             // memory-bound case: special looping order
-            config_tile(M);
+            (*tile_configer)(M);
             call_args args;
             args.strideA = strideA;
             args.strideC = strideC;
@@ -560,7 +739,6 @@ public:
                 args.pC += REG_BLK_N * sizeof(uint32_t);
             }
         } else {
-            //printf("==========%p\n", pA);            
             // compute-bound case
             for (auto* ik = first_K; ik != last_K; ik++) {
                 auto& k_size = *ik;
@@ -712,7 +890,7 @@ public:
             sign_bit_mask.load(0x80000000);
             vmax.load(0);
 
-            jit->for_(i, 0, count, simdw, [&](KReg kmask){
+            jit->for_loop(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
                     d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)
@@ -734,7 +912,7 @@ public:
 
             vdscale.store(pscale, VReg::LDST_TYPE::scalar_fp32);
 
-            jit->for_(i, 0, count, simdw, [&](KReg kmask){
+            jit->for_loop(i, 0, count, simdw, [&](KReg kmask){
                 if (x_dtype == DTYPE_FP16)
                     d0.load(psrc + i * sizeof(int16_t), VReg::LDST_TYPE::packed_fp16_fp32, kmask);
                 else if (x_dtype == DTYPE_BF16)
@@ -801,11 +979,11 @@ public:
             N.load(pargs + offsetof(call_args, N));
 
             auto simdw = d0.lanes<int32_t>();
-            jit->for_(m, 0, M, 1, [&] {
+            jit->for_loop(m, 0, M, 1, [&] {
                 VReg vscale_m, vscale_n;
                 vscale_m.load(pscale_M + m*sizeof(float), VReg::LDST_TYPE::broadcast_fp32);
 
-                jit->for_(n, 0, N, simdw, [&] {
+                jit->for_loop(n, 0, N, simdw, [&] {
                     vscale_n.load(pscale_N + n * sizeof(float), VReg::LDST_TYPE::packed_fp32);
                     d0.load(psrc + n * sizeof(int32_t), VReg::LDST_TYPE::packed_i32_fp32);
                     jit->vmulps(d0, d0, vscale_n);
@@ -844,17 +1022,56 @@ public:
     }
 };
 
-template <class T>
-struct scratch_buff {
-    std::shared_ptr<T> buff;
-    size_t cur_count = 0;
-    void ensure_size(size_t count) {
-        if (cur_count < count) {
-            buff = alloc_cache_aligned<T>(count);
-            cur_count = count;
-        }
+
+inline std::shared_ptr<int8_t> pack_weights(PlainTensor* ws, int w_count, int w_dtype_size, bool cvt_f16_to_bf16,
+                                            blocking_1d& blk_bn,
+                                            blocking_1d& blk_bk) {
+    static auto amx_repack_Btile = make_cacheable<func_amx_repack_Btile>(cvt_f16_to_bf16);
+
+    auto K = ws[0].shape(1);
+    std::vector<int> runsum_N(w_count);
+    int sumN = 0;
+    for(int i = 0; i < w_count; i++) {
+        runsum_N[i] = sumN;
+        sumN += ws[i].shape(0);
     }
-};
+
+    auto get_weight = [&](int k, int n, size_t& stride) -> const void* {
+        int id;
+        for(id = w_count - 1; id > 0; id --) {
+            if (n >= runsum_N[id]) {
+                n -= runsum_N[id];
+                break;
+            }
+        }
+        // DEBUG_LOG(id, N0, N01, k, n);
+        stride = ws[id].strides(0);
+        return reinterpret_cast<const uint8_t*>(ws[id].data()) + k * w_dtype_size + n * stride;
+    };
+
+    auto REG_BLK_N = 32;
+    auto REG_BLK_K = 32;
+
+    auto w_buff = alloc_cache_aligned<int8_t>(sumN * K * (w_dtype_size));
+    auto* pdst_base = reinterpret_cast<uint8_t*>(w_buff.get());
+    blk_bn.for_each_blk(0, [&](int ibn, int n0, int n1) {
+        blk_bk.for_each_blk([&](int ibk, int k0, int k1) {
+            auto* pdst = pdst_base + (n0 * K + (n1 - n0) * k0) / (REG_BLK_N * REG_BLK_K) * 2048;
+            for (int n = n0; n < n1; n += REG_BLK_N) {
+                for (int k = k0; k < k1; k += REG_BLK_K) {
+                    size_t stride_src;
+                    auto* psrc0 = get_weight(k, n, stride_src);
+                    (*amx_repack_Btile)(psrc0, stride_src, pdst);
+
+                    auto* psrc1 = get_weight(k, n + 16, stride_src);
+                    (*amx_repack_Btile)(psrc1, stride_src, pdst + 1024);
+                    pdst += 2048;
+                }
+            }
+        });
+    });
+    return w_buff;
+}
 
 struct AMXLinearKernel {
     std::shared_ptr<int8_t> w_buff;
@@ -888,15 +1105,19 @@ struct AMXLinearKernel {
 
     // weight may be bf16/fp16/int8
     template <class F>
-    void init(size_t _K, size_t _N, int tmul_type, const F& get_weight) {
+    void init(size_t _K, size_t _N, int tmul_type, int w_dtype, const F& get_weight) {
         K = _K;
         N = _N;
 
+        auto f16_to_bf16 = (w_dtype == DTYPE_FP16 && tmul_type == func_amx::TMUL_BF16);
         amx_mm = make_cacheable<func_amx>(256, tmul_type);
-        amx_repack_Btile = make_cacheable<func_amx_repack_Btile>();
+        amx_repack_Btile = make_cacheable<func_amx_repack_Btile>(f16_to_bf16);
         reduce2_fp32 = make_cacheable<func_reduce2>(func_reduce2::SUM_FP32);
         reduce2_int32 = make_cacheable<func_reduce2>(func_reduce2::SUM_INT32);
         w_is_int8 = (tmul_type == func_amx::TMUL_SSD);
+
+        //std::cout << "tmul_type=" << tmul_type << ", w_dtype=" << w_dtype << ", f16_to_bf16=" << f16_to_bf16
+        //          << ", DTYPE_FP16=" << DTYPE_FP16 << ", DTYPE_BF16=" << DTYPE_BF16 << std::endl;
 
         REG_BLK_N = 16 * 2;
         REG_BLK_K = 16 * (w_is_int8 ? 4 : 2);
@@ -909,7 +1130,7 @@ struct AMXLinearKernel {
         } else {
             blk_bk.reset_size(K, CACHE_BLK_K);
         }
-        auto nthr = omp_get_max_threads();
+        auto nthr = parallel_get_max_threads();
 
         ksyncs.resize(nthr);
         bool b_small_weights = (N / nthr) < 256;
@@ -1012,18 +1233,16 @@ struct AMXLinearKernel {
                     strideC += 64;
                 auto* pC = get_ctemp((BM)*strideC / sizeof(float));
 
-                ksyncs[ithr].pC = pC;
-
                 // DEBUG_LOG(ithr, nthr, i, group_id, group_off, pC);
                 int64_t ki0 = 0, ki1 = blk_bk.size();
                 if (k_group_workers > 1) {
+                    ksyncs[ithr].pC = pC;
                     splitter(static_cast<int64_t>(blk_bk.size()), k_group_workers, ithr % k_group_workers, ki0, ki1);
                 }
                 auto k_off = blk_bk[ki0].first;
                 auto* pw = pw_base + (n0 * K + k_off * (n1 - n0)) / (REG_BLK_N * REG_BLK_K) * 2048;
                 auto* px = p_x + m0 * stride_x + k_off * (w_is_int8 ? 1 : 2);
 
-                //DEBUG_LOG(m0, m1);
                 amx_mm->matmulx(m1 - m0,
                                 n1 - n0,
                                 Ks.data() + ki0,

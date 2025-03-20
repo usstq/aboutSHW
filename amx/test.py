@@ -5,6 +5,8 @@ import time, sys
 import numa
 import inspect
 import argparse
+import pyperf
+import contextlib
 
 class Colors:
     """ ANSI color codes """
@@ -173,15 +175,21 @@ class testcase:
         qkv_projs = [AMXQKVLinear(self.W) for _ in range(layers)]
         build_ms = (time.time() - t0)/layers * 1e3
         latency_ms = []
+        ctx_mgr = contextlib.suppress()
+        if 0:
+            ctx_mgr = pyperf.perf([]).verbose(title="AMXQKVLinear", rounds=layers, kernel_loops=1,
+                                         kernel_flops=self.M * self.K * np.sum(self.Ns)*2,
+                                         kernel_mem_rbytes=np.sum([w.nbytes for w in self.W]))
         for r in range(5):
-            t0 = time.time()
-            if self.dyn_quant:
-                for qkv in qkv_projs:
-                    qkv.forward_dyn_quant_i8(self.X, self.Z, self.Wscales)
-            else:
-                for qkv in qkv_projs:
-                    qkv.forward(self.X, self.Z)
-            latency_ms.append((time.time() - t0)/layers * 1e3)
+            with ctx_mgr:
+                t0 = time.time()
+                if self.dyn_quant:
+                    for qkv in qkv_projs:
+                        qkv.forward_dyn_quant_i8(self.X, self.Z, self.Wscales)
+                else:
+                    for qkv in qkv_projs:
+                        qkv.forward(self.X, self.Z)
+                latency_ms.append((time.time() - t0)/layers * 1e3)
         correct = self.check()
         min_latency = float(np.amin(latency_ms))
         std_latency = float(np.std(latency_ms[1:]))
@@ -239,11 +247,13 @@ def numactl(target_node, cores):
     global ncores
     numa.schedule.run_on_nodes(target_node)
     numa.memory.set_membind_nodes(target_node)
-    node_num_cpus = len(numa.info.node_to_cpus(target_node))
+    cpus = numa.info.node_to_cpus(target_node)
+    node_num_cpus = len(cpus)
     if cores > 0:
         ncores = cores
     else:
         ncores = node_num_cpus//2
+    numa.schedule.run_on_cpus(0, *cpus[:ncores])
     print(f"numactl ncores {ncores} on node {target_node} with {node_num_cpus} cpus")
 
 
@@ -294,8 +304,14 @@ numactl(args.node, args.ncores)
 if args.expr:
     # experimental tests
     AMXQKVLinear = csrc.AMXQKVLinear2
+    src_dtype = torch.float16
+    src_dtype = torch.bfloat16
     for i in range(args.repeat):
-        testcase(torch.bfloat16, torch.bfloat16, 10000+16, 512, [512, 512, 512], dyn_quant=False).test(ncores, 100, 0.45)
+        testcase(src_dtype, torch.bfloat16, 10000+16, 512, [512, 512, 512], dyn_quant=False).test(1, 100, 0.45)
+    sys.exit(0)
+    for K in (64, 96, 128, 256, 320, 512,):
+        for i in range(args.repeat):
+            testcase(src_dtype, torch.bfloat16, 10000, K, [512, 512, 512], dyn_quant=False).test(ncores, 100, 0.45)
     sys.exit(0)
 
 if args.dynquant:

@@ -886,6 +886,9 @@ struct PerfEventGroup : public IPerfEventDumper {
         bool is_instructions() {
             return type == PERF_TYPE_HARDWARE && config == PERF_COUNT_HW_INSTRUCTIONS;
         }
+        bool is_task_clock() {
+            return type == PERF_TYPE_SOFTWARE && config == PERF_COUNT_SW_TASK_CLOCK;
+        }
         Config(std::string str) {
             if (str == "HW_CPU_CYCLES" || str == "cycles") {
                 type = PERF_TYPE_HARDWARE;
@@ -896,6 +899,11 @@ struct PerfEventGroup : public IPerfEventDumper {
                 type = PERF_TYPE_HARDWARE;
                 config = PERF_COUNT_HW_INSTRUCTIONS;
                 name = str;
+            }
+            else if (str == "SW_TASK_CLOCK" || str == "task_clock") {
+                type = PERF_TYPE_SOFTWARE;
+                config = PERF_COUNT_SW_TASK_CLOCK;
+                name = str;                
             }
             else if (str == "SW_PAGE_FAULTS" || str == "pagefaults") {
                 type = PERF_TYPE_SOFTWARE;

@@ -52,7 +52,7 @@ target_compile_definitions(cppmodule
     if debug:
         btype = "Debug"
     subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}"], shell=False)
-    subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
+    subprocess.check_output(["cmake", "--build", build_path, "--config", btype, "-j"], shell=False)
 
 build_with_cmake(debug = 0)
 from .cppmodule import *
