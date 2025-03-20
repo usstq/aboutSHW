@@ -20,31 +20,22 @@ __kernel void iAdd_opt(__global half * input, __global half * rhs, int size) {
     intel_sub_group_block_write_us((__global ushort*)(input), as_ushort(x0 + x1));
 }
 
-__attribute__((intel_reqd_sub_group_size(8)))
-__kernel void iAdd_opt8(__global half * input, __global half * rhs, int size) {
-    int i = get_group_id(0) * get_local_size(0) + get_sub_group_id() * 8;
-    input += i;
-    half x0 = as_half(intel_sub_group_block_read_us((const __global ushort*)(input)));
-    half x1 = as_half(intel_sub_group_block_read_us((const __global ushort*)(rhs + i)));
-    intel_sub_group_block_write_us((__global ushort*)(input), as_ushort(x0 + x1));
-}
-
-__attribute__((intel_reqd_sub_group_size(8)))
+__attribute__((intel_reqd_sub_group_size(16)))
 __kernel void iAdd_opt_asm(__global half * input, __global half * rhs, int size) {
-    // NOTE: must use 16 items/subgroup to compute the offset
-    int i = (get_group_id(0) * get_local_size(0) + get_sub_group_id() * 8) * 2;
+    // NOTE: must use 32 items/subgroup to compute the offset
+    int i = (get_group_id(0) * get_local_size(0) + get_sub_group_id() * 16) * 2;
     input += i;
     float x0 = as_float(intel_sub_group_block_read((const __global uint*)(input)));
     float x1 = as_float(intel_sub_group_block_read((const __global uint*)(rhs + i)));
     float result;
     // NOTE: must use MX_NM to override the execution mask
-    // change subgroup size from 8 to 16
+    // change subgroup size from 16 to 32
     __asm__(
         "{\n"
-        ".decl add_result v_type=G type=hf num_elts=16 align=GRF alias=<%0,0>\n"
-        ".decl add_x0 v_type=G type=hf num_elts=16 align=GRF alias=<%1,0>\n"
-        ".decl add_x1 v_type=G type=hf num_elts=16 align=GRF alias=<%2,0>\n"
-        "add (M1_NM, 16) add_result(0,0)<1> add_x0(0,0)<1;1,0> add_x1(0,0)<1;1,0> // add\n"
+        ".decl add_result v_type=G type=hf num_elts=32 align=GRF alias=<%0,0>\n"
+        ".decl add_x0 v_type=G type=hf num_elts=32 align=GRF alias=<%1,0>\n"
+        ".decl add_x1 v_type=G type=hf num_elts=32 align=GRF alias=<%2,0>\n"
+        "add (M1_NM, 32) add_result(0,0)<1> add_x0(0,0)<1;1,0> add_x1(0,0)<1;1,0> // add\n"
         "/*add (M1, 32) %0(0,0)<1> %1(0,0)<1;1,0> %2(0,0)<1;1,0> */\n"
         "}\n"
         : "=rw"(result)
@@ -166,7 +157,7 @@ class Embedding:
 if __name__ == "__main__":
     cl.profiling(True)
     
-    size=17
+    size=16*8
 
     x0 = torch.randn([size,], dtype=torch.float16)
     #print(f'{x0=}')
@@ -176,7 +167,7 @@ if __name__ == "__main__":
     cl_kernels.enqueue("iAdd_opt", [cl0.numel], [16*8], cl0, cl1, cl0.numel)
     cl0_asm = to_cl(x0)
     #cl_kernels.enqueue("iAdd_opt", [cl0_asm.numel], [16*8], cl0_asm, cl1, cl0_asm.numel)
-    # NOTE: due to the subgroup size changed from 16 to 8, to keep the same xve count, the local size must be divided by 2.
+    # NOTE: due to the subgroup size changed from 32 to 16, to keep the same xve count, the local size must be divided by 2.
     cl_kernels.enqueue("iAdd_opt_asm", [cl0_asm.numel], [16*8//2], cl0_asm, cl1, cl0_asm.numel)
 
     durs = cl.finish()
