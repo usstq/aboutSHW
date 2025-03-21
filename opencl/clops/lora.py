@@ -287,21 +287,31 @@ def generate_store_C(regM, regN, withscale, withSum):
         src += f"\n\tptrC += N;\n\n"
 
     return src
+# This function would generate 1st token kernel based on 'regM, regN, withscale, withSum'.
+# regM, regN would be the register  blocking.
+# withscale = true for LORA GEMMA kernel to genereate multiply post ops
+# withsum =  true for LORA GEMMB kernel to genereate add post ops
+def generate_gemm_src(regM, regN, withscale = False, withSum=False):
+    assert (withscale and withSum) == False, f"not support both LORA alpha and sum in one gemm kernel"
+    if withscale:
+        func = f'gemmA_rM{regM}_rN{regN}'
+    elif withSum:
+        func = f'gemmB_rM{regM}_rN{regN}'
+    else:
+        func = f'gemm_rM{regM}_rN{regN}'
 
-def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False):
-    func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
     ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
+        int sgN = get_local_size(1) / SG_SZ;
+        int sgM = get_local_size(0);
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
         ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
-        //__local half lA[BM*BK];
-        //__local half lB[BK*BN];
-        //__local half* ptrA = lA;
-        //__local half* ptrB = lB;
+        int BM = regM * sgM;
+        int BN = get_local_size(1) * regN;
         int m_idx = get_group_id(0) * BM  + sgid_M * regM;
         int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
         if (m_idx >= M || n_idx >=N )
@@ -316,11 +326,7 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
 
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
 
-        //for(int i = 0; i < K; i += BK) {
         for(int i = 0; i < K; i += SG_SZ) {
-
-            // copy B & A into shared local mem
-            //for(int j = 0; j < BK; j+=SG_SZ) {
                 
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
 
@@ -333,7 +339,6 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
                     ptrB += N;
                 }
                 ptrA +=SG_SZ;
-            //}
         }
 
         ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
@@ -342,7 +347,7 @@ def generate_gemm_src(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
     return [func, src]
 
  #A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
- #B_regM, B_regN, B_sgM, B_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
+ #B_regM, B_regN, B_sgM, B_sgN: GEMMB register blocking in one sg and sg number in M and N dimesnion.
 class LORA_1ST:
     def __init__(self, batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN, use_ref = False):
         self.batch = batch
@@ -365,8 +370,8 @@ class LORA_1ST:
         B_BN = B_regN*B_sgN*self.sg_sz
         
         
-        gemma_func, gemma_kernel_src = generate_gemm_src(batch, rank, input_state, A_regM, A_regN, A_sgM, A_sgN, True, False)
-        gemmb_func, gemmb_kernel_src = generate_gemm_src(batch, output_state, rank, B_regM, B_regN, B_sgM, B_sgN, False, True)
+        gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
+        gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
         self.gemma_func = gemma_func
         self.gemmb_func = gemmb_func
 
@@ -378,8 +383,8 @@ class LORA_1ST:
         self.gemmb_LWS = [B_sgM, B_sgN *  self.sg_sz]
         assert B_sgM *B_sgN *  self.sg_sz <= 1024, f" B_LWS:{self.gemmb_LWS} exceed 1024 limitation"
         
-        self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}  -DBM={A_BM} -DBN={A_BN} -DsgM={A_sgM} -DsgN={A_sgN}")
-        self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz}  -DBM={B_BM} -DBN={B_BN} -DsgM={B_sgM} -DsgN={B_sgN}")
+        self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
+        self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
 
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
         self.use_ref = use_ref
@@ -546,7 +551,6 @@ def blocking_2nd(rank, input_state, output_state):
 
 def blocking_1nd(batch, rank, input_state, output_state):
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"     
-
 # GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m, 
 #                                     2, choose[sgN], 
 #                                     3  sgM = 16//sgN or sgM = 8//sgN
@@ -581,11 +585,13 @@ def blocking_1nd(batch, rank, input_state, output_state):
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 if __name__ == "__main__":
+    
+
     """
     test 1st acc:
     """
-    if 0:
-        for batch in range(8, 1024):
+    if 1:
+        for batch in range(8, 1024, 107):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for output_state_idx in range(256//16, 1024//16):
                     for rank in (16, 32 ,64, 128):
@@ -596,7 +602,7 @@ if __name__ == "__main__":
     """
     test 2nd acc:
     """
-    if 0:
+    if 1:
         for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for rank in (16, 32, 64, 128):
