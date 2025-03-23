@@ -8,6 +8,7 @@ https://github.com/triSYCL/sycl/blob/sycl/unified/master/sycl/doc/extensions/exp
 #include <sycl/sycl.hpp>
 
 #include "common.hpp"
+#include "sycl/rms_kernel.hpp"
 
 using namespace sycl::ext::intel::esimd;
 using namespace sycl::ext::intel;
@@ -53,7 +54,21 @@ tensor test_dpas(tensor& a, tensor& b) {
     return c;
 }
 
+tensor rms(tensor& a, tensor& b, float eps) {
+    half* pA = a;
+    half* pB = b;
+    auto shape = a.get_shape();
+    tensor c(shape, py::dtype("float16"));
+    half *pC = c;
+    int size = a.numel;
+    int channel = *(shape.end() - 1);
+    auto e = cldnn::sycl::details::rms_kernel(sycl_queue, pA, pB, pC, size / channel, channel, eps);
+
+    return c;
+}
+
 void init_ops(py::module_& m) {
     m.def("test_esimd", &test_esimd);
     m.def("test_dpas", &test_dpas);
+    m.def("rms", &rms);
 }

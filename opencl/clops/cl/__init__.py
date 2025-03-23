@@ -19,7 +19,7 @@ dir_path = cwd
 btype = "RelWithDebInfo"
 pybind11_dir = pybind11.get_cmake_dir()
 #btype = "Debug"
-subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={pybind11_dir}"], shell=False)
+subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={pybind11_dir}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], shell=False)
 subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
 
 from .csrc import *

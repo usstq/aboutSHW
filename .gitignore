@@ -6,3 +6,4 @@ build
 *.so
 a.out
 *.pyc
+.cache

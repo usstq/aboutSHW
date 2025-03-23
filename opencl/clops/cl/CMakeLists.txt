@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.0)
+
+set(CMAKE_C_COMPILER "icx")
+set(CMAKE_CXX_COMPILER "icpx")
 project(csrc)
 
-set(CMAKE_C_COMPILER "icpx")
-set(CMAKE_CXX_COMPILER "icpx")
-
 find_package(pybind11 REQUIRED)
+find_package(IntelSYCL REQUIRED)
 
 FILE(GLOB CPP_SRCS ./*.cpp)
 
@@ -25,6 +26,8 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -lOpenCL")
 # define (VERSION_INFO) here.
 
 target_include_directories(csrc PRIVATE ../../include)
+# explictly include sycl headers, make intelligence work
+target_include_directories(csrc PRIVATE ${SYCL_INCLUDE_DIR})
 
 set_target_properties(csrc
     PROPERTIES

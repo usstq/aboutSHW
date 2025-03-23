@@ -119,7 +119,7 @@ struct buffer_pool {
 };
 static buffer_pool g_buff_pool;
 
-void tensor::resize(const std::vector<size_t>& dims, py::dtype dtype) {
+void tensor::resize(const std::vector<cl_uint>& dims, py::dtype dtype) {
     dt = dtype;
     auto it_dims = dims.begin();
     auto it_dims_end = dims.end();
@@ -444,7 +444,7 @@ PYBIND11_MODULE(csrc, m) {
     py::class_<tensor>(m, "tensor")
         .def(py::init<>())
         .def(py::init<const py::array&>())
-        .def(py::init<const std::vector<size_t>&, py::dtype>())
+        .def(py::init<const std::vector<cl_uint>&, py::dtype>())
         .def("numpy", &tensor::to_numpy)
         .def_property_readonly("shape", &tensor::get_shape)
         .def_property_readonly("numel", &tensor::get_numel)

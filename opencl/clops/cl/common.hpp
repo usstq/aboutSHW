@@ -46,12 +46,12 @@ struct tensor {
         return p_buff.get();
     }
 
-    void resize(const std::vector<size_t>& dims, py::dtype dtype);
+    void resize(const std::vector<cl_uint>& dims, py::dtype dtype);
 
     tensor(const py::array& arr) {
         resize(arr);
     }
-    tensor(const std::vector<size_t>& dims, py::dtype dtype) {
+    tensor(const std::vector<cl_uint>& dims, py::dtype dtype) {
         resize(dims, dtype);
     }
     void update_buff();
