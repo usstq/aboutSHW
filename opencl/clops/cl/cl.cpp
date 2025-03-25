@@ -3,7 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <map>
-
+#include <variant>
 #include <sstream>
 #include <sycl/sycl.hpp>
 
@@ -56,7 +56,7 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 #define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
 
 sycl::queue sycl_queue;
-static std::vector<cl_event> all_events;
+std::vector<std::variant<cl_event, sycl::event>> all_events;
 
 
 // all tensors are device memory managed by buffer_pool
@@ -360,15 +360,17 @@ struct cl_kernels {
         if (arg_idx < nargs)
             throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
 
+        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
         cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
 
-        all_events.emplace_back();
-        err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &all_events.back());
+        cl_event event;
+        err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
         if (err != CL_SUCCESS) {
             std::stringstream ss;
             ss << "clEnqueueNDRangeKernel(\"" << kernel_name << "\",...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
             throw std::runtime_error(ss.str());
         }
+        all_events.emplace_back(event);
         return;
     }
     std::string info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
@@ -490,12 +492,20 @@ PYBIND11_MODULE(csrc, m) {
         // return all event time-stamps
         std::vector<uint64_t> ret;
         if (enable_profile) {
-            for (auto& evt : all_events) {
+            for (auto& e : all_events) {
                 ret.emplace_back();
-                cl_ulong start, end;
-                clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
-                clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
-                ret.back() = end - start;
+                if (e.index() == 0) {
+                    auto evt = std::get<cl_event>(e);
+                    cl_ulong start, end;
+                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
+                    ret.back() = end - start;
+                } else {
+                    auto evt = std::get<sycl::event>(e);
+                    auto start = evt.get_profiling_info<info::event_profiling::command_start>();
+                    auto end = evt.get_profiling_info<info::event_profiling::command_end>();
+                    ret.back() = end - start;
+                }
             }
         }
         all_events.clear();

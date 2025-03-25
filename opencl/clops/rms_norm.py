@@ -69,7 +69,7 @@ C_WG_SIZE = 256
 
 class RMSNorm:
     def __init__(self, weight, epsilon):
-        self.weight = to_cl(weight.half())
+        self.weight = to_cl(weight.half() if isinstance(weight, torch.Tensor) else weight)
         self.n_channels = weight.shape[-1]
         self.epsilon = epsilon
         assert(self.n_channels >= C_WG_SIZE)
@@ -81,6 +81,10 @@ class RMSNorm:
         #cl_kernels.enqueue("RMSNorm_v0", [input.numel // self.n_channels], [1], input, output, self.weight, self.n_channels, self.epsilon)
         self.cl_kernels.enqueue("RMSNorm", [input.numel // self.n_channels * C_WG_SIZE], [C_WG_SIZE], input, output, self.weight, self.epsilon)
         return output
+
+    def _profile(self, input, weight, output, eps):
+        self.cl_kernels.enqueue("RMSNorm", [input.numel // self.n_channels * C_WG_SIZE], [C_WG_SIZE], input, output, weight, eps)
+
 
     # this is torch-cpu reference for debugging purpose
     def reference_impl(self, input):

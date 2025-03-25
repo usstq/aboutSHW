@@ -15,6 +15,7 @@ using namespace sycl::ext::intel;
 using namespace sycl;
 
 extern sycl::queue sycl_queue;
+extern std::vector<std::variant<cl_event, sycl::event>> all_events;
 
 void test_esimd(tensor& a, tensor& b) {
     half* Buf1 = a;
@@ -54,17 +55,15 @@ tensor test_dpas(tensor& a, tensor& b) {
     return c;
 }
 
-tensor rms(tensor& a, tensor& b, float eps) {
+void rms(tensor& a, tensor& b, tensor& c, float eps) {
     half* pA = a;
     half* pB = b;
-    auto shape = a.get_shape();
-    tensor c(shape, py::dtype("float16"));
+    auto& shape = a.get_shape();
     half *pC = c;
     int size = a.numel;
-    int channel = *(shape.end() - 1);
+    int channel = shape.back();
     auto e = cldnn::sycl::details::rms_kernel(sycl_queue, pA, pB, pC, size / channel, channel, eps);
-
-    return c;
+    all_events.emplace_back(e);
 }
 
 void init_ops(py::module_& m) {
