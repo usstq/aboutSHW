@@ -82,8 +82,14 @@ opt_lora_kernel_2nd = r'''
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
         for (int offset = sgid * SG_SZ; offset < wg_k_len; offset += local_sz) {
             __global half *input_ptr = A + k_start_wg + offset;
-            half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
-            local_input[offset + lid] = copy_val;
+            if ((offset + SG_SZ) <=wg_k_len) {
+                half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
+                local_input[offset + lid] = copy_val;
+            } else {
+                // K tail handling to ensure valid reading A.
+                if (lid < (wg_k_len - offset))
+                    local_input[offset + lid] = *(input_ptr+lid);
+            }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
         int k_offset = sgid_k * GEMMA_SG_BK;
@@ -97,12 +103,22 @@ opt_lora_kernel_2nd = r'''
             half sum = 0.f;
             for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
                 ushort input = intel_sub_group_block_read_us((const __local ushort*)(A_ptr + kk));
-                __attribute__((opencl_unroll_hint))
-                for (int j = 0; j < SG_SZ; j++) {
-                    half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
-                    half aa = as_half(intel_sub_group_broadcast(input, j));
-                    sum = fma(aa, bb, sum);
-                    B_ptr += RANK;
+                if ((kk + SG_SZ) <= klen_sg) {
+                    __attribute__((opencl_unroll_hint))
+                    for (int j = 0; j < SG_SZ; j++) {
+                        half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
+                        half aa = as_half(intel_sub_group_broadcast(input, j));
+                        sum = fma(aa, bb, sum);
+                        B_ptr += RANK;
+                    }
+                } else {
+                    // K-tail handling.
+                    for (int j = 0; j < klen_sg - kk; j++) {
+                        half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
+                        half aa = as_half(intel_sub_group_broadcast(input, j));
+                        sum = fma(aa, bb, sum);
+                        B_ptr += RANK;
+                    }     
                 }
             }
             *(sg_fma_buff + n_idx + lid) = sum;
@@ -125,11 +141,9 @@ opt_lora_kernel_2nd = r'''
         int wg_id = get_group_id(0);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
-        int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
         int id_sg_local = get_sub_group_local_id();
         __local half reduce[RANK];
 
-        __global half *B_ptr = B + n_idx;
 
         //1. Reduce
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
@@ -147,8 +161,15 @@ opt_lora_kernel_2nd = r'''
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        if (n_idx >= N)
+        int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
+        // up-aligning in N would introduce extra useless sg
+        if (n_idx > N)
             return;
+        // N tail handling in the SG.
+        if ((n_idx + SG_SZ) > N)
+            n_idx = N - SG_SZ;
+        __global half *B_ptr = B + n_idx;
+
         //2.  GEMMB
         __global half *C_ptr = C + n_idx;
 
@@ -198,10 +219,17 @@ class LORA_2ND:
         self.gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
         self.gemma_sgK = gemma_sgK
 
-        assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.rank % self.sg_sz == 0, f"'RANK' {self.rank} is not multiple of SG_SZ {self.sg_sz}"
         assert gemma_sg_BK % self.sg_sz == 0, f"'gemma_sg_BK' { gemma_sg_BK} is not multiple of SG_SZ {self.sg_sz}"
-        assert self.gemmb_wg_sz % self.sg_sz == 0, f"'gemmb_wg_sz' {self.gemmb_wg_sz} is not multiple of SG_SZ {self.sg_sz}"
+        # Tail handling limitation: current when output_state(N dimension) is not aligned with sg_sz, gemmb kernel code would 
+        # move the n_index to  (N - SG_SZ) to ensure `SG_SZ` columns is calculated. So there would some duplicate calculation
+        # and store for the N tail. So N must be bigger than SG_SZ.
+        assert self.output_state >= self.sg_sz, f"'output_state' {self.output_state} is smaller than sg_sz{self.sg_sz}."
+        # When having tail and move n_idx to (N - SG_SZ). Seems low level has some limitation. Once the output_state is odd for fp16,
+        # accuray would have problem for. However,  for FP32 and SG_SZ=8, odd tail can be handled. So seems minimum dupliated storing
+        # element across subgroups should be aligned with 32 bit???
+        assert self.output_state % 2 == 0, f"'output_state' {self.output_state} is not even."
+
         self.gemma_wg_BK = gemma_sg_BK * gemma_sgK
         
         options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs}'
@@ -223,17 +251,17 @@ class LORA_2ND:
         if self.use_ref:
             tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float16))
             
-            # self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank],[1, self.rank], loraInput, stataA,
-            #                             tA_output_ref, self.rank, self.input_state, self.input_state_per_wg, self.batch)
-            
-                        
             self.cl_kernels_ref.enqueue("gemmA", [1, self.rank],[1, self.rank], loraInput, stataA,
                                         tA_output_ref, self.rank, self.input_state, self.gemma_wg_BK, 1)
-            REF_LOCAL_SIZE = 16
-            assert self.output_state % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {self.output_state} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
-            
-            # self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
-            #                             mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, self.batch)
+            if self.output_state % 16 == 0:
+                REF_LOCAL_SIZE = 16
+            elif self.output_state % 8 == 0:
+                REF_LOCAL_SIZE = 8
+            elif self.output_state % 4 == 0:
+                REF_LOCAL_SIZE = 4
+            else:
+                REF_LOCAL_SIZE = 1
+                
             self.cl_kernels_ref.enqueue("gemmB", [1, self.output_state],[1, REF_LOCAL_SIZE],
                                         mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, 1)
         else:
@@ -358,18 +386,17 @@ class LORA_1ST:
         
         assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
         assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
-        assert output_state % self.sg_sz == 0 , f'output_state:{output_state} is not multiple of SG_SZ:{self.sg_sz}'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
+        # tail hanlding limitation for ouput_state. Same as 2nd limitation.
         assert output_state >= B_regN * self.sg_sz, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
-        
-        
+        assert output_state % 2 == 0 , f'output_state:{output_state} is not even'
+
         A_BM = A_regM*A_sgM
         A_BN = A_regN*A_sgN*self.sg_sz
         B_BM = B_regM*B_sgM
         B_BN = B_regN*B_sgN*self.sg_sz
-        
-        
+
         gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
         gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
         self.gemma_func = gemma_func
@@ -432,7 +459,7 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     else:
         REPEAT = 200
     # for GEMMA, K decides how many WGs are needed.
-    gemma_wgs = ALIGN_UP(input_state, gemma_sg_BK *gemma_sgK)
+    gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
     alpha = np.random.rand(rank).astype(np.float16)
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
@@ -581,35 +608,47 @@ def blocking_1nd(batch, rank, input_state, output_state):
     else:
         B_regM, B_regN = [16, 2]
         B_sgM, B_sgN = [8, 4]
+    assert output_state >= B_regN * 16 and output_state%2 == 0 , "N tail limitation for 1st GEMMB"
 
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 if __name__ == "__main__":
-    
+    for output_state in range(64, 1024, 2):
+        test_lora_1st(128, 64 ,1024,  output_state, A_regM = 4, A_regN = 2, A_sgM=2, A_sgN = 2,
+                                       B_regM=4, B_regN=2, B_sgM=2, B_sgN=2, check_acc=True)
 
     """
     test 1st acc:
     """
-    if 1:
-        for batch in range(8, 1024, 107):
-            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-                for output_state_idx in range(256//16, 1024//16):
-                    for rank in (16, 32 ,64, 128):
-                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state_idx*16)
-                        test_lora_1st(batch, rank ,input_state,  output_state_idx*16, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    # if 0:
+    #     for batch in range(8, 1024, 107):
+    #         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+    #             for output_state_idx in range(256//16, 1024//16):
+    #                 for rank in (16, 32 ,64, 128):
+    #                     A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state_idx*16)
+    #                     test_lora_1st(batch, rank ,input_state,  output_state_idx*16, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+    #                                   B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
     
     """
     test 2nd acc:
     """
-    if 1:
-        for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
-            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+    if 0:
+        # for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
+            # for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+            #     for rank in (16, 32, 64, 128):
+            #         # for sgk in range(1, 17):
+            #         #     for bk in (16, 32, 48, 64, 80, 96, 112):
+            #                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+            #                 test_lora_2nd(input_state, rank, out_state*2, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+
+        # test case of output state and input state not multiple of 16
+        for out_state in range(8, 100):
+            for input_state in range(1024-63, 1024+63,):
                 for rank in (16, 32, 64, 128):
                     # for sgk in range(1, 17):
                     #     for bk in (16, 32, 48, 64, 80, 96, 112):
                             gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+                            test_lora_2nd(input_state, rank, out_state*2, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
                             
         # for rank in [64]:
         #     for out_state in [512, 1536, 3840, ]:
@@ -619,7 +658,7 @@ if __name__ == "__main__":
     """
     test perf based on minicpm:
     """
-    if 1:
+    if 0:
         for rank in [64]:
             for out_state in [512, 1536, 3840]:
                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
