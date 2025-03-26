@@ -12,6 +12,7 @@ vRANGE = 2
 np.random.seed(0)
 B = 1
 # TODO: esimd support tails(1~31)
+# TODO: xetla support tails(1~255)
 HS = 4096 + 32*0
 #HS = 128
 A = np.random.randint(-vRANGE, vRANGE+1, [B, HS]).astype(np.float16)
@@ -38,6 +39,8 @@ ref = ref_rms(A, B, eps)
 cur = tC.numpy()
 if not np.allclose(cur, ref, rtol=0.01, atol=0.01):
     print(f'{cur=}\n{ref=}')
+    pos = np.where(np.abs(cur - ref > 0.01))
+    print(f"{pos=}\ncur_bad={cur[pos]}\nref_bad={ref[pos]}")
     assert(False)
 else:
     print(f'accuracy: good')

@@ -28,6 +28,8 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -lOpenCL")
 target_include_directories(csrc PRIVATE ../../include)
 # explictly include sycl headers, make intelligence work
 target_include_directories(csrc PRIVATE ${SYCL_INCLUDE_DIR})
+target_include_directories(csrc PRIVATE sycl)
+target_include_directories(csrc PRIVATE sycl/xetla)
 
 set_target_properties(csrc
     PROPERTIES
