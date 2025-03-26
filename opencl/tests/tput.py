@@ -16,6 +16,8 @@ def ALIGN_UP(a, b):
 def ALIGN_DOWN(a, b):
     return (a // b * b)
 
+def DIV_UP(a, b):
+    return (a + b -1) // b
 cl_kernel_sources_ref = r'''
     __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
@@ -103,6 +105,8 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         int sgid = get_sub_group_id();
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
+        int lid =  get_sub_group_local_id();
+
         ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
         //__local half lA[BM*BK];
         //__local half lB[BK*BN];
@@ -121,38 +125,51 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
         __global half *ptrC = C + m_idx * N + n_idx;
 
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
-
-        //for(int i = 0; i < K; i += BK) {
-        for(int i = 0; i < K; i += SG_SZ) {
-
-            // copy B & A into shared local mem
-            //for(int j = 0; j < BK; j+=SG_SZ) {
-                
+        int i;
+        for(i = 0; (i+SG_SZ) <= K; i += SG_SZ) {
+             if ((i + SG_SZ) <= K) {
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+                '''  + "\n\t\t ".join([f"//half input{m} = *(ptrA + {m} * K + lid);" for m in range(regM)]) + r'''
 
-                //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
             
                      '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(as_ushort(input{m}), kk));" for m in range(regM)]) + r'''
                      ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
                     ptrB += N;
                 }
                 ptrA +=SG_SZ;
-            //}
+            }
         }
+       if (i < K) {
+                int tail_len = K - i;
+                int offset = (lid < tail_len) ? lid : 0;
+#if 1
+                '''  + "\n\t\t ".join([f"ushort input{m} = as_ushort(*(ptrA + {m} * K + offset));" for m in range(regM)]) + r'''
+
+#else
+                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+
+#endif
+                for (int kk = 0; kk < tail_len; kk++) {
+            
+                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(as_ushort(input{m}), kk));" for m in range(regM)]) + r'''
+                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
+                    ptrB += N;
+                }
+            }
 
         ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
-    
 
     # print(src)
     cl.profiling(True)
 
-    # np.random.seed(0)
+    np.random.seed(0)
     vRANGE = 1
-    REPEAT = 100
+    REPEAT = 1
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
     alpha = np.random.rand(N).astype(np.float16)
@@ -171,87 +188,39 @@ def test_FMA_blocking(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=F
     tMaininput_list = [cl.tensor(mainInput) for _ in range(REPEAT)]
 
     SG_SZ = 16
-    BK= 64
     BM = regM*sgM
     BN = regN*sgN*SG_SZ
     
     assert M >= regM , f'M:{M} is smaller than regM:{regM}'
     assert N >= regN*SG_SZ , f'N:{N} is smaller than :regN*SG_SZ {regN*SG_SZ}'
-    assert N % SG_SZ == 0 , f'N:{N} is not multiple of SG_SZ:{SG_SZ}'
 
     # assert BK % SG_SZ == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
     # assert K % BK == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
 
-    kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
+    kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
     GWS = [ALIGN_UP(M, BM)//regM , ALIGN_UP(N, BN)//(regN)]
     LWS = [sgM, sgN * SG_SZ]
     assert sgM *sgN * SG_SZ <= 1024, f" LWS:{LWS} exceed 1024 limitation"
-
+    cl.finish()
     for i in range(0, REPEAT):
         kernel.enqueue(func, GWS, LWS, tA_list[i], tB_list[i],tC_list[i], tAlpha_list[i], tMaininput_list[i], M, N, K)
     ns = cl.finish()
+    total_wgs = (M // BM) * (N //BN)
     flops = M * N * K * 2
+    rd_b = (M+N) * K *2
+    total_rd_b = total_wgs * (BM +BN) * K * 2
     for time in ns:
-        print(f'TPUT: {flops/time:.1f} GFLOPS, us: {time*1e-3:.1f}')
+        print(f'[TPUT]: {flops/time:.1f} GFLOPS, [RD]:{rd_b/time:.1f} GB/s, [RD_TOTAL]:{total_rd_b/(1024**2):.1f}MB, {total_rd_b/time:.1f} GB/s, us: {time*1e-3:.1f}')
     print("----------------------------------------------------")
-    print(f'GWS:{GWS}, LWS:{LWS}, M:{M}/{BM}, N:{N}/{BN}, K:{K}/{BK}')
+    print(f'GWS:{GWS}, LWS:{LWS}, M:{M}/{BM}, N:{N}/{BN}, K:{K}, SGM:{sgM}, SGN:{sgN}')
     print("----------------------------------------------------")
+    # print(C_ref)
+    # print(tC_list[0].numpy())
     compare(C_ref, tC_list[0].numpy())
 
 
-def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False):
+def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, BK=64, withscale = False, withSum=False):
     func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
-    gen_src =  r'''
-    __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void 
-    ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
-        int sgid = get_sub_group_id();
-        int sgid_N = sgid % sgN;
-        int sgid_M = sgid / sgN;
-        ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
-        //__local half lA[BM*BK];
-        //__local half lB[BK*BN];
-        //__local half* ptrA = lA;
-        //__local half* ptrB = lB;
-        int m_idx = get_group_id(0) * BM  + sgid_M * regM;
-        int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        if (m_idx >= M || n_idx >=N )
-            return;
-        if (m_idx + regM > M)
-            m_idx = M - regM;
-        if (n_idx + regN * SG_SZ > N)
-            n_idx = N - regN * SG_SZ;
-        __global half *ptrA = A + m_idx * K;
-        __global half *ptrB = B + n_idx;
-        __global half *ptrC = C + m_idx * N + n_idx;
-
-        '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
-
-        //for(int i = 0; i < K; i += BK) {
-        for(int i = 0; i < K; i += SG_SZ) {
-
-            // copy B & A into shared local mem
-            //for(int j = 0; j < BK; j+=SG_SZ) {
-                
-                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
-
-                //__attribute__((opencl_unroll_hint))
-                for (int kk = 0; kk < SG_SZ; kk++) {
-            
-                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
-                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
-                    ptrB += N;
-                }
-                ptrA +=SG_SZ;
-            //}
-        }
-
-        ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
-    }
-    '''
-
-
     gen_slm_src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
@@ -285,6 +254,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
 
         for(int j = 0; j < K; j += BK) {
             int k_len = (j+BK) > K ? (K - j) : BK;
+#if 1
             //copy A to SLM.
             if (m_idx < M) {
                 __attribute__((opencl_unroll_hint))
@@ -292,7 +262,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
                     ''' + "\n\t\t ".join([f"ushort tmpA_{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K + offset_K));" for m in range(regM)]) + r'''
                     ''' + "\n\t\t ".join([f"intel_sub_group_block_write_us((const __local ushort*)(lA_ptr_dest + {m} * BK + offset_K), tmpA_{m});" for m in range(regM)])+ r'''                    
                 }
-            }
+           }
            if (n_idx < N) {
                 //copy B to SLM.
                 __attribute__((opencl_unroll_hint))
@@ -301,7 +271,13 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
                     ''' + "\n\t\t ".join([f"intel_sub_group_block_write_us((const __local ushort*)(lB_ptr_dest + {n} * SG_SZ + offset_K*BN), tmpB_{n});" for n in range(regN)])+ r'''  
                 }
             }
+#endif
+
+#if 1
             barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
+#if 0
             __local half* lA_ptr = lA_ptr_dest;
             __local half* lB_ptr = lB_ptr_dest;
 
@@ -322,7 +298,31 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
                     lA_ptr +=SG_SZ;
                 }
             }
+#else
+            __local half* lA_ptr = lA_ptr_dest;
+            __local half* lB_ptr = lB_ptr_dest;
+
+            if (m_idx < M && n_idx < N) {
+                // FMA Matmul([BM, BK], [BK, BN]) = [BM, BN]
+                for(int i = 0; i < k_len; i+=SG_SZ) {
+                                        
+                    '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + {m} * BK));" for m in range(regM)]) + r'''
+
+                    //__attribute__((opencl_unroll_hint))
+                    for (int kk = 0; kk < SG_SZ; kk++) {
+                
+                        '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __local ushort*)(lB_ptr + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                        '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
+                        ''' + "\n\t\t\t".join([f"sum{m}_{n} = aa{m}*bb{n};" for m in range(regM) for n in range(regN)]) + r'''
+                        lB_ptr += BN;
+                    }
+                    lA_ptr +=SG_SZ;
+                }
+            }
+#endif
+#if 1
             barrier(CLK_LOCAL_MEM_FENCE);
+#endif
             ptrA += BK;
             ptrB += BK * N;
         }
@@ -331,27 +331,27 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
         ''' +  gen_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
-    print(gen_slm_src)
+    # print(gen_slm_src)
     cl.profiling(True)
 
     # np.random.seed(0)
     vRANGE = 1
-    REPEAT = 100
+    REPEAT = 50
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
     B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
     alpha = np.random.rand(N).astype(np.float16)
     mainInput = np.random.randint(-vRANGE, vRANGE+1, [M, N]).astype(np.float16)
-    if withscale:
-        C_ref = np.multiply(np.matmul(A, B), alpha)
-    elif withSum:
-        C_ref = np.add(np.matmul(A, B), mainInput)
-    else:
-        C_ref = np.matmul(A, B)
+    # if withscale:
+    #     C_ref = np.multiply(np.matmul(A, B), alpha)
+    # elif withSum:
+    #     C_ref = np.add(np.matmul(A, B), mainInput)
+    # else:
+    #     C_ref = np.matmul(A, B)
 
     tA_list = [cl.tensor(A) for _ in range(REPEAT)]
     tB_list = [cl.tensor(B) for _ in range(REPEAT)]
     tAlpha_list =  [cl.tensor(alpha) for _ in range(REPEAT)]
-    tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
+    # tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
     tC_slm_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
 
     tMaininput_list = [cl.tensor(mainInput) for _ in range(REPEAT)]
@@ -360,9 +360,6 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
     SLM_SZ = 64*1024
     BM = regM*sgM
     BN = regN*sgN*SG_SZ
-    BK = min(K, ALIGN_DOWN(SLM_SZ // ((BM + BN)*2), SG_SZ))
-    BK = 80
-        
     assert M >= regM , f'M:{M} is smaller than regM:{regM}'
     assert N >= regN*SG_SZ , f'N:{N} is smaller than :regN*SG_SZ {regN*SG_SZ}'
     assert N % SG_SZ == 0 , f'N:{N} is not multiple of SG_SZ:{SG_SZ}'
@@ -370,7 +367,6 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
     # assert BK % SG_SZ == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
     # assert K % BK == 0 , f'BK:{BK} is not multiple of SG_SZ:{SG_SZ}'
 
-    kernel_opt = kernel_cache(gen_src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
     kernel_slm = kernel_cache(gen_slm_src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
     
     GWS = [ALIGN_UP(M, BM)//regM , ALIGN_UP(N, BN)//(regN)]
@@ -378,19 +374,19 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
     assert sgM *sgN * SG_SZ <= 1024, f" LWS:{LWS} exceed 1024 limitation"
 
     for i in range(0, REPEAT):
-        kernel_opt.enqueue(func, GWS, LWS, tA_list[i], tB_list[i],tC_list[i], tAlpha_list[i], tMaininput_list[i], M, N, K)
         kernel_slm.enqueue(func, GWS, LWS, tA_list[i], tB_list[i],tC_slm_list[i], tAlpha_list[i], tMaininput_list[i], M, N, K)
     ns = cl.finish()
+    total_wgs = (M // BM) * (N //BN)
     flops = M * N * K * 2
-    for i in range(0, REPEAT):
-        time_opt = ns[2*i]
-        time_slm = ns[2*i + 1]
-        print(f'TPUT: [OPT]:{flops/time_opt:.1f} GFLOPS, us: {time_opt*1e-3:.1f}, [SLM]:{flops/time_slm:.1f} GFLOPS, us: {time_slm*1e-3:.1f}, [GAIN]:{time_opt/time_slm:.2f}')
+    rd_b = (M+N) * K *2
+    total_rd_b = total_wgs * (BM +BN) * K * 2
+    for time in ns:
+        print(f'[TPUT_SLM]: {flops/time:.1f} GFLOPS, [RD]:{rd_b/time:.1f} GB/s, [RD_TOTAL]:{total_rd_b/(1024**2):.1f}MB, {total_rd_b/time:.1f} GB/s, us: {time*1e-3:.1f}')
     print("----------------------------------------------------")
-    print(f'GWS:{GWS}, LWS:{LWS}, M:{M}/{BM}, N:{N}/{BN}, K:{K}/{BK}')
+    print(f'GWS:{GWS}, LWS:{LWS}, M:{M}/{BM}, N:{N}/{BN}, K:{K}/{BK}, SGM:{sgM}, SGN:{sgN}')
     print("----------------------------------------------------")
-    compare(C_ref, tC_slm_list[0].numpy())
-    compare(C_ref, tC_list[0].numpy())
+    # compare(C_ref, tC_slm_list[0].numpy())
+    # compare(C_ref, tC_list[0].numpy())
 
 # GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m, 2, choose[sgN], 3 sgM = 16//sgN or sgM = 8//sgN
 # seems regM and regN influces FPS more than sgM, sgN. 
@@ -426,10 +422,20 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, withscale = False, withSum=False)
 #          for n in (512,1536,3840,):
 #              test_SLM_FMA(m, n, k, regM=16, regN=2, sgM=8, sgN=4)
 
-test_SLM_FMA(3051, N=64, K=1536, regM=8, regN=2, sgM=16, sgN=2)
+# test_FMA_blocking(1, N=16, K=1025, regM=1, regN=1, sgM=2, sgN=2)
 
-# for batch in range(8, 256):
-#     for n_idx in range(2, 32):
-#         test_SLM_FMA(batch, N=n_idx*16, K=256, regM=4, regN=2, sgM=8, sgN=4)
+test_FMA_blocking(2, N=16, K=20, regM=1, regN=1, sgM=1, sgN=1)
+
+# test_SLM_FMA(4096, N=4096, K=2048, regM=16, regN=2, sgM=8, sgN=4, BK=64)  5500G,
+# test_FMA_blocking(4096, N=4096, K=2048, regM=16, regN=2, sgM=8, sgN=4)  tput, 4000G
+
+# test_FMA_blocking(4096, N=4096, K=2048, regM=16, regN=2, sgM=8, sgN=4)
+# test_FMA_blocking(4096, N=4096, K=4096, regM=16, regN=2, sgM=8, sgN=4)
+
+## test the not alignement without SLM
+for batch in range(8, 64, 3):
+    for n_idx in range(32, 64, 2):
+        for k_idx in range(128, 192,2):
+            test_FMA_blocking(batch, N=n_idx, K=k_idx, regM=4, regN=2, sgM=8, sgN=4)
 
 # test_SLM_FMA(65, 272, K=256, regM=4, regN=2, sgM=8, sgN=4)
