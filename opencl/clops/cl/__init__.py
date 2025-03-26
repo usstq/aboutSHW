@@ -23,3 +23,17 @@ subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_B
 subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
 
 from .csrc import *
+
+'''
+decorator for CM code:
+    options="-cmc -mdump_asm -g2"
+
+'''
+def source(options=""):
+    import inspect
+    def _cl_kernel(f):
+        frame = inspect.currentframe().f_back
+        src_lines, line_no = inspect.getsourcelines(f)
+        src = "\n"*(line_no + 1) + f()
+        return kernels(src, options)
+    return _cl_kernel

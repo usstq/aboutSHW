@@ -55,7 +55,29 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 #define DEBUG_MEMPOOL_SUMMARY (CLDEBUG & 1)
 #define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
 
-sycl::queue sycl_queue;
+static sycl::queue update_queue(bool enable_profile = false) {
+    std::cout << "update_queue:" << std::endl;
+    auto opencl_gpu_selector = [](const sycl::device& d) {
+        std::cout << "opencl_gpu_selector: "
+                  << (d.is_cpu() ? "[CPU]" : "")
+                  << (d.is_gpu() ? "[GPU]" : "")
+                  << d.get_info<sycl::info::device::name>() << std::endl;
+        if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
+            return 1;
+        }
+        return -1;
+    };
+
+    if (enable_profile) {
+        sycl::property_list propList{sycl::property::queue::in_order(), sycl::property::queue::enable_profiling()};
+        return sycl::queue(opencl_gpu_selector, propList);
+    } else {
+        sycl::property_list propList{sycl::property::queue::in_order()};
+        return sycl::queue(opencl_gpu_selector, propList);
+    }
+}
+
+sycl::queue sycl_queue = update_queue();
 std::vector<std::variant<cl_event, sycl::event>> all_events;
 
 
@@ -269,39 +291,55 @@ struct cl_kernels {
     std::string m_source;
     std::string m_options;
 
+    void check_error(const char* name, cl_int error, bool show_build_log = false) {
+        if (error != CL_SUCCESS) {
+            std::stringstream ss;
+            ss << name << " failed with " << get_ocl_error_string(error) << " (" << error << ")";
+
+            if (show_build_log) {
+                cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+                size_t len = 0;
+                cl_int ret = CL_SUCCESS;
+                ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
+                if (ret != CL_SUCCESS) {
+                    ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
+                    throw std::runtime_error(ss.str());
+                }
+                std::string log;
+                log.resize(len + 1, '\0');
+                ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
+                if (ret != CL_SUCCESS) {
+                    ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
+                    throw std::runtime_error(ss.str());
+                }
+
+                ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
+                ss << "build options: " << m_options << std::endl;
+
+                ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
+            }
+            throw std::runtime_error(ss.str());
+        }
+    }
+
+    cl_kernels(py::bytes bin_bytes, std::string options) : m_options(options) {
+        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+        cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+        std::string content{bin_bytes};
+        size_t lengths[1] = {content.size()};
+        const unsigned char* binaries[1] = { reinterpret_cast<unsigned char*>(content.data()) };
+        cl_int binary_status[1] = {0};
+        cl_int errcodes[1] = {0};
+        m_prog = clCreateProgramWithBinary(ocl_context, 1, &ocl_device, lengths, binaries, binary_status, errcodes);
+        check_error("clCreateProgramWithBinary", errcodes[0]);
+
+        cl_int build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
+        check_error("clBuildProgram", build_error, true);
+    }
+
     cl_kernels(std::string source, std::string options, std::string dump_dir) : m_source(source), m_options(options) {
         cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
         cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
-
-        auto check_error = [&](const char* name, cl_int error, bool show_build_log = false) {
-            if (error != CL_SUCCESS) {
-                std::stringstream ss;
-                ss << name << " failed with " << get_ocl_error_string(error) << " (" << error << ")";
-
-                if (show_build_log) {
-                    size_t len = 0;
-                    cl_int ret = CL_SUCCESS;
-                    ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
-                    if (ret != CL_SUCCESS) {
-                        ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
-                        throw std::runtime_error(ss.str());
-                    }
-                    std::string log;
-                    log.resize(len + 1, '\0');
-                    ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
-                    if (ret != CL_SUCCESS) {
-                        ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
-                        throw std::runtime_error(ss.str());
-                    }
-
-                    ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
-                    ss << "build options: " << m_options << std::endl;
-
-                    ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
-                }
-                throw std::runtime_error(ss.str());
-            }
-        };
 
         // C for metal suppport
         if (options.find("-cmc") == std::string::npos)
@@ -414,33 +452,15 @@ struct cl_kernels {
 
 static bool enable_profile = false;
 
-static void update_queue() {
-    auto opencl_gpu_selector = [](const sycl::device& d) {
-        if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
-            return 1;
-        }
-        return -1;
-    };
-
-    if (enable_profile) {
-        sycl::property_list propList{sycl::property::queue::in_order(), sycl::property::queue::enable_profiling()};
-        sycl_queue = sycl::queue(opencl_gpu_selector, propList);
-    } else {
-        sycl::property_list propList{sycl::property::queue::in_order()};
-        sycl_queue = sycl::queue(opencl_gpu_selector, propList);
-    }
-}
-
 void init_ops(py::module_ &m);
 
 PYBIND11_MODULE(csrc, m) {
-    update_queue();
 
     init_ops(m);
 
     m.def("profiling", [&](bool enable) {
         enable_profile = enable;
-        update_queue();
+        sycl_queue = update_queue(enable);
     });
 
     py::class_<tensor>(m, "tensor")
@@ -461,6 +481,7 @@ PYBIND11_MODULE(csrc, m) {
             }));
 
     py::class_<cl_kernels>(m, "kernels")
+        .def(py::init<py::bytes, std::string>(), py::arg("bin_bytes"), py::arg("options") = "")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
         .def("enqueue", &cl_kernels::enqueue)
         .def("info", &cl_kernels::info)

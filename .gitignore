@@ -7,3 +7,6 @@ build
 a.out
 *.pyc
 .cache
+*.asm
+*.visaasm
+*.dat
