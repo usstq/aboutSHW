@@ -353,8 +353,8 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
         __global half *ptrC = C + m_idx * N + n_idx;
 
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
-
-        for(int i = 0; i < K; i += SG_SZ) {
+        int i;
+        for(i = 0; (i+SG_SZ) <= K; i += SG_SZ) {
                 
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
 
@@ -368,7 +368,25 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
                 }
                 ptrA +=SG_SZ;
         }
+       if (i < K) {
+                int lid =  get_sub_group_local_id();
+                int tail_len = K - i;
+                int offset = (lid < tail_len) ? lid : 0;
+#if 1
+                '''  + "\n\t\t ".join([f"ushort input{m} = as_ushort(*(ptrA + {m} * K + offset));" for m in range(regM)]) + r'''
 
+#else
+                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+
+#endif
+                for (int kk = 0; kk < tail_len; kk++) {
+            
+                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(as_ushort(input{m}), kk));" for m in range(regM)]) + r'''
+                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
+                    ptrB += N;
+                }
+            }
         ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
@@ -386,7 +404,7 @@ class LORA_1ST:
         
         assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
         assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
-        assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
+        assert self.input_state % 2 == 0, f"'input state' {self.input_state} is not even"
         assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
         # tail hanlding limitation for ouput_state. Same as 2nd limitation.
         assert output_state >= B_regN * self.sg_sz, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
@@ -613,42 +631,52 @@ def blocking_1nd(batch, rank, input_state, output_state):
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 if __name__ == "__main__":
-    for output_state in range(64, 1024, 2):
-        test_lora_1st(128, 64 ,1024,  output_state, A_regM = 4, A_regN = 2, A_sgM=2, A_sgN = 2,
-                                       B_regM=4, B_regN=2, B_sgM=2, B_sgN=2, check_acc=True)
-
     """
     test 1st acc:
     """
-    # if 0:
-    #     for batch in range(8, 1024, 107):
-    #         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-    #             for output_state_idx in range(256//16, 1024//16):
-    #                 for rank in (16, 32 ,64, 128):
-    #                     A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state_idx*16)
-    #                     test_lora_1st(batch, rank ,input_state,  output_state_idx*16, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-    #                                   B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    # 1st case: input_state, output_state aligned with 16.
+    if 0:
+        for batch in range(8, 1024, 107):
+            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+                for output_state in range(256, 1024, 16):
+                    for rank in (16, 32 ,64, 128):
+                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state)
+                        test_lora_1st(batch, rank ,input_state,  output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    # 1st case: input_state, output_state not aligned with 16.
+    if 0:
+        for batch in range(8, 1024, 107):
+            for input_state in range (1024, 1100, 2):
+                for output_state in range(256, 300, 2):
+                    for rank in (16, 32 ,64, 128):
+                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state)
+                        test_lora_1st(batch, rank ,input_state,  output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
     
     """
     test 2nd acc:
     """
+    # 2nd case: input_state, output_state aligned with 16.
     if 0:
-        # for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
-            # for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-            #     for rank in (16, 32, 64, 128):
-            #         # for sgk in range(1, 17):
-            #         #     for bk in (16, 32, 48, 64, 80, 96, 112):
-            #                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-            #                 test_lora_2nd(input_state, rank, out_state*2, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
-
-        # test case of output state and input state not multiple of 16
-        for out_state in range(8, 100):
-            for input_state in range(1024-63, 1024+63,):
+        for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
+            for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for rank in (16, 32, 64, 128):
                     # for sgk in range(1, 17):
                     #     for bk in (16, 32, 48, 64, 80, 96, 112):
                             gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state*2, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+    # 2nd case: input_state, output_state aligned with 16.
+    if 0:
+        for out_state in range(16, 100, 2):
+            for input_state in range(512-63, 512+11):
+                for rank in (16, 32, 64, 128):
+                    # for sgk in range(1, 17):
+                    #     for bk in (16, 32, 48, 64, 80, 96, 112):
+                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+    """
+    test acc based on minicpm:
+    """
                             
         # for rank in [64]:
         #     for out_state in [512, 1536, 3840, ]:
@@ -658,7 +686,7 @@ if __name__ == "__main__":
     """
     test perf based on minicpm:
     """
-    if 0:
+    if 1:
         for rank in [64]:
             for out_state in [512, 1536, 3840]:
                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
