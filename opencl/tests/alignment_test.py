@@ -350,14 +350,33 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
     # print(tC_list[0].numpy())
     compare(C_ref, tC_list[0].numpy())
 
+'''FP32 N-tail summary: 
+# No limitation for now.
+''' 
 # test_FMA_basic_fp32()
+
+'''FP16 N-tail summary: 
+# N must be odd when M=1 or M > 1;
+''' 
 # test_FMA_basic_fp16()
+
 # print("-------------------------")
 cl.profiling(True)
 # test_FMA_blocking_fp16(4, N=16, K=24, regM=1, regN=1, sgM=2, sgN=1)
 
+'''FP16 K-tail summary: 
+# when m = 1, K can be odd or even  for FP16. so no limitation for 2nd token.
+# when m > 1, K <16, K can be odd or even for FP16.
+# when m >1 and K >=16, K must be odd for the tail case(K%16 !=0).
+# above all, not aligned K must be even for FP16. doesn't know why.
+''' 
 for k_len in range (16, 32, 2):    
-    test_FMA_blocking_fp16(4, N=16, K=k_len, regM=1, regN=1, sgM=1, sgN=1)
+    test_FMA_blocking_fp16(2, N=16, K=k_len, regM=1, regN=1, sgM=1, sgN=1)
+
+
+'''FP32 K-tail summary: 
+# No limitation for now.
+''' 
 # for k_len in range (16, 48):    
 #     test_FMA_blocking_fp32(4, N=16, K=k_len, regM=1, regN=1, sgM=1, sgN=1)
 
