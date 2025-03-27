@@ -256,8 +256,8 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
         half sum0_0 = 0;;
         int i = 0;
         for(i = 0; (i+SG_SZ) <= K; i += SG_SZ) {
-                ushort input0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * K));
-                //ushort input0 = as_ushort(*(ptrA + 0 * K + lid));
+                //ushort input0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * K));
+                ushort input0 = as_ushort(*(ptrA + 0 * K + lid));
                 for (int kk = 0; kk < SG_SZ; kk++) {
                      half bb0 = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + 0 * SG_SZ)));
                      half aa0 = as_half(intel_sub_group_broadcast(input0, kk));
@@ -269,7 +269,7 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
         if (i < K) {
                 int tail_len = K - i;
                 int offset = (lid < tail_len) ? lid : 0;
-# if 1
+# if 0
                 *(A_tail + lid) = as_ushort(*(ptrA + 0 * K + offset));
                 barrier(CLK_LOCAL_MEM_FENCE);
                 ushort src0 = intel_sub_group_block_read_us((const __local ushort*)(A_tail));
@@ -282,6 +282,7 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
                 }
 #else
                 ushort src0 = as_ushort(*(ptrA + 0 * K + offset));
+
                 for (int kk = 0; kk < tail_len; kk++) {
                         half bbb0 = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + 0 * SG_SZ)));
                         half aaa0 = as_half(intel_sub_group_broadcast(src0, kk));
@@ -356,7 +357,10 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
 # test_FMA_basic_fp32()
 
 '''FP16 N-tail summary: 
-# N must be odd when M=1 or M > 1;
+# N must be odd. It should be caused by https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html read address boundary alignment limitation.
+# But according intel_sub_group_block_write_us() limitation, the write address should be 64-byte boundary alignment. In our cases, N is even can only ensure the 
+# boundary is 4-byte boundary alignment. But the wrting result is oky. So wrting only need 4-byte boundary alignemnt?
+# intel_sub_group_block_write_us(image2d_t image, int2 byte_coord, ushort data )
 ''' 
 # test_FMA_basic_fp16()
 
@@ -364,14 +368,24 @@ def test_FMA_blocking_fp16(M, N, K,regM, regN, sgM, sgN, withscale = False, with
 cl.profiling(True)
 # test_FMA_blocking_fp16(4, N=16, K=24, regM=1, regN=1, sgM=2, sgN=1)
 
+test_FMA_blocking_fp16(2, N=16, K=31, regM=1, regN=1, sgM=1, sgN=1)
+
 '''FP16 K-tail summary: 
 # when m = 1, K can be odd or even  for FP16. so no limitation for 2nd token.
 # when m > 1, K <16, K can be odd or even for FP16.
-# when m >1 and K >=16, K must be odd for the tail case(K%16 !=0).
-# above all, not aligned K must be even for FP16. doesn't know why.
+# when m >1 and K >=16, K must be odd for the tail case(K%16 !=0) , if using intel_sub_group_block_read_us() to read A in the align-body. Otherwise, would accuracy on the second row.
+# when m >1 and K >=16, K no limitation , if using scatter read to read A.
+
+# above all, The root cause is boundary alignment limitation using intel_sub_group_block_write_us(). The address must be 4-byte alighment. When K is not even,  means row stride is not 
+4-byte alignment. So for the 2nd, 4th, 6th row, row starting address is not 4-byte alignment. So the loop body subgroup read would having issue.
+ So that is why m>1 and K >=16 , there whould be accuray error for interleaved row(2nd, 4th, 6th);
+ 
+ If using scatter read for A, there would be no such limitation.
+  
+https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_subgroups_short.html
 ''' 
-for k_len in range (16, 32, 2):    
-    test_FMA_blocking_fp16(2, N=16, K=k_len, regM=1, regN=1, sgM=1, sgN=1)
+# for k_len in range (16, 32, 2):    
+#     test_FMA_blocking_fp16(2, N=16, K=k_len, regM=1, regN=1, sgM=1, sgN=1)
 
 
 '''FP32 K-tail summary: 
