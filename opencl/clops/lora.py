@@ -58,6 +58,9 @@ opt lora 2nd token
 ------------------------------------------------------------------------------------------------------------------
 """
 opt_lora_kernel_2nd = r'''
+#define MAX_GEMMA_SGK 48
+#define MAX_LORA_RANK 256
+#define  MAX_GEMMA_SG_BK 64
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemmA(__global half * A, __global half *B,  __global half *C, int K) {
         int gid =  get_group_id(0);
@@ -73,11 +76,11 @@ opt_lora_kernel_2nd = r'''
         int wg_k_len = (k_start_wg + bk_wg) > K ?  (K - k_start_wg) : bk_wg;
 
         // store each sg accumulation result into SLM. Will reduce sg result into wg result. 
-        __local half fma_buff[GEMMA_SGK * RANK];
-        __local half *sg_fma_buff = fma_buff + sgid_k * RANK;
+        __local half fma_buff[MAX_GEMMA_SGK * MAX_LORA_RANK];
+        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_LORA_RANK;
 
         //put all need input activation into SLM. 'sgN' sgs would share same input.
-        __local half local_input[GEMMA_SGK * GEMMA_SG_BK];
+        __local half local_input[MAX_GEMMA_SGK * MAX_GEMMA_SG_BK];
         int local_sz = get_num_sub_groups() * SG_SZ;
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
         for (int offset = sgid * SG_SZ; offset < wg_k_len; offset += local_sz) {
@@ -91,7 +94,7 @@ opt_lora_kernel_2nd = r'''
 
         //The sg is needs to accumulate. Otherwise, sg not needed. sg_k diverge here.
         if (sgid_k * GEMMA_SG_BK  <  wg_k_len) {
-            int klen_sg =  GEMMA_SG_BK;
+            int klen_sg =  (k_offset + GEMMA_SG_BK) > wg_k_len ? (wg_k_len - k_offset) : GEMMA_SG_BK;
             __global half *B_ptr = B + k_idx * RANK + n_idx;
             __local half *A_ptr = local_input + k_offset;
             half sum = 0.f;
@@ -114,7 +117,7 @@ opt_lora_kernel_2nd = r'''
             half sum = 0.f;
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < GEMMA_SGK; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * RANK + n_idx)));
+                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
             }
             intel_sub_group_block_write_us((const __global ushort*)(C_ptr + n_idx), as_short(sum));
         }
@@ -127,7 +130,7 @@ opt_lora_kernel_2nd = r'''
         int sg_num = get_num_sub_groups();
         int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
         int id_sg_local = get_sub_group_local_id();
-        __local half reduce[RANK];
+        __local half reduce[MAX_LORA_RANK];
 
         __global half *B_ptr = B + n_idx;
 
@@ -491,6 +494,7 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
         REPEAT = 1
     else:
         REPEAT = 100
+    np.random.seed(0)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
     alpha = np.random.rand(rank).astype(np.float16)
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
@@ -585,12 +589,14 @@ def blocking_1nd(batch, rank, input_state, output_state):
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 if __name__ == "__main__":
-    
+
+    test_lora_2nd(2048, 128, 256, gemma_sgK = 4,  gemma_sg_BK=48, gemmb_sgN=32 , check_acc=True)
+    # test_lora_2nd(1216, 128, 256, gemma_sgK = 7,  gemma_sg_BK=16, gemmb_sgN=32 , check_acc=True)
 
     """
     test 1st acc:
     """
-    if 1:
+    if 0:
         for batch in range(8, 1024, 107):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for output_state_idx in range(256//16, 1024//16):
@@ -602,14 +608,15 @@ if __name__ == "__main__":
     """
     test 2nd acc:
     """
-    if 1:
+    if 0:
         for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for rank in (16, 32, 64, 128):
-                    # for sgk in range(1, 17):
-                    #     for bk in (16, 32, 48, 64, 80, 96, 112):
-                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
+                    for sgk in range(16, 32):
+                        for bk in (32, 48, 64):
+                            test_lora_2nd(input_state, rank, out_state, gemma_sgK = min(sgk, 512 // rank), gemma_sg_BK=bk, gemmb_sgN=32 , check_acc=True)
+                            # gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+                            # test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
                             
         # for rank in [64]:
         #     for out_state in [512, 1536, 3840, ]:
@@ -619,7 +626,7 @@ if __name__ == "__main__":
     """
     test perf based on minicpm:
     """
-    if 1:
+    if 0:
         for rank in [64]:
             for out_state in [512, 1536, 3840]:
                 gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
