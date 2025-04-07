@@ -22,6 +22,14 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=core-avx2")
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath=/opt/intel/oneapi/compiler/latest/lib")
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -lOpenCL")
 
+############# onednn ##################
+add_library(onednn_gpu STATIC IMPORTED) # or STATIC instead of SHARED
+set_target_properties(onednn_gpu PROPERTIES
+  IMPORTED_LOCATION "/home/openvino-ci-74/tingqian/openvino/build/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/libopenvino_onednn_gpu.a"
+  INTERFACE_INCLUDE_DIRECTORIES "/home/openvino-ci-74/tingqian/openvino/build/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/include/"
+)
+target_link_libraries(csrc PRIVATE onednn_gpu)
+
 # EXAMPLE_VERSION_INFO is defined by setup.py and passed into the C++ code as a
 # define (VERSION_INFO) here.
 

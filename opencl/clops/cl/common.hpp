@@ -12,6 +12,15 @@ namespace py = pybind11;
 #include <vector>
 #include <memory>
 
+#ifndef ASSERT
+#    define ASSERT(cond)                                                     \
+        if (!(cond)) {                                                       \
+            std::stringstream ss;                                            \
+            ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
+            throw std::runtime_error(ss.str());                              \
+        }
+#endif
+
 // composite of cl::Buffer & layout information
 // like numpy array
 struct tensor {

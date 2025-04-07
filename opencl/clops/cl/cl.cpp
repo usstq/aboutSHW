@@ -453,10 +453,12 @@ struct cl_kernels {
 static bool enable_profile = false;
 
 void init_ops(py::module_ &m);
+void init_ops_onednn(py::module_& m);
 
 PYBIND11_MODULE(csrc, m) {
 
     init_ops(m);
+    init_ops_onednn(m);
 
     m.def("profiling", [&](bool enable) {
         enable_profile = enable;
