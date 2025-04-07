@@ -631,10 +631,21 @@ if __name__ == "__main__":
                     gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
                     test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
                             
-    for rank in [64,]:
-        for out_state in [512, 1536, 3840, ]:
-            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
-            test_lora_2nd(1536, rank, out_state, gemma_sgK = 4, gemma_sg_BK=32, gemmb_sgN = 16, check_acc=True)
+    """
+    test acc of minicpm and qwen2.5:
+    """
+    if 1:
+        for batch in [1, 3192]:
+            for rank in [64,]:
+                for out_state in [512, 1536, 3840, 256, 8960]:
+                    for input_state in [1536, 8960]:
+                        if batch == 1:
+                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+                            test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc=True)
+                        else:
+                            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
+                            test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 
     """
     test perf based on minicpm:
@@ -650,3 +661,20 @@ if __name__ == "__main__":
                     A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, 1536, out_state)
                     test_lora_1st(batch, rank ,1536,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                         B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+
+
+    """
+    test perf based on qwen:
+    """
+    if 1:
+        for batch in [1, 3192]:
+            for rank in [64,]:
+                for out_state in [1536, 3840, 256, 8960]:
+                    for input_state in [1536, 8960]:
+                        if batch == 1:
+                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+                            test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+                        else:
+                            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
+                            test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
