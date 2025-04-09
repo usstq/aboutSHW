@@ -501,6 +501,7 @@ PYBIND11_MODULE(csrc, m) {
         .def(py::init<const py::array&>())
         .def(py::init<const std::vector<cl_uint>&, py::dtype>())
         .def("numpy", &tensor::to_numpy)
+        .def_property("offset", &tensor::get_offset, &tensor::set_offset)
         .def_property_readonly("shape", &tensor::get_shape)
         .def_property_readonly("numel", &tensor::get_numel)
         .def_property_readonly("dtype", &tensor::get_dtype)

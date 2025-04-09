@@ -15,13 +15,32 @@ namespace py = pybind11;
 #include <mutex>
 
 #ifndef ASSERT
-#    define ASSERT(cond)                                                     \
-        if (!(cond)) {                                                       \
-            std::stringstream ss;                                            \
-            ss << __FILE__ << ":" << __LINE__ << " " << #cond << " failed!"; \
-            throw std::runtime_error(ss.str());                              \
-        }
+
+template <typename... TS>
+void _write_all(std::ostream& os, TS&&... args) {
+    int dummy[sizeof...(TS)] = {(os << std::forward<TS>(args), 0)...};
+    (void)dummy;
+}
+
+#ifdef __x86_64__
+#    define TRAP_INST() __asm__("int3");
 #endif
+
+#ifdef __aarch64__
+#    define TRAP_INST() __asm__("brk #0x1");
+#endif
+
+#define ASSERT(cond, ...)                                                                   \
+        if (!(cond)) {                                                                      \
+            std::stringstream ss;                                                           \
+            _write_all(ss, __FILE__, ":", __LINE__, " ", #cond, " failed:", ##__VA_ARGS__); \
+            std::cout << "\033[31m" << ss.str() << "\033[0m" << std::endl;                  \
+            /* TRAP_INST();*/                                                               \
+            throw std::runtime_error(ss.str());                                             \
+        }
+
+#endif
+
 
 // composite of cl::Buffer & layout information
 // like numpy array
@@ -31,6 +50,7 @@ struct tensor {
     cl_uint numel = 0;
     std::shared_ptr<void> p_buff;
     py::dtype dt;
+    int offset = 0;
 
     tensor() {}
 
@@ -50,11 +70,22 @@ struct tensor {
     operator T*() const {
         //if (py::dtype::of<T>() != dt)
         //    throw std::runtime_error(std::string("unable to cast from tensor of dtype ") + dt.kind() + " to " + py::dtype::of<T>().kind());
-        return reinterpret_cast<T*>(p_buff.get());
+        return reinterpret_cast<T*>(data());
     }
 
     operator void*() const {
-        return p_buff.get();
+        return data();
+    }
+
+    void* data() const {
+        return reinterpret_cast<int8_t*>(p_buff.get()) + offset;
+    }
+
+    void set_offset(int off) {
+        offset = off;
+    }
+    int get_offset() {
+        return offset;
     }
 
     void resize(const std::vector<cl_uint>& dims, py::dtype dtype);

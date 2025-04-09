@@ -115,6 +115,11 @@ struct onednn_matmul {
         return *this;
     }
 
+    onednn_matmul& post_op_sum(float scale = 1.f, int32_t zero_point = 0) {
+        postops.append_sum(scale, zero_point, memory::data_type::undef);
+        return *this;
+    }
+
     void create() {
         if (postops.len() > 0) {
             attr.set_post_ops(postops);
@@ -145,6 +150,7 @@ struct onednn_matmul {
         none,
         with_bin_mul,
         with_bin_mul_per_row,
+        with_bin_mul_per_row_sum,
         with_silu,
         with_silu_bin_mul,
     };
@@ -159,6 +165,12 @@ struct onednn_matmul {
             bin_post_id = 0;
             bin_per_row = true;
             post_op_bin_mul(false);
+        }
+        if (t == type::with_bin_mul_per_row_sum) {
+            bin_post_id = 0;
+            bin_per_row = true;
+            post_op_bin_mul(false);
+            post_op_sum();
         }
         if (t == type::with_silu)
             post_op_silu();
@@ -248,7 +260,7 @@ struct onednn_linear {
     void forward(const tensor& a, tensor& c, tensor& bin_input) {
         memory::dim M = a.get_shape()[0];
 
-        ASSERT(m_batch == 0 || m_batch == M);
+        ASSERT(m_batch == 0 || m_batch == M, "m_batch=", m_batch, " M=", M);
 
         memory::desc rt_src_md = memory::desc(memory::dims({M, m_K}), m_a_type, memory::format_tag::ab);
         memory::desc rt_dst_md = memory::desc(memory::dims({M, m_N}), m_a_type, memory::format_tag::ab);
@@ -455,6 +467,8 @@ py::array tensor::to_numpy_f16(const memory& mem) {
 }
 #endif
 
+
+
 void init_ops_onednn(py::module_& m) {
     py::class_<onednn_linear>(m, "onednn_linear")
         .def(py::init())
@@ -470,6 +484,7 @@ void init_ops_onednn(py::module_& m) {
         .value("none", onednn_matmul::type::none)
         .value("with_bin_mul", onednn_matmul::type::with_bin_mul)
         .value("with_bin_mul_per_row", onednn_matmul::type::with_bin_mul_per_row)
+        .value("with_bin_mul_per_row_sum", onednn_matmul::type::with_bin_mul_per_row_sum)
         .value("with_silu", onednn_matmul::type::with_silu)
         .value("with_silu_bin_mul", onednn_matmul::type::with_silu_bin_mul);
 

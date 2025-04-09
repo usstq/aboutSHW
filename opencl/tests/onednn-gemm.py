@@ -98,8 +98,8 @@ from torch import nn
 class config:
     hidden_size = 2048
     intermediate_size = 8192
-    num_experts = 4
-    num_experts_per_tok = 2
+    num_experts = 128
+    num_experts_per_tok = 8
     moe_intermediate_size = 768
     num_hidden_layers = 1
     sliding_window = 4096
@@ -109,6 +109,7 @@ class config:
     attention_bias = False
     rms_norm_eps = 1e-6
     attention_dropout = 0
+    debug = False
 
 class Qwen3MoeMLP(nn.Module):
     def __init__(self, config, intermediate_size=None):
@@ -138,31 +139,41 @@ class Qwen3MoeMLP(nn.Module):
                 if (expert_mask[j,k] != 0):
                     top_x.append(k)
                     idx.append(j)
-        print("========== expert_mask")
-        print(expert_mask)
-        print("========== top_x", top_x)
-        print("========== idx", idx)
-        
+        if len(top_x) == 0:
+            if config.debug: print("skip")
+            return
+
+        if config.debug:
+            print("========== expert_mask")
+            print(expert_mask)
+            print("========== top_x", top_x)
+            print("========== idx", idx)
+
         x = hidden_states[top_x, :] # slicing2d
-        print("========== x")
-        print(x.detach().numpy())
+        if config.debug:
+            print("========== x")
+            print(x.detach().numpy())
         # expert_layer
         y = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        print("========== y")
-        print(y.detach().numpy())
+        if config.debug:
+            print("========== y")
+            print(y.detach().numpy())
 
         # routing_weights[i, j] i'th token's top-j's routing weight
         # y[i, :]  i'th token's all hidden-states
-        print("========== routing_weights[top_x, idx, None]")
-        print(routing_weights[top_x, idx, None])
+        if config.debug:
+            print("========== routing_weights[top_x, idx, None]")
+            print(routing_weights[top_x, idx, None])
+
         y = y * routing_weights[top_x, idx, None]
 
-        print("========== y * routing_weights")
-        print(y.detach().numpy())
+        if config.debug:
+            print("========== y * routing_weights")
+            print(y.detach().numpy())
 
         # However `index_add_` only support torch tensors for indexing so we'll use
         # the `top_x` tensor here.
-        final_hidden_states.index_add_(0, torch.tensor(top_x), y)
+        final_hidden_states.index_add_(0, torch.tensor(top_x, dtype=torch.int32), y)
 
 
 ocl_sources=r'''
@@ -210,6 +221,13 @@ __kernel void index_add_(
 
 '''
 
+class scratchBuff:
+    def __init__(self):
+        self.x = None
+        self.rweights = None
+        self.n_tokens = -1
+        self.act_gate = None
+        self.act_up = None
 
 class onednnMLP:
     def __init__(self, mlp):
@@ -225,17 +243,17 @@ class onednnMLP:
     def update_batch(self, batch):
         if self.M != batch:
             empty_cl_tensor = cl.tensor()
-            print("======== create linear_up =========")
+            if config.debug: print("======== create linear_up =========")
             self.linear_up = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.hidden_size, self.config.moe_intermediate_size,
                                         self.K_group_size, cl.onednn_matmul_type.none,
                                         cl.onednn_dtype.f16, 
                                         self.weight_up, empty_cl_tensor, empty_cl_tensor)
-            print("======== create linear_gate =========")
+            if config.debug: print("======== create linear_gate =========")
             self.linear_gate = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.hidden_size, self.config.moe_intermediate_size,
                                         self.K_group_size, cl.onednn_matmul_type.with_silu_bin_mul,
                                         cl.onednn_dtype.f16, 
                                         self.weight_gate, empty_cl_tensor, empty_cl_tensor)
-            print("======== create linear_down =========")
+            if config.debug: print("======== create linear_down =========")
             self.linear_down = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.moe_intermediate_size, self.config.hidden_size,
                                         self.K_group_size, cl.onednn_matmul_type.none,
                                         cl.onednn_dtype.f16, 
@@ -245,6 +263,12 @@ class onednnMLP:
                                         self.K_group_size, cl.onednn_matmul_type.with_bin_mul_per_row,
                                         cl.onednn_dtype.f16, 
                                         self.weight_down, empty_cl_tensor, empty_cl_tensor)
+            if (batch == 1):
+                self.linear_down3 = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.moe_intermediate_size, self.config.hidden_size,
+                                        self.K_group_size, cl.onednn_matmul_type.with_bin_mul_per_row_sum,
+                                        cl.onednn_dtype.f16, 
+                                        self.weight_down, empty_cl_tensor, empty_cl_tensor)
+            self.M = batch
 
     def forward(self, input):
         M = input.shape[0]
@@ -256,12 +280,11 @@ class onednnMLP:
         self.linear_up.forward(input, temp_up, cl.tensor())
         self.linear_gate.forward(input, temp_gate, temp_up)
         self.linear_down.forward(temp_gate, dst, cl.tensor())
-        cl.finish()
         return dst
 
 
     # top_x： token index
-    def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states):
+    def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states, scratch):
         # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
         # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
         
@@ -273,54 +296,87 @@ class onednnMLP:
                 if (expert_mask[j,k] != 0):
                     top_x.append(k)
                     idx.append(j)
-        print("========== expert_mask")
-        print(expert_mask)
-        print("========== top_x", top_x)
-        print("========== idx", idx)
-        
-        # x = hidden_states[top_x, :] # slicing2d
+
         n_tokens = len(top_x)
-        x = cl.tensor(np.zeros([n_tokens, self.config.hidden_size], dtype=np.float16))
-        tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
-        top_index = cl.tensor(np.array(idx, dtype=np.int32))
+        if n_tokens == 0:
+            if config.debug: print("skip")
+            return
 
-        rweights = cl.tensor(np.zeros([n_tokens], dtype=np.float16))
+        if config.debug:
+            print("========== expert_mask")
+            print(expert_mask)
+            print("========== top_x", top_x)
+            print("========== idx", idx)
 
-        self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 1],
-                                 hidden_states, x,
-                                 routing_weights, rweights,
-                                 tok_index, top_index,
-                                 hidden_states.shape[1], routing_weights.shape[1])
+        # x = hidden_states[top_x, :] # slicing2d
 
-        print("========== x")
-        print(x.numpy())
+        if hidden_states.shape[0] == 1:
+            # fast path
+            x = hidden_states
+            if config.debug:
+                print("========== x")
+                print(x.numpy())
 
-        # expert_layer
-        self.update_batch(n_tokens)
-        temp_gate = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
-        temp_up = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
-        y = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+            # expert_layer
+            self.update_batch(n_tokens)
+            if scratch.n_tokens != n_tokens:
+                scratch.n_tokens = 1
+                scratch.act_gate = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
+                scratch.act_up = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
 
-        self.linear_up.forward(x, temp_up, cl.tensor())
-        self.linear_gate.forward(x, temp_gate, temp_up)
-        self.linear_down2.forward(temp_gate, y, rweights)   # with routing weights applied
+            # extract single rweights is time-consuming, just build a offseted tensor with just 1 element
+            routing_weights.offset = idx[0]*2
+            self.linear_up.forward(x, scratch.act_up, cl.tensor())
+            self.linear_gate.forward(x, scratch.act_gate, scratch.act_up)
+            self.linear_down3.forward(scratch.act_gate, final_hidden_states, routing_weights)   # with routing weights applied
+        else:
+            # slow path
+            self.update_batch(n_tokens)
+            if scratch.n_tokens != n_tokens:
+                scratch.n_tokens = n_tokens
+                scratch.act_gate = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+                scratch.act_up = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+                scratch.y = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+                scratch.x = cl.tensor(np.zeros([n_tokens, self.config.hidden_size], dtype=np.float16))
+                scratch.rweights = cl.tensor(np.zeros([n_tokens], dtype=np.float16))
 
-        print("========== y")
-        print(y.numpy())
+            tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
+            top_index = cl.tensor(np.array(idx, dtype=np.int32))
+            
 
-        # routing_weights[i, j] i'th token's top-j's routing weight
-        # y[i, :]  i'th token's all hidden-states
-        print("========== routing_weights[top_x, idx, None]", routing_weights.shape, routing_weights.shape[1])
-        print(rweights.numpy())
+            self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 1],
+                                    hidden_states, scratch.x,
+                                    routing_weights, scratch.rweights,
+                                    tok_index, top_index,
+                                    hidden_states.shape[1], routing_weights.shape[1])
 
-        # However `index_add_` only support torch tensors for indexing so we'll use
-        # the `top_x` tensor here.
-        # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
-        
-        self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 1],
-                                 y, final_hidden_states,
-                                 tok_index, 
-                                 hidden_states.shape[1])
+            if config.debug:
+                print("========== x")
+                print(scratch.x.numpy())
+
+            # expert_layer
+            self.linear_up.forward(scratch.x, scratch.act_up, cl.tensor())
+            self.linear_gate.forward(scratch.x, scratch.act_gate, scratch.act_up)
+            self.linear_down2.forward(scratch.act_gate, scratch.y, scratch.rweights)   # with routing weights applied
+
+            if config.debug:
+                print("========== y")
+                print(scratch.y.numpy())
+
+                # routing_weights[i, j] i'th token's top-j's routing weight
+                # y[i, :]  i'th token's all hidden-states
+                print("========== routing_weights[top_x, idx, None]", routing_weights.shape, routing_weights.shape[1])
+                print(scratch.rweights.numpy())
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
+            
+            self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 1],
+                                    scratch.y, final_hidden_states,
+                                    tok_index, 
+                                    hidden_states.shape[1])
+
 
 
 
@@ -385,10 +441,70 @@ def test_mlp(K_group_size, w_dtype):
         print(dst_cur)
 
 
+def test_moe(n_tokens = 120):
+    torch.manual_seed(0)
 
+    moe1 = [Qwen3MoeMLP(config, intermediate_size = config.moe_intermediate_size).eval() for _ in range(config.num_experts)]
+    moe2 = [onednnMLP(mlp) for mlp in moe1]
 
+    hidden_states = torch.randint(-1, 2, size=[n_tokens, config.hidden_size], dtype=torch.float16)
+
+    # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
+    selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=config.num_experts).permute(2, 1, 0)
+    # routing_weights[i, j] i'th token's top-j's routing weight
+    routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
+
+    # reference
+    if config.debug: print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> torch >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+    final_hidden_states1 = torch.zeros(n_tokens, config.hidden_size, dtype=torch.float32)
+    for expert_id in range(config.num_experts):
+        moe1[expert_id].forward_expert(hidden_states.to(dtype=torch.float32),
+                                       expert_mask[expert_id,...],
+                                       routing_weights.to(dtype=torch.float32),
+                                       final_hidden_states1)
+
+    if config.debug: print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> onednn >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+    # impl
+    scratch = scratchBuff()
+    final_hidden_states2 = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+    for expert_id in range(config.num_experts):
+        moe2[expert_id].forward_expert(cl.tensor(hidden_states.detach().numpy()),
+                            expert_mask[expert_id,...],
+                            cl.tensor(routing_weights.detach().numpy()),
+                            final_hidden_states2, scratch)
+
+    dst_ref = final_hidden_states1.detach().numpy()
+    dst_cur = final_hidden_states2.numpy()
+    
+    if not np.allclose(dst_ref, dst_cur):
+        print("============ dst_ref")
+        print(dst_ref)
+        print("============ dst_cur")
+        print(dst_cur)
+    
+
+    import time
+    for r in range(10):
+        cl.finish()
+        t0 = time.time()
+        for expert_id in range(config.num_experts):
+            moe2[expert_id].forward_expert(cl.tensor(hidden_states.detach().numpy()),
+                                expert_mask[expert_id,...],
+                                cl.tensor(routing_weights.detach().numpy()),
+                                final_hidden_states2, scratch)
+        cl.finish()
+        t1 = time.time()
+        print(f" [{r}] :  {(t1 - t0)*1e3 : .3f} ms")
+            
+    import sys
+    sys.exit()
 
 np.set_printoptions(linewidth=1024)
+
+test_moe(12)
+
+
 if 0:
     test_mm(M = 1, K = 768, N = 2048, K_group_size = 0, w_dtype = cl.onednn_dtype.f16)
     test_mm(M = 1, K = 768, N = 2048, K_group_size = 32, w_dtype = cl.onednn_dtype.s8)
