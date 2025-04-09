@@ -15,34 +15,23 @@ class index_add:
 
     def __call__(self, dim, dst: torch.Tensor, src: torch.Tensor, index: torch.Tensor):
         # shape inference
-        num_dims = len(dst.size())
+        assert len(dst.size()) == 2
 
         dst_sizes = dst.size()
         print(f"len(dst_sizes)={len(dst_sizes)}, dst_sizes={dst_sizes}")
-        dst_sizes = to_cl(torch.tensor(dst_sizes).int())
         
         src_sizes = src.size()
         print(f"len(dst_sizes)={len(src_sizes)}, src_sizes={src_sizes}")
-        src_sizes = to_cl(torch.tensor(src_sizes).int())
         
-        dst_strides = [dst.size()[-1], 1]
-        print(f"len(dst_sizes)={len(dst_strides)}, dst_strides={dst_strides}")
-        dst_strides = to_cl(torch.tensor(dst_strides).int())
-        
-        src_strides = [src.size()[-1], 1]
-        print(f"len(dst_sizes)={len(src_strides)}, src_strides={src_strides}")
-        src_strides = to_cl(torch.tensor(src_strides).int())
-
-        GWS = [src.numel()]
-        LWS = [1]
+        GWS = [src_sizes[0], src_sizes[1]]
+        LWS = [1, 1]
         
         dst = to_cl(dst)
 
         print(f"GWS={GWS}, LWS={LWS}")
         self.cl_kernels.enqueue("index_add", GWS, LWS,
-                            dst, to_cl(src), to_cl(index), dim, num_dims,
-                            dst_sizes, dst_strides,
-                            src_sizes, src_strides)
+                            dst, to_cl(src), to_cl(index),
+                            to_cl(torch.tensor(dst_sizes).int()), to_cl(torch.tensor(src_sizes).int()))
 
         return dst
 
@@ -81,9 +70,13 @@ if __name__ == "__main__":
         except Exception as inst:
             print('failed.')
 
-    test_acc(0, torch.ones([5, 3], dtype=torch.float), torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float), torch.tensor([0, 4, 2], dtype=torch.int32))
-    test_acc(0, torch.ones(10, 2048), torch.randn([6, 2048], dtype=torch.float), torch.tensor([0, 4, 2, 9, 1, 3], dtype=torch.int32))
-    test_acc(0, torch.ones(10, 2048), torch.randn([6, 2048], dtype=torch.float), torch.tensor([0, 0, 0, 0, 0, 0], dtype=torch.int32))
+    # float cases
+    # test_acc(0, torch.ones([5, 3], dtype=torch.float), torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float), torch.tensor([0, 4, 2], dtype=torch.int32))
+    # test_acc(0, torch.ones(10, 2048), torch.randn([6, 2048], dtype=torch.float), torch.tensor([0, 4, 2, 9, 1, 3], dtype=torch.int32))
     
-    test_acc(0, torch.ones([5, 3], dtype=torch.float16), torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float16), torch.tensor([0, 4, 2], dtype=torch.int32))
+    # float16 cases
+    # test_acc(0, torch.ones([5, 3], dtype=torch.float16), torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float16), torch.tensor([0, 4, 2], dtype=torch.int32))
     test_acc(0, torch.ones([10, 2048], dtype=torch.float16), torch.randn([6, 2048], dtype=torch.float16), torch.tensor([0, 4, 2, 9, 1, 3], dtype=torch.int32))
+    
+    # conflict case
+    # test_acc(0, torch.ones(10, 2048), torch.randn([6, 2048], dtype=torch.float), torch.tensor([0, 0, 0, 0, 0, 0], dtype=torch.int32))

@@ -30,63 +30,38 @@ inline void atomic_add_half(volatile __global ushort *addr, half value) {
     } while (current.u16 != old_val.u16);
 }
 
+
+/*
+    dst[index[i], :] += src[i, :]  # for DIM == 0 only && 2-dimensions only
+*/
 __kernel void index_add(
     __global DATATYPE *dst,
     __global const DATATYPE *src,
     __global const int *index,
-    int dim,
-    int num_dims,
     __constant const int *dst_sizes,
-    __constant const int *dst_strides,
-    __constant const int *src_sizes,
-    __constant const int *src_strides)
-{
-    int gid = get_global_id(0);
-    
+    __constant const int *src_sizes)
+{   
     // Calculate source coordinates
-    int src_coords[8]; // Supports up to 8 dimensions
-    int remaining = gid;
-    for (int d = 0; d < num_dims; ++d) {
-        src_coords[d] = (remaining / src_strides[d]) % src_sizes[d];
-        remaining = remaining % src_strides[d];
-    }
-
-    // if (gid==3)printf("index=%d,%d,%d\n", index[0], index[1], index[2]);
-    // if (gid==3)printf("src_coords=%d,%d\n", src_coords[0], src_coords[1]);
+    int src_coords[2] = { get_global_id(0), get_global_id(1) };
     
-    // Fetch index value
-    // self[index[i], :, :] += alpha * src[i, :, :]  # if dim == 0
-    // self[:, index[i], :] += alpha * src[:, i, :]  # if dim == 1
-    // self[:, :, index[i]] += alpha * src[:, :, i]  # if dim == 2
-    int idx = index[src_coords[dim]];
-    
-    // Compute destination coordinates
-    int dst_coords[8];
-    for (int d = 0; d < num_dims; ++d) {
-        dst_coords[d] = (d == dim) ? idx : src_coords[d];
-    }
+    // Fetch index value and compute destination coordinates
+    int dst_coords[2] = { index[src_coords[0]], src_coords[1] };
 
-    // if (gid==3)printf("dst_coords=%d,%d, idx=%d,%d\n", dst_coords[0], dst_coords[1], idx, src_coords[dim]);
+    // if (src_idx==3)printf("dst_coords=%d,%d, idx=%d,%d\n", dst_coords[0], dst_coords[1], idx, src_coords[DIM]);
     
     // Bounds checking
-    bool out_of_bounds = false;
-    for (int d = 0; d < num_dims; ++d) {
-        if (dst_coords[d] < 0 || dst_coords[d] >= dst_sizes[d]) {
-            out_of_bounds = true;
-            break;
-        }
+    if (dst_coords[0] < 0 || dst_coords[0] >= dst_sizes[0] ||
+        dst_coords[1] < 0 || dst_coords[1] >= dst_sizes[1]) {
+        return;
     }
-    if (out_of_bounds) return;
-    
-    // Calculate destination linear index
-    int dst_gid = 0;
-    for (int d = 0; d < num_dims; ++d) {
-        dst_gid += dst_coords[d] * dst_strides[d];
-    }
+
+    // Calculate destination & source linear index
+    int dst_idx = dst_coords[0] * dst_sizes[1] + dst_coords[1];
+    int src_idx = src_coords[0] * src_sizes[1] + src_coords[1];
     
     // Perform atomic addition
-    DATATYPE val = src[gid];
-    dst[dst_gid] += val;
-    // atomic_add_half(&dst[dst_gid], val);
-    // printf("[%d %d] %.2f\n ", gid, dst_gid, dst[dst_gid]);
+    DATATYPE val = src[src_idx];
+    dst[dst_idx] += val;
+    // atomic_add_float(&dst[dst_idx], val);
+    // printf("[%d %d] %.2f\n ", src_idx, dst_idx, dst[dst_idx]);
 }
