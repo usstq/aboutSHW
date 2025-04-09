@@ -285,170 +285,201 @@ static const char* get_ocl_error_string(cl_int error) {
     }
 }
 
-struct cl_kernels {
-    std::map<std::string, cl_kernel> kernel_map;
-    cl_program m_prog;
-    std::string m_source;
-    std::string m_options;
+void cl_kernels::check_error(const char* name, cl_int error, bool show_build_log) {
+    if (error != CL_SUCCESS) {
+        std::stringstream ss;
+        ss << name << " failed with " << get_ocl_error_string(error) << " (" << error << ")";
 
-    void check_error(const char* name, cl_int error, bool show_build_log = false) {
-        if (error != CL_SUCCESS) {
-            std::stringstream ss;
-            ss << name << " failed with " << get_ocl_error_string(error) << " (" << error << ")";
-
-            if (show_build_log) {
-                cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
-                size_t len = 0;
-                cl_int ret = CL_SUCCESS;
-                ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
-                if (ret != CL_SUCCESS) {
-                    ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
-                    throw std::runtime_error(ss.str());
-                }
-                std::string log;
-                log.resize(len + 1, '\0');
-                ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
-                if (ret != CL_SUCCESS) {
-                    ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
-                    throw std::runtime_error(ss.str());
-                }
-
-                ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
-                ss << "build options: " << m_options << std::endl;
-
-                ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
-            }
-            throw std::runtime_error(ss.str());
-        }
-    }
-
-    cl_kernels(py::bytes bin_bytes, std::string options) : m_options(options) {
-        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-        cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
-        std::string content{bin_bytes};
-        size_t lengths[1] = {content.size()};
-        const unsigned char* binaries[1] = { reinterpret_cast<unsigned char*>(content.data()) };
-        cl_int binary_status[1] = {0};
-        cl_int errcodes[1] = {0};
-        m_prog = clCreateProgramWithBinary(ocl_context, 1, &ocl_device, lengths, binaries, binary_status, errcodes);
-        check_error("clCreateProgramWithBinary", errcodes[0]);
-
-        cl_int build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
-        check_error("clBuildProgram", build_error, true);
-    }
-
-    cl_kernels(std::string source, std::string options, std::string dump_dir) : m_source(source), m_options(options) {
-        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-        cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
-
-        // C for metal suppport
-        if (options.find("-cmc") == std::string::npos)
-            m_options = options + " -cl-std=CL3.0";
-
-        cl_int build_error = CL_SUCCESS;
-        const char* strings = source.c_str();
-        const size_t length = source.size();
-        m_prog = ::clCreateProgramWithSource(ocl_context, (cl_uint)1, &strings, &length, &build_error);
-        check_error("clCreateProgramWithSource", build_error);
-        build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
-        check_error("clBuildProgram", build_error, true);
-    }
-
-    void enqueue(std::string kernel_name, const std::vector<size_t>& global_size, const std::vector<size_t>& local_size, py::args args) {
-        cl_int err = CL_SUCCESS;
-        auto it = kernel_map.find(kernel_name);
-        if (it == kernel_map.end()) {
-            cl_kernel kernel = clCreateKernel(m_prog, kernel_name.c_str(), &err);
-            if (err != CL_SUCCESS) {
-                std::stringstream ss;
-                ss << "clCreateKernel(\"" << kernel_name << "\", ...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
+        if (show_build_log) {
+            cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+            size_t len = 0;
+            cl_int ret = CL_SUCCESS;
+            ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
+            if (ret != CL_SUCCESS) {
+                ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
                 throw std::runtime_error(ss.str());
             }
-            kernel_map[kernel_name] = kernel;
-        }
-        auto& kernel = kernel_map[kernel_name];
-
-        cl_uint nargs;
-        err = ::clGetKernelInfo(kernel, CL_KERNEL_NUM_ARGS, sizeof(nargs), &nargs, nullptr);
-        if (err != CL_SUCCESS) {
-            std::stringstream ss;
-            ss << "clGetKernelInfo(\"" << kernel_name << "\", CL_KERNEL_NUM_ARGS, ...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
-            throw std::runtime_error(ss.str());
-        }
-        int arg_idx = 0;
-        for (auto& arg : args) {
-            if (arg_idx >= nargs)
-                throw std::runtime_error(std::string("arg index ") + std::to_string(arg_idx) + " exceeds nargs=" + std::to_string(nargs));
-            if (py::isinstance<py::int_>(arg)) {
-                auto i = arg.cast<int>();
-                ::clSetKernelArg(kernel, arg_idx, sizeof(i), &i);
-            } else if (py::isinstance<py::float_>(arg)) {
-                auto f = arg.cast<float>();
-                ::clSetKernelArg(kernel, arg_idx, sizeof(f), &f);
-            } else if (py::isinstance<tensor>(arg)) {
-                const auto& t = arg.cast<tensor>();
-                ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(t));
-            } else if (arg.is_none()) {
-                ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(nullptr));
-            } else {
-                throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
+            std::string log;
+            log.resize(len + 1, '\0');
+            ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
+            if (ret != CL_SUCCESS) {
+                ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
+                throw std::runtime_error(ss.str());
             }
-            arg_idx++;
+
+            ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
+            ss << "build options: " << m_options << std::endl;
+
+            ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
         }
-        if (arg_idx < nargs)
-            throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
+        throw std::runtime_error(ss.str());
+    }
+}
 
-        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-        cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+cl_kernels::cl_kernels(py::bytes bin_bytes, std::string options) : m_options(options) {
+    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+    cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+    std::string content{bin_bytes};
+    size_t lengths[1] = {content.size()};
+    const unsigned char* binaries[1] = { reinterpret_cast<unsigned char*>(content.data()) };
+    cl_int binary_status[1] = {0};
+    cl_int errcodes[1] = {0};
+    m_prog = clCreateProgramWithBinary(ocl_context, 1, &ocl_device, lengths, binaries, binary_status, errcodes);
+    check_error("clCreateProgramWithBinary", errcodes[0]);
 
-        cl_event event;
-        err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
+    cl_int build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
+    check_error("clBuildProgram", build_error, true);
+}
+
+void cl_kernels::setup(std::string source, std::string options, std::string dump_dir) {
+    m_source = source;
+    m_options = options;
+    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+    cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+
+    // C for metal suppport
+    if (options.find("-cmc") == std::string::npos)
+        m_options = options + " -cl-std=CL3.0";
+
+    cl_int build_error = CL_SUCCESS;
+    const char* strings = source.c_str();
+    const size_t length = source.size();
+    m_prog = ::clCreateProgramWithSource(ocl_context, (cl_uint)1, &strings, &length, &build_error);
+    check_error("clCreateProgramWithSource", build_error);
+    build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
+    check_error("clBuildProgram", build_error, true);
+}
+
+cl_kernels::cl_kernels(std::string source, std::string options, std::string dump_dir) {
+    setup(source, options, dump_dir);
+}
+
+cl_kernel cl_kernels::get_kernel(std::string kernel_name) {
+    cl_int err = CL_SUCCESS;
+    auto it = kernel_map.find(kernel_name);
+    if (it == kernel_map.end()) {
+        cl_kernel kernel = clCreateKernel(m_prog, kernel_name.c_str(), &err);
         if (err != CL_SUCCESS) {
             std::stringstream ss;
-            ss << "clEnqueueNDRangeKernel(\"" << kernel_name << "\",...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
+            ss << "clCreateKernel(\"" << kernel_name << "\", ...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
             throw std::runtime_error(ss.str());
         }
-        all_events.emplace_back(event);
-        return;
+        kernel_map[kernel_name] = kernel;
     }
-    std::string info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
-        return "";
+    return kernel_map[kernel_name];
+}
+
+void cl_kernels::set_arg(cl_kernel kernel, int idx, int arg) {
+    ::clSetKernelArg(kernel, idx, sizeof(arg), &arg);
+}
+void cl_kernels::set_arg(cl_kernel kernel, int idx, float arg) {
+    ::clSetKernelArg(kernel, idx, sizeof(arg), &arg);
+}
+void cl_kernels::set_arg(cl_kernel kernel, int idx, void* arg) {
+    ::clSetKernelArgSVMPointer(kernel, idx, arg);
+}
+
+void cl_kernels::enqueue(cl_kernel kernel, const std::vector<size_t>& global_size, const std::vector<size_t>& local_size) {
+    cl_int err = CL_SUCCESS;
+    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+    cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+
+    cl_event event;
+    err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
+    if (err != CL_SUCCESS) {
+        std::stringstream ss;
+        ss << "clEnqueueNDRangeKernel(...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
+        throw std::runtime_error(ss.str());
     }
+    all_events.emplace_back(event);
+    return;
+}
+
+void cl_kernels::enqueue_py(std::string kernel_name, const std::vector<size_t>& global_size, const std::vector<size_t>& local_size, py::args args) {
+    cl_int err = CL_SUCCESS;
+    auto kernel = get_kernel(kernel_name);
+
+    cl_uint nargs;
+    err = ::clGetKernelInfo(kernel, CL_KERNEL_NUM_ARGS, sizeof(nargs), &nargs, nullptr);
+    if (err != CL_SUCCESS) {
+        std::stringstream ss;
+        ss << "clGetKernelInfo(\"" << kernel_name << "\", CL_KERNEL_NUM_ARGS, ...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
+        throw std::runtime_error(ss.str());
+    }
+    int arg_idx = 0;
+    for (auto& arg : args) {
+        if (arg_idx >= nargs)
+            throw std::runtime_error(std::string("arg index ") + std::to_string(arg_idx) + " exceeds nargs=" + std::to_string(nargs));
+        if (py::isinstance<py::int_>(arg)) {
+            auto i = arg.cast<int>();
+            ::clSetKernelArg(kernel, arg_idx, sizeof(i), &i);
+        } else if (py::isinstance<py::float_>(arg)) {
+            auto f = arg.cast<float>();
+            ::clSetKernelArg(kernel, arg_idx, sizeof(f), &f);
+        } else if (py::isinstance<tensor>(arg)) {
+            const auto& t = arg.cast<tensor>();
+            ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(t));
+        } else if (arg.is_none()) {
+            ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(nullptr));
+        } else {
+            throw std::runtime_error(std::string("Unknown kernel arg at index ") + std::to_string(arg_idx));
+        }
+        arg_idx++;
+    }
+    if (arg_idx < nargs)
+        throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
+
+    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+    cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+
+    cl_event event;
+    err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
+    if (err != CL_SUCCESS) {
+        std::stringstream ss;
+        ss << "clEnqueueNDRangeKernel(\"" << kernel_name << "\",...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
+        throw std::runtime_error(ss.str());
+    }
+    all_events.emplace_back(event);
+    return;
+}
+
+std::string cl_kernels::info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
+    return "";
+}
 
 #if 0
-    std::string info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
-        std::stringstream ss;
-        cl::NDRange local_work_size = to_ndrange(local_size);
-        auto device = cl::Device::getDefault();
-        auto& k = kernel_map[kernel_name];
+std::string cl_kernels::info(const char* kernel_name, const std::vector<int>& local_size, size_t sub_groups) {
+    std::stringstream ss;
+    cl::NDRange local_work_size = to_ndrange(local_size);
+    auto device = cl::Device::getDefault();
+    auto& k = kernel_map[kernel_name];
 
-        ss << kernel_name << " [getWorkGroupInfo] :" << "\n";
-        ss << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
-        ss << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
-        // std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
-        ss << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
-        ss << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
-        ss << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
-        ss << "    CL_KERNEL_SPILL_MEM_SIZE_INTEL: " << k.getWorkGroupInfo<CL_KERNEL_SPILL_MEM_SIZE_INTEL>(device) << "\n";
+    ss << kernel_name << " [getWorkGroupInfo] :" << "\n";
+    ss << "    CL_KERNEL_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device) << "\n";
+    ss << "    CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: " << k.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << "\n";
+    // std::cout << "    CL_KERNEL_GLOBAL_WORK_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_GLOBAL_WORK_SIZE>(device) << "\n";
+    ss << "    CL_KERNEL_COMPILE_WORK_GROUP_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_COMPILE_WORK_GROUP_SIZE>(device) << "\n";
+    ss << "    CL_KERNEL_LOCAL_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device) << "\n";
+    ss << "    CL_KERNEL_PRIVATE_MEM_SIZE: " << k.getWorkGroupInfo<CL_KERNEL_PRIVATE_MEM_SIZE>(device) << "\n";
+    ss << "    CL_KERNEL_SPILL_MEM_SIZE_INTEL: " << k.getWorkGroupInfo<CL_KERNEL_SPILL_MEM_SIZE_INTEL>(device) << "\n";
 
-        ss << kernel_name << " [getSubGroupInfo] :" << "\n";
-        ss << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)
-           << "\n";
-        ss << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)
-           << "\n";
-        ss << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups) << "\n";
-        ss << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
-        ss << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
+    ss << kernel_name << " [getSubGroupInfo] :" << "\n";
+    ss << "    CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE>(device, local_work_size)
+        << "\n";
+    ss << "    CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE: " << local_work_size << " is " << k.getSubGroupInfo<CL_KERNEL_SUB_GROUP_COUNT_FOR_NDRANGE>(device, local_work_size)
+        << "\n";
+    ss << "    CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT: " << sub_groups << " is " << k.getSubGroupInfo<CL_KERNEL_LOCAL_SIZE_FOR_SUB_GROUP_COUNT>(device, sub_groups) << "\n";
+    ss << "    CL_KERNEL_MAX_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_MAX_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
+    ss << "    CL_KERNEL_COMPILE_NUM_SUB_GROUPS: " << k.getSubGroupInfo<CL_KERNEL_COMPILE_NUM_SUB_GROUPS>(device, local_work_size) << "\n";
 
-        auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
-        ss << " args " << nargs << " :" << std::endl;
-        for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
-            ss << "\t" << arg_idx << " " << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx) << std::endl;
-        }
-        return ss.str();
+    auto nargs = k.getInfo<CL_KERNEL_NUM_ARGS>();
+    ss << " args " << nargs << " :" << std::endl;
+    for (int arg_idx = 0; arg_idx < nargs; arg_idx++) {
+        ss << "\t" << arg_idx << " " << k.getArgInfo<CL_KERNEL_ARG_TYPE_NAME>(arg_idx) << " " << k.getArgInfo<CL_KERNEL_ARG_NAME>(arg_idx) << std::endl;
     }
+    return ss.str();
+}
 #endif
-};
 
 static bool enable_profile = false;
 
@@ -485,7 +516,7 @@ PYBIND11_MODULE(csrc, m) {
     py::class_<cl_kernels>(m, "kernels")
         .def(py::init<py::bytes, std::string>(), py::arg("bin_bytes"), py::arg("options") = "")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
-        .def("enqueue", &cl_kernels::enqueue)
+        .def("enqueue", &cl_kernels::enqueue_py)
         .def("info", &cl_kernels::info)
         .def(py::pickle(
             [](cl_kernels& p) {  // __getstate__

@@ -30,24 +30,15 @@ def test_mm(M, K, N, K_group_size, w_dtype):
         C = A @ B
         print("ref is calculated!")
 
-        tB = cl.tensor(B)
-        with_wc_scales = False
-        with_wc_zp = False
-        with_silu = False
-        with_binmul = False
-        mm = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, K, N, 0,
-                            with_wc_scales,
-                            with_wc_zp,
-                            with_silu,
-                            with_binmul)
-        linear = mm.get_linear(cl.onednn_dtype.f16, tB, cl.tensor(), cl.tensor())
-
+        tB = cl.tensor(B.transpose().copy())
+        linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, -1, cl.onednn_matmul_type.none,
+                                  cl.onednn_dtype.f16, tB, cl.tensor(), cl.tensor())
 
     if w_dtype == cl.onednn_dtype.s8:
         assert (K % K_group_size) == 0
         K_groups = K // K_group_size
         B_q = np.random.randint(-1,2,[K, N]).astype(np.int8)
-        B_scale = np.random.randint(-4,5,[K_groups, N]).astype(np.float32)
+        B_scale = np.random.randint(-4,5,[K_groups, N]).astype(np.float16)
         B_zp = np.random.randint(-1,2,[K_groups, N]).astype(np.int8)
 
         B = (B_q.astype(np.float32) - B_zp.astype(np.float32).repeat(K_group_size, axis=0)) * B_scale.repeat(K_group_size, axis=0)
@@ -55,20 +46,12 @@ def test_mm(M, K, N, K_group_size, w_dtype):
         C = A @ B
         print("ref is calculated!")
 
-        tBq = cl.tensor(B_q)
+        tBq = cl.tensor(B_q.transpose().copy())
         tBs = cl.tensor(B_scale)
         tBz = cl.tensor(B_zp)
 
-        with_wc_scales = True
-        with_wc_zp = True
-        with_silu = False
-        with_binmul = False
-        mm = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, K, N, K_group_size,
-                            with_wc_scales,
-                            with_wc_zp,
-                            with_silu,
-                            with_binmul)
-        linear = mm.get_linear(cl.onednn_dtype.s8, tBq, tBs, tBz)
+        linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, K_group_size, cl.onednn_matmul_type.none,
+                                  cl.onednn_dtype.s8, tBq, tBs, tBz)
 
 
     if w_dtype == cl.onednn_dtype.u4:
@@ -87,24 +70,15 @@ def test_mm(M, K, N, K_group_size, w_dtype):
         print("ref is calculated!")
 
         # pack weight into 4bit
-        B_q4 = pack_i8_to_i4(B_q)
+        B_q4 = pack_i8_to_i4(B_q.transpose().copy())
         B_zp4 = pack_i8_to_i4(B_zp)
 
         tBq4 = cl.tensor(B_q4)
         tBs = cl.tensor(B_scale)
         tBz = cl.tensor(B_zp4)
+        linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, K_group_size, cl.onednn_matmul_type.with_bin_mul,
+                                  cl.onednn_dtype.u4, tBq4, tBs, tBz)
 
-        with_wc_scales = True
-        with_wc_zp = True
-        with_silu = False
-        with_binmul = True
-        mm = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, K, N, K_group_size,
-                            with_wc_scales,
-                            with_wc_zp,
-                            with_silu,
-                            with_binmul)
-        linear = mm.get_linear(cl.onednn_dtype.u4, tBq4, tBs, tBz)
-        
         tP1 = cl.tensor(BinarySrc)
 
     linear.forward(tA, tC, tP1)
@@ -116,6 +90,8 @@ def test_mm(M, K, N, K_group_size, w_dtype):
     if not np.allclose(C, C1):
         print(C)
         print(C1)
+    else:
+        print("================ PASSED ==================" , M, K, N, w_dtype)
 
 
 from torch import nn
@@ -149,69 +125,273 @@ class Qwen3MoeMLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
+    # top_x： token index
+    def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states):
+        # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
+        # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
+        
+        # using CPU to get token_list & routing_weights index from expert_mask
+        top_x = []
+        idx = []
+        for j in range(expert_mask.shape[0]):
+            for k in range(expert_mask.shape[1]):
+                if (expert_mask[j,k] != 0):
+                    top_x.append(k)
+                    idx.append(j)
+        print("========== expert_mask")
+        print(expert_mask)
+        print("========== top_x", top_x)
+        print("========== idx", idx)
+        
+        x = hidden_states[top_x, :] # slicing2d
+        print("========== x")
+        print(x.detach().numpy())
+        # expert_layer
+        y = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        print("========== y")
+        print(y.detach().numpy())
+
+        # routing_weights[i, j] i'th token's top-j's routing weight
+        # y[i, :]  i'th token's all hidden-states
+        print("========== routing_weights[top_x, idx, None]")
+        print(routing_weights[top_x, idx, None])
+        y = y * routing_weights[top_x, idx, None]
+
+        print("========== y * routing_weights")
+        print(y.detach().numpy())
+
+        # However `index_add_` only support torch tensors for indexing so we'll use
+        # the `top_x` tensor here.
+        final_hidden_states.index_add_(0, torch.tensor(top_x), y)
+
+
+ocl_sources=r'''
+// [n_tokens, count] [1, 1]
+__kernel void gather_2d_ref(
+    const __global half* src_tok,
+    __global half* dst_tok,
+    const __global half* src_rweight,
+    __global half* dst_rweight,
+    __global int * tok_index,
+    __global int * top_index,
+    int tok_size,
+    int rweight_size) {
+
+    int k = get_global_id(0);
+    int off = get_global_id(1);
+    int tok_idx = tok_index[k];
+    
+    src_tok += tok_idx * tok_size;
+    dst_tok += k * tok_size;
+
+    dst_tok[off] = src_tok[off];
+
+    if (off == 0) {
+        int top_idx = top_index[k];
+        dst_rweight[k] = src_rweight[tok_idx * rweight_size + top_idx];
+    }
+}
+
+__kernel void index_add_(
+    const __global half* src_tok,
+    __global half* dst_tok,
+    __global int * tok_index,
+    int tok_size) {
+
+    int k = get_global_id(0);
+    int off = get_global_id(1);
+    int tok_idx = tok_index[k];
+    
+    src_tok += k * tok_size;
+    dst_tok += tok_idx * tok_size;
+
+    dst_tok[off] += src_tok[off];
+}
+
+'''
+
+
+class onednnMLP:
+    def __init__(self, mlp):
+        self.w_dtype = cl.onednn_dtype.f16
+        self.config = mlp.config
+        self.M = -1
+        self.K_group_size = -1
+        self.weight_up = cl.tensor(mlp.up_proj.weight.detach().to(dtype=torch.float16).numpy())
+        self.weight_gate = cl.tensor(mlp.gate_proj.weight.detach().to(dtype=torch.float16).numpy())
+        self.weight_down = cl.tensor(mlp.down_proj.weight.detach().to(dtype=torch.float16).numpy())
+        self.ocl_kernels = cl.kernels(ocl_sources, "-D FMACNT=4 -D UNROLL=4")
+
+    def update_batch(self, batch):
+        if self.M != batch:
+            empty_cl_tensor = cl.tensor()
+            print("======== create linear_up =========")
+            self.linear_up = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.hidden_size, self.config.moe_intermediate_size,
+                                        self.K_group_size, cl.onednn_matmul_type.none,
+                                        cl.onednn_dtype.f16, 
+                                        self.weight_up, empty_cl_tensor, empty_cl_tensor)
+            print("======== create linear_gate =========")
+            self.linear_gate = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.hidden_size, self.config.moe_intermediate_size,
+                                        self.K_group_size, cl.onednn_matmul_type.with_silu_bin_mul,
+                                        cl.onednn_dtype.f16, 
+                                        self.weight_gate, empty_cl_tensor, empty_cl_tensor)
+            print("======== create linear_down =========")
+            self.linear_down = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.moe_intermediate_size, self.config.hidden_size,
+                                        self.K_group_size, cl.onednn_matmul_type.none,
+                                        cl.onednn_dtype.f16, 
+                                        self.weight_down, empty_cl_tensor, empty_cl_tensor)
+
+            self.linear_down2 = cl.onednn_linear(cl.onednn_dtype.f16, self.w_dtype, batch, self.config.moe_intermediate_size, self.config.hidden_size,
+                                        self.K_group_size, cl.onednn_matmul_type.with_bin_mul_per_row,
+                                        cl.onednn_dtype.f16, 
+                                        self.weight_down, empty_cl_tensor, empty_cl_tensor)
+
+    def forward(self, input):
+        M = input.shape[0]
+        self.update_batch(M)
+        temp_gate = cl.tensor(np.zeros([M, config.moe_intermediate_size], dtype=np.float16))
+        temp_up = cl.tensor(np.zeros([M, config.moe_intermediate_size], dtype=np.float16))
+        dst = cl.tensor(np.zeros([M, config.hidden_size], dtype=np.float16))
+
+        self.linear_up.forward(input, temp_up, cl.tensor())
+        self.linear_gate.forward(input, temp_gate, temp_up)
+        self.linear_down.forward(temp_gate, dst, cl.tensor())
+        cl.finish()
+        return dst
+
+
+    # top_x： token index
+    def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states):
+        # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
+        # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
+        
+        # using CPU to get token_list & routing_weights index from expert_mask
+        top_x = []
+        idx = []
+        for j in range(expert_mask.shape[0]):
+            for k in range(expert_mask.shape[1]):
+                if (expert_mask[j,k] != 0):
+                    top_x.append(k)
+                    idx.append(j)
+        print("========== expert_mask")
+        print(expert_mask)
+        print("========== top_x", top_x)
+        print("========== idx", idx)
+        
+        # x = hidden_states[top_x, :] # slicing2d
+        n_tokens = len(top_x)
+        x = cl.tensor(np.zeros([n_tokens, self.config.hidden_size], dtype=np.float16))
+        tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
+        top_index = cl.tensor(np.array(idx, dtype=np.int32))
+
+        rweights = cl.tensor(np.zeros([n_tokens], dtype=np.float16))
+
+        self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 1],
+                                 hidden_states, x,
+                                 routing_weights, rweights,
+                                 tok_index, top_index,
+                                 hidden_states.shape[1], routing_weights.shape[1])
+
+        print("========== x")
+        print(x.numpy())
+
+        # expert_layer
+        self.update_batch(n_tokens)
+        temp_gate = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+        temp_up = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+        y = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+
+        self.linear_up.forward(x, temp_up, cl.tensor())
+        self.linear_gate.forward(x, temp_gate, temp_up)
+        self.linear_down2.forward(temp_gate, y, rweights)   # with routing weights applied
+
+        print("========== y")
+        print(y.numpy())
+
+        # routing_weights[i, j] i'th token's top-j's routing weight
+        # y[i, :]  i'th token's all hidden-states
+        print("========== routing_weights[top_x, idx, None]", routing_weights.shape, routing_weights.shape[1])
+        print(rweights.numpy())
+
+        # However `index_add_` only support torch tensors for indexing so we'll use
+        # the `top_x` tensor here.
+        # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
+        
+        self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 1],
+                                 y, final_hidden_states,
+                                 tok_index, 
+                                 hidden_states.shape[1])
+
 
 
 
 def test_mlp(K_group_size, w_dtype):
-    mlp = Qwen3MoeMLP(config, intermediate_size = config.moe_intermediate_size)
-    mlp = mlp.eval()
-    is_quantized = w_dtype != cl.onednn_dtype.f16
-    with_wc_scales = is_quantized
-    with_wc_zp = is_quantized
-    with_silu = False
-    with_binmul = False
+    torch.manual_seed(0)
 
-    mlp_up = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, config.hidden_size, config.moe_intermediate_size, K_group_size,
-                            with_wc_scales,
-                            with_wc_zp,
-                            with_silu,
-                            True)
-    mlp_gate = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, config.hidden_size, config.moe_intermediate_size, K_group_size,
-                            with_wc_scales,
-                            with_wc_zp,
-                            True,
-                            with_binmul)
+    mlp1 = Qwen3MoeMLP(config, intermediate_size = config.moe_intermediate_size)
+    mlp1 = mlp1.eval()
+    mlp2 = onednnMLP(mlp1)
 
-    mlp_down = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, config.moe_intermediate_size, config.hidden_size, K_group_size,
-                            with_wc_scales,
-                            with_wc_zp,
-                            with_silu,
-                            with_binmul)
+    n_tokens = 8
+    input = torch.randint(-1, 2, size=[n_tokens, config.hidden_size], dtype=torch.float16)
 
-    linear_up = mlp_up.get_linear(cl.onednn_dtype.f32, cl.tensor(mlp.up_proj.weight.detach().numpy()), cl.tensor(), cl.tensor())
-    linear_gate = mlp_gate.get_linear(cl.onednn_dtype.f32, cl.tensor(mlp.gate_proj.weight.detach().numpy()), cl.tensor(), cl.tensor())
-    linear_down = mlp_down.get_linear(cl.onednn_dtype.f32, cl.tensor(mlp.down_proj.weight.detach().numpy()), cl.tensor(), cl.tensor())
+    dst_ref = mlp1.forward(input.to(dtype=torch.float32))
+    input_cl = cl.tensor(input.to(dtype=torch.float16).detach().numpy())
+    dst_cur = mlp2.forward(input_cl)
+    dst_cur = mlp2.forward(input_cl)
+    dst_cur = mlp2.forward(input_cl)
 
-    M = 120
+    dst_ref = dst_ref.detach().numpy()
+    dst_cur = dst_cur.numpy()
+    if not np.allclose(dst_ref, dst_cur):
+        print("============ dst_ref")
+        print(dst_ref)
+        print("============ dst_cur")
+        print(dst_cur)
 
-    input = torch.randint(-1, 2, size=[M, config.hidden_size], dtype=torch.float16)
+    print("\n"*6,f":::::::::: TEST EXPERT:::::::::: n_tokens={n_tokens} num_experts={config.num_experts} num_experts_per_tok={config.num_experts_per_tok} ")
+
+    hidden_states = torch.randint(-1, 2, size=[n_tokens, config.hidden_size], dtype=torch.float16)
+
+    # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
+    selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=config.num_experts).permute(2, 1, 0)
+    # routing_weights[i, j] i'th token's top-j's routing weight
+    routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
+
+    # reference
+    final_hidden_states1 = torch.zeros(n_tokens, config.hidden_size, dtype=torch.float32)
+    for expert_id in range(config.num_experts):
+        mlp1.forward_expert(hidden_states.to(dtype=torch.float32),
+                            expert_mask[expert_id,...],
+                            routing_weights.to(dtype=torch.float32),
+                            final_hidden_states1)
+
+    # impl
+    final_hidden_states2 = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+    for expert_id in range(config.num_experts):
+        mlp2.forward_expert(cl.tensor(hidden_states.detach().numpy()),
+                            expert_mask[expert_id,...],
+                            cl.tensor(routing_weights.detach().numpy()),
+                            final_hidden_states2)
+
+    dst_ref = final_hidden_states1.detach().numpy()
+    dst_cur = final_hidden_states2.numpy()
     
-    x = cl.tensor(input.numpy())
-    temp_gate = cl.tensor(np.zeros([M, config.moe_intermediate_size], dtype=np.float16))
-    temp_up = cl.tensor(np.zeros([M, config.moe_intermediate_size], dtype=np.float16))
-    dst = cl.tensor(np.zeros([M, config.hidden_size], dtype=np.float16))
+    if not np.allclose(dst_ref, dst_cur):
+        print("============ dst_ref")
+        print(dst_ref)
+        print("============ dst_cur")
+        print(dst_cur)
 
-    linear_gate.forward(x, temp_gate, cl.tensor())
-    linear_up.forward(x, temp_up, temp_gate)
-    linear_down.forward(temp_up, dst, cl.tensor())
-    cl.finish()
 
-    print(x.numpy())
-    print(temp_gate.numpy())
-    print(temp_up.numpy())
-    
-    dst_ref = mlp.forward(input.to(dtype=torch.float32))
-    
-    ref = dst_ref.detach().numpy()
-    act = dst.numpy()
-    if not np.allclose(ref, act):
-        print("============")
-        print(ref)
-        print("============")
-        print(act)
+
+
 
 np.set_printoptions(linewidth=1024)
-#test_mm(M = 1, K = 768, N = 2048, K_group_size = 0, w_dtype = cl.onednn_dtype.f16)
-#test_mm(M = 1, K = 768, N = 2048, K_group_size = 32, w_dtype = cl.onednn_dtype.s8)
-#test_mm(M = 1, K = 768, N = 2048, K_group_size = 32, w_dtype = cl.onednn_dtype.u4)
+if 0:
+    test_mm(M = 1, K = 768, N = 2048, K_group_size = 0, w_dtype = cl.onednn_dtype.f16)
+    test_mm(M = 1, K = 768, N = 2048, K_group_size = 32, w_dtype = cl.onednn_dtype.s8)
+    test_mm(M = 1, K = 768, N = 2048, K_group_size = 32, w_dtype = cl.onednn_dtype.u4)
+
 test_mlp(K_group_size = 128, w_dtype = cl.onednn_dtype.f16)
