@@ -291,7 +291,9 @@ struct onednn_linear {
             auto bin_mem = dnnl::ocl_interop::make_memory(rt_bin_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bin_input));
             args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
         }
-        m_prim.execute(m_stream, args);
+        auto event = dnnl::ocl_interop::execute(m_prim, m_stream, args);
+        all_events.push_back(event);
+        //m_prim.execute(m_stream, args);
     }
 };
 

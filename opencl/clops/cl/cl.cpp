@@ -548,13 +548,15 @@ PYBIND11_MODULE(csrc, m) {
         std::vector<uint64_t> ret;
         if (enable_profile) {
             for (auto& e : all_events) {
-                ret.emplace_back();
+                ret.emplace_back(0);
                 if (e.index() == 0) {
                     auto evt = std::get<cl_event>(e);
-                    cl_ulong start, end;
-                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
-                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
-                    ret.back() = end - start;
+                    if (evt != 0) {
+                        cl_ulong start, end;
+                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
+                        ret.back() = end - start;
+                    }
                 } else {
                     auto evt = std::get<sycl::event>(e);
                     auto start = evt.get_profiling_info<info::event_profiling::command_start>();

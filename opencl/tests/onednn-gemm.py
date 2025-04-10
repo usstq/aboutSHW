@@ -3,6 +3,7 @@ from clops import cl
 import numpy as np
 import sys
 import torch
+import time, sys
 
 
 def pack_i8_to_i4(B_q):
@@ -289,42 +290,23 @@ class onednnMLP:
         # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
         # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
         
-        # using CPU to get token_list & routing_weights index from expert_mask
-        idx, top_x = torch.where(expert_mask)
-        if top_x.numel() == 0:
-            if config.debug: print("skip")
-            return
-
-        #top_x, idx = 
-        '''
-        top_x = []
-        idx = []
-        for j in range(expert_mask.shape[0]):
-            for k in range(expert_mask.shape[1]):
-                if (expert_mask[j,k] != 0):
-                    top_x.append(k)
-                    idx.append(j)
-        '''
-        n_tokens = len(top_x)
-
-        if config.debug:
-            print("========== expert_mask")
-            print(expert_mask)
-            print("========== top_x", top_x)
-            print("========== idx", idx)
-
         # x = hidden_states[top_x, :] # slicing2d
-
         if hidden_states.shape[0] == 1:
-            # fast path
+            # fast path - check 
+            # using CPU to get token_list & routing_weights index from expert_mask
+            idx, top_x = torch.where(expert_mask)
+            if top_x.numel() == 0:
+                if config.debug: print("skip")
+                return
+            
             x = hidden_states
             if config.debug:
                 print("========== x")
                 print(x.numpy())
 
             # expert_layer
-            self.update_batch(n_tokens)
-            if scratch.n_tokens != n_tokens:
+            self.update_batch(1)
+            if scratch.n_tokens != 1:
                 scratch.n_tokens = 1
                 scratch.act_gate = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
                 scratch.act_up = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
@@ -336,6 +318,23 @@ class onednnMLP:
             self.linear_down3.forward(scratch.act_gate, final_hidden_states, routing_weights)   # with routing weights applied
         else:
             # slow path
+            t0 = time.time()
+            idx, top_x = torch.where(expert_mask)
+            if top_x.numel() == 0:
+                if config.debug: print("skip")
+                return
+
+            n_tokens = len(top_x)
+            # print("n_tokens=", n_tokens)
+            t1 = time.time()
+            # print(f">>>>>>>> expert_mask:{expert_mask.shape}  {(t1-t0)*1e3:.3f} ms")
+            
+            if config.debug:
+                print("========== expert_mask")
+                print(expert_mask)
+                print("========== top_x", top_x)
+                print("========== idx", idx)
+
             self.update_batch(n_tokens)
             if scratch.n_tokens != n_tokens:
                 scratch.n_tokens = n_tokens
@@ -448,7 +447,7 @@ def test_mlp(K_group_size, w_dtype):
         print(dst_cur)
 
 
-def test_moe(n_tokens = 120):
+def test_moe(n_tokens = 120, running_experts = config.num_experts):
     torch.manual_seed(0)
 
     moe1 = [Qwen3MoeMLP(config, intermediate_size = config.moe_intermediate_size).eval() for _ in range(config.num_experts)]
@@ -465,7 +464,7 @@ def test_moe(n_tokens = 120):
     # reference
     if config.debug: print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> torch >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     final_hidden_states1 = torch.zeros(n_tokens, config.hidden_size, dtype=torch.float32)
-    for expert_id in range(config.num_experts):
+    for expert_id in range(running_experts):
         moe1[expert_id].forward_expert(hidden_states.to(dtype=torch.float32),
                                        expert_mask[expert_id,...],
                                        routing_weights.to(dtype=torch.float32),
@@ -477,7 +476,7 @@ def test_moe(n_tokens = 120):
     final_hidden_states2 = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
     cl_hidden_states = cl.tensor(hidden_states.detach().numpy())
     cl_routing_weights = cl.tensor(routing_weights.detach().numpy())    
-    for expert_id in range(config.num_experts):
+    for expert_id in range(running_experts):
         moe2[expert_id].forward_expert(cl_hidden_states,
                                        expert_mask[expert_id,...],
                                        cl_routing_weights,
@@ -493,26 +492,29 @@ def test_moe(n_tokens = 120):
         print(dst_cur)
     
 
-    import time
     for r in range(10):
         cl.finish()
         t0 = time.time()
-        for expert_id in range(config.num_experts):
+        for expert_id in range(running_experts):
             moe2[expert_id].forward_expert(cl_hidden_states,
                                            expert_mask[expert_id,...],
                                            cl_routing_weights,
                                            final_hidden_states2, scratch)
-        cl.finish()
+        latency_ns = cl.finish()
         t1 = time.time()
+        for t in latency_ns:
+            print(f"\t gpu-kernel: {t*1e-3:.3f} us")
+
         print(f" [{r}] :  {(t1 - t0)*1e3 : .3f} ms")
-            
-    import sys
-    sys.exit()
 
 np.set_printoptions(linewidth=1024)
 
-test_moe(1)
+# cl.profiling(True)
 
+test_moe(1)
+test_moe(4096, running_experts = 1)
+
+sys.exit()
 
 if 0:
     test_mm(M = 1, K = 768, N = 2048, K_group_size = 0, w_dtype = cl.onednn_dtype.f16)
