@@ -5,6 +5,9 @@ from . import compare
 from . import utils
 
 
+MAX_GEMMA_SGK = 32
+VERBOSE=True
+
 """
 ------------------------------------------------------------------------------------------------------------------
 ref kernel
@@ -12,14 +15,14 @@ ref kernel
 """
 
 cl_kernel_sources_ref = r'''
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
+    __kernel void gemmA(__global float * A, __global float *B,  __global float *CC, int N, int K, int k_blk, int M) {
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
         size_t blk_num = (K + k_blk -1 )/ k_blk;
-        half sum = 0.f;
+        float sum = 0.f;
         for (int i = 0; i < blk_num; i++) {
-            half sub_sum = 0.f;
+            float sub_sum = 0.f;
             int k_idx = i*k_blk;
             // incase K%k_blk != 0;
             if ((k_idx + k_blk) > K)
@@ -33,19 +36,19 @@ cl_kernel_sources_ref = r'''
         //CC[m_idx * N + n_idx] = sum * alpha[n_idx];
         CC[m_idx * N + n_idx] = sum;
     }
-    __kernel void reduce(__global half * temp_C, __global half *C, int N, int cnt) {
+    __kernel void reduce(__global float * temp_C, __global float *C, int N, int cnt) {
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
-        half sum = 0.f;
+        float sum = 0.f;
         for (int i = 0; i < cnt; i++)
             sum += temp_C[m_idx*cnt*N + i*N + n_idx];
         C[m_idx * N + n_idx] = sum;
     }
     
-    __kernel void gemmB(__global half * main_input, __global half * A, __global half *B,  __global half *CC, __global half * alpha, int N, int K, int M) {
+    __kernel void gemmB(__global float * main_input, __global float * A, __global float *B,  __global float *CC, __global float * alpha, int N, int K, int M) {
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
-        half sum = 0.f;
+        float sum = 0.f;
         for (int i = 0; i < K; i++)
             sum = fma(A[m_idx * K + i] * alpha[i], B[i*N+n_idx], sum);
         CC[m_idx * N + n_idx] = sum + main_input[m_idx * N + n_idx];
@@ -58,11 +61,11 @@ opt lora 2nd token
 ------------------------------------------------------------------------------------------------------------------
 """
 opt_lora_kernel_2nd = r'''
-#define MAX_GEMMA_SGK 64
+#define MAX_GEMMA_SGK (''' + f'{MAX_GEMMA_SGK}' + r''') 
 #define MAX_LORA_RANK 256
 #define MAX_GEMMA_SG_BK 64
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *C, int K) {
+    __kernel void gemmA(__global float * A, __global float *B,  __global float *C, int K) {
         int gid =  get_group_id(0);
         int sgid = get_sub_group_id();
         // For 2nd token, rank is small. sg in one wg would be divided by 2 dimensions to increase threads number in wg.
@@ -77,16 +80,16 @@ opt_lora_kernel_2nd = r'''
         int sgK = (wg_k_len + GEMMA_SG_BK - 1) / GEMMA_SG_BK;
 
         // store each sg accumulation result into SLM. Will reduce sg result into wg result. 
-        __local half fma_buff[MAX_GEMMA_SGK * MAX_LORA_RANK];
-        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_LORA_RANK;
+        __local float fma_buff[MAX_GEMMA_SGK * MAX_LORA_RANK];
+        __local float *sg_fma_buff = fma_buff + sgid_k * MAX_LORA_RANK;
 
         //put all need input activation into SLM. 'sgN' sgs would share same input.
-        __local half local_input[MAX_GEMMA_SGK * MAX_GEMMA_SG_BK];
+        __local float local_input[MAX_GEMMA_SGK * MAX_GEMMA_SG_BK];
         int local_sz = get_num_sub_groups() * SG_SZ;
         //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
         for (int offset = sgid * SG_SZ; offset < wg_k_len; offset += local_sz) {
-            __global half *input_ptr = A + k_start_wg + offset;
-            half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
+            __global float *input_ptr = A + k_start_wg + offset;
+            float copy_val = as_float(intel_sub_group_block_read((const __global uint*)input_ptr));
             local_input[offset + lid] = copy_val;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
@@ -96,15 +99,15 @@ opt_lora_kernel_2nd = r'''
         //The sg is needs to accumulate. Otherwise, sg not needed. sg_k diverge here.
         if (sgid_k * GEMMA_SG_BK  <  wg_k_len) {
             int klen_sg =  (k_offset + GEMMA_SG_BK) > wg_k_len ? (wg_k_len - k_offset) : GEMMA_SG_BK;
-            __global half *B_ptr = B + k_idx * RANK + n_idx;
-            __local half *A_ptr = local_input + k_offset;
-            half sum = 0.f;
+            __global float *B_ptr = B + k_idx * RANK + n_idx;
+            __local float *A_ptr = local_input + k_offset;
+            float sum = 0.f;
             for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
-                ushort input = intel_sub_group_block_read_us((const __local ushort*)(A_ptr + kk));
+                uint input = intel_sub_group_block_read((const __local uint*)(A_ptr + kk));
                 __attribute__((opencl_unroll_hint))
                 for (int j = 0; j < SG_SZ; j++) {
-                    half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
-                    half aa = as_half(intel_sub_group_broadcast(input, j));
+                    float bb = as_float(intel_sub_group_block_read((const __global uint*)(B_ptr)));
+                    float aa = as_float(sub_group_broadcast(input, j));
                     sum = fma(aa, bb, sum);
                     B_ptr += RANK;
                 }
@@ -112,45 +115,45 @@ opt_lora_kernel_2nd = r'''
             *(sg_fma_buff + n_idx + lid) = sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
-        __global half *C_ptr = C + RANK * gid;
+        __global float *C_ptr = C + RANK * gid;
         //only need sg on N dimenion to update data.
         if (sgid_k != 0)
             return;
-        half sum = 0.f;
+        float sum = 0.f;
         if (sgK == GEMMA_SGK) {
             //unroll
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < GEMMA_SGK; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
+                sum += as_float(intel_sub_group_block_read((const __local uint*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
             }
         } else {
             //can't unroll, tail handling
             for (int i = 0;  i < sgK; i++)
-            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
+            sum += as_float(intel_sub_group_block_read((const __local uint*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
         }
-        intel_sub_group_block_write_us((const __global ushort*)(C_ptr + n_idx), as_short(sum));
+        intel_sub_group_block_write((const __global uint*)(C_ptr + n_idx), as_int(sum));
     }
 
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmB(__global half * main_input, __global half * A,  __global half *B,  __global half *C, __global half * alpha, int N) {
+    __kernel void gemmB(__global float * main_input, __global float * A,  __global float *B,  __global float *C, __global float * alpha, int N) {
         int wg_id = get_group_id(0);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
         int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
         int id_sg_local = get_sub_group_local_id();
-        __local half reduce[MAX_LORA_RANK];
+        __local float reduce[MAX_LORA_RANK];
 
-        __global half *B_ptr = B + n_idx;
+        __global float *B_ptr = B + n_idx;
 
         //1. Reduce
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
         int local_sz = get_local_size(0);
         for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
-            __global half *A_ptr = A + offset;
-            half sum = 0.f;
+            __global float *A_ptr = A + offset;
+            float sum = 0.f;
             __attribute__((opencl_unroll_hint))
             for (int part_idx = 0; part_idx < GEMMB_PART_NUM; part_idx++) {
-                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)A_ptr));
+                float partial_val = as_float(intel_sub_group_block_read((const __global uint*)A_ptr));
                 sum += partial_val;
                 A_ptr += RANK;
             }
@@ -161,30 +164,29 @@ opt_lora_kernel_2nd = r'''
         if (n_idx >= N)
             return;
         //2.  GEMMB
-        __global half *C_ptr = C + n_idx;
+        __global float *C_ptr = C + n_idx;
 
-        half sum = 0;
+        float sum = 0;
         __attribute__((opencl_unroll_hint))
         for (int kk = 0; kk < RANK; kk += SG_SZ) {
-            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + kk)));
-            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + kk)));
+            float scale = as_float(intel_sub_group_block_read((const __global uint*)(alpha + kk)));
+            float input = as_float(intel_sub_group_block_read((const __local uint*)(reduce + kk)));
 
             input *= scale;
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
-                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
-                half aa = as_half(intel_sub_group_broadcast(as_ushort(input), j));
+                float bb = as_float(intel_sub_group_block_read((const __global uint*)B_ptr));
+                float aa = as_float(sub_group_broadcast(as_uint(input), j));
                 sum = fma(aa, bb, sum);
                 B_ptr += N;
             }
         }
-        __global half *main_input_ptr = main_input + n_idx;
-        half m_input = as_half(intel_sub_group_block_read_us((const __global ushort*)main_input_ptr));
-        intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum+m_input));
+        __global float *main_input_ptr = main_input + n_idx;
+        float m_input = as_float(intel_sub_group_block_read((const __global uint*)main_input_ptr));
+        intel_sub_group_block_write((const __global uint*)C_ptr, as_int(sum+m_input));
     }
     '''
 
-VERBOSE=True
 
 def ALIGN_UP(a, b):
     return ((a + (b -1)) // b *b)
@@ -201,7 +203,7 @@ class LORA_2ND:
         self.rank = rank
         self.input_state = input_state
         self.output_state = output_state
-        self.sg_sz = 16
+        self.sg_sz = 8
         assert gemmb_sgN <=64, f'gemmb_sgN:{gemmb_sgN} bigger than 64 limitation'
         self.gemmb_wg_sz = gemmb_sgN * self.sg_sz
         self.use_ref = use_ref
@@ -232,7 +234,7 @@ class LORA_2ND:
     def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB, Aoutput, result):
 
         if self.use_ref:
-            tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float16))
+            tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float32))
             
             # self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank],[1, self.rank], loraInput, stataA,
             #                             tA_output_ref, self.rank, self.input_state, self.input_state_per_wg, self.batch)
@@ -240,7 +242,7 @@ class LORA_2ND:
                         
             self.cl_kernels_ref.enqueue("gemmA", [1, self.rank],[1, self.rank], loraInput, stataA,
                                         tA_output_ref, self.rank, self.input_state, self.gemma_wg_BK, 1)
-            REF_LOCAL_SIZE = 16
+            REF_LOCAL_SIZE = 8
             assert self.output_state % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {self.output_state} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
             
             # self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
@@ -272,27 +274,27 @@ def generate_store_C(regM, regN, withscale, withSum):
     if withscale:
         # read all needed scale.
         src += r'''
-        __global half *alpha_ptr = alpha + n_idx;
-        ''' + "\n\t".join([f'half alpha_{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+        __global float *alpha_ptr = alpha + n_idx;
+        ''' + "\n\t".join([f'float alpha_{n} = as_float(intel_sub_group_block_read((const __global uint*)(alpha_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
         '''
     elif withSum:
         src += r'''
-        __global half *main_ptr = mainInput + m_idx * N + n_idx;
-        ''' + "\n\t".join([f'half main_N{n} = 0;' for n in range(regN)]) + r'''
+        __global float *main_ptr = mainInput + m_idx * N + n_idx;
+        ''' + "\n\t".join([f'float main_N{n} = 0;' for n in range(regN)]) + r'''
         '''
 
     for m in range(regM):
         # read out `regN` mainInput
         if withSum:
-            src += "\n\t".join([f'main_N{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+            src += "\n\t".join([f'main_N{n} = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
                     ''' 
         for n in range(regN):
             if withscale:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}*alpha_{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}*alpha_{n}));"
             elif withSum:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}+main_N{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}+main_N{n}));"
             else:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}));"
         if withSum:
             src += f"\n\tmain_ptr+= N;"
         src += f"\n\tptrC += N;\n\n"
@@ -314,7 +316,7 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
+    ''' + f'{func}' + r'''(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
         int sgM = get_local_size(0);
@@ -331,21 +333,21 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
             m_idx = M - regM;
         if (n_idx + regN * SG_SZ > N)
             n_idx = N - regN * SG_SZ;
-        __global half *ptrA = A + m_idx * K;
-        __global half *ptrB = B + n_idx;
-        __global half *ptrC = C + m_idx * N + n_idx;
+        __global float *ptrA = A + m_idx * K;
+        __global float *ptrB = B + n_idx;
+        __global float *ptrC = C + m_idx * N + n_idx;
 
-        '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
+        '''  + "\n\t ".join([f"float sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
 
         for(int i = 0; i < K; i += SG_SZ) {
                 
-                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+                '''  + "\n\t\t ".join([f"uint input{m} = intel_sub_group_block_read((const __global uint*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
 
                 //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
             
-                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"float bb{n} = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"float aa{m} = as_float(sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
                      ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
                     ptrB += N;
                 }
@@ -365,7 +367,7 @@ class LORA_1ST:
         self.rank = rank
         self.input_state = input_state
         self.output_state = output_state
-        self.sg_sz = 16
+        self.sg_sz = 8
         
         assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
         assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
@@ -410,11 +412,11 @@ class LORA_1ST:
     def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB, Aoutput, result):
 
         if self.use_ref:
-            tA_output_ref = cl.tensor([self.batch, self.rank], np.dtype(np.float16))
-            REF_LOCAL_SIZE = 16
+            tA_output_ref = cl.tensor([self.batch, self.rank], np.dtype(np.float32))
+            REF_LOCAL_SIZE = 8
                         
             self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank],[1, REF_LOCAL_SIZE], loraInput, stataA,
-                                        tA_output_ref, self.rank, self.input_state, self.sg_sz, self.batch)            
+                                        tA_output_ref, self.rank, self.input_state, self.sg_sz, self.batch)
             self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
                                         mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, self.batch)
         else:
@@ -422,9 +424,6 @@ class LORA_1ST:
                                      self.batch, self.rank, self.input_state)
             self.kernel_opt_gemmb.enqueue(self.gemmb_func, self.gemmb_GWS, self.gemmb_LWS, Aoutput, stateB, result, stateAlpha, mainInput,
                                      self.batch, self.output_state, self.rank)
-
-
-        # cl.finish()
         return result
 
 
@@ -436,7 +435,7 @@ test code
 """
 def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
     cl.profiling(True)
-    SG_SZ = 16
+    SG_SZ = 8
     vRANGE = 1
     if check_acc:
         REPEAT = 1
@@ -444,12 +443,12 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
         REPEAT = 200
     # for GEMMA, K decides how many WGs are needed.
     gemma_wgs = ALIGN_UP(input_state, gemma_sg_BK *gemma_sgK)
-    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
-    alpha = np.random.rand(rank).astype(np.float16)
-    stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
-    loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)
-    mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float16)
-    Aoutput = np.zeros([gemma_wgs, rank]).astype(np.float16) 
+    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float32)
+    alpha = np.random.rand(rank).astype(np.float32)
+    stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
+    loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float32)
+    mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float32)
+    Aoutput = np.zeros([gemma_wgs, rank]).astype(np.float32)
     
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
     alpha_list = [cl.tensor(alpha) for _ in range(REPEAT)]
@@ -458,8 +457,8 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor([1, output_state], np.dtype(np.float32))for _ in range(REPEAT)]
+    ref_list = [cl.tensor([1, output_state], np.dtype(np.float32))for _ in range(REPEAT)]
 
     ref = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
     opt = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
@@ -503,12 +502,12 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
     else:
         REPEAT = 100
     # np.random.seed(0)
-    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
-    alpha = np.random.rand(rank).astype(np.float16)
-    stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
-    loraInput = np.random.randint(-vRANGE, vRANGE+1, [batch, input_state]).astype(np.float16)
-    mainInput = np.random.randint(-vRANGE, vRANGE+1, [batch, output_state]).astype(np.float16)
-    Aoutput = np.zeros([batch, rank]).astype(np.float16) 
+    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float32)
+    alpha = np.random.rand(rank).astype(np.float32)
+    stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
+    loraInput = np.random.randint(-vRANGE, vRANGE+1, [batch, input_state]).astype(np.float32)
+    mainInput = np.random.randint(-vRANGE, vRANGE+1, [batch, output_state]).astype(np.float32)
+    Aoutput = np.zeros([batch, rank]).astype(np.float32) 
     
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
     alpha_list = [cl.tensor(alpha) for _ in range(REPEAT)]
@@ -517,8 +516,8 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor([batch, output_state], np.dtype(np.float32))for _ in range(REPEAT)]
+    ref_list = [cl.tensor([batch, output_state], np.dtype(np.float32))for _ in range(REPEAT)]
 
     ref = LORA_1ST(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,True)
     opt = LORA_1ST( batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,False)
@@ -554,14 +553,17 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
 
 
 def blocking_2nd(rank, input_state, output_state):
-    # 512 or 1024? First try 512
+    SG_SZ = 8
     MAX_WG_SZ = 512
+    # Macro is the same with
+    MAX_GEMMA_SGK = 32
     gemma_sg_BK = 32
-    gemma_sgK = MAX_WG_SZ//rank
-    gemmb_sgN = MAX_WG_SZ//16
+    gemma_sgK = min(MAX_WG_SZ//rank, MAX_GEMMA_SGK)
+    gemmb_sgN = MAX_WG_SZ//SG_SZ
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
 def blocking_1nd(batch, rank, input_state, output_state):
+    SG_SZ = 8
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"     
 # GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m, 
 #                                     2, choose[sgN], 
@@ -574,11 +576,11 @@ def blocking_1nd(batch, rank, input_state, output_state):
         if rank == 64:
             A_regM, A_regN = [8, 2]
         elif rank == 128 or rank == 256:
-            A_regM, A_regN = [16, 2]
+            A_regM, A_regN = [8, 2]
         else:
             A_regM, A_regN = [4, 1]
-        assert (rank//16 % A_regN) == 0
-        A_sgN = rank//16//A_regN
+        assert (rank//SG_SZ % A_regN) == 0
+        A_sgN = rank//SG_SZ//A_regN
         A_sgM = DIV_UP(16, A_sgN)
     else:
         A_regM, A_regN = [4, 1]
@@ -591,19 +593,19 @@ def blocking_1nd(batch, rank, input_state, output_state):
         B_sgM, B_sgN = [16, 4]
 
     else:
-        B_regM, B_regN = [16, 2]
+        B_regM, B_regN = [8, 2]
         B_sgM, B_sgN = [8, 4]
 
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 if __name__ == "__main__":
 
-    # test_lora_2nd(2048, 128, 256, gemma_sgK = 4,  gemma_sg_BK=48, gemmb_sgN=32 , check_acc=True)
+    test_lora_2nd(1024, 64, 256, gemma_sgK = 4,  gemma_sg_BK=32, gemmb_sgN=64 , check_acc=True)
 
     """
     test 1st acc:
     """
-    if 0:
+    if 1:
         for batch in range(8, 1024, 107):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for output_state_idx in range(256//16, 1024//16):
@@ -624,49 +626,49 @@ if __name__ == "__main__":
                     #         test_lora_2nd(input_state, rank, out_state, gemma_sgK = min(sgk, 512 // rank), gemma_sg_BK=bk, gemmb_sgN=32 , check_acc=True)
                     gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
                     test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
-    """
-    test acc of minicpm and qwen2.5:
-    """
-    if 1:
-        for batch in [1, 3192]:                       
-            for rank in [64,]:
-                for out_state in [512, 1536, 3840, 256, 8960]:
-                    for input_state in [1536, 8960]:
-                        if batch == 1:
-                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc=True)
-                        else:
-                            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
-                            test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    # """
+    # test acc of minicpm and qwen2.5:
+    # """
+    # if 0:
+    #     for batch in [1, 3192]:
+    #         for rank in [64,]:
+    #             for out_state in [512, 1536, 3840, 256, 8960]:
+    #                 for input_state in [1536, 8960]:
+    #                     if batch == 1:
+    #                         gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+    #                         test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc=True)
+    #                     else:
+    #                         A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
+    #                         test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+    #                                   B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 
-    """
-    test perf based on minicpm:
-    """
-    if 0:
-        for rank in [64]:
-            for out_state in [512, 1536, 3840]:
-                gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
-                test_lora_2nd(1536, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
-        for batch in [3051]:
-            for rank in [64]:
-                for out_state in [512, 1536, 3840]:
-                    A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, 1536, out_state)
-                    test_lora_1st(batch, rank ,1536,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                        B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+    # """
+    # test perf based on minicpm:
+    # """
+    # if 0:
+    #     for rank in [64]:
+    #         for out_state in [512, 1536, 3840]:
+    #             gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, 1536, out_state)
+    #             test_lora_2nd(1536, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+    #     for batch in [3051]:
+    #         for rank in [64]:
+    #             for out_state in [512, 1536, 3840]:
+    #                 A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, 1536, out_state)
+    #                 test_lora_1st(batch, rank ,1536,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+    #                                     B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
 
-    """
-    test perf based on qwen:
-    """
-    if 1:
-        for batch in [1, 3192]:                       
-            for rank in [64,]:
-                for out_state in [1536, 3840, 256, 8960]:
-                    for input_state in [1536, 8960]:
-                        if batch == 1:
-                            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
-                            test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
-                        else:
-                            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
-                            test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                      B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+    # """
+    # test perf based on qwen:
+    # """
+    # if 0:
+    #     for batch in [1, 3192]:
+    #         for rank in [64,]:
+    #             for out_state in [1536, 3840, 256, 8960]:
+    #                 for input_state in [1536, 8960]:
+    #                     if batch == 1:
+    #                         gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
+    #                         test_lora_2nd(input_state, rank, out_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+    #                     else:
+    #                         A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, out_state)
+    #                         test_lora_1st(batch, rank ,input_state,  out_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+    #                                   B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
