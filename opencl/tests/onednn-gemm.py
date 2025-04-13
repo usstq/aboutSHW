@@ -178,7 +178,8 @@ class Qwen3MoeMLP(nn.Module):
 
 
 ocl_sources=r'''
-// [n_tokens, count] [1, 1]
+// [n_tokens, count] [1, 16]
+__attribute__((intel_reqd_sub_group_size(16)))
 __kernel void gather_2d_ref(
     const __global half* src_tok,
     __global half* dst_tok,
@@ -196,7 +197,9 @@ __kernel void gather_2d_ref(
     src_tok += tok_idx * tok_size;
     dst_tok += k * tok_size;
 
-    dst_tok[off] = src_tok[off];
+    // dst_tok[off] = src_tok[off];
+    ushort value = intel_sub_group_block_read_us((const __global ushort *)(src_tok + off));
+    intel_sub_group_block_write_us((__global ushort *)(dst_tok + off), value);
 
     if (off == 0) {
         int top_idx = top_index[k];
@@ -204,6 +207,7 @@ __kernel void gather_2d_ref(
     }
 }
 
+__attribute__((intel_reqd_sub_group_size(16)))
 __kernel void index_add_(
     const __global half* src_tok,
     __global half* dst_tok,
@@ -348,7 +352,7 @@ class onednnMLP:
             top_index = cl.tensor(np.array(idx, dtype=np.int32))
             
 
-            self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 1],
+            self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 16],
                                     hidden_states, scratch.x,
                                     routing_weights, scratch.rweights,
                                     tok_index, top_index,
@@ -376,7 +380,7 @@ class onednnMLP:
             # the `top_x` tensor here.
             # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
             
-            self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 1],
+            self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 16],
                                     scratch.y, final_hidden_states,
                                     tok_index, 
                                     hidden_states.shape[1])
@@ -512,7 +516,8 @@ np.set_printoptions(linewidth=1024)
 # cl.profiling(True)
 
 test_moe(1)
-test_moe(4096, running_experts = 1)
+test_moe(1024)
+#test_moe(4096, running_experts = 1)
 
 sys.exit()
 
