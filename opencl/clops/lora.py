@@ -298,11 +298,30 @@ def generate_store_C(regM, regN, withscale, withSum):
         src += f"\n\tptrC += N;\n\n"
 
     return src
+
+def generate_fma(regM, regN):
+        src = r'''
+        for(int i = 0; i < K; i += SG_SZ) {
+                
+                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+
+                //__attribute__((opencl_unroll_hint))
+                for (int kk = 0; kk < SG_SZ; kk++) {
+            
+                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
+                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
+                    ptrB += N;
+                }
+                ptrA +=SG_SZ;
+        }
+        '''
+        return src
 # This function would generate 1st token kernel based on 'regM, regN, withscale, withSum'.
 # regM, regN would be the register  blocking.
 # withscale = true for LORA GEMMA kernel to genereate multiply post ops
 # withsum =  true for LORA GEMMB kernel to genereate add post ops
-def generate_gemm_src(regM, regN, withscale = False, withSum=False):
+def generate_gemm_src(regM, regN, regM_tail, regN_tail, withscale = False, withSum=False):
     assert (withscale and withSum) == False, f"not support both LORA alpha and sum in one gemm kernel"
     if withscale:
         func = f'gemmA_rM{regM}_rN{regN}'
@@ -320,6 +339,8 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
         int sgM = get_local_size(0);
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
+        bool M_tail = false;
+        bool N_tail = false;
         ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
         int BM = regM * sgM;
         int BN = get_local_size(1) * regN;
@@ -328,31 +349,27 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
         if (m_idx >= M || n_idx >=N )
             return;
         if (m_idx + regM > M)
-            m_idx = M - regM;
+            M_tail = true;
         if (n_idx + regN * SG_SZ > N)
-            n_idx = N - regN * SG_SZ;
+            N_tail = true;
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B + n_idx;
         __global half *ptrC = C + m_idx * N + n_idx;
 
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
-
-        for(int i = 0; i < K; i += SG_SZ) {
-                
-                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
-
-                //__attribute__((opencl_unroll_hint))
-                for (int kk = 0; kk < SG_SZ; kk++) {
-            
-                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
-                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
-                    ptrB += N;
-                }
-                ptrA +=SG_SZ;
+        if (!M_tail && !N_tail) {
+            ''' + generate_fma(regM, regN) + r'''
+            ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
+        } else if (!M_tail && N_tail) {
+            ''' + generate_fma(regM, regN_tail) + r'''
+            ''' +  generate_store_C(regM, regN_tail, withscale, withSum) + r'''
+        } else if (M_tail && !N_tail) {
+            ''' + generate_fma(regM_tail, regN) + r'''
+            ''' +  generate_store_C(regM_tail, regN, withscale, withSum) + r'''
+        } else{
+            ''' + generate_fma(regM_tail, regN_tail) + r'''
+            ''' +  generate_store_C(regM_tail, regN_tail, withscale, withSum) + r'''
         }
-
-        ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
     }
     '''
     return [func, src]
@@ -381,8 +398,8 @@ class LORA_1ST:
         B_BN = B_regN*B_sgN*self.sg_sz
         
         
-        gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
-        gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
+        gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN, batch%A_regM, rank//self.sg_sz%A_regN, True, False)
+        gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN, batch%B_regM, output_state//self.sg_sz%B_regN, False, True)
         self.gemma_func = gemma_func
         self.gemmb_func = gemmb_func
 
@@ -458,21 +475,21 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     ref_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
 
     ref = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
     opt = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
     
     if check_acc:
-        opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
+        opt(res_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
         ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], ref_list[0])
         cl.finish()
         compare(ref_list[0].numpy(), res_list[0].numpy())
         print(f'INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} ACC PASS!')
     else:
         for i in range(0, REPEAT):
-            opt(mainInput_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i],  A_output_list[i], res_list[i])
+            opt(res_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i],  A_output_list[i], res_list[i])
         profiling_data  = cl.finish()
         # FMA
         flops_a = rank*input_state*2
@@ -517,14 +534,14 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     ref_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
 
     ref = LORA_1ST(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,True)
     opt = LORA_1ST( batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,False)
     
     if check_acc:
-        opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
+        opt(res_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
         ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], ref_list[0])
         cl.finish()
         compare(ref_list[0].numpy(), res_list[0].numpy())
@@ -609,7 +626,7 @@ if __name__ == "__main__":
     """
     test 1st acc:
     """
-    if 0:
+    if 1:
         for batch in range(8, 1024, 107):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for output_state_idx in range(256//16, 1024//16):
