@@ -299,6 +299,20 @@ def generate_store_C(regM, regN, withscale, withSum):
 
     return src
 
+def generate_tail_store_C(withscale, withSum):
+    if withscale:
+        return r'''
+            __global half *scale_ptr = alpha_ptr + subB * SG_SZ;
+            half scale_val = as_half(intel_sub_group_block_read_us((const __global ushort*)(scale_ptr)));
+            intel_sub_group_block_write_us((__global ushort*)(CC_ptr), as_short(sum*scale_val));'''
+    elif withSum:
+        return r'''
+            __global half *main_ptr = main + subA * N + subB * SG_SZ;
+            half main_val = as_half(intel_sub_group_block_read_us((const __global ushort*)(main_ptr)));
+            intel_sub_group_block_write_us((__global ushort*)(CC_ptr), as_short(sum+main_val));'''
+    else:
+        return ""
+
 def generate_fma(regM, regN):
         src = r'''
         for(int i = 0; i < K; i += SG_SZ) {
@@ -348,27 +362,47 @@ def generate_gemm_src(regM, regN, regM_tail, regN_tail, withscale = False, withS
         int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
         if (m_idx >= M || n_idx >=N )
             return;
-        if (m_idx + regM > M)
+        if (m_idx + regM > M) {
             M_tail = true;
-        if (n_idx + regN * SG_SZ > N)
+            regM = M - m_idx;
+        }
+        if (n_idx + regN * SG_SZ > N) {
             N_tail = true;
+            regN = (N - n_idx) / SG_SZ;
+        }
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B + n_idx;
         __global half *ptrC = C + m_idx * N + n_idx;
 
-        '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
         if (!M_tail && !N_tail) {
+            '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
             ''' + generate_fma(regM, regN) + r'''
             ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
-        } else if (!M_tail && N_tail) {
-            ''' + generate_fma(regM, regN_tail) + r'''
-            ''' +  generate_store_C(regM, regN_tail, withscale, withSum) + r'''
-        } else if (M_tail && !N_tail) {
-            ''' + generate_fma(regM_tail, regN) + r'''
-            ''' +  generate_store_C(regM_tail, regN, withscale, withSum) + r'''
-        } else{
-            ''' + generate_fma(regM_tail, regN_tail) + r'''
-            ''' +  generate_store_C(regM_tail, regN_tail, withscale, withSum) + r'''
+        } else {
+            __global half *main = mainInput + m_idx * N + n_idx;
+            __global half *alpha_ptr = alpha + n_idx;
+            for (int subA = 0; subA <  regM; subA++) {
+                for (int subB = 0; subB < regN; subB++) {
+                    half sum = 0;
+                    __global half *AA_ptr = ptrA + subA * K;
+                    __global half *BB_ptr = ptrB + subB * SG_SZ;
+                    __global half *CC_ptr = ptrC + subA * N + subB * SG_SZ;
+
+                    for(int i = 0; i < K; i += SG_SZ) {
+                        ushort input0 = intel_sub_group_block_read_us((const __global ushort*)(AA_ptr));
+                        __attribute__((opencl_unroll_hint))
+                        for (int kk = 0; kk < SG_SZ; kk++) {
+                            half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(BB_ptr)));
+                            half aa = as_half(intel_sub_group_broadcast(input0, kk));
+                            sum = fma(aa, bb, sum);
+                            BB_ptr += N;
+                        }
+                        AA_ptr +=SG_SZ;
+                    }
+                ''' + generate_tail_store_C(withscale, withSum) + r'''
+
+                }
+            }
         }
     }
     '''
@@ -548,7 +582,7 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
         print(f'BATCH:{batch} INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state} ACC PASS!')
     else:
         for i in range(0, REPEAT):
-            opt(mainInput_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i],  A_output_list[i], res_list[i])
+            opt(res_list[i], loraInput_list[i], stateA_list[i], alpha_list[i], stateB_list[i],  A_output_list[i], res_list[i])
         profiling_data  = cl.finish()
         # FMA + multiply scale
         flops_a = batch*rank*input_state*2 + batch*rank
@@ -638,7 +672,7 @@ if __name__ == "__main__":
     """
     test 2nd acc:
     """
-    if 0:
+    if 1:
         for out_state in (256, 512, 1024, 2048, 1536, 3072, 3840, 15*16,  17*16, 7*16, 11*16, 13*16):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for rank in (16, 32, 64, 128, 256):
