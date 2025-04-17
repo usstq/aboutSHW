@@ -16,11 +16,11 @@ def test_lora_fused_qkv():
             sum += temp_C[i*N + n_idx];
         C[n_idx] = sum;
     }
-    __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, __global half * alpha) {
-        // Accumulate whole K to sum would meet accuracy issue for float data with opt kernel because of different k blocking behavior.
-        // First accumulat k_blk to sub_sum and then accumulat sub_sum to final sum. Behave same with opt kernel
-        int n_idx = get_global_id(0);
-        half scale = alpha[get_group_id(0)];
+
+        __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
+        // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
+        int m_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
         size_t blk_num = (K + k_blk -1 )/ k_blk;
         half sum = 0.f;
         for (int i = 0; i < blk_num; i++) {
@@ -30,59 +30,45 @@ def test_lora_fused_qkv():
             if ((k_idx + k_blk) > K)
                 k_blk = K - k_idx;
             for (size_t sub_k = 0; sub_k < k_blk; sub_k++) {
-                sub_sum = fma(A[k_idx], B[k_idx*N+n_idx], sub_sum);
+                sub_sum = fma(A[m_idx * K + k_idx], B[k_idx*N+n_idx], sub_sum);
                 k_idx++;
             }
             sum += sub_sum;
         }
-        CC[n_idx] = sum;
+        CC[m_idx * N + n_idx] = sum;
     }
-# if 0
-    __kernel void gemmA_with_split_wei(__global half * A, __global half *BQ, __global half *BK,__global half *BV, __global half *CC, int RANK, int K, int N) {
-        int n = get_global_id(1);
-        int n_blk = get_group_id(1);
-        __global half*B = NULL;
-        if (n_blk == 0)
-            B = BQ;
-        else if (n_blk == 1)
-            B = BK;
-        else
-            B = BV;
-        int m = get_global_id(0);
-        int sub_n = get_local_id(1);
-        half sum = 0.f;
-        for (int i = 0; i < K; i++)
-            sum += A[m*K+i]*B[i*RANK+sub_n];
-        CC[m*N+n] = sum;
-    }
-#endif
-    __kernel void gemmB(__global half * main_input, __global half * input, __global half *B_Q,  __global half *B_K, __global half *B_V, __global half *CC, __global half * alpha, int rank) {
-        int wgs = get_num_groups(0);
-        int wg_id = get_group_id(0);
-        int lid = get_local_id(0);
-        int n_idx = get_global_id(0);
-        half *scale = alpha;
-        __global half *A = input;
-        __global half *BN = B_Q + n_idx;
-        int stride = Q_OUTPUT_STATE;
 
-        if (wg_id ==  wgs - 2) {
-            A += rank;
-            BN = B_K + lid;
-            stride = KV_OUTPUT_STATE;
-            scale = alpha + rank;
-        } else if (wg_id ==  wgs - 1) {
-            A += rank * 2;
-            BN = B_V + lid;
-            stride = KV_OUTPUT_STATE;
-            scale = alpha + rank*2;
+    __kernel void gemmB(__global half * main_input, __global half * lora_input, __global half *B_0,  __global half *B_1, __global half *B_2, __global half *CC, __global half * alpha, int rank) {
+        const int m_idx = get_global_id(0);
+        const int n_idx = get_global_id(1);
+        int n_off = n_idx;
+        __global half *A_ptr = lora_input + m_idx * rank * 3;
+        __global half* scale_ptr = alpha;
+        __global half *B_ptr = B_0 + n_off;
+        int stride_B = N_0;
+        int stride_C = (N_0 + N_1_2 + N_1_2);
+
+        if (n_idx >= (N_0+N_1_2)) {
+            // Use B_2
+            A_ptr += rank *2;
+            scale_ptr += rank * 2;
+            n_off -= (N_0+N_1_2);
+            B_ptr = B_2 + n_off;
+            stride_B = N_1_2;
+
+        } else if (n_idx >= N_0) {
+            //Use B_1
+            A_ptr += rank;
+            scale_ptr += rank;
+            n_off -= N_0;
+            B_ptr = B_1 + n_off;
+            stride_B = N_1_2;
         }
-
+        
         half sum = 0.f;
-        for (int i = 0; i < rank; i++)
-            //sum += A[i]*BN[i*stride];
-            sum = fma(A[i]*scale[i], BN[i*stride], sum);
-        CC[n_idx] = sum + main_input[n_idx];
+        for (int k = 0; k < rank; k++)
+            sum = fma(A_ptr[k]*scale_ptr[k], B_ptr[k*stride_B], sum);
+        CC[m_idx *stride_C + n_idx] = sum + main_input[m_idx *stride_C + n_idx];
     }
     '''
     opt_src =  r'''
@@ -227,6 +213,7 @@ def test_lora_fused_qkv():
     KV_GROUP_SZ = Q_OUTPUT_STATE // KV_OUTPUT_STATE
     QKV_OUTPUT_STATE = (Q_OUTPUT_STATE+KV_OUTPUT_STATE*2)
     RANK = 64
+    batch = 1
     N = RANK * 3
     K = INPUT_STATE
     WG_NUM = 8
@@ -289,11 +276,11 @@ def test_lora_fused_qkv():
     tOutputA = cl.tensor(np.zeros([WG_NUM, N]).astype(np.float16))
     toutputA_Reduce = cl.tensor([1, N], np.dtype(np.float16))
     tOutputB = cl.tensor([1, QKV_OUTPUT_STATE], np.dtype(np.float16))
-    ref_ker = kernel_cache(reference, options=f"-DQ_OUTPUT_STATE={Q_OUTPUT_STATE} -DKV_OUTPUT_STATE={KV_OUTPUT_STATE}")
+    ref_ker = kernel_cache(reference, options=f"-DN_0={Q_OUTPUT_STATE} -DN_1_2={KV_OUTPUT_STATE}")
     # Each WG would update `RANK` columns. 3 WGs needed.
-    ref_ker.enqueue("gemmA", [N],[RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG, tAlpha)
+    ref_ker.enqueue("gemmA", [batch, N],[1, RANK], tInput, tWeiA, tOutputA_Ref, N, K, K_PER_WG, 1)
     # Each WG would update `KV_OUTPUT_STATE` columns. (KV_GROUP_SZ + 2) WGs needed.
-    ref_ker.enqueue("gemmB", [QKV_OUTPUT_STATE],[KV_OUTPUT_STATE], tMainInput, tOutputA_Ref, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB_Ref, tAlpha, RANK)
+    ref_ker.enqueue("gemmB", [batch, QKV_OUTPUT_STATE],[1, min(QKV_OUTPUT_STATE, 1024)], tMainInput, tOutputA_Ref, tWeiB_Q, tWeiB_K, tWeiB_V, tOutputB_Ref, tAlpha, RANK)
     cl.finish()
 
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={WG_NUM} -DK_PER_WG={K_PER_WG} -DRANK={RANK} -DKV_OUTPUT_STATE={KV_OUTPUT_STATE} -DKV_GROUP_SZ={KV_GROUP_SZ} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM}")
@@ -312,40 +299,7 @@ def test_lora_fused_qkv():
         compare(tOutputB_Ref.numpy(), tOutputB.numpy())
         print(" GEMMB OK!")
 
-# C = Matmul(A, B): A[1, 16], B [16, 16], C [1, 16]. The basic kernel
-def test_FMA_basic():
-    src =  r'''
-    __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemm(__global half * A, __global half *B,  __global half *C, int N, int K) {
-        half sum = 0;
-        ushort input = intel_sub_group_block_read_us((const __global ushort*)(A));
-        __attribute__((opencl_unroll_hint))
-        for (int j = 0; j < SG_SZ; j++) {
-            half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B));
-            half aa = as_half(intel_sub_group_broadcast(input, j));
-            sum = fma(aa, bb, sum);
-            B += N;
-        }
-        intel_sub_group_block_write_us((const __global ushort*)C, as_short(sum));
-    }
-    '''
-    N = 16
-    K = 16
-    np.random.seed(0)
-    vRANGE = 3
-    A = np.random.randint(-vRANGE, vRANGE+1, [1, K]).astype(np.float16)
-    B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
-    C_ref = np.matmul(A, B)
-    tA = cl.tensor(A)
-    tB = cl.tensor(B)
-    SG_SZ = 16
-    kernel = kernel_cache(src, options=f"-DSG_SZ={SG_SZ}")
-    C = cl.tensor([1, N], np.dtype(np.float16))
-    kernel.enqueue("gemm", [N],[N], tA, tB, C, N, K)
-    cl.finish()
-    compare(C_ref, C.numpy())
 
 cl.profiling(True)
 test_lora_fused_qkv()
-# test_FMA_basic()
 print("-------------------------")
