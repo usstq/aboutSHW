@@ -313,241 +313,407 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
     else:
         func = f'gemm_rM{regM}_rN{regN}'
 
-    src =  r'''
+    src_gemma =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    gemmA_rM4_rN1(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
-        int sgid = get_sub_group_id();
-        int sgN = get_local_size(1) / SG_SZ;
-        int sgM = get_local_size(0);
-        int sgid_N = sgid % sgN;
-        int sgid_M = sgid / sgN;
-        int regM = 4;
-int regN = 1;
-        int BM = regM * sgM;
-        int BN = get_local_size(1) * regN;
-        int m_idx = get_group_id(0) * BM  + sgid_M * regM;
-        int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        if (m_idx >= M || n_idx >=N )
-            return;
-        if (m_idx + regM > M)
-            m_idx = M - regM;
-        if (n_idx + regN * SG_SZ > N)
-            n_idx = N - regN * SG_SZ;
-        __global float *ptrA = A + m_idx * K;
-        __global float *ptrB = B + n_idx;
-        __global float *ptrC = C + m_idx * N + n_idx;
+    gemmA_rM4_rN1(__global float * lora_input, __global float *state_a,  __global float *output_a, __global float *state_alpha,  __global float *mainInput, int M, int N, int K) {
 
-        float sum0_0 = 0;
-	 float sum1_0 = 0;
-	 float sum2_0 = 0;
-	 float sum3_0 = 0;;
+#define SUBGROUP_SIZE 8
+#define A_REG_N 1
+#define A_REG_M 4
 
-        for(int i = 0; i < K; i += SG_SZ) {
-                
-                uint input0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * K));
-		 uint input1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * K));
-		 uint input2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * K));
-		 uint input3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * K));
+#define INPUT1_TYPE_SIZE 4
+#define STATE_TYPE_SIZE 4
+#define ACCUMULATOR_TYPE_SIZE 4
 
-                //__attribute__((opencl_unroll_hint))
-                for (int kk = 0; kk < SG_SZ; kk++) {
-            
-                     float bb0 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SG_SZ)));
-                     float aa0 = as_float(sub_group_broadcast(input0, kk));
-			 float aa1 = as_float(sub_group_broadcast(input1, kk));
-			 float aa2 = as_float(sub_group_broadcast(input2, kk));
-			 float aa3 = as_float(sub_group_broadcast(input3, kk));
-                     sum0_0 = fma(aa0, bb0, sum0_0);
-			sum1_0 = fma(aa1, bb0, sum1_0);
-			sum2_0 = fma(aa2, bb0, sum2_0);
-			sum3_0 = fma(aa3, bb0, sum3_0);
-                    ptrB += N;
-                }
-                ptrA +=SG_SZ;
-        }
+#define ACCUMULATOR_TYPE float
+#define INPUT1_TYPE float
+#define STATE_TYPE float
+#define AS_ACCUMULATOR_TYPE as_float
+#define LORA_RANK 16
 
-        
-        __global float *alpha_ptr = alpha + n_idx;
-        float alpha_0 = as_float(intel_sub_group_block_read((const __global uint*)(alpha_ptr + SG_SZ * 0)));
-        
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum0_0*alpha_0));
-	ptrC += N;
+    int sgid = get_sub_group_id();
+    int sgN = get_local_size(1) / SUBGROUP_SIZE;
+    int sgM = get_local_size(0);
+    int sgid_N = sgid % sgN;
+    int sgid_M = sgid / sgN;
+    int BM = A_REG_M * sgM;
+    int BN = get_local_size(1) * A_REG_N;
+    int m_idx = get_group_id(0) * BM  + sgid_M * A_REG_M;
+    int n_idx = get_group_id(1) * BN  + sgid_N * SUBGROUP_SIZE * A_REG_N;
+
+    // printf("M: %d, N: %d, K: %d", M, N, K);
+
+    if (m_idx >= M || n_idx >= LORA_RANK)
+        return;
+
+    if (m_idx + A_REG_M > M)
+        m_idx = M - A_REG_M;
+
+    if (n_idx + A_REG_N * SUBGROUP_SIZE > LORA_RANK)
+        n_idx = LORA_RANK - A_REG_N * SUBGROUP_SIZE;
+
+    __global INPUT1_TYPE* ptrA = lora_input + m_idx * K;
+    __global STATE_TYPE* ptrB = state_a + n_idx;
+    __global ACCUMULATOR_TYPE* ptrC = output_a + m_idx * LORA_RANK + n_idx;
 
 
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum1_0*alpha_0));
-	ptrC += N;
+    ACCUMULATOR_TYPE sum_0_0 = 0;
+    ACCUMULATOR_TYPE sum_1_0 = 0;
+    ACCUMULATOR_TYPE sum_2_0 = 0;
+    ACCUMULATOR_TYPE sum_3_0 = 0;
+
+    for (int i = 0; i < K; i += SUBGROUP_SIZE) {
 
 
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum2_0*alpha_0));
-	ptrC += N;
+#if INPUT1_TYPE_SIZE == 4
+            uint input_0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * K));
+            uint input_1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * K));
+            uint input_2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * K));
+            uint input_3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * K));
+#else
+            ushort input_0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * K));
+            ushort input_1 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 1 * K));
+            ushort input_2 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 2 * K));
+            ushort input_3 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 3 * K));
+#endif
+
+            //__attribute__((opencl_unroll_hint))
+            for (int kk = 0; kk < SUBGROUP_SIZE; kk++) {
+
+#if STATE_TYPE_SIZE == 4
+                ACCUMULATOR_TYPE bb_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SUBGROUP_SIZE)));
+#else
+                ACCUMULATOR_TYPE bb_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read_us((const __global ushort*)(ptrB + 0 * SUBGROUP_SIZE)));
+#endif
+
+#if INPUT1_TYPE_SIZE == 4
+                ACCUMULATOR_TYPE aa_0 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_0, kk));
+                ACCUMULATOR_TYPE aa_1 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_1, kk));
+                ACCUMULATOR_TYPE aa_2 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_2, kk));
+                ACCUMULATOR_TYPE aa_3 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_3, kk));
+#else
+                ACCUMULATOR_TYPE aa_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_0, kk));
+                ACCUMULATOR_TYPE aa_1 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_1, kk));
+                ACCUMULATOR_TYPE aa_2 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_2, kk));
+                ACCUMULATOR_TYPE aa_3 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_3, kk));
+#endif
 
 
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum3_0*alpha_0));
-	ptrC += N;
+                sum_0_0 = fma(aa_0, bb_0, sum_0_0);
+                sum_1_0 = fma(aa_1, bb_0, sum_1_0);
+                sum_2_0 = fma(aa_2, bb_0, sum_2_0);
+                sum_3_0 = fma(aa_3, bb_0, sum_3_0);
 
-
+                ptrB += LORA_RANK;
+            }
+            ptrA += SUBGROUP_SIZE;
     }
-    
 
+
+    __global STATE_TYPE *alpha_ptr = state_alpha + n_idx;
+
+
+#if STATE_TYPE_SIZE == 4
+    // TO_ACCUMULATOR_TYPE(AS_STATE_TYPE(..)) - right version
+    ACCUMULATOR_TYPE alpha_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read((const __global uint*)(alpha_ptr + SUBGROUP_SIZE * 0)));
+#else
+    ACCUMULATOR_TYPE alpha_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read_us((const __global ushort*)(alpha_ptr + SUBGROUP_SIZE * 0)));
+#endif
+
+
+#if ACCUMULATOR_TYPE_SIZE == 4
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(sum_0_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(sum_1_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(sum_2_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(sum_3_0 * alpha_0));
+    ptrC += LORA_RANK;
+#else
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(sum_0_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(sum_1_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(sum_2_0 * alpha_0));
+    ptrC += LORA_RANK;
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(sum_3_0 * alpha_0));
+    ptrC += LORA_RANK;
+#endif
+}
+'''
+    src_gemmb =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    gemmB_rM8_rN2(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
-        int sgid = get_sub_group_id();
-        int sgN = get_local_size(1) / SG_SZ;
-        int sgM = get_local_size(0);
-        int sgid_N = sgid % sgN;
-        int sgid_M = sgid / sgN;
-        int regM = 8;
-int regN = 2;
-        int BM = regM * sgM;
-        int BN = get_local_size(1) * regN;
-        int m_idx = get_group_id(0) * BM  + sgid_M * regM;
-        int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
-        if (m_idx >= M || n_idx >=N )
-            return;
-        if (m_idx + regM > M)
-            m_idx = M - regM;
-        if (n_idx + regN * SG_SZ > N)
-            n_idx = N - regN * SG_SZ;
-        __global float *ptrA = A + m_idx * K;
-        __global float *ptrB = B + n_idx;
-        __global float *ptrC = C + m_idx * N + n_idx;
+    gemmB_rM8_rN2(__global float * output_a, __global float *state_b,  __global float *output, __global float *alpha,  __global float *main_input, int M, int N, int K) {
+#define SUBGROUP_SIZE 8
+#define REG_N 2
+#define REG_M 8
 
-        float sum0_0 = 0;
-	 float sum0_1 = 0;
-	 float sum1_0 = 0;
-	 float sum1_1 = 0;
-	 float sum2_0 = 0;
-	 float sum2_1 = 0;
-	 float sum3_0 = 0;
-	 float sum3_1 = 0;
-	 float sum4_0 = 0;
-	 float sum4_1 = 0;
-	 float sum5_0 = 0;
-	 float sum5_1 = 0;
-	 float sum6_0 = 0;
-	 float sum6_1 = 0;
-	 float sum7_0 = 0;
-	 float sum7_1 = 0;;
+#define INPUT1_TYPE_SIZE 4
+#define STATE_TYPE_SIZE 4
+#define ACCUMULATOR_TYPE_SIZE 4
 
-        for(int i = 0; i < K; i += SG_SZ) {
-                
-                uint input0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * K));
-		 uint input1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * K));
-		 uint input2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * K));
-		 uint input3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * K));
-		 uint input4 = intel_sub_group_block_read((const __global uint*)(ptrA + 4 * K));
-		 uint input5 = intel_sub_group_block_read((const __global uint*)(ptrA + 5 * K));
-		 uint input6 = intel_sub_group_block_read((const __global uint*)(ptrA + 6 * K));
-		 uint input7 = intel_sub_group_block_read((const __global uint*)(ptrA + 7 * K));
+#define ACCUMULATOR_TYPE float
+#define INPUT1_TYPE float
+#define STATE_TYPE float
+#define LORA_RANK 16
+#define OUTPUT_TYPE float
+#define INPUT0_TYPE float
 
-                //__attribute__((opencl_unroll_hint))
-                for (int kk = 0; kk < SG_SZ; kk++) {
-            
-                     float bb0 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SG_SZ)));
-			 float bb1 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 1 * SG_SZ)));
-                     float aa0 = as_float(sub_group_broadcast(input0, kk));
-			 float aa1 = as_float(sub_group_broadcast(input1, kk));
-			 float aa2 = as_float(sub_group_broadcast(input2, kk));
-			 float aa3 = as_float(sub_group_broadcast(input3, kk));
-			 float aa4 = as_float(sub_group_broadcast(input4, kk));
-			 float aa5 = as_float(sub_group_broadcast(input5, kk));
-			 float aa6 = as_float(sub_group_broadcast(input6, kk));
-			 float aa7 = as_float(sub_group_broadcast(input7, kk));
-                     sum0_0 = fma(aa0, bb0, sum0_0);
-			sum0_1 = fma(aa0, bb1, sum0_1);
-			sum1_0 = fma(aa1, bb0, sum1_0);
-			sum1_1 = fma(aa1, bb1, sum1_1);
-			sum2_0 = fma(aa2, bb0, sum2_0);
-			sum2_1 = fma(aa2, bb1, sum2_1);
-			sum3_0 = fma(aa3, bb0, sum3_0);
-			sum3_1 = fma(aa3, bb1, sum3_1);
-			sum4_0 = fma(aa4, bb0, sum4_0);
-			sum4_1 = fma(aa4, bb1, sum4_1);
-			sum5_0 = fma(aa5, bb0, sum5_0);
-			sum5_1 = fma(aa5, bb1, sum5_1);
-			sum6_0 = fma(aa6, bb0, sum6_0);
-			sum6_1 = fma(aa6, bb1, sum6_1);
-			sum7_0 = fma(aa7, bb0, sum7_0);
-			sum7_1 = fma(aa7, bb1, sum7_1);
-                    ptrB += N;
-                }
-                ptrA +=SG_SZ;
+#define AS_ACCUMULATOR_TYPE as_float
+#define AS_INPUT0_TYPE as_float
+#define TO_INPUT0_TYPE (float)
+    int sgid = get_sub_group_id();
+    int sgN = get_local_size(1) / SUBGROUP_SIZE;
+    int sgM = get_local_size(0);
+    int sgid_N = sgid % sgN;
+    int sgid_M = sgid / sgN;
+    int BM = REG_M * sgM;
+    int BN = get_local_size(1) * REG_N;
+    int m_idx = get_group_id(0) * BM  + sgid_M * REG_M;
+    int n_idx = get_group_id(1) * BN  + sgid_N * SUBGROUP_SIZE * REG_N;
+
+    // printf("M: %d, N: %d, K: %d", M, N, K);
+
+    if (m_idx >= M || n_idx >= N)
+        return;
+
+    if (m_idx + REG_M > M)
+        m_idx = M - REG_M;
+
+    if (n_idx + REG_N * SUBGROUP_SIZE > N)
+        n_idx = N - REG_N * SUBGROUP_SIZE;
+
+    __global ACCUMULATOR_TYPE* ptrA = output_a + m_idx * LORA_RANK;
+    __global STATE_TYPE* ptrB = state_b + n_idx;
+    __global OUTPUT_TYPE* ptrC = output + m_idx * N + n_idx;
+
+
+    ACCUMULATOR_TYPE sum_0_0 = 0;
+    ACCUMULATOR_TYPE sum_0_1 = 0;
+    ACCUMULATOR_TYPE sum_1_0 = 0;
+    ACCUMULATOR_TYPE sum_1_1 = 0;
+    ACCUMULATOR_TYPE sum_2_0 = 0;
+    ACCUMULATOR_TYPE sum_2_1 = 0;
+    ACCUMULATOR_TYPE sum_3_0 = 0;
+    ACCUMULATOR_TYPE sum_3_1 = 0;
+    ACCUMULATOR_TYPE sum_4_0 = 0;
+    ACCUMULATOR_TYPE sum_4_1 = 0;
+    ACCUMULATOR_TYPE sum_5_0 = 0;
+    ACCUMULATOR_TYPE sum_5_1 = 0;
+    ACCUMULATOR_TYPE sum_6_0 = 0;
+    ACCUMULATOR_TYPE sum_6_1 = 0;
+    ACCUMULATOR_TYPE sum_7_0 = 0;
+    ACCUMULATOR_TYPE sum_7_1 = 0;
+
+    for (int i = 0; i < LORA_RANK; i += SUBGROUP_SIZE) {
+
+
+#if INPUT1_TYPE_SIZE == 4
+        uint input_0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * LORA_RANK));
+        uint input_1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * LORA_RANK));
+        uint input_2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * LORA_RANK));
+        uint input_3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * LORA_RANK));
+        uint input_4 = intel_sub_group_block_read((const __global uint*)(ptrA + 4 * LORA_RANK));
+        uint input_5 = intel_sub_group_block_read((const __global uint*)(ptrA + 5 * LORA_RANK));
+        uint input_6 = intel_sub_group_block_read((const __global uint*)(ptrA + 6 * LORA_RANK));
+        uint input_7 = intel_sub_group_block_read((const __global uint*)(ptrA + 7 * LORA_RANK));
+#else
+        ushort input_0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * LORA_RANK));
+        ushort input_1 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 1 * LORA_RANK));
+        ushort input_2 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 2 * LORA_RANK));
+        ushort input_3 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 3 * LORA_RANK));
+        ushort input_4 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 4 * LORA_RANK));
+        ushort input_5 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 5 * LORA_RANK));
+        ushort input_6 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 6 * LORA_RANK));
+        ushort input_7 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 7 * LORA_RANK));
+#endif
+
+            //__attribute__((opencl_unroll_hint))
+        for (int kk = 0; kk < SUBGROUP_SIZE; kk++) {
+
+#if STATE_TYPE_SIZE == 4
+            ACCUMULATOR_TYPE bb_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SUBGROUP_SIZE)));
+            ACCUMULATOR_TYPE bb_1 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read((const __global uint*)(ptrB + 1 * SUBGROUP_SIZE)));
+#else
+            ACCUMULATOR_TYPE bb_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read_us((const __global ushort*)(ptrB + 0 * SUBGROUP_SIZE)));
+            ACCUMULATOR_TYPE bb_1 = AS_ACCUMULATOR_TYPE(intel_sub_group_block_read_us((const __global ushort*)(ptrB + 1 * SUBGROUP_SIZE)));
+#endif
+
+#if INPUT1_TYPE_SIZE == 4
+            ACCUMULATOR_TYPE aa_0 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_0, kk));
+            ACCUMULATOR_TYPE aa_1 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_1, kk));
+            ACCUMULATOR_TYPE aa_2 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_2, kk));
+            ACCUMULATOR_TYPE aa_3 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_3, kk));
+            ACCUMULATOR_TYPE aa_4 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_4, kk));
+            ACCUMULATOR_TYPE aa_5 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_5, kk));
+            ACCUMULATOR_TYPE aa_6 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_6, kk));
+            ACCUMULATOR_TYPE aa_7 = AS_ACCUMULATOR_TYPE(sub_group_broadcast(input_7, kk));
+#else
+            ACCUMULATOR_TYPE aa_0 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_0, kk));
+            ACCUMULATOR_TYPE aa_1 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_1, kk));
+            ACCUMULATOR_TYPE aa_2 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_2, kk));
+            ACCUMULATOR_TYPE aa_3 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_3, kk));
+            ACCUMULATOR_TYPE aa_4 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_4, kk));
+            ACCUMULATOR_TYPE aa_5 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_5, kk));
+            ACCUMULATOR_TYPE aa_6 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_6, kk));
+            ACCUMULATOR_TYPE aa_7 = AS_ACCUMULATOR_TYPE(intel_sub_group_broadcast(input_7, kk));
+#endif
+
+
+
+
+            sum_0_0 = fma(aa_0, bb_0, sum_0_0);
+            sum_0_1 = fma(aa_0, bb_1, sum_0_1);
+            sum_1_0 = fma(aa_1, bb_0, sum_1_0);
+            sum_1_1 = fma(aa_1, bb_1, sum_1_1);
+            sum_2_0 = fma(aa_2, bb_0, sum_2_0);
+            sum_2_1 = fma(aa_2, bb_1, sum_2_1);
+            sum_3_0 = fma(aa_3, bb_0, sum_3_0);
+            sum_3_1 = fma(aa_3, bb_1, sum_3_1);
+            sum_4_0 = fma(aa_4, bb_0, sum_4_0);
+            sum_4_1 = fma(aa_4, bb_1, sum_4_1);
+            sum_5_0 = fma(aa_5, bb_0, sum_5_0);
+            sum_5_1 = fma(aa_5, bb_1, sum_5_1);
+            sum_6_0 = fma(aa_6, bb_0, sum_6_0);
+            sum_6_1 = fma(aa_6, bb_1, sum_6_1);
+            sum_7_0 = fma(aa_7, bb_0, sum_7_0);
+            sum_7_1 = fma(aa_7, bb_1, sum_7_1);
+
+            ptrB += N;
         }
-
-        
-        __global float *main_ptr = mainInput + m_idx * N + n_idx;
-        float main_N0 = 0;
-	float main_N1 = 0;
-        main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum0_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum0_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum1_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum1_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum2_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum2_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum3_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum3_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum4_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum4_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum5_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum5_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum6_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum6_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
-	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
-                    
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum7_0+main_N0));
-	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum7_1+main_N1));
-	main_ptr+= N;
-	ptrC += N;
-
-
+        ptrA += SUBGROUP_SIZE;
     }
+
+    __global INPUT0_TYPE *main_ptr = main_input + m_idx * N + n_idx;
+
+
+    INPUT0_TYPE main_N_0 = 0;
+    INPUT0_TYPE main_N_1 = 0;
+
+#if INPUT1_TYPE_SIZE == 4
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_0_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_0_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_1_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_1_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_2_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_2_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_3_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_3_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_4_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_4_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_5_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_5_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_6_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_6_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read((const __global uint*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 0), as_int(TO_INPUT0_TYPE(sum_7_0) + main_N_0));
+    intel_sub_group_block_write((__global uint*)(ptrC + SUBGROUP_SIZE * 1), as_int(TO_INPUT0_TYPE(sum_7_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+#else
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_0_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_0_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_1_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_1_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_2_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_2_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_3_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_3_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_4_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_4_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_5_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_5_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_6_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_6_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+
+    main_N_0 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 0)));
+    main_N_1 = AS_INPUT0_TYPE(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SUBGROUP_SIZE * 1)));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 0), as_short(TO_INPUT0_TYPE(sum_7_0) + main_N_0));
+    intel_sub_group_block_write_us((__global ushort*)(ptrC + SUBGROUP_SIZE * 1), as_short(TO_INPUT0_TYPE(sum_7_1) + main_N_1));
+    main_ptr += N;
+    ptrC += N;
+#endif
+}
+
     
     '''
+    if withscale:
+        src = src_gemma
+    elif withSum:
+        src = src_gemmb 
     return [func, src]
 
  #A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
