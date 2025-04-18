@@ -79,21 +79,23 @@ def test_lora_fused_qkv():
     }
     '''
     opt_src =  r'''
-#define MAX_GEMMA_SGK 64
-#define MAX_LORA_RANK 256
-#define MAX_GEMMA_SG_BK 64
+#define MAX_GEMMA_SGK (64/3)
+#define MAX_LORA_RANK (256*3)
+#define MAX_GEMMA_SG_BK 256
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmA(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *CC, int K) {
-        int gid0 =  get_group_id(0);
-        int gid2 =  get_group_id(2);
-        __global half *B = (gid2 == 0 ? B0 : (gid2 == 1 ? B1: B2));
-        __global half *C = (gid2 == 0 ? CC : (gid2 == 1 ? (CC + RANK): (CC + RANK * 2)));
+    __kernel void gemmA(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *C, int K) {
 
+        int gid0 =  get_group_id(0);
         int sgid = get_sub_group_id();
         // For 2nd token, rank is small. sg in one wg would be divided by 2 dimensions to increase threads number in wg.
-        int sgN = RANK / SG_SZ;
+        int sgN = RANK*3 / SG_SZ;
         int sgid_k = sgid / sgN;
         int n_idx = sgid % sgN * SG_SZ;
+        int n_off = n_idx % RANK;
+        int B_idx = n_idx / RANK;
+        __global half *B = B_idx == 0 ? B0 : ((B_idx == 1) ? B1: B2);
+        B += n_off;
+        
         int lid =  get_sub_group_local_id();
         //How many K is accumulated in the WG.
         int bk_wg = GEMMA_SGK * GEMMA_SG_BK;
@@ -121,7 +123,7 @@ def test_lora_fused_qkv():
         //The sg is needs to accumulate. Otherwise, sg not needed. sg_k diverge here.
         if (sgid_k * GEMMA_SG_BK  <  wg_k_len) {
             int klen_sg =  (k_offset + GEMMA_SG_BK) > wg_k_len ? (wg_k_len - k_offset) : GEMMA_SG_BK;
-            __global half *B_ptr = B + k_idx * RANK + n_idx;
+            __global half *B_ptr = B + k_idx * RANK;
             __local half *A_ptr = local_input + k_offset;
             half sum = 0.f;
             for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
@@ -247,8 +249,8 @@ def test_lora_fused_qkv():
     cl.profiling(True)
     REPEAT = 20
     CHECK_RES = 1
-    INPUT_STATE = 1536
-    KV_OUTPUT_STATE = 512
+    INPUT_STATE = 768
+    KV_OUTPUT_STATE = 256
     Q_OUTPUT_STATE = INPUT_STATE
     KV_GROUP_SZ = Q_OUTPUT_STATE // KV_OUTPUT_STATE
     QKV_OUTPUT_STATE = (Q_OUTPUT_STATE+KV_OUTPUT_STATE*2)
@@ -258,15 +260,15 @@ def test_lora_fused_qkv():
     K = INPUT_STATE
     SG_SZ = 16
 
-    MAX_WG_SZ = 512
-    gemma_sgK = MAX_WG_SZ//RANK
+    MAX_WG_SZ = 1024
+    gemma_sgK = MAX_WG_SZ//(RANK*3)
     gemma_sg_BK = 32
     gemma_wg_BK = gemma_sg_BK * gemma_sgK
 
     gemma_wgs = DIV_UP(INPUT_STATE, gemma_sg_BK *gemma_sgK)
     PART_NUM = DIV_UP(INPUT_STATE, gemma_sg_BK *gemma_sgK)
     
-    gemma_lws = [1 , gemma_sgK, RANK]
+    gemma_lws = [1 , gemma_sgK, RANK*3]
     gemma_gws = [gemma_wgs, gemma_sgK, RANK*3]
         
     # Run in parallel in 8 Xecores.
@@ -326,7 +328,7 @@ def test_lora_fused_qkv():
     
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
 
-
+    print(f'| [2ND_GEMMA]: GWS:{gemma_gws}, LWS:{gemma_lws} SG_BK:{gemma_sg_BK} SGK:{gemma_sgK}')
     opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={PART_NUM} -DRANK={RANK} -DKV_OUTPUT_STATE={KV_OUTPUT_STATE} -DKV_GROUP_SZ={KV_GROUP_SZ} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM} \
                                                 -DGEMMA_SGK={gemma_sgK} -DGEMMA_SG_BK={gemma_sg_BK}")
     for i in range(0, REPEAT):
