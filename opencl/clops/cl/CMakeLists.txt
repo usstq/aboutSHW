@@ -1,8 +1,15 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.23)
 
+if (WIN32)
+set(CMAKE_C_COMPILER "icx")
+set(CMAKE_CXX_COMPILER "icx")
+else()
 set(CMAKE_C_COMPILER "icx")
 set(CMAKE_CXX_COMPILER "icpx")
+endif()
+
 project(csrc)
+
 
 find_package(pybind11 REQUIRED)
 find_package(IntelSYCL REQUIRED)
@@ -10,6 +17,7 @@ find_package(IntelSYCL REQUIRED)
 FILE(GLOB CPP_SRCS ./*.cpp)
 
 pybind11_add_module(csrc ${CPP_SRCS})
+target_compile_features(csrc PRIVATE cxx_std_17)
 
 find_package(OpenMP)
 if (OPENMP_FOUND)
@@ -19,8 +27,9 @@ if (OPENMP_FOUND)
 endif()
 
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=core-avx2")
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath=/opt/intel/oneapi/compiler/latest/lib")
+#set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath=/opt/intel/oneapi/compiler/latest/lib")
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -lOpenCL")
+
 
 # EXAMPLE_VERSION_INFO is defined by setup.py and passed into the C++ code as a
 # define (VERSION_INFO) here.
@@ -30,6 +39,9 @@ target_include_directories(csrc PRIVATE ../../include)
 target_include_directories(csrc PRIVATE ${SYCL_INCLUDE_DIR})
 target_include_directories(csrc PRIVATE sycl)
 target_include_directories(csrc PRIVATE sycl/xetla)
+
+target_link_libraries(csrc PRIVATE OpenCL ${SYCL_LIBRARY})
+target_link_directories(csrc PRIVATE ${SYCL_LIBRARY_DIR})
 
 set_target_properties(csrc
     PROPERTIES

@@ -16,11 +16,18 @@ if os.name == 'nt':
 cwd = os.path.dirname(os.path.realpath(__file__))
 build_path=os.path.join(cwd, "build")
 dir_path = cwd
+
+# where can cmake find packages
+cmake_search_dir=":".join([pybind11.get_cmake_dir()])
+
+# on windows, custom compiler requires Ninja instead of VC++
+generator="-GNinja" if os.name == 'nt' else ""
+
 btype = "RelWithDebInfo"
-pybind11_dir = pybind11.get_cmake_dir()
 #btype = "Debug"
-subprocess.check_output(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={pybind11_dir}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], shell=False)
-subprocess.check_output(["cmake", "--build", build_path, "--config", btype], shell=False)
+
+subprocess.run(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={cmake_search_dir}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", generator], shell=False)
+subprocess.run(["cmake", "--build", build_path, "--config", btype], shell=False)
 
 from .csrc import *
 

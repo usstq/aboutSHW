@@ -2,12 +2,13 @@
 https://github.com/triSYCL/sycl/blob/sycl/unified/master/sycl/doc/extensions/experimental/sycl_ext_intel_esimd/sycl_ext_intel_esimd.md
 */ 
 
-#include <pybind11/numpy.h>
-#include <iostream>
+#include "common.hpp"
+
+#if __INTEL_LLVM_COMPILER < 20250100
+// after 20250100 following code cannot work
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/sycl.hpp>
 
-#include "common.hpp"
 #include "sycl/rms_kernel.hpp"
 
 using namespace sycl::ext::intel::esimd;
@@ -71,3 +72,10 @@ void init_ops(py::module_& m) {
     m.def("test_dpas", &test_dpas);
     m.def("rms", &rms);
 }
+#else
+void init_ops(py::module_& m) {
+    //m.def("test_esimd", &test_esimd);
+    //m.def("test_dpas", &test_dpas);
+    //m.def("rms", &rms);
+}
+#endif

@@ -7,7 +7,7 @@ namespace py = pybind11;
 
 #define CL_HPP_ENABLE_EXCEPTIONS
 #define CL_HPP_TARGET_OPENCL_VERSION 300
-#include <sycl/CL/opencl.h>
+#include <CL/opencl.h>
 
 #include <vector>
 #include <memory>

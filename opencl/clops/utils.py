@@ -1,5 +1,5 @@
 from clops import cl
-import torch
+# import torch
 import numpy as np
 
 class KernelCache:

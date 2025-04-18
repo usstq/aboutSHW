@@ -21,8 +21,8 @@ print(f"t.shape={t.shape}, t.numpy()=\n{t.numpy()}")
 @cl.source("-cmc -mdump_asm -g2")
 def testcm():
     return r'''
-//#include <cm/cm.h>
-//#include <cm/cmtl.h>
+#include <cm/cm.h>
+#include <cm/cmtl.h>
 
 extern "C" _GENX_MAIN_ void cm_check(svmptr_t dst) {
     //unsigned int id = cm_linear_global_id();
