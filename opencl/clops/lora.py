@@ -368,44 +368,43 @@ class LORA_1ST:
         self.input_state = input_state
         self.output_state = output_state
         self.sg_sz = 8
-        
-        assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
-        assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
-        assert output_state % self.sg_sz == 0 , f'output_state:{output_state} is not multiple of SG_SZ:{self.sg_sz}'
-        assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
-        assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
-        assert output_state >= B_regN * self.sg_sz, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
-        
-        
-        A_BM = A_regM*A_sgM
-        A_BN = A_regN*A_sgN*self.sg_sz
-        B_BM = B_regM*B_sgM
-        B_BN = B_regN*B_sgN*self.sg_sz
-        
-        
-        gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
-        gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
-        self.gemma_func = gemma_func
-        self.gemmb_func = gemmb_func
+        if use_ref == False:
+            assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
+            assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
+            assert output_state % self.sg_sz == 0 , f'output_state:{output_state} is not multiple of SG_SZ:{self.sg_sz}'
+            assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
+            assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
+            assert output_state >= B_regN * self.sg_sz, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
+            
+            
+            A_BM = A_regM*A_sgM
+            A_BN = A_regN*A_sgN*self.sg_sz
+            B_BM = B_regM*B_sgM
+            B_BN = B_regN*B_sgN*self.sg_sz
+            
+            gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
+            gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
+            self.gemma_func = gemma_func
+            self.gemmb_func = gemmb_func
 
-        self.gemma_GWS = [ALIGN_UP(batch, A_BM)//A_regM , ALIGN_UP(rank, A_BN)//(A_regN)]
-        self.gemma_LWS = [A_sgM, A_sgN * self.sg_sz]
-        assert A_sgM *A_sgN * self.sg_sz <= 1024, f" A_LWS:{self.gemma_LWS} exceed 1024 limitation"
-        
-        self.gemmb_GWS = [ALIGN_UP(batch, B_BM)//B_regM , ALIGN_UP(output_state, B_BN)//(B_regN)]
-        self.gemmb_LWS = [B_sgM, B_sgN *  self.sg_sz]
-        assert B_sgM *B_sgN *  self.sg_sz <= 1024, f" B_LWS:{self.gemmb_LWS} exceed 1024 limitation"
-        
-        self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
-        self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
-
-        self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
+            self.gemma_GWS = [ALIGN_UP(batch, A_BM)//A_regM , ALIGN_UP(rank, A_BN)//(A_regN)]
+            self.gemma_LWS = [A_sgM, A_sgN * self.sg_sz]
+            assert A_sgM *A_sgN * self.sg_sz <= 1024, f" A_LWS:{self.gemma_LWS} exceed 1024 limitation"
+            
+            self.gemmb_GWS = [ALIGN_UP(batch, B_BM)//B_regM , ALIGN_UP(output_state, B_BN)//(B_regN)]
+            self.gemmb_LWS = [B_sgM, B_sgN *  self.sg_sz]
+            assert B_sgM *B_sgN *  self.sg_sz <= 1024, f" B_LWS:{self.gemmb_LWS} exceed 1024 limitation"
+            
+            self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
+            self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
+        else:
+            self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
         self.use_ref = use_ref
         if use_ref == False:
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
             print(f'| BATCH = {batch} INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
-            print(f'[1ST_GEMMA] GWS:{self.gemma_GWS}, LWS:{self.gemma_LWS}, M:{batch}/{A_BM}, N:{rank}/{A_BN}')
-            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_GWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}')
+            print(f'[1ST_GEMMA] GWS:{self.gemma_GWS}, LWS:{self.gemma_LWS}, M:{batch}/{A_BM}, N:{rank}/{A_BN}, A_sgM={A_sgM},A_regM={A_regM},A_sgN={A_sgN},A_regN={A_regN}')
+            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_LWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}, B_sgM={B_sgM},B_regM={B_regM},B_sgN={B_sgN},B_regN={B_regN}')
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
 
@@ -420,6 +419,7 @@ class LORA_1ST:
             self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
                                         mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, self.batch)
         else:
+
             self.kernel_opt_gemma.enqueue(self.gemma_func, self.gemma_GWS, self.gemma_LWS, loraInput, stataA, Aoutput, stateAlpha, mainInput,
                                      self.batch, self.rank, self.input_state)
             self.kernel_opt_gemmb.enqueue(self.gemmb_func, self.gemmb_GWS, self.gemmb_LWS, Aoutput, stateB, result, stateAlpha, mainInput,
@@ -584,8 +584,10 @@ def blocking_1nd(batch, rank, input_state, output_state):
         A_sgM = DIV_UP(16, A_sgN)
     else:
         A_regM, A_regN = [4, 1]
-        A_sgN = rank//16//A_regN
-        A_sgM = DIV_UP(16, A_sgN)
+        A_sgN = rank//SG_SZ//A_regN
+        assert (rank//SG_SZ % A_regN) == 0
+        # A_sgM = DIV_UP(16, A_sgN)
+        A_sgM = DIV_UP(SG_SZ, A_sgN)
 # GEMMB: M < 256 regM=8, regN=2, sgM=16, sgN=4, small M() fits into
 #        M >= 256, regM=16, regN=2, sgM=8, sgN=4
     if batch < 256:
@@ -600,12 +602,18 @@ def blocking_1nd(batch, rank, input_state, output_state):
 
 if __name__ == "__main__":
 
-    test_lora_2nd(1024, 64, 256, gemma_sgK = 4,  gemma_sg_BK=32, gemmb_sgN=64 , check_acc=True)
+    batch = 32
+    input_state = 512
+    output_state = 2048
+    rank = 16
+    A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state)
+    test_lora_1st(batch, rank ,input_state,  output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                    B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 
     """
     test 1st acc:
     """
-    if 1:
+    if 0:
         for batch in range(8, 1024, 107):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for output_state_idx in range(256//16, 1024//16):
