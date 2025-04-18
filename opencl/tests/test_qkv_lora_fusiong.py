@@ -14,7 +14,7 @@ def DIV_UP(a, b):
     return ((a + (b -1)) // b)
 
 
-def test_lora_fused_qkv():
+def test_lora_fused_qkv(input_state, kv_state, rank):
     reference =  r'''
     __kernel void reduceA(__global half * temp_C, __global half *C, int N, int cnt) {
         int n_idx = get_global_id(0);
@@ -80,7 +80,8 @@ def test_lora_fused_qkv():
     '''
     opt_src =  r'''
 #define MAX_GEMMA_SGK (64/3)
-#define MAX_LORA_RANK (256*3)
+#define MAX_LORA_RANK (256)
+#define MAX_N (MAX_LORA_RANK * 3)
 #define MAX_GEMMA_SG_BK 256
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemmA(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *C, int K) {
@@ -104,8 +105,8 @@ def test_lora_fused_qkv():
         int sgK = (wg_k_len + GEMMA_SG_BK - 1) / GEMMA_SG_BK;
 
         // store each sg accumulation result into SLM. Will reduce sg result into wg result. 
-        __local half fma_buff[MAX_GEMMA_SGK * MAX_LORA_RANK];
-        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_LORA_RANK;
+        __local half fma_buff[MAX_GEMMA_SGK * MAX_N];
+        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_N;
 
         //put all need input activation into SLM. 'sgN' sgs would share same input.
         __local half local_input[MAX_GEMMA_SGK * MAX_GEMMA_SG_BK];
@@ -148,92 +149,72 @@ def test_lora_fused_qkv():
             //unroll
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < GEMMA_SGK; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
+                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_N + n_idx)));
             }
         } else {
             //can't unroll, tail handling
             for (int i = 0;  i < sgK; i++)
-            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_LORA_RANK + n_idx)));
+            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_N + n_idx)));
         }
         intel_sub_group_block_write_us((const __global ushort*)(C_ptr + n_idx), as_short(sum));
     }
 
 
+
+#if 1
+
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmB(__global half * main_input, __global half * input_ptr,  __global half *BQ, __global half *BK,__global half *BV, __global half *CC, __global half * alpha, int A_stride) {
+    __kernel void gemmB(__global half * main_input, __global half *A,  __global half *B0, __global half *B1,__global half *B2,  __global half *C, __global half * alpha, int N) {
         int wg_id = get_group_id(0);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
-        int sg_idx = wg_id * sg_num  +  sg_id;
+        int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
         int id_sg_local = get_sub_group_local_id();
-#if GEMMB_USE_SLM
-        __local half reduce[RANK];
-#else
-        half reduce[RANK] = {0.f};
-#endif
-
-        // Default A, B for Q projection
-        __global half *A_ptr = input_ptr;
-        __global half *B_ptr = BQ + sg_idx * SG_SZ;
-        int B_stride = KV_OUTPUT_STATE * KV_GROUP_SZ;
-        half* sub_alpha = alpha;
-
-        if (sg_idx >= KV_OUTPUT_STATE * (KV_GROUP_SZ + 1) / SG_SZ) {
+        __local half reduce[MAX_N];
+        int slm_offset = 0;
+        __global half *B_ptr = B0 + n_idx;
+        int B_stride = N0;
+        if (n_idx >= (N0 + N1_2)) {
             // V projection
-            A_ptr += RANK * 2;
-            B_ptr = BV + sg_idx * SG_SZ - KV_OUTPUT_STATE * (KV_GROUP_SZ + 1);
-            B_stride = KV_OUTPUT_STATE;
-            sub_alpha = alpha + RANK * 2;
-        } else if (sg_idx >=KV_OUTPUT_STATE * KV_GROUP_SZ / SG_SZ) {
+            B_ptr = B2 + n_idx - N0 - N1_2;
+            B_stride = N1_2;
+            alpha +=  RANK * 2;
+            slm_offset = RANK *2;
+        } else if (n_idx >= N0) {
             // K projection
-            A_ptr += RANK;
-            B_ptr = BK + sg_idx * SG_SZ - KV_OUTPUT_STATE * KV_GROUP_SZ;
-            B_stride = KV_OUTPUT_STATE;
-            sub_alpha = alpha + RANK * 1;
+            B_ptr = B1 + n_idx - N0;
+            B_stride = N1_2;
+            alpha += RANK;
+            slm_offset = RANK;
         }
-
+    
         //1. Reduce
-#if GEMMB_USE_SLM
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
-        // Q, K, V has its separate input activation(let us call input_Q, input_K, input_V) and weight(BQ, BK, BV).
-        // We must ensure Q, K, V subgroups can't be mixed inot same WG. See  `GEMMB_USE_SLM` initializing check.
         int local_sz = get_local_size(0);
-        //sg would diverge here. not all the sgs can satisfy 'offset < RANK'.
-        __attribute__((opencl_unroll_hint))
-        for (int offset = sg_id * SG_SZ; offset < RANK; offset += local_sz) {
-            __global half *subA_ptr = A_ptr + offset;
+        for (int offset = sg_id * SG_SZ; offset < MAX_N; offset += local_sz) {
+            __global half *A_ptr = A + offset;
             half sum = 0.f;
             __attribute__((opencl_unroll_hint))
-            for (int part_idx = 0; part_idx < PART_NUM; part_idx++) {
-                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)subA_ptr));
+            for (int part_idx = 0; part_idx < GEMMB_PART_NUM; part_idx++) {
+                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)A_ptr));
                 sum += partial_val;
-                subA_ptr += A_stride;
+                A_ptr += RANK*3;
             }
             reduce[offset + id_sg_local] = sum;
-
         }
         barrier(CLK_LOCAL_MEM_FENCE);
-#else
-        //Each work item would reduce the input activation.
-        for (int i = 0; i < PART_NUM; i++) {
-            __attribute__((opencl_unroll_hint))
-            for (int j = 0; j < RANK; j++) {
-                reduce[j] += A_ptr[i * A_stride + j];
-            }
-        }
-#endif
+
+        if (n_idx >= N)
+            return;
         //2.  GEMMB
-        __global half *C_ptr = CC + sg_idx * SG_SZ;
-        __global half *main_input_ptr = main_input + sg_idx * SG_SZ;
-        half m_input = as_half(intel_sub_group_block_read_us((const __global ushort*)main_input_ptr));
+        __global half *C_ptr = C + n_idx;
+        __local half* reduce_ptr = reduce + slm_offset;
         half sum = 0;
+        __attribute__((opencl_unroll_hint))
         for (int kk = 0; kk < RANK; kk += SG_SZ) {
-            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(sub_alpha + kk)));
-#if GEMMB_USE_SLM
-            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce + kk)));
-#else
-            half input = reduce[id_sg_local + kk];
-#endif
+            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + kk)));
+            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce_ptr + kk)));
+
             input *= scale;
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
@@ -243,18 +224,23 @@ def test_lora_fused_qkv():
                 B_ptr += B_stride;
             }
         }
+        __global half *main_input_ptr = main_input + n_idx;
+        half m_input = as_half(intel_sub_group_block_read_us((const __global ushort*)main_input_ptr));
         intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum+m_input));
     }
+
+#else
+ 
+#endif
     '''
     cl.profiling(True)
     REPEAT = 20
     CHECK_RES = 1
-    INPUT_STATE = 768
-    KV_OUTPUT_STATE = 256
+    INPUT_STATE = input_state
+    KV_OUTPUT_STATE = kv_state
     Q_OUTPUT_STATE = INPUT_STATE
-    KV_GROUP_SZ = Q_OUTPUT_STATE // KV_OUTPUT_STATE
     QKV_OUTPUT_STATE = (Q_OUTPUT_STATE+KV_OUTPUT_STATE*2)
-    RANK = 64
+    RANK = rank
     batch = 1
     N = RANK * 3
     K = INPUT_STATE
@@ -264,26 +250,23 @@ def test_lora_fused_qkv():
     gemma_sgK = MAX_WG_SZ//(RANK*3)
     gemma_sg_BK = 32
     gemma_wg_BK = gemma_sg_BK * gemma_sgK
-
     gemma_wgs = DIV_UP(INPUT_STATE, gemma_sg_BK *gemma_sgK)
     PART_NUM = DIV_UP(INPUT_STATE, gemma_sg_BK *gemma_sgK)
-    
     gemma_lws = [1 , gemma_sgK, RANK*3]
     gemma_gws = [gemma_wgs, gemma_sgK, RANK*3]
-        
+    
+    gemmb_sgN = MAX_WG_SZ//SG_SZ
+    gemmb_wg_sz = gemmb_sgN * SG_SZ
+    gemmb_lws = [gemmb_wg_sz]
+    gemmb_gws = [ALIGN_UP(QKV_OUTPUT_STATE, gemmb_wg_sz)]
+
     # Run in parallel in 8 Xecores.
     # RANK and input hidden_size should be multiple of subgroup_size
     assert RANK % SG_SZ == 0 and RANK//SG_SZ >= 1, f"'Rank'  {RANK} is not multiple of SG_SIZE {SG_SZ}"
     assert K % SG_SZ == 0, f"'hidden_size' {K} is not multiple of SG_SIZE {SG_SZ}"
 
     USE_RANDINT = 0
-    # gemmb used 8 EUs per Xecore to balance the workload between Xecores(3, 4, 7, 8 Xecores can has)
-    GEMMB_LOCAL_SIZE = 128
-    assert (QKV_OUTPUT_STATE) % GEMMB_LOCAL_SIZE == 0, f"GEMMB: 'global size' {(QKV_OUTPUT_STATE)} is not multiple of 'local size' {GEMMB_LOCAL_SIZE}"
 
-    # Each Xecore should share the same [1,RANK] input for gemmB.If  KV_OUTPUT_STATE % GEMMB_LOCAL_SIZE, means  Xecore  would use 2 different inputs(such as `RANK` input elements across input_Q and input_K).
-    GEMMB_USE_SLM = 1 if KV_OUTPUT_STATE % GEMMB_LOCAL_SIZE == 0 else 0
-    GEMMA_USE_SLM = 1
     # np.random.seed(0)
     if USE_RANDINT:
         vRANGE = 2
@@ -328,12 +311,18 @@ def test_lora_fused_qkv():
     
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
 
+    print(f'----------------------------------------------------------------------------------------------------------------------------------')
+    print(f'| BATCH = 1 Q_STATE:{input_state}, RANK:{rank}, KV_STATE:{kv_state}:')
     print(f'| [2ND_GEMMA]: GWS:{gemma_gws}, LWS:{gemma_lws} SG_BK:{gemma_sg_BK} SGK:{gemma_sgK}')
-    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DPART_NUM={PART_NUM} -DRANK={RANK} -DKV_OUTPUT_STATE={KV_OUTPUT_STATE} -DKV_GROUP_SZ={KV_GROUP_SZ} -DGEMMB_USE_SLM={GEMMB_USE_SLM} -DGEMMA_USE_SLM={GEMMA_USE_SLM} \
-                                                -DGEMMA_SGK={gemma_sgK} -DGEMMA_SG_BK={gemma_sg_BK}")
+    print(f'| [2ND_GEMMB]: GWS:{gemmb_lws}, LWS:{gemmb_lws} SGN:{gemmb_sgN}')
+    print(f'----------------------------------------------------------------------------------------------------------------------------------')
+
+    opt_kernel = kernel_cache(opt_src, options=f"-DSG_SZ={SG_SZ} -DGEMMB_PART_NUM={PART_NUM} -DRANK={RANK} -DN1_2={KV_OUTPUT_STATE} -DN0={Q_OUTPUT_STATE}\
+                                -DGEMMA_SGK={gemma_sgK} -DGEMMA_SG_BK={gemma_sg_BK}")
+
     for i in range(0, REPEAT):
-        opt_kernel.enqueue("gemmA", gemma_gws, gemma_lws, loraInput_list[i], stateA0_list[i], stateA1_list[i], stateA2_list[i], outputA_list[i], INPUT_STATE)    
-        opt_kernel.enqueue("gemmB", [QKV_OUTPUT_STATE],[GEMMB_LOCAL_SIZE], mainInput_list[i], outputA_list[i],  stateB0_list[i], stateB1_list[i], stateB2_list[i], outputB_list[i], alpha_list[i], N)
+        opt_kernel.enqueue("gemmA", gemma_gws, gemma_lws, loraInput_list[i], stateA0_list[i], stateA1_list[i], stateA2_list[i], outputA_list[i], INPUT_STATE)
+        opt_kernel.enqueue("gemmB", gemmb_gws ,gemmb_lws, mainInput_list[i], outputA_list[i],  stateB0_list[i], stateB1_list[i], stateB2_list[i], outputB_list[i], alpha_list[i], QKV_OUTPUT_STATE)
     print(cl.finish())
     if CHECK_RES:
         tOutputA_Ref = cl.tensor([1, RANK*3], np.dtype(np.float16))
@@ -343,12 +332,19 @@ def test_lora_fused_qkv():
         ref_ker = kernel_cache(reference, options=f"-DN_0={Q_OUTPUT_STATE} -DN_1_2={KV_OUTPUT_STATE}")
         # Each WG would update `RANK` columns. 3 WGs needed.
         ref_ker.enqueue("gemmA", [batch, N],[1, RANK], loraInput_list[0], tWeiA, tOutputA_Ref, N, K, gemma_wg_BK, 1)
-        # Each WG would update `KV_OUTPUT_STATE` columns. (KV_GROUP_SZ + 2) WGs needed.
         ref_ker.enqueue("gemmB", [batch, QKV_OUTPUT_STATE],[1, min(QKV_OUTPUT_STATE, 1024)], mainInput_list[0], tOutputA_Ref, stateB0_list[0], stateB1_list[0], stateB2_list[0], tOutputB_Ref, alpha_list[0], RANK)
         compare(tOutputB_Ref.numpy(), outputB_list[0].numpy())
         print(" ACC OK!")
 
 
 cl.profiling(True)
-test_lora_fused_qkv()
+
+test_lora_fused_qkv(1536, 256, 64)
+for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+    for rank in (16, 32, 64, 128, 256):
+        test_lora_fused_qkv(input_state, input_state, rank)
+        for kv_groups in (3, 4, 5, 6, 7, 8, 9):
+            if input_state % kv_groups == 0 and input_state//kv_groups%16 == 0:
+                test_lora_fused_qkv(input_state, input_state//kv_groups, rank)
+
 print("-------------------------")
