@@ -316,13 +316,14 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    ''' + f'{func}' + r'''(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
+    gemmA_rM4_rN1(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
         int sgM = get_local_size(0);
         int sgid_N = sgid % sgN;
         int sgid_M = sgid / sgN;
-        ''' + f'int regM = {regM};\nint regN = {regN};' + r'''
+        int regM = 4;
+int regN = 1;
         int BM = regM * sgM;
         int BN = get_local_size(1) * regN;
         int m_idx = get_group_id(0) * BM  + sgid_M * regM;
@@ -337,25 +338,215 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
         __global float *ptrB = B + n_idx;
         __global float *ptrC = C + m_idx * N + n_idx;
 
-        '''  + "\n\t ".join([f"float sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
+        float sum0_0 = 0;
+	 float sum1_0 = 0;
+	 float sum2_0 = 0;
+	 float sum3_0 = 0;;
 
         for(int i = 0; i < K; i += SG_SZ) {
                 
-                '''  + "\n\t\t ".join([f"uint input{m} = intel_sub_group_block_read((const __global uint*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
+                uint input0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * K));
+		 uint input1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * K));
+		 uint input2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * K));
+		 uint input3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * K));
 
                 //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
             
-                     '''  + "\n\t\t\t ".join([f"float bb{n} = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"float aa{m} = as_float(sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
-                     ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
+                     float bb0 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SG_SZ)));
+                     float aa0 = as_float(sub_group_broadcast(input0, kk));
+			 float aa1 = as_float(sub_group_broadcast(input1, kk));
+			 float aa2 = as_float(sub_group_broadcast(input2, kk));
+			 float aa3 = as_float(sub_group_broadcast(input3, kk));
+                     sum0_0 = fma(aa0, bb0, sum0_0);
+			sum1_0 = fma(aa1, bb0, sum1_0);
+			sum2_0 = fma(aa2, bb0, sum2_0);
+			sum3_0 = fma(aa3, bb0, sum3_0);
                     ptrB += N;
                 }
                 ptrA +=SG_SZ;
         }
 
-        ''' +  generate_store_C(regM, regN, withscale, withSum) + r'''
+        
+        __global float *alpha_ptr = alpha + n_idx;
+        float alpha_0 = as_float(intel_sub_group_block_read((const __global uint*)(alpha_ptr + SG_SZ * 0)));
+        
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum0_0*alpha_0));
+	ptrC += N;
+
+
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum1_0*alpha_0));
+	ptrC += N;
+
+
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum2_0*alpha_0));
+	ptrC += N;
+
+
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum3_0*alpha_0));
+	ptrC += N;
+
+
     }
+    
+
+    __attribute__((intel_reqd_sub_group_size(SG_SZ)))
+    __kernel void 
+    gemmB_rM8_rN2(__global float * A, __global float *B,  __global float *C, __global float *alpha,  __global float *mainInput, int M, int N, int K) {
+        int sgid = get_sub_group_id();
+        int sgN = get_local_size(1) / SG_SZ;
+        int sgM = get_local_size(0);
+        int sgid_N = sgid % sgN;
+        int sgid_M = sgid / sgN;
+        int regM = 8;
+int regN = 2;
+        int BM = regM * sgM;
+        int BN = get_local_size(1) * regN;
+        int m_idx = get_group_id(0) * BM  + sgid_M * regM;
+        int n_idx = get_group_id(1) * BN  + sgid_N * SG_SZ * regN;
+        if (m_idx >= M || n_idx >=N )
+            return;
+        if (m_idx + regM > M)
+            m_idx = M - regM;
+        if (n_idx + regN * SG_SZ > N)
+            n_idx = N - regN * SG_SZ;
+        __global float *ptrA = A + m_idx * K;
+        __global float *ptrB = B + n_idx;
+        __global float *ptrC = C + m_idx * N + n_idx;
+
+        float sum0_0 = 0;
+	 float sum0_1 = 0;
+	 float sum1_0 = 0;
+	 float sum1_1 = 0;
+	 float sum2_0 = 0;
+	 float sum2_1 = 0;
+	 float sum3_0 = 0;
+	 float sum3_1 = 0;
+	 float sum4_0 = 0;
+	 float sum4_1 = 0;
+	 float sum5_0 = 0;
+	 float sum5_1 = 0;
+	 float sum6_0 = 0;
+	 float sum6_1 = 0;
+	 float sum7_0 = 0;
+	 float sum7_1 = 0;;
+
+        for(int i = 0; i < K; i += SG_SZ) {
+                
+                uint input0 = intel_sub_group_block_read((const __global uint*)(ptrA + 0 * K));
+		 uint input1 = intel_sub_group_block_read((const __global uint*)(ptrA + 1 * K));
+		 uint input2 = intel_sub_group_block_read((const __global uint*)(ptrA + 2 * K));
+		 uint input3 = intel_sub_group_block_read((const __global uint*)(ptrA + 3 * K));
+		 uint input4 = intel_sub_group_block_read((const __global uint*)(ptrA + 4 * K));
+		 uint input5 = intel_sub_group_block_read((const __global uint*)(ptrA + 5 * K));
+		 uint input6 = intel_sub_group_block_read((const __global uint*)(ptrA + 6 * K));
+		 uint input7 = intel_sub_group_block_read((const __global uint*)(ptrA + 7 * K));
+
+                //__attribute__((opencl_unroll_hint))
+                for (int kk = 0; kk < SG_SZ; kk++) {
+            
+                     float bb0 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 0 * SG_SZ)));
+			 float bb1 = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + 1 * SG_SZ)));
+                     float aa0 = as_float(sub_group_broadcast(input0, kk));
+			 float aa1 = as_float(sub_group_broadcast(input1, kk));
+			 float aa2 = as_float(sub_group_broadcast(input2, kk));
+			 float aa3 = as_float(sub_group_broadcast(input3, kk));
+			 float aa4 = as_float(sub_group_broadcast(input4, kk));
+			 float aa5 = as_float(sub_group_broadcast(input5, kk));
+			 float aa6 = as_float(sub_group_broadcast(input6, kk));
+			 float aa7 = as_float(sub_group_broadcast(input7, kk));
+                     sum0_0 = fma(aa0, bb0, sum0_0);
+			sum0_1 = fma(aa0, bb1, sum0_1);
+			sum1_0 = fma(aa1, bb0, sum1_0);
+			sum1_1 = fma(aa1, bb1, sum1_1);
+			sum2_0 = fma(aa2, bb0, sum2_0);
+			sum2_1 = fma(aa2, bb1, sum2_1);
+			sum3_0 = fma(aa3, bb0, sum3_0);
+			sum3_1 = fma(aa3, bb1, sum3_1);
+			sum4_0 = fma(aa4, bb0, sum4_0);
+			sum4_1 = fma(aa4, bb1, sum4_1);
+			sum5_0 = fma(aa5, bb0, sum5_0);
+			sum5_1 = fma(aa5, bb1, sum5_1);
+			sum6_0 = fma(aa6, bb0, sum6_0);
+			sum6_1 = fma(aa6, bb1, sum6_1);
+			sum7_0 = fma(aa7, bb0, sum7_0);
+			sum7_1 = fma(aa7, bb1, sum7_1);
+                    ptrB += N;
+                }
+                ptrA +=SG_SZ;
+        }
+
+        
+        __global float *main_ptr = mainInput + m_idx * N + n_idx;
+        float main_N0 = 0;
+	float main_N1 = 0;
+        main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum0_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum0_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum1_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum1_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum2_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum2_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum3_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum3_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum4_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum4_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum5_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum5_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum6_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum6_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+main_N0 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 0)));
+	main_N1 = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * 1)));
+                    
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 0), as_int(sum7_0+main_N0));
+	intel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * 1), as_int(sum7_1+main_N1));
+	main_ptr+= N;
+	ptrC += N;
+
+
+    }
+    
     '''
     return [func, src]
 
@@ -386,6 +577,8 @@ class LORA_1ST:
             gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
             self.gemma_func = gemma_func
             self.gemmb_func = gemmb_func
+            print(gemma_kernel_src)
+            print(gemmb_kernel_src)
 
             self.gemma_GWS = [ALIGN_UP(batch, A_BM)//A_regM , ALIGN_UP(rank, A_BN)//(A_regN)]
             self.gemma_LWS = [A_sgM, A_sgN * self.sg_sz]
