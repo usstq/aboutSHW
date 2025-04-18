@@ -9,7 +9,8 @@ if os.name == 'nt':
     '''
     for path in ["C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
                  "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin"]:
+                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
+                 "C:\\Program Files (x86)\\Intel\\oneAPI\\dnnl\\latest\\bin"]:
         if os.path.exists(path):
             os.add_dll_directory(path)
 
@@ -26,8 +27,18 @@ generator="-GNinja" if os.name == 'nt' else ""
 btype = "RelWithDebInfo"
 #btype = "Debug"
 
-subprocess.run(["cmake", "-B", build_path , "-S", dir_path, f"-DCMAKE_BUILD_TYPE={btype}", "-Wno-dev", f"-DCMAKE_PREFIX_PATH={cmake_search_dir}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", generator], shell=False)
-subprocess.run(["cmake", "--build", build_path, "--config", btype], shell=False)
+cmake_need_config = not os.path.isfile(os.path.join(build_path, "CMakeCache.txt")) or int(os.environ.get("DO_CMAKE", "0"))
+
+if cmake_need_config:
+    subprocess.run(["cmake", "-B", build_path ,
+                    "-S", dir_path,
+                    f"-DCMAKE_BUILD_TYPE={btype}",
+                    "-Wno-dev",
+                    f"-DCMAKE_PREFIX_PATH={cmake_search_dir}",
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                    generator], shell=False, check=True)
+
+subprocess.run(["cmake", "--build", build_path, "--config", btype], shell=False, check=True)
 
 from .csrc import *
 
