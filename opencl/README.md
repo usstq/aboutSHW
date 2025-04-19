@@ -11,7 +11,7 @@ some highlights in the design:
 ```bash
 # need intel compiler to work
 # win32
-call C:\Program Files (x86)\Intel\oneAPI\setvars.bat
+call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
 # linux
 source /opt/intel/oneapi/setvars.sh 
 

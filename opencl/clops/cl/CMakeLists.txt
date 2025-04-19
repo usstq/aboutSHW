@@ -52,8 +52,8 @@ target_include_directories(csrc PRIVATE ${SYCL_INCLUDE_DIR})
 target_include_directories(csrc PRIVATE sycl)
 target_include_directories(csrc PRIVATE sycl/xetla)
 
-target_link_libraries(csrc PRIVATE OpenCL ${SYCL_LIBRARY})
-target_link_directories(csrc PRIVATE ${SYCL_LIBRARY_DIR})
+target_link_libraries(csrc PRIVATE OpenCL IntelSYCL::SYCL_CXX)
+# target_link_directories(csrc PRIVATE ${SYCL_LIBRARY_DIR})
 
 set_target_properties(csrc
     PROPERTIES
@@ -64,3 +64,7 @@ set_target_properties(csrc
 
 target_compile_definitions(csrc
                            PRIVATE PACKAGE_NAME=csrc)
+
+# try to install oneapi dependencies: not working
+install(TARGETS csrc LIBRARY DESTINATION lib)
+install(IMPORTED_RUNTIME_ARTIFACTS DNNL::dnnl DESTINATION lib)
