@@ -443,7 +443,7 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     else:
         REPEAT = 200
     # for GEMMA, K decides how many WGs are needed.
-    gemma_wgs = ALIGN_UP(input_state, gemma_sg_BK *gemma_sgK)
+    gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
     alpha = np.random.rand(rank).astype(np.float16)
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
