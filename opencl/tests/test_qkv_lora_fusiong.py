@@ -329,7 +329,7 @@ def test_lora_fused_qkv(input_state, kv_state, rank):
         print(" ACC OK!")
 
 cl.profiling(True)
-test_lora_fused_qkv(1536, 128, 64)
+# test_lora_fused_qkv(1536, 128, 64)
 # test_lora_fused_qkv(1536, 256, 64)
 # for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
 #     for rank in (16, 32, 64, 128, 256):
@@ -628,7 +628,7 @@ def test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK = 8, gemma_sg_BK = 
     if check_acc:
         REPEAT = 1
     else:
-        REPEAT = 50
+        REPEAT = 200
     np.random.seed(0)
 
     # for GEMMA, K decides how many WGs are needed.
@@ -715,17 +715,24 @@ cl.profiling(True)
 # gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
 # test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
 
-test_lora_fused_qkv(1536, 256, 64)
-for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-    for rank in (16, 32, 64, 128, 256):
-        kv_state = input_state
-        gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
-        test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
-        for kv_groups in (3, 4, 5, 6, 7, 8, 9):
-            if input_state % kv_groups == 0 and input_state//kv_groups%16 == 0:
-                kv_state = input_state // kv_groups
-                gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
-                test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
-
+#2nd acc
+if 0:
+    for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
+        for rank in (16, 32, 64, 128, 256):
+            kv_state = input_state
+            gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
+            test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+            for kv_groups in (3, 4, 5, 6, 7, 8, 9):
+                if input_state % kv_groups == 0 and input_state//kv_groups%16 == 0:
+                    kv_state = input_state // kv_groups
+                    gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
+                    test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+#2nd perf based on qwen QKV,
+if 1:
+    rank=64
+    input_state=1536
+    kv_state=256
+    gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, input_state+2*kv_state)
+    test_lora_qkv_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
 
 print("-------------------------")
