@@ -81,6 +81,10 @@ struct tensor {
         return reinterpret_cast<int8_t*>(p_buff.get()) + offset;
     }
 
+    uintptr_t addr() const {
+        return reinterpret_cast<uintptr_t>(p_buff.get()) + offset;
+    }
+
     void set_offset(int off) {
         offset = off;
     }

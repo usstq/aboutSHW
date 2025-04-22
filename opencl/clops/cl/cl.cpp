@@ -61,11 +61,13 @@ static sycl::queue update_queue(bool enable_profile = false) {
         std::cout << "opencl_gpu_selector: "
                   << (d.is_cpu() ? "[CPU]" : "")
                   << (d.is_gpu() ? "[GPU]" : "")
-                  << d.get_info<sycl::info::device::name>() << std::endl;
+                  << d.get_info<sycl::info::device::name>();
         if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
+            std::cout << "<====" << std::endl;
             return 1;
         }
-        return -1;
+        std::cout << std::endl;
+        return 0;
     };
 
     if (enable_profile) {
@@ -501,6 +503,7 @@ PYBIND11_MODULE(csrc, m) {
         .def(py::init<const py::array&>())
         .def(py::init<const std::vector<cl_uint>&, py::dtype>())
         .def("numpy", &tensor::to_numpy)
+        .def_property_readonly("addr", &tensor::addr)
         .def_property("offset", &tensor::get_offset, &tensor::set_offset)
         .def_property_readonly("shape", &tensor::get_shape)
         .def_property_readonly("numel", &tensor::get_numel)
