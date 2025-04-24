@@ -7,10 +7,13 @@ if os.name == 'nt':
     since python is packaged apps, PATH is not searched when loading DLL (the pybind11 part).
     we have to explicitly add following path for using SYCL/DPC++
     '''
-    for path in ["C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
-                 "C:\\Program Files (x86)\\Intel\\oneAPI\\dnnl\\latest\\bin"]:
+    for path in [#"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
+                 #"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
+                 #"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
+                 r"C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\bin",
+                 r"C:\Program Files (x86)\Common Files\intel\Shared Libraries\bin"
+                 #'C:\\Program Files (x86)\\Intel\\oneAPI\\tbb\\latest\\bin'
+                ]:
         if os.path.exists(path):
             os.add_dll_directory(path)
 
@@ -55,3 +58,68 @@ def source(options=""):
         src = "\n"*(line_no + 1) + f()
         return kernels(src, options)
     return _cl_kernel
+
+
+import json
+class ChromeTraceDumpper:
+    def __init__(self, filename):
+        self.filename = filename
+
+    def __enter__(self):
+        self.f = open(self.filename, 'w')
+        self.f.write('''{"schemaVersion" : 1, "traceEvents" : [\n''')
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.f.write(json.dumps({
+            "name" : "Profiler End",
+            "ph" : "i",
+            "s" : "g",
+            "pid" : "Traces",
+            "tid" : "Trace OV Profiler",
+            "ts" : 0
+        }))
+        self.f.write("\n]}")
+        self.f.close()
+        print(f"[ChromeTraceDumpper]: {self.filename} is dumpped!")
+
+    def phb(self, name, cat, _id, pid, tid, begin_us, end_us, args = None):
+        # name + cat + id is the unique key to match phb with phe
+        ph_begin = {
+            "ph" : "b",
+            "cat" : cat,
+            "name" : name,
+            "id" : _id,
+            "pid" : pid,
+            "tid" : tid,
+            "ts" : begin_us,
+        }
+        if args:
+            ph_begin["args"] = args
+        ph_end = {
+            "ph" : "e",
+            "cat" : cat,
+            "name" : name,
+            "id" : _id,
+            "pid" : pid,
+            "tid" : tid,
+            "ts" : end_us
+        }
+        self.f.write(json.dumps(ph_begin))
+        self.f.write(",\n")
+        self.f.write(json.dumps(ph_end))
+        self.f.write(",\n")
+    def phX(self, name, cat, pid, tid, begin_us, end_us, args = None):
+        phX = {
+            "ph" : "X",
+            "name" : name,
+            "cat" : cat,
+            "pid" : pid,
+            "tid" : tid,
+            "ts" : begin_us,
+            "dur" : end_us - begin_us
+        }
+        if args:
+            phX["args"] = args
+        self.f.write(json.dumps(phX))
+        self.f.write(",\n")
