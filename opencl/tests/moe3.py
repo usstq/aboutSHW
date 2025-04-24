@@ -48,20 +48,19 @@ typedef half fp16;
 #endif
 
 
-constexpr int QK = 32; // compatible
-constexpr int SBS = 8; // compatible
+constexpr int QK = 128; // compatible
+constexpr int SBS = 2; // compatible
 constexpr int BLOCK_SIZE = QK / 2;
 constexpr int SCALE_SIZE = sizeof(fp16);
 #define NUM_EXPERTS             8
-#define NUM_MOE_MLP_LAYER       128
 
 inline auto load_qblocks(const uint8_t* weight, const uint8_t* scale)
 {
-    vector<uint8_t, BLOCK_SIZE* SBS> ybytes;
+    vector<uint8_t, BLOCK_SIZE* SBS> ybytes;   //128bytes
     ybytes.format<int>() = LSC_LOAD_0(int, (BLOCK_SIZE * SBS / 4))((int*)weight, 0);
 
-    vector<fp16, SBS> scales;
-    scales.format<int>() = LSC_LOAD_0(int, (SBS / 2))((int*)scale, 0);
+    vector<fp16, SBS> scales; 
+    scales.format<int>() = LSC_LOAD_0(int, (SBS / 2))((int*)scale, 0); //4 bytes 2x scale
     //vector<fp16, SBS> scales = LSC_LOAD(fp16, SBS, Cached, Cached)((fp16*)scale, 0);  compiler error
 
 
@@ -80,8 +79,8 @@ inline auto load_qblocks(const uint8_t* weight, const uint8_t* scale)
 
 inline auto load_qblock(const uint8_t* weight, const uint8_t* scale) {
     vector<uint8_t, BLOCK_SIZE> ybytes;
-    ybytes.format<int>() = LSC_LOAD_0(int, (BLOCK_SIZE / 4))((int*)weight, 0);
-    fp16 scales = *(const fp16*)scale;
+    ybytes.format<int>() = LSC_LOAD_0(int, (BLOCK_SIZE / 4))((int*)weight, 0); //read 64 bytes
+    fp16 scales = *(const fp16*)scale;      // 1x scale
 
     vector<uint8_t, QK> uyv;
     // uyv.select<QK / 2, 1>(0) = ybytes & (uint8_t)0xF;
@@ -92,6 +91,160 @@ inline auto load_qblock(const uint8_t* weight, const uint8_t* scale) {
 
     return yv;
 }
+#if 0
+template <typename IT, const int VS, const int GS, const int ES>
+_GENX_MAIN_ void moe_forward_up_kernel(
+    BUFFERINDEX(input),
+    BUFFERINDEX(indexs),
+    BUFFERINDEX(gate_addrs),
+    BUFFERINDEX(up_addrs),
+    BUFFERINDEX(gate_scales_addrs),
+    BUFFERINDEX(up_scales_addrs),
+    BUFFERINDEX(output),
+    const int num_experts,
+    const int state_size,
+    const int output_size
+) {
+    cm_slm_init(2 * GS * VS * sizeof(float));
+    uint slmX = cm_slm_alloc(2 * GS * VS * sizeof(float));
+
+    const int nb = state_size / QK;
+    const int nsb = nb / SBS;
+
+    const int eid = cm_group_id(0) * cm_local_size(0) + cm_local_id(0);
+    const int tid = cm_local_id(1);
+    const int vid = cm_group_id(1) * VS;
+
+    //64bit index
+    //vector<int, NUM_EXPERTS*2> indexs_vec = LSC_LOAD_0(int, NUM_EXPERTS * 2)(indexs, 0);
+    //int index = indexs_vec.format<unsigned long long>()[eid];
+
+    //32bit index
+    vector<int, NUM_EXPERTS> indexs_vec = LSC_LOAD_0(int, NUM_EXPERTS)(indexs, 0);
+    int index = indexs_vec[eid];
+
+    int g_offset = index / 8;
+    int l_offset = index % 8;
+    vector<int, 16> gpu_gate_addr = LSC_LOAD_0(int, 16)(gate_addrs, g_offset * 64);     //8  * 16
+    const uint8_t* weight1 = (uint8_t*)gpu_gate_addr.format<unsigned long long>()[l_offset];
+
+    vector<int, 16> gpu_up_addr = LSC_LOAD_0(int, 16)(up_addrs, g_offset * 64);     //8  * 16
+    const uint8_t* weight2 = (uint8_t*)gpu_up_addr.format<unsigned long long>()[l_offset];
+
+    vector<int, 16> gpu_gate_scales_addr = LSC_LOAD_0(int, 16)(gate_scales_addrs, g_offset * 64);     //8  * 16
+    const uint8_t* scales1 = (uint8_t*)gpu_gate_scales_addr.format<unsigned long long>()[l_offset];
+
+    vector<int, 16> gpu_up_scales_addr = LSC_LOAD_0(int, 16)(up_scales_addrs, g_offset * 64);     //8  * 16
+    const uint8_t* scales2 = (uint8_t*)gpu_up_scales_addr.format<unsigned long long>()[l_offset];
+
+
+    const uint8_t* weight1_base = weight1 + nb * BLOCK_SIZE * vid;
+    const uint8_t* scale1_base = scales1 + nb * SCALE_SIZE * vid;
+    const uint8_t* weight2_base = weight2 + nb * BLOCK_SIZE * vid;
+    const uint8_t* scale2_base = scales2 + nb * SCALE_SIZE * vid;
+
+    vector<IT, VS* ES> accvs1{};
+    vector<IT, VS* ES> accvs2{};
+
+    for (int s = tid; s < nsb; s += GS) {
+        vector<IT, SBS* QK> xvs;   //512 bytes
+        xvs.format<int>().select<64, 1>(0) = LSC_LOAD_0(int, (SBS * QK / 4))((int*)input, s * SBS * QK * sizeof(IT));
+        xvs.format<int>().select<64, 1>(64) = LSC_LOAD_0(int, (SBS * QK / 4))((int*)input, s * SBS * QK * sizeof(IT) + 256);
+
+#pragma unroll
+        for (int v = 0; v < VS; ++v) {
+            vector<fp16, SBS* QK> yvs1 = load_qblocks(
+                weight1_base + v * nb * BLOCK_SIZE + s * SBS * BLOCK_SIZE,
+                scale1_base + v * nb * SCALE_SIZE + s * SBS * SCALE_SIZE
+            );
+
+#pragma unroll
+            for (int i = 0; i < SBS * QK; i += ES) {
+                accvs1.template select<ES, 1>(v * ES) +=
+                    xvs.template select<ES, 1>(i) * yvs1.template select<ES, 1>(i);
+            }
+
+            vector<fp16, SBS* QK> yvs2 = load_qblocks(
+                weight2_base + v * nb * BLOCK_SIZE + s * SBS * BLOCK_SIZE,
+                scale2_base + v * nb * SCALE_SIZE + s * SBS * SCALE_SIZE
+            );
+
+#pragma unroll
+            for (int i = 0; i < SBS * QK; i += ES) {
+                accvs2.template select<ES, 1>(v * ES) +=
+                    xvs.template select<ES, 1>(i) *
+                    yvs2.template select<ES, 1>(i);
+            }
+        }
+    }
+
+    for (int b = nsb * SBS + tid; b < nb; b += GS) {
+        vector<IT, QK> xv;  //256 bytes
+        xv.format<int>() = LSC_LOAD_0(int, (QK / 2))((int*)input, b * QK * sizeof(IT));
+
+#pragma unroll
+        for (int v = 0; v < VS; ++v) {
+            vector<fp16, QK> yv1 = load_qblock(
+                weight1_base + v * nb * BLOCK_SIZE + b * BLOCK_SIZE,
+                scale1_base + v * nb * SCALE_SIZE + b * SCALE_SIZE
+            );
+
+#pragma unroll
+            for (int i = 0; i < QK; i += ES) {
+                accvs1.template select<ES, 1>(v * ES) +=
+                    xv.template select<ES, 1>(i) *
+                    yv1.template select<ES, 1>(i);
+            }
+
+            vector<fp16, QK> yv2 = load_qblock(
+                weight2_base + v * nb * BLOCK_SIZE + b * BLOCK_SIZE,
+                scale2_base + v * nb * SCALE_SIZE + b * SCALE_SIZE
+            );
+
+#pragma unroll
+            for (int i = 0; i < QK; i += ES) {
+                accvs2.template select<ES, 1>(v * ES) +=
+                    xv.template select<ES, 1>(i) *
+                    yv2.template select<ES, 1>(i);
+            }
+        }
+    }
+
+    vector<float, VS> accs1;
+    vector<float, VS> accs2;
+#pragma unroll
+    for (int v = 0; v < VS; ++v) {
+        accs1[v] = cm_sum<float>(accvs1.template select<ES, 1>(v * ES));
+        accs2[v] = cm_sum<float>(accvs2.template select<ES, 1>(v * ES));
+    }
+
+    cm_slm_block_write<float, VS >(slmX, tid * VS * sizeof(float), accs1);
+    cm_slm_block_write<float, VS >(slmX, tid * VS * sizeof(float) + GS * VS * sizeof(float), accs2);
+
+    cm_slm_fence(0x20);
+    cm_barrier();
+
+    if (tid == 0) {
+#pragma unroll
+        for (int i = 1; i < GS; ++i) {
+            vector<float, VS> accs1_slm;
+            cm_slm_block_read<float, VS>(slmX, GENX_DWALIGNED, i * VS * sizeof(float), accs1_slm);
+            accs1 += accs1_slm;
+        }
+
+#pragma unroll
+        for (int i = 1; i < GS; ++i) {
+            vector<float, VS> accs2_slm;
+            cm_slm_block_read<float, VS>(slmX, GENX_DWALIGNED, i * VS * sizeof(float) + GS * VS * sizeof(float), accs2_slm);
+            accs2 += accs2_slm;
+        }
+
+        vector<IT, VS> result = accs1 / (1 + cm_pow(2.718281828459f, -accs1)) * accs2;
+
+        LSC_STORE(int, VS/2, WriteBack, WriteBack)((int*)output, (eid * output_size + vid) * sizeof(IT), result.format<int>());//fp16
+    }
+}
+#endif
 template <typename IT, const int VS, const int GS, const int ES>
 void moe_forward_down_kernel(
     BUFFERINDEX(input),
@@ -115,8 +268,12 @@ void moe_forward_down_kernel(
     const int tid = cm_local_id(1);
     const int vid = cm_group_id(1) * VS;
 
-    vector<int, NUM_EXPERTS * 2> indexs_vec = LSC_LOAD_0(int, NUM_EXPERTS * 2)(indexs, 0);
-    int index = indexs_vec.format<unsigned long long>()[eid];
+    //vector<int, NUM_EXPERTS * 2> indexs_vec = LSC_LOAD_0(int, NUM_EXPERTS * 2)(indexs, 0);
+    //int index = indexs_vec.format<unsigned long long>()[eid];
+
+    //32bit index
+    vector<int, NUM_EXPERTS> indexs_vec = LSC_LOAD_0(int, NUM_EXPERTS)(indexs, 0);
+    int index = indexs_vec[eid];
 
     vector<IT, NUM_EXPERTS> eweights_vec;
     eweights_vec.format<int>() = LSC_LOAD_0(int, 4)(eweights, 0);   //8 fp16
@@ -131,7 +288,6 @@ void moe_forward_down_kernel(
     const uint8_t* scales = (const uint8_t*)gpu_down_scales_addr.format<unsigned long long>()[l_offset];
 
 
-    //const IT* input = static_cast<const IT*>(input_ptr) + eid * state_size;
     int input_base_offset = eid * state_size * sizeof(IT);
 
     const uint8_t* weight_base = weight + nb * BLOCK_SIZE * vid;
@@ -140,8 +296,7 @@ void moe_forward_down_kernel(
     vector<IT, VS* ES> accvs{};
 
     for (int s = tid; s < nsb; s += GS) {
-        //8x32 fp16
-        vector<IT, SBS* QK> xvs;
+        vector<IT, SBS* QK> xvs;      //512 bytes
         xvs.format<int>().select<64, 1>(0) = LSC_LOAD_0(int, (SBS * QK / 4))((int*)input, input_base_offset + s * SBS * QK * sizeof(IT));
         xvs.format<int>().select<64, 1>(64) = LSC_LOAD_0(int, (SBS * QK / 4))((int*)input, input_base_offset + s * SBS * QK * sizeof(IT) + 256);
 
@@ -162,7 +317,7 @@ void moe_forward_down_kernel(
     }
 
     for (int b = nsb * SBS + tid; b < nb; b += GS) {
-        vector<IT, QK> xv;
+        vector<IT, QK> xv;   //256bytes
         xv.format<int>() = LSC_LOAD_0(int, (QK / 2))((int*)input, input_base_offset + b * QK * sizeof(IT));
 
 #pragma unroll
@@ -203,32 +358,6 @@ void moe_forward_down_kernel(
         vector<IT, VS> accs_fp16 = accs * eweight;
         LSC_STORE(int, VS/2, WriteBack, WriteBack)((int*)output, (eid * output_size + vid) * sizeof(IT), accs_fp16.format<int>());//fp16
     }
-}
-
-_GENX_MAIN_ void moe_up_kernel(
-    int* input, 			// shape: f16[1, 2048]
-    int* indexs,			// shape: u64[8] ??? i32
-    int* gate_addrs,		// shape: u64[128]
-    int* up_addrs,			// shape: u64[128]
-    int* gate_scales_addrs,	// shape: f16[768, 2048/32=64] 
-    int* up_scales_addrs,	// shape: f16[768, 2048/32=64]
-    int* output,			// shape: f16[8, 1, 768]
-    const int num_experts,
-    const int state_size,     // 2048
-    const int output_size) {  // 768
-#if 0
-    moe_forward_up_kernel<fp16, 2U, 4U, 32U>(
-    input, 			// shape: f16[1, 2048]
-    indexs,			// shape: u64[8] ??? i32
-    gate_addrs,		// shape: u64[128]
-    up_addrs,			// shape: u64[128]
-    gate_scales_addrs,	// shape: f16[768, 2048/32=64] 
-    up_scales_addrs,	// shape: f16[768, 2048/32=64]
-    output,			// shape: f16[8, 1, 768]
-    num_experts,
-    state_size,     // 2048
-    output_size);   // 768
-    #endif
 }
 
 _GENX_MAIN_ void moe_down_kernel(
@@ -272,7 +401,7 @@ N_BLOCK = SUBGROUP_NUM
 N_LAYERS = 100 # 24*8
 
 import sys
-K_group_size = 32
+K_group_size = 128
 
 N_EXPERTS = 8
 kernel_name = "mlp_down_n2" #sys.argv[1]
@@ -343,7 +472,7 @@ localV = 4
 globalSize = [groupH * localH, groupV * localV]
 localSize = [localH, localV]
 all_index = []
-index_np = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.uint64)
+index_np = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.uint32)
 for i in range(N_LAYERS):
     all_index.append(cl.tensor(index_np + i*8))
 
