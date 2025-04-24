@@ -48,7 +48,6 @@ from .csrc import *
 '''
 decorator for CM code:
     options="-cmc -mdump_asm -g2"
-
 '''
 def source(options=""):
     import inspect
@@ -59,7 +58,13 @@ def source(options=""):
         return kernels(src, options)
     return _cl_kernel
 
+# ================================================================
+# Boilerplate
+import numpy as np
+np.random.seed(0)
+np.set_printoptions(linewidth=1024)
 
+# ================================================================
 import json
 class ChromeTraceDumpper:
     def __init__(self, filename):
@@ -123,3 +128,92 @@ class ChromeTraceDumpper:
             phX["args"] = args
         self.f.write(json.dumps(phX))
         self.f.write(",\n")
+
+class SGTracer:
+    code = r'''
+        ulong __attribute__((overloadable)) intel_get_cycle_counter( void );
+        uint __attribute__((overloadable)) intel_get_active_channel_mask( void);
+        uint __attribute__((overloadable)) intel_get_hw_thread_id( void );
+        uint __attribute__((overloadable)) intel_get_slice_id( void );
+        uint __attribute__((overloadable)) intel_get_dual_subslice_id( void );
+        uint __attribute__((overloadable)) intel_get_subslice_id( void );
+        uint __attribute__((overloadable)) intel_get_eu_id( void );
+        uint __attribute__((overloadable)) intel_get_eu_thread_id( void );
+        void __attribute__((overloadable)) intel_eu_thread_pause( uint value );
+
+        inline void SGTracer_begin(__global ulong** psg_info) {
+            if (*psg_info && get_sub_group_local_id() == 0) {
+                uint wg_id = get_group_id(0) + (get_group_id(1) + get_group_id(2)*get_num_groups(1)) * get_num_groups(0);
+                uint sg_id = wg_id * get_num_sub_groups() + get_sub_group_id();
+                *psg_info += sg_id * 3;
+
+                uint hw_tid = intel_get_hw_thread_id();
+                uint slice_id = intel_get_slice_id();
+                uint sub_slice_id = intel_get_subslice_id();
+                uint eu_id = intel_get_eu_id();
+                uint eu_tid = intel_get_eu_thread_id();
+                ulong geuid = (slice_id & 0xF);               // Render-Slice
+                geuid = (geuid << 4) | (sub_slice_id & 0xF); // xe-core
+                geuid = (geuid << 4) | (eu_id & 0xF);
+                geuid = (geuid << 4) | (eu_tid & 0xF);
+                geuid = (geuid << 32) | (wg_id);
+
+                (*psg_info)[0] = geuid;
+                (*psg_info)[1] = intel_get_cycle_counter();
+            }
+        }
+        inline void SGTracer_end(__global ulong** psg_info) {
+            if (*psg_info && get_sub_group_local_id() == 0) {
+                (*psg_info)[2] = intel_get_cycle_counter();
+            }
+        }
+    '''
+
+    @classmethod
+    def dump(cls, sg_info, json_file_name = "ocl.json"):
+        with ChromeTraceDumpper(json_file_name) as ctd:
+            #ctd.phb("name","cat", 1, "100", "1", 0, 1000, {"EV": 1.78, "xxx":"hwllo"})
+            #ctd.phb("name","cat", 2, "100", "1", 100, 1200)
+            #ctd.phX("name","catXXX", "100", "1", 100, 1200)
+            ts_base = sg_info[:,1].min()
+            sg_info[:,1:] -= ts_base
+
+            for sg_id in range(sg_info.shape[0]):
+                loc = int(sg_info[sg_id,0])
+                wg_id = loc & 0xFFFFFFFF; loc = loc >> 32
+                eu_tid = loc & 0xF; loc = loc >> 4
+                eu_id  = loc & 0xF; loc = loc >> 4
+                sub_slice_id  = loc & 0xF; loc = loc >> 4
+                slice_id  = loc & 0xF; loc = loc >> 4
+
+                cycle_start = sg_info[sg_id,1]
+                cycle_end = sg_info[sg_id,2]
+                if 0:
+                    ctd.phb(name = f"{wg_id}",
+                            cat = f"{wg_id}",
+                            pid = f"SubSlice:{slice_id}.{sub_slice_id}",
+                            tid = f"EU-thread:{eu_id}.{eu_tid}",
+                            begin_us = float(cycle_start)/1e3,
+                            end_us = float(cycle_end)/1e3,
+                            args = {
+                                "cycle_start":int(cycle_start),
+                                "cycle_end":int(cycle_end),
+                                "loc" : f"{slice_id}.{sub_slice_id}.{eu_id}.{eu_tid}",
+                                "work-group":wg_id,
+                                "sub-group" : sg_id
+                            })
+                else:
+                    ctd.phX(name = f"{wg_id}",
+                            cat = f"{wg_id}",
+                            pid = f"SubSlice:{slice_id}.{sub_slice_id}.{eu_id}",
+                            tid = f"EU-thread:{eu_tid}",
+                            begin_us = float(cycle_start)/1e3,
+                            end_us = float(cycle_end)/1e3,
+                            args = {
+                                "cycle_start":int(cycle_start),
+                                "cycle_end":int(cycle_end),
+                                "loc" : f"{slice_id}.{sub_slice_id}.{eu_id}.{eu_tid}",
+                                "work-group":wg_id,
+                                "sub-group" : sg_id
+                            })
+

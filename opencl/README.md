@@ -9,6 +9,14 @@ some highlights in the design:
  - shottened the distance between network-description & implementation optimization
 
 ```bash
+
+# install cm-compiler
+sudo apt-get install -y gpg-agent wget
+wget -qO - https://repositories.intel.com/graphics/intel-graphics.key |  sudo apt-key add -
+sudo apt-add-repository 'deb [arch=amd64] https://repositories.intel.com/graphics/ubuntu focal main'
+sudo apt update
+sudo apt install intel-igc-cm
+
 # need intel compiler to work
 # win32
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
@@ -32,7 +40,7 @@ git clone https://github.com/intel/vc-intrinsics.git llvm-project/llvm/projects/
 git clone https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git -b llvm_release_110 llvm-project/llvm/projects/SPIRV-LLVM-Translator
 mkdir build && cd build
 cmake -DLLVM_ENABLE_Z3_SOLVER=OFF -DCLANG_ANALYZER_ENABLE_Z3_SOLVER=OFF -DCMAKE_INSTALL_PREFIX=../install -DLLVM_ENABLE_PROJECTS="clang" -DLLVM_TARGETS_TO_BUILD="" ../llvm-project/llvm
-make install
+make install -j8
 
 # CM_FE_DIR must contains libclangFEWrapper.so
 $ CM_FE_DIR=/path/to/install/lib/ python ./tests/test_cm.py
