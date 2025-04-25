@@ -179,7 +179,7 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
     return [func, src]
 
 gemma_kernel_src=r'''
-   __kernel void  gemmA_rM8_rN2(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
+   __kernel void  gemmA_rM8_rN2(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K, int rank) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
         int sgM = get_local_size(0);
@@ -200,13 +200,13 @@ gemma_kernel_src=r'''
         __global half *ptrA = A + m_idx * K;
         __global half *ptrB = B0 + n_idx;
 
-        if (n_idx >= RANK*2) {
+        if (n_idx >= rank*2) {
             // V projection
-            ptrB = B2 + n_idx-RANK*2;
+            ptrB = B2 + n_idx-rank*2;
 
-        } else if (n_idx >= RANK) {
+        } else if (n_idx >= rank) {
             // K projection
-            ptrB = B1 + n_idx-RANK;
+            ptrB = B1 + n_idx-rank;
 
         }
         __global half *ptrC = C + m_idx * N + n_idx;
@@ -268,7 +268,7 @@ gemma_kernel_src=r'''
 			sum6_1 = fma(aa6, bb1, sum6_1);
 			sum7_0 = fma(aa7, bb0, sum7_0);
 			sum7_1 = fma(aa7, bb1, sum7_1);
-                    ptrB += RANK;
+                    ptrB += rank;
                 }
                 ptrA +=SG_SZ;
         }
@@ -322,7 +322,7 @@ gemma_kernel_src=r'''
 gemmb_kernel_src=r'''
   __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void 
-    gemmB_rM16_rN2(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
+    gemmB_rM16_rN2(__global half * A,  __global half *B0, __global half *B1, __global half *B2,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
         int sgM = get_local_size(0);
@@ -340,10 +340,25 @@ int regN = 2;
             m_idx = M - regM;
         if (n_idx + regN * SG_SZ > N)
             n_idx = N - regN * SG_SZ;
-        __global half *ptrA = A + m_idx * K;
-        __global half *ptrB = B + n_idx;
+        int strideA = K*3;
         __global half *ptrC = C + m_idx * N + n_idx;
+        __global half *ptrA = A + m_idx * strideA;
+        __global half *ptrB = B0 + n_idx;
+        int strideB = N0;
 
+        if (n_idx >= (N0 + N1_2)) {
+            // V projection
+            ptrB = B2 + n_idx - N0 - N1_2;
+            strideB = N1_2;
+            ptrA += K*2;
+
+        } else if (n_idx >= N0) {
+            // K projection
+            ptrB = B1 + n_idx - N0;
+            strideB = N1_2;
+            ptrA += K;
+        }
+        
         half sum0_0 = 0;
 	 half sum0_1 = 0;
 	 half sum1_0 = 0;
@@ -380,21 +395,21 @@ int regN = 2;
         for(int i = 0; i < K; i += SG_SZ) {
                 
                 ushort input0 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 0 * K));
-		 ushort input1 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 1 * K));
-		 ushort input2 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 2 * K));
-		 ushort input3 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 3 * K));
-		 ushort input4 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 4 * K));
-		 ushort input5 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 5 * K));
-		 ushort input6 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 6 * K));
-		 ushort input7 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 7 * K));
-		 ushort input8 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 8 * K));
-		 ushort input9 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 9 * K));
-		 ushort input10 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 10 * K));
-		 ushort input11 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 11 * K));
-		 ushort input12 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 12 * K));
-		 ushort input13 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 13 * K));
-		 ushort input14 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 14 * K));
-		 ushort input15 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 15 * K));
+		 ushort input1 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 1 * strideA));
+		 ushort input2 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 2 * strideA));
+		 ushort input3 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 3 * strideA));
+		 ushort input4 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 4 * strideA));
+		 ushort input5 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 5 * strideA));
+		 ushort input6 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 6 * strideA));
+		 ushort input7 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 7 * strideA));
+		 ushort input8 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 8 * strideA));
+		 ushort input9 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 9 * strideA));
+		 ushort input10 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 10 * strideA));
+		 ushort input11 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 11 * strideA));
+		 ushort input12 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 12 * strideA));
+		 ushort input13 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 13 * strideA));
+		 ushort input14 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 14 * strideA));
+		 ushort input15 = intel_sub_group_block_read_us((const __global ushort*)(ptrA + 15 * strideA));
 
                 //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
@@ -449,7 +464,7 @@ int regN = 2;
 			sum14_1 = fma(aa14, bb1, sum14_1);
 			sum15_0 = fma(aa15, bb0, sum15_0);
 			sum15_1 = fma(aa15, bb1, sum15_1);
-                    ptrB += N;
+                    ptrB += strideB;
                 }
                 ptrA +=SG_SZ;
         }
@@ -636,7 +651,7 @@ class LORA_1ST:
             self.tA_output_ref = cl.tensor([batch, self.rank*3], np.dtype(np.float16))
 
         else:
-            self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz} -DRANK={self.rank}")
+            self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
             self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz} -DN0={self.q_state} -DN1_2={self.kv_state}")
 
         self.use_ref = use_ref
@@ -644,7 +659,7 @@ class LORA_1ST:
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
             print(f'| BATCH = {batch} Q_STATE:{input_state}, KV_STATE:{kv_state}, RANK:{rank}:')
             print(f'[1ST_GEMMA] GWS:{self.gemma_GWS}, LWS:{self.gemma_LWS}, M:{batch}/{A_BM}, N:{rank}/{A_BN}, SGM:{A_sgM} SGN:{A_sgN} REGM:{A_regM} REGN:{A_regN}')
-            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_GWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}')
+            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_GWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}, SGM:{B_sgM} SGN:{B_sgN} REGM:{B_regM} REGN:{B_regN}')
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
 
@@ -655,19 +670,19 @@ class LORA_1ST:
             self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank*3],[1, self.rank], loraInput, stateA,
                                         self.tA_output_ref, stateAlpha, self.rank*3, self.input_state, 1, self.batch)
             # REF_LOCAL_SIZE = 16
-            # self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.input_state + 2*self.kv_state],[1, min(self.input_state + 2*self.kv_state, 1024)],
-            #                             mainInput, tA_output_ref, stateB0, stateB1, stateB2, result, stateAlpha, self.rank)
+            self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.input_state + 2*self.kv_state],[1, min(self.qkv_state, 1024)],
+                                        mainInput, self.tA_output_ref, stateB0, stateB1, stateB2, result, stateAlpha, self.rank)
             return self.tA_output_ref
 
         else:
             # GEMMA: ONE WG would has {self.gemma_sgK*self.rank/SG_SZ}subgroups. self.rank/SG_SZ subgroups on N dimension, self.gemma_sgK on K dimension
             # Total {self.gemma_wg} WGS
             self.kernel_opt_gemma.enqueue("gemmA_rM8_rN2", self.gemma_GWS, self.gemma_LWS, 
-                                        loraInput, stateA0, stateA1, stateA2, Aoutput, stateAlpha, mainInput,self.batch, self.rank*3, self.input_state)
+                                        loraInput, stateA0, stateA1, stateA2, Aoutput, stateAlpha, mainInput,self.batch, self.rank*3, self.input_state, self.rank)
             # GEMMB: ONE WG would has {gemmb_wg_sz/SG_SZ}subgroups.
             # Total {(self.q_state+2*self.kv_state)/gemmb_wg_sz} WGS
-            # self.kernel_opt_gemmb.enqueue("gemmB", self.gemmb_gws, self.gemmb_lws, 
-            #                             mainInput, Aoutput, stateB0, stateB1, stateB2, result, stateAlpha, self.q_state+2*self.kv_state)
+            self.kernel_opt_gemmb.enqueue("gemmB_rM16_rN2", self.gemmb_GWS, self.gemmb_LWS, 
+                                          Aoutput, stateB0, stateB1, stateB2, result, stateAlpha, mainInput, self.batch, self.qkv_state, self.rank)
             return Aoutput
 
         # print("======================opt:")
@@ -717,7 +732,7 @@ def test_lora_1st(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM, A_
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
     res_list = [cl.tensor([batch, qkv_state], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref_list = [cl.tensor([batch, qkv_state], np.dtype(np.float16))for _ in range(REPEAT)]
+    ref_result = cl.tensor([batch, qkv_state], np.dtype(np.float16))
 
 
     ref = LORA_1ST(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,True)
@@ -726,12 +741,12 @@ def test_lora_1st(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM, A_
     
     if check_acc:
         tmp_opt=opt(mainInput_list[0], loraInput_list[0], stateA0_list[0], stateA1_list[0], stateA2_list[0], None, alpha_list[0], stateB0_list[0], stateB1_list[0], stateB2_list[0], A_output_list[0], res_list[0])
-        print(cl.finish())
-        tmp_ref=ref(mainInput_list[0], loraInput_list[0], None, None, None, stateA_list[0], alpha_list[0], stateB0_list[0], stateB1_list[0], stateB2_list[0], A_output_list[0], ref_list[0])
+        # print(cl.finish())
+        tmp_ref=ref(mainInput_list[0], loraInput_list[0], None, None, None, stateA_list[0], alpha_list[0], stateB0_list[0], stateB1_list[0], stateB2_list[0], A_output_list[0], ref_result)
         cl.finish()
         compare(tmp_ref.numpy(), tmp_opt.numpy())
 
-        #compare(ref_list[0].numpy(), res_list[0].numpy())
+        compare(ref_result.numpy(), res_list[0].numpy())
         print(f'BATCH:{batch} INPUT_STATE:{input_state}, RANK:{rank}, KV_STATE:{kv_state} ACC PASS!')
     else:
         for i in range(0, REPEAT):
@@ -771,7 +786,7 @@ def blocking_1nd(batch, rank, input_state, kvstate):
         if rank == 64:
             A_regM, A_regN = [8, 2]
         elif rank == 128 or rank == 256:
-            A_regM, A_regN = [16, 2]
+            A_regM, A_regN = [8, 2]
         else:
             A_regM, A_regN = [4, 1]
         A_sgN = rank*3//(sg_sz*A_regN)
@@ -791,14 +806,14 @@ def blocking_1nd(batch, rank, input_state, kvstate):
         B_sgM, B_sgN = [8, 4]
     ##one SG calculation can't cross Q,K,V should only one of Q,K,V . For both GEMMA and GEMMB.
     assert (rank%(sg_sz*A_regN)) == 0
-    assert kvstate %(B_regN*sg_sz) == 0
+    assert kvstate %(B_regN*sg_sz) == 0, f'kvstate:{kvstate}, B_regN:{B_regN}'
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 cl.profiling(True)
 
-A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(3172, 64, 1536, 1536)
-test_lora_1st(3172, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                    B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+# A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(3172, 64, 1536, 1536)
+# test_lora_1st(3172, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+#                     B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 
 # test_lora_1st(3180, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
 #                     B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
@@ -806,4 +821,17 @@ test_lora_1st(3172, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM
 # test_lora_1st(3172, 64, 1536, 512, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
 #                     B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 
+for batch in range(2054, 2077):              
+    for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*32, 11*32, 13*32, 15*32, 12*32,17*32):
+        for rank in (32, 64, 128, 256):
+            kv_state = input_state
+            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, kv_state)
+            test_lora_1st(batch, rank, input_state, kv_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                        B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+            for kv_groups in (3, 4, 5, 6, 7, 8, 9):
+                if (input_state % kv_groups == 0) and ((input_state//kv_groups)%32 == 0):
+                    kv_state = input_state // kv_groups
+                    A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, kv_state)
+                    test_lora_1st(batch, rank, input_state, kv_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                        B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
 print("-------------------------")
