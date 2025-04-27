@@ -54,7 +54,7 @@ extern "C" _GENX_MAIN_ void mlp_down_n2(
     cm_barrier();
 
     //# INTERMEDIATE_SIZE/GROUP_SIZE < 64
-    vector<float, INTERMEDIATE_SIZE/GROUP_SIZE> xsum;
+    vector<float, K_GROUPS_PAD> xsum;
     cm_slm_block_read(slmXSUM, GENX_DWALIGNED, 0, xsum);
 
     int wid = (cm_global_id(0) + base_id) * 3;
@@ -71,17 +71,36 @@ extern "C" _GENX_MAIN_ void mlp_down_n2(
 
         vector<float, SIMDW> sum0 = 0;
         vector<float, SIMDW> sum1 = 0;
+#if SZ_LAYOUT == 1
+        const __global half* S = scales + n*K/GROUP_SIZE;
+        const __global uchar* Z = zps + n*K/GROUP_SIZE/2;
+
+        vector<half, K_GROUPS_PAD> v_scales0;
+        vector<half, K_GROUPS_PAD> v_scales1;
+        vector<half, K_GROUPS_PAD> v_zpcomp0;
+        vector<half, K_GROUPS_PAD> v_zpcomp1;
+        
+        cm_svm_block_read((svmptr_t)S, v_scales0);
+        cm_svm_block_read((svmptr_t)S + K/GROUP_SIZE, v_scales1);
+        {
+            vector<uint8_t, K_GROUPS_PAD> v_zp;
+            cm_svm_block_read((svmptr_t)Z, v_zp);
+            v_zpcomp0 = v_zp & 0xF;
+            v_zpcomp1 = v_zp >> 4;
+            v_zpcomp0 *= xsum;
+            v_zpcomp1 *= xsum;
+        }
+        for (int gk = 0; gk < K / GROUP_SIZE; gk++) {
+#else
         auto S = scales + n;
         auto Z = zps + n / 2;
-        float sumzp0 = 0;
-        float sumzp1 = 0;
         for (int gk = 0; gk < K / GROUP_SIZE; gk++, S += N, Z += N / 2) {
             half s0 = S[0];
             half s1 = S[1];
             uint8_t z = Z[0];
             uint8_t z0 = (z & 0xf);
             uint8_t z1 = (z >> 4);
-
+#endif
             vector<half, SIMDW*2> a;
             vector<uint8_t, SIMDW> bi40;
             vector<uint8_t, SIMDW> bi41;
@@ -109,8 +128,13 @@ extern "C" _GENX_MAIN_ void mlp_down_n2(
                 sum_p1 += (a.select<SIMDW, 1>(0) * bi41_even.format<int8_t>() +
                            a.select<SIMDW, 1>(SIMDW) * bi41_odd.format<int8_t>());
             }
+#if SZ_LAYOUT == 1
+            sum0 += (sum_p0 - v_zpcomp0[gk]) * v_scales0[gk];
+            sum1 += (sum_p1 - v_zpcomp1[gk]) * v_scales1[gk];
+#else
             sum0 += (sum_p0 - xsum[gk]*z0)*s0;
             sum1 += (sum_p1 - xsum[gk]*z1)*s1;
+#endif
         }
         ((__global half*)y)[n] = cm_sum<float>(sum0);
         ((__global half*)y)[n+1] = cm_sum<float>(sum1);
@@ -127,10 +151,11 @@ WG_THREADS_NUM = 8
 N_BLOCK = 16
 N_EXPERTS = 8
 N_LAYERS = 24*4
-SZ_LAYOUT = 0
+SZ_LAYOUT = 1
 PERF_TEST_ROUNDS = N_LAYERS
 kernel_name = "mlp_down_n2" #sys.argv[1]
-
+K_GROUPS_PAD = K // GROUP_SIZE
+K_GROUPS_PAD = (K_GROUPS_PAD + 8 - 1) // 8 * 8
 M = 1
 
 A = np.random.randint(-1,2,[M, K]).astype(np.float16)
@@ -150,7 +175,8 @@ class WeightQ4A:
         self.raw_weight_q = np.random.randint(0,3,[K, N]).astype(np.int8)
         self.raw_weight_s = np.random.randint(-4,5,[self.K_groups, N]).astype(np.float16)/32
         self.raw_weight_z = np.random.randint(0,3,[self.K_groups, N]).astype(np.int8)
-        #self.raw_weight_z *= 0
+        self.raw_weight_s = self.raw_weight_s*0 + 1
+        self.raw_weight_z *= 0
         
         self.weight = (self.raw_weight_q.astype(np.float32) - self.raw_weight_z.astype(np.float32).repeat(K_group_size, axis=0)) * self.raw_weight_s.repeat(K_group_size, axis=0)
         # [N, K]
@@ -175,6 +201,7 @@ class WeightQ4A:
     def relayout_sz(sz):
         if SZ_LAYOUT == 0:
             return sz
+        return sz.transpose().copy()
         k_groups, N = sz.shape
         assert N % 2 == 0
         new_sz = np.zeros([N//2, k_groups*2], sz.dtype)
@@ -217,7 +244,8 @@ ocl_kernels = cl.kernels(mlp_sources,
                               -D INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} \
                               -D HIDDEN_SIZE={HIDDEN_SIZE} \
                               -D MAX_TOPK={MAX_TOPK} \
-                              -D SZ_LAYOUT={SZ_LAYOUT}", "./dump")
+                              -D SZ_LAYOUT={SZ_LAYOUT} \
+                              -D K_GROUPS_PAD={K_GROUPS_PAD}", "./dump")
 
 # WG_THREADS_NUM threads run as a work-group
 # each HW thread do N_BLOCK columns of work 
@@ -248,13 +276,13 @@ print(f"{sg_info.shape[0]} sub-groups   [{N_EXPERTS=}, {N//N_BLOCK}],[1, {WG_THR
 
 C1 = tC.numpy()
 if not np.allclose(C, C1):
-    print(f'{C=}\n')
-    print(f'{C1=}')
+    print(f'{C[0,:16]}')
+    print(f'{C1[0,:16]}')
     #print(f'{C.shape=} {C1.shape=}')
     #sys.exit(0)
     print("================ ERROR ==================" , M, K, N)
 else:
-    print(f'{C=}\n')
-    print(f'{C1=}')
+    #print(f'{C=}\n')
+    #print(f'{C1=}')
     print("================ PASSED ==================" , M, K, N)
-print(f"INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} HIDDEN_SIZE={HIDDEN_SIZE}")
+print(f"{K=} {N=} {GROUP_SIZE=} {K_GROUPS_PAD=}")
