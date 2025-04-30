@@ -32,6 +32,7 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -lOpenCL")
 
 ############# onednn ##################
 if(DEFINED ENV{OV_DNNL_PATH})
+    message("++++++++++ $ENV{OV_DNNL_PATH} ++++++++++++++++ ")
     add_library(onednn_gpu STATIC IMPORTED) # or STATIC instead of SHARED
     set_target_properties(onednn_gpu PROPERTIES
         IMPORTED_LOCATION "$ENV{OV_DNNL_PATH}lib/libopenvino_onednn_gpu.a"
@@ -39,7 +40,8 @@ if(DEFINED ENV{OV_DNNL_PATH})
     )
     target_link_libraries(csrc PRIVATE onednn_gpu)
 else()
-    find_package(DNNL REQUIRED)
+    message(WARNING "onednn from OneAPI release may cause segmentfault due to ext_oneapi_get_state, using OV GPU plugin builds w/o DNNL_WITH_SYCL please (OV_DNNL_PATH)")
+    find_package(DNNL REQUIRED) 
     target_link_libraries(csrc PRIVATE DNNL::dnnl)
 endif()
 
@@ -66,5 +68,8 @@ target_compile_definitions(csrc
                            PRIVATE PACKAGE_NAME=csrc)
 
 # try to install oneapi dependencies: not working
+if(DEFINED ENV{OV_DNNL_PATH})
+else()
 install(TARGETS csrc LIBRARY DESTINATION lib)
 install(IMPORTED_RUNTIME_ARTIFACTS DNNL::dnnl DESTINATION lib)
+endif()
