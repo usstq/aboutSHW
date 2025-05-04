@@ -4,7 +4,7 @@ https://github.com/triSYCL/sycl/blob/sycl/unified/master/sycl/doc/extensions/exp
 
 #include "common.hpp"
 
-#if __INTEL_LLVM_COMPILER < 20250100
+#if defined(SYCL_LANGUAGE_VERSION) &&  (__INTEL_LLVM_COMPILER < 20250100)
 // after 20250100 following code cannot work
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/sycl.hpp>

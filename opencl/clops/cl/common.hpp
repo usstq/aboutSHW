@@ -13,6 +13,7 @@ namespace py = pybind11;
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <iostream>
 
 #ifndef ASSERT
 
@@ -39,6 +40,238 @@ void _write_all(std::ostream& os, TS&&... args) {
             throw std::runtime_error(ss.str());                                             \
         }
 
+#endif
+
+
+#ifdef SYCL_LANGUAGE_VERSION
+#include <sycl/sycl.hpp>
+using namespace sycl;
+struct ocl_queue {
+    cl_context context;
+    cl_device_id device;
+    cl_command_queue queue;
+
+    sycl::queue sycl_queue;
+    
+    std::vector<std::variant<cl_event, sycl::event>> events;
+    bool enable_profile;
+
+    ocl_queue() {
+        update_queue(false);
+    }
+
+    std::vector<uint64_t> finish() {
+        sycl_queue.wait();
+        // return all event time-stamps
+        std::vector<uint64_t> ret;
+        if (enable_profile) {
+            for (auto& e : events) {
+                ret.emplace_back(0);
+                if (e.index() == 0) {
+                    auto evt = std::get<cl_event>(e);
+                    if (evt != 0) {
+                        cl_ulong start, end;
+                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
+                        ret.back() = end - start;
+                    }
+                } else {
+                    auto evt = std::get<sycl::event>(e);
+                    auto start = evt.get_profiling_info<info::event_profiling::command_start>();
+                    auto end = evt.get_profiling_info<info::event_profiling::command_end>();
+                    ret.back() = end - start;
+                }
+            }
+        }
+        events.clear();
+        return ret;        
+    }
+
+    void* malloc(size_t sz) {
+        return sycl::malloc_device(sz, sycl_queue);
+    }
+
+    void memcpy_HtoD(void* pdst, void* psrc, size_t bytes) {
+        sycl_queue.submit([&](handler& h) {
+            h.memcpy(pdst, psrc, bytes);
+        });
+        sycl_queue.wait();
+    }
+
+    void memcpy_DtoH(void* pdst, void* psrc, size_t bytes) {
+        sycl_queue.submit([&](handler& h) {
+            h.memcpy(pdst, psrc, bytes);
+        });
+        sycl_queue.wait();
+    }
+
+    template<class MAP>
+    void get_device_info(MAP& result) {
+        auto device = sycl_queue.get_device();
+        result["CL_DEVICE_NAME"] = device.get_info<sycl::info::device::name>();
+        result["CL_DEVICE_EXTENSIONS"] = device.get_info<sycl::info::device::extensions>();
+        result["CL_DEVICE_MAX_COMPUTE_UNITS"] = device.get_info<sycl::info::device::max_compute_units>();
+        result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = device.get_info<sycl::info::device::max_clock_frequency>();
+        result["CL_DEVICE_LOCAL_MEM_SIZE"] = device.get_info<sycl::info::device::local_mem_size>();
+    }
+
+    void update_queue(bool _enable_profile = false) {
+        std::cout << "update_queue:" << std::endl;
+        auto opencl_gpu_selector = [](const sycl::device& d) {
+            std::cout << "opencl_gpu_selector: "
+                    << (d.is_cpu() ? "[CPU]" : "")
+                    << (d.is_gpu() ? "[GPU]" : "")
+                    << d.get_info<sycl::info::device::name>();
+            if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
+                // return higher score 1
+                std::cout << "<====" << std::endl;
+                return 1;
+            }
+            std::cout << std::endl;
+            return 0;
+        };
+
+        enable_profile = _enable_profile;
+        if (enable_profile) {
+            sycl::property_list propList{sycl::property::queue::in_order(), sycl::property::queue::enable_profiling()};
+            sycl_queue = sycl::queue(opencl_gpu_selector, propList);
+        } else {
+            sycl::property_list propList{sycl::property::queue::in_order()};
+            sycl_queue = sycl::queue(opencl_gpu_selector, propList);
+        }
+        context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
+        device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
+        queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+    }
+};
+
+#else
+
+template<typename T>
+T getDeviceInfo(cl_device_id device, cl_device_info param_name) {
+    size_t bytes = 0;
+    clGetDeviceInfo(device, param_name, 0, nullptr, &bytes);
+    ASSERT(bytes == sizeof(T), "clGetDeviceInfo needs more space");
+    T ret;
+    clGetDeviceInfo(device, param_name, sizeof(ret), &ret, nullptr);
+    return ret;
+}
+
+template<>
+inline std::string getDeviceInfo<std::string>(cl_device_id device, cl_device_info param_name) {
+    size_t bytes = 0;
+    clGetDeviceInfo(device, param_name, 0, nullptr, &bytes);
+    std::string ret(bytes, 0);
+    clGetDeviceInfo(device, param_name, bytes, &ret[0], nullptr);
+    return ret;
+}
+
+struct ocl_queue {
+    cl_device_id device;
+    cl_context context;
+    cl_command_queue queue;
+
+    bool enable_profile;
+    std::vector<cl_event> events;
+
+    ocl_queue() {
+        select_device();
+        update_queue(false);
+    }
+
+    std::vector<uint64_t> finish() {
+        ASSERT(clFinish(queue) == CL_SUCCESS);
+        std::vector<uint64_t> ret;
+        if (enable_profile) {
+            for (auto& evt : events) {
+                ret.emplace_back(0);
+                if (evt != 0) {
+                    cl_ulong start, end;
+                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+                    clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
+                    ret.back() = end - start;
+                }
+            }
+        }
+        events.clear();
+        return ret;
+    }
+
+    void* malloc(size_t sz) {
+        return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
+    }
+
+    void memcpy_HtoD(void* pdst, void* psrc, size_t bytes) {
+        ASSERT(clFinish(queue) == CL_SUCCESS);
+        clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr);
+        std::memcpy(pdst, psrc, bytes);
+        clEnqueueSVMUnmap(queue, pdst, 0, nullptr, nullptr);
+        ASSERT(clFinish(queue) == CL_SUCCESS);
+    }
+
+    void memcpy_DtoH(void* pdst, void* psrc, size_t bytes) {
+        ASSERT(clFinish(queue) == CL_SUCCESS);
+        clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_READ, psrc, bytes, 0, nullptr, nullptr);
+        std::memcpy(pdst, psrc, bytes);
+        clEnqueueSVMUnmap(queue, psrc, 0, nullptr, nullptr);
+        ASSERT(clFinish(queue) == CL_SUCCESS);
+    }
+
+    template<class MAP>
+    void get_device_info(MAP& result) {
+        result["CL_DEVICE_NAME"] = getDeviceInfo<std::string>(device, CL_DEVICE_NAME);
+        result["CL_DEVICE_EXTENSIONS"] = getDeviceInfo<std::string>(device, CL_DEVICE_EXTENSIONS);
+        result["CL_DEVICE_MAX_COMPUTE_UNITS"] = getDeviceInfo<cl_uint>(device, CL_DEVICE_MAX_COMPUTE_UNITS);
+        result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = getDeviceInfo<cl_uint>(device, CL_DEVICE_MAX_CLOCK_FREQUENCY);
+        result["CL_DEVICE_LOCAL_MEM_SIZE"] = getDeviceInfo<cl_ulong>(device, CL_DEVICE_LOCAL_MEM_SIZE);
+    }
+
+    void select_device(std::vector<std::string> exts = {}) {
+        cl_int error;
+        cl_uint n = 0;
+        clGetPlatformIDs(0, nullptr, &n);
+        std::vector<cl_platform_id> ids(n);
+        clGetPlatformIDs(n, ids.data(), nullptr);
+        int gpu_dev_index = 0;
+        std::vector<cl_device_id> device_ids;
+        for(int i = 0; i < n; i++) {
+            auto platform_id = ids[i];
+            cl_uint n_devs = 0;
+            clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_GPU, 0, nullptr, &n_devs);
+            if (n_devs == 0) continue;
+
+            std::vector<cl_device_id> dev_ids(n_devs);
+            error = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_GPU, n_devs, dev_ids.data(), nullptr); ASSERT(error == CL_SUCCESS);
+
+            for(int k = 0; k < n_devs; k++) {
+                auto devid = dev_ids[k];
+                std::cout << " GPU device [" << gpu_dev_index << "] : "
+                          << getDeviceInfo<std::string>(devid, CL_DEVICE_NAME)
+                          << " by \"" << getDeviceInfo<std::string>(devid, CL_DEVICE_VENDOR) << "\" : "
+                          << getDeviceInfo<cl_uint>(devid, CL_DEVICE_MAX_COMPUTE_UNITS) << " EUs "
+                          << getDeviceInfo<cl_uint>(devid, CL_DEVICE_MAX_CLOCK_FREQUENCY) << " MHz "
+                          << getDeviceInfo<cl_ulong>(devid, CL_DEVICE_LOCAL_MEM_SIZE) << " bytes SLM"
+                          << std::endl;
+                device_ids.push_back(devid);
+                gpu_dev_index++;
+            }
+        }
+        device = device_ids[0];
+        context = clCreateContext(NULL, 1, &device, NULL, NULL, &error); ASSERT(error == 0);
+        return;
+    }
+
+    void update_queue(bool _enable_profile = false) {
+        enable_profile = _enable_profile;
+        cl_queue_properties queue_properties[] = {
+                    CL_QUEUE_PROPERTIES,
+                    enable_profile ? CL_QUEUE_PROFILING_ENABLE : 0ul,
+                    0ul};
+
+        cl_int error;
+        queue = clCreateCommandQueueWithProperties(context, device, queue_properties, &error); ASSERT(error == 0);
+    }
+};
 #endif
 
 

@@ -5,9 +5,6 @@
 #include <map>
 #include <variant>
 #include <sstream>
-#include <sycl/sycl.hpp>
-
-using namespace sycl;
 
 #ifdef __linux__
 #    include <dlfcn.h>
@@ -55,33 +52,7 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 #define DEBUG_MEMPOOL_SUMMARY (CLDEBUG & 1)
 #define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
 
-static sycl::queue update_queue(bool enable_profile = false) {
-    std::cout << "update_queue:" << std::endl;
-    auto opencl_gpu_selector = [](const sycl::device& d) {
-        std::cout << "opencl_gpu_selector: "
-                  << (d.is_cpu() ? "[CPU]" : "")
-                  << (d.is_gpu() ? "[GPU]" : "")
-                  << d.get_info<sycl::info::device::name>();
-        if (d.is_gpu() && d.get_backend() == sycl::backend::opencl) {
-            std::cout << "<====" << std::endl;
-            return 1;
-        }
-        std::cout << std::endl;
-        return 0;
-    };
-
-    if (enable_profile) {
-        sycl::property_list propList{sycl::property::queue::in_order(), sycl::property::queue::enable_profiling()};
-        return sycl::queue(opencl_gpu_selector, propList);
-    } else {
-        sycl::property_list propList{sycl::property::queue::in_order()};
-        return sycl::queue(opencl_gpu_selector, propList);
-    }
-}
-
-sycl::queue sycl_queue = update_queue();
-std::vector<std::variant<cl_event, sycl::event>> all_events;
-
+ocl_queue g_queue;
 
 // all tensors are device memory managed by buffer_pool
 struct buffer_pool {
@@ -106,7 +77,7 @@ struct buffer_pool {
         total_alloc_size += sz;
         total_alloc_count++;
 
-        void* p = sycl::malloc_device(sz, sycl_queue);
+        void* p = g_queue.malloc(sz);
         if (DEBUG_MEMPOOL_VERBOSE)
             std::cout << "[buffer_pool] alloc new " << sz << " bytes @ " << p << std::endl;
         return p;
@@ -187,11 +158,7 @@ void tensor::resize(const py::array& b) {
     }
     update_buff();
     auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
-
-    sycl_queue.submit([&](handler& h) {
-        h.memcpy(p_buff.get(), p_host, numel * dt.itemsize());
-    });
-    sycl_queue.wait();
+    g_queue.memcpy_HtoD(p_buff.get(), p_host, numel * dt.itemsize());
 }
 
 py::array tensor::to_numpy() {
@@ -201,11 +168,7 @@ py::array tensor::to_numpy() {
     py::buffer_info info = ret.request();
     auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
 
-    // make sure data is ready
-    sycl_queue.submit([&](handler& h) {
-        h.memcpy(p_host, p_buff.get(), numel * dt.itemsize());
-    });
-    sycl_queue.wait();
+    g_queue.memcpy_DtoH(p_host, p_buff.get(), numel * dt.itemsize());
     return ret;
 }
 
@@ -293,23 +256,22 @@ void cl_kernels::check_error(const char* name, cl_int error, bool show_build_log
         ss << name << " failed with " << get_ocl_error_string(error) << " (" << error << ")";
 
         if (show_build_log) {
-            cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
             size_t len = 0;
             cl_int ret = CL_SUCCESS;
-            ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
+            ret = clGetProgramBuildInfo(m_prog, g_queue.device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &len);
             if (ret != CL_SUCCESS) {
                 ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
                 throw std::runtime_error(ss.str());
             }
             std::string log;
             log.resize(len + 1, '\0');
-            ret = clGetProgramBuildInfo(m_prog, ocl_device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
+            ret = clGetProgramBuildInfo(m_prog, g_queue.device, CL_PROGRAM_BUILD_LOG, len, log.data(), NULL);
             if (ret != CL_SUCCESS) {
                 ss << "clGetProgramBuildInfo(..., CL_PROGRAM_BUILD_LOG, ...) failed with " << get_ocl_error_string(ret) << " (" << ret << ")";
                 throw std::runtime_error(ss.str());
             }
 
-            ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
+            // ss << "build failed on device: " << sycl_queue.get_device().get_info<sycl::info::device::name>() << std::endl;
             ss << "build options: " << m_options << std::endl;
 
             ss << ANSI_COLOR_ERROR << log << ANSI_COLOR_RESET << std::endl;
@@ -319,25 +281,21 @@ void cl_kernels::check_error(const char* name, cl_int error, bool show_build_log
 }
 
 cl_kernels::cl_kernels(py::bytes bin_bytes, std::string options) : m_options(options) {
-    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-    cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
     std::string content{bin_bytes};
     size_t lengths[1] = {content.size()};
     const unsigned char* binaries[1] = { reinterpret_cast<unsigned char*>(content.data()) };
     cl_int binary_status[1] = {0};
     cl_int errcodes[1] = {0};
-    m_prog = clCreateProgramWithBinary(ocl_context, 1, &ocl_device, lengths, binaries, binary_status, errcodes);
+    m_prog = clCreateProgramWithBinary(g_queue.context, 1, &g_queue.device, lengths, binaries, binary_status, errcodes);
     check_error("clCreateProgramWithBinary", errcodes[0]);
 
-    cl_int build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
+    cl_int build_error = ::clBuildProgram(m_prog, 1, &g_queue.device, m_options.c_str(), nullptr, nullptr);
     check_error("clBuildProgram", build_error, true);
 }
 
 void cl_kernels::setup(std::string source, std::string options, std::string dump_dir) {
     m_source = source;
     m_options = options;
-    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-    cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
 
     // C for metal suppport
     if (options.find("-cmc") == std::string::npos)
@@ -346,9 +304,9 @@ void cl_kernels::setup(std::string source, std::string options, std::string dump
     cl_int build_error = CL_SUCCESS;
     const char* strings = source.c_str();
     const size_t length = source.size();
-    m_prog = ::clCreateProgramWithSource(ocl_context, (cl_uint)1, &strings, &length, &build_error);
+    m_prog = ::clCreateProgramWithSource(g_queue.context, (cl_uint)1, &strings, &length, &build_error);
     check_error("clCreateProgramWithSource", build_error);
-    build_error = ::clBuildProgram(m_prog, 1, &ocl_device, m_options.c_str(), nullptr, nullptr);
+    build_error = ::clBuildProgram(m_prog, 1, &g_queue.device, m_options.c_str(), nullptr, nullptr);
     check_error("clBuildProgram", build_error, true);
 }
 
@@ -383,17 +341,15 @@ void cl_kernels::set_arg(cl_kernel kernel, int idx, void* arg) {
 
 void cl_kernels::enqueue(cl_kernel kernel, const std::vector<size_t>& global_size, const std::vector<size_t>& local_size) {
     cl_int err = CL_SUCCESS;
-    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-    cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
 
     cl_event event;
-    err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
+    err = ::clEnqueueNDRangeKernel(g_queue.queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
     if (err != CL_SUCCESS) {
         std::stringstream ss;
         ss << "clEnqueueNDRangeKernel(...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
         throw std::runtime_error(ss.str());
     }
-    all_events.emplace_back(event);
+    g_queue.events.emplace_back(event);
     return;
 }
 
@@ -431,17 +387,14 @@ void cl_kernels::enqueue_py(std::string kernel_name, const std::vector<size_t>& 
     if (arg_idx < nargs)
         throw std::runtime_error(std::string("arg count ") + std::to_string(arg_idx) + " smaller than expected nargs=" + std::to_string(nargs));
 
-    cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-    cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
-
     cl_event event;
-    err = ::clEnqueueNDRangeKernel(cmd_queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
+    err = ::clEnqueueNDRangeKernel(g_queue.queue, kernel, global_size.size(), nullptr, global_size.data(), local_size.data(), 0, nullptr, &event);
     if (err != CL_SUCCESS) {
         std::stringstream ss;
         ss << "clEnqueueNDRangeKernel(\"" << kernel_name << "\",...) failed with " << get_ocl_error_string(err) << " (" << err << ")";
         throw std::runtime_error(ss.str());
     }
-    all_events.emplace_back(event);
+    g_queue.events.emplace_back(event);
     return;
 }
 
@@ -495,7 +448,7 @@ PYBIND11_MODULE(csrc, m) {
 
     m.def("profiling", [&](bool enable) {
         enable_profile = enable;
-        sycl_queue = update_queue(enable);
+        g_queue.update_queue(enable);
     });
 
     py::class_<tensor>(m, "tensor")
@@ -536,39 +489,11 @@ PYBIND11_MODULE(csrc, m) {
 
     m.def("dev_info", []() {
         py::dict result;
-        auto device = sycl_queue.get_device();
-        result["CL_DEVICE_NAME"] = device.get_info<sycl::info::device::name>();
-        result["CL_DEVICE_EXTENSIONS"] = device.get_info<sycl::info::device::extensions>();
-        result["CL_DEVICE_MAX_COMPUTE_UNITS"] = device.get_info<sycl::info::device::max_compute_units>();
-        result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = device.get_info<sycl::info::device::max_clock_frequency>();
-        result["CL_DEVICE_LOCAL_MEM_SIZE"] = device.get_info<sycl::info::device::local_mem_size>();
+        g_queue.get_device_info(result);
         return result;
     });
 
     m.def("finish", []() {
-        sycl_queue.wait();
-        // return all event time-stamps
-        std::vector<uint64_t> ret;
-        if (enable_profile) {
-            for (auto& e : all_events) {
-                ret.emplace_back(0);
-                if (e.index() == 0) {
-                    auto evt = std::get<cl_event>(e);
-                    if (evt != 0) {
-                        cl_ulong start, end;
-                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
-                        clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(end), &end, nullptr);
-                        ret.back() = end - start;
-                    }
-                } else {
-                    auto evt = std::get<sycl::event>(e);
-                    auto start = evt.get_profiling_info<info::event_profiling::command_start>();
-                    auto end = evt.get_profiling_info<info::event_profiling::command_end>();
-                    ret.back() = end - start;
-                }
-            }
-        }
-        all_events.clear();
-        return ret;
+        return g_queue.finish();
     });
 }

@@ -5,24 +5,20 @@
 #include <string>
 #include <vector>
 
-#include <sycl/sycl.hpp>
+#ifdef WITH_ONEDNN
 
 #include "oneapi/dnnl/dnnl.hpp"
 #include "oneapi/dnnl/dnnl_ocl.hpp"
 
 using namespace dnnl;
-extern sycl::queue sycl_queue;
-extern std::vector<std::variant<cl_event, sycl::event>> all_events;
+extern ocl_queue g_queue;
 
 class onednn_context {
     dnnl::engine m_engine;
     dnnl::stream m_stream;
     onednn_context() {
-        cl_context ocl_context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
-        cl_device_id ocl_device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
-        cl_command_queue cmd_queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
-        m_engine = dnnl::ocl_interop::make_engine(ocl_device, ocl_context);
-        m_stream = dnnl::ocl_interop::make_stream(m_engine, cmd_queue);
+        m_engine = dnnl::ocl_interop::make_engine(g_queue.device, g_queue.context);
+        m_stream = dnnl::ocl_interop::make_stream(m_engine, g_queue.queue);
     }
     static onednn_context& get() {
         static onednn_context ctx;
@@ -292,11 +288,12 @@ struct onednn_linear {
             args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
         }
         auto event = dnnl::ocl_interop::execute(m_prim, m_stream, args);
-        all_events.push_back(event);
+        g_queue.events.push_back(event);
         //m_prim.execute(m_stream, args);
     }
 };
 
+#if 0
 memory to_memory(const py::array& b, memory::data_type dtype) {
     // returns an instance of A that you made using B
     py::buffer_info info = b.request();
@@ -321,14 +318,10 @@ memory to_memory(const py::array& b, memory::data_type dtype) {
     memory::desc md = memory::desc(dims, dtype, fmt);
     memory ret = dnnl::ocl_interop::make_memory(md, onednn_context::engine(), ocl_interop::memory_kind::usm);
 
-    sycl_queue.submit([&](sycl::handler& h) {
-        h.memcpy(ret.get_data_handle(), p_host, numel * host_dt.itemsize());
-    });
-    sycl_queue.wait();
+    g_queue.memcpy_DtoH(ret.get_data_handle(), p_host, numel * host_dt.itemsize());
     return ret;
 }
 
-#if 0
 py::array tensor::to_numpy_f16(const memory& mem) {
     // this shouldn't be a very frequent operation which requires optimizations
     // so we just allocate
@@ -337,6 +330,8 @@ py::array tensor::to_numpy_f16(const memory& mem) {
     auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
 
     // make sure data is ready
+    g_queue.memcpy_DtoH(ret.get_data_handle(), p_host, numel * host_dt.itemsize());
+    
     sycl_queue.submit([&](sycl::handler& h) {
         h.memcpy(p_host, p_buff.get(), numel * dt.itemsize());
     });
@@ -353,9 +348,9 @@ void init_ops_onednn(py::module_& m) {
         .def(py::init(&onednn_linear::create))
         .def("forward", &onednn_linear::forward);
 
-    py::class_<memory>(m, "onednn_memory")
-        .def(py::init())
-        .def(py::init(&to_memory));
+    //py::class_<memory>(m, "onednn_memory")
+    //    .def(py::init())
+    //    .def(py::init(&to_memory));
 
 
     py::enum_<onednn_matmul::type>(m, "onednn_matmul_type", py::arithmetic())
@@ -379,3 +374,6 @@ void init_ops_onednn(py::module_& m) {
     //    .def("get_linear", &onednn_matmul::get_linear);
 }
 
+#else
+void init_ops_onednn(py::module_& m) {}
+#endif
