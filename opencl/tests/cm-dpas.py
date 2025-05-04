@@ -1,83 +1,63 @@
 #!/usr/bin/python3
 from clops import cl
 import numpy as np
-
-
-# the decorator `cl.source` turns testcm() into a compiled opencl kernel object
-# by invoking clbuild inside.
-#
-# thanks to `-mdump_asm -g2`, we can find following dumps after running:
-#    vISA asm file:   cm_check.visaasm
-#    GEN asm file:    cm_check.asm (with interleaved src-code & line-number)
-src = r'''
-#include <cm/cm.h>
-#include <cm/cmtl.h>
-
-#ifndef CM_HAS_LSC_UNTYPED_2D
-#error "CM_HAS_LSC_UNTYPED_2D is required!!!!"
-#endif
-
-template<int RegM, int RegN>
-void dpas_regs(svmptr_t pdst, svmptr_t psrc1, svmptr_t psrc2) {
-    matrix<float, RegM*RegN, XXX_AccSize> acc;// The matrix C
-    matrix<int32_t, RegN, XXX_Src1Size> src1; // The matrix B
-    matrix<int32_t, RegM, XXX_Src2Size> src2; // The matrix A
-
-    lsc::block_2d_desc<short, RegN, 16, 16*RegN> Desc((__global short*)(psrc1), 16, RegN*16, RegN*16*sizeof(half)-1, 0, 0);
-
-    cm_svm_block_read(pdst, acc);
-    cm_svm_block_read(psrc1, src1);
-    cm_svm_block_read(psrc2, src2);
-
-    //# loop over K dimension
-    //# register-blocking MatMul
-
-    #define SystolicDepth 8
-    #pragma unroll (RegM)
-    for(int m = 0; m < RegM; m++) {
-        #pragma unroll (RegN)
-        for(int n = 0; n < RegN; n++) {
-            acc.row(m*RegN + n) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, XXX_RepeatCount>(
-                                            acc.row(m*RegN + n),
-                                            src1.row(n),
-                                            src2.row(m));
-        }
-    }
-    cm_svm_block_write(pdst, acc);
-}
-
-extern "C" _GENX_MAIN_ void cm_dpas_check(
-    svmptr_t pdst [[type("svmptr_t")]],
-    svmptr_t psrc1 [[type("svmptr_t")]],
-    svmptr_t psrc2 [[type("svmptr_t")]]
-    ) {
-    dpas_regs<1,1>(pdst, psrc1, psrc2);
-    printf("Hello,CM\n");
-}
-'''
+import time
 
 '''
-register width: 512 bit
-so SIMD-16 is required for DPAS in Xe2
+Xe2 register width: 512 bit
+16x 32bits accumulation destinations
+
+each systolic step do a VNNI-style dot-product: 
+    // bf16/fp16
+    dest[i] +=  src2[i*2+0] * src1[i*2+0]
+              + src2[i*2+1] * src1[i*2+1]
+
+    // s8/u8
+    dest[i] +=  src2[i*4+0] * src1[i*4+0]
+              + src2[i*4+1] * src1[i*4+1]
+              + src2[i*4+2] * src1[i*4+2]
+              + src2[i*4+3] * src1[i*4+3]
 
 The systolic depth must be equal to 8 for all the XMX functions.
-The K dimension is calculated as the product of the systolic depth
-and the number of operations per channel, so:
+so K dimension is 8*2 for bf16/fp16 and 8*4 for s8/u8
 
-hf x hf : K = 8*2
+https://www.techpowerup.com/gpu-specs/arc-b580.c4244
+ - 160 EU
+ - SIMD-16 ALU (32 flops)
+ - frequency: 2.67HGz, clinfo MAX 2.9GHz   
+ - SLM: 131072 (128*1024 = 128 KiB)
+
+FP32    : 160*2.67*16(SIMD-width)*2(MAD)/1e3 = 13.67 TFLOPS
+FP16    : 160*2.67*32(SIMD-width)*2(MAD)/1e3 = 27.34 TFLOPS
+XMX-FP16: 160*2.67*32(SIMD-width)*2(MAD)/1e3*4 = 109.36 TFLOPS
+          160*2.9*32*2/1e3*4 = 118.78 TFLOPS
+
 '''
+devinfo = cl.dev_info()
+num_EUs = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"]
+max_freqMHz = devinfo["CL_DEVICE_MAX_CLOCK_FREQUENCY"]
 
-regM = 1
-regN = 1
+SIMD_WIDTH = 16
+MAC_PER_LANE = 2 #(2xfp16 VNNI)
+DEPTH = 4 #?
+OPS_PER_MAC = 2
+max_TFLOPS = num_EUs * SIMD_WIDTH * MAC_PER_LANE * DEPTH * OPS_PER_MAC * max_freqMHz * 1e-6
+# 118 TFLOPS
 
+regM = 2
+regN = 2
+
+src_op_bits = 16
+SystolicDepth = 8
+VNNI_WIDTH = 32//src_op_bits  # 2 or 4
 RepeatCount = 8
 M = RepeatCount * regM  # RepeatCount 1~8
-K = 16                  # 16 x half  = 256 bits
+K = SystolicDepth * VNNI_WIDTH   # 16 x half  = 256 bits
 N = 16 * regN           # 16 x float = 512 bits
 
-AccSize = M*N
-Src1Size = K*N//2
-Src2Size = M*K//2
+AccSize = RepeatCount * 16
+Src1Size = K*16//2
+Src2Size = RepeatCount*K//2
 
 print(f" {M=} {K=} {N=} {Src1Size=} {Src2Size=} ")
 B = np.random.randint(-4,5,[K, N]).astype(np.float16)
@@ -97,16 +77,134 @@ tA = cl.tensor(A)
 tB = cl.tensor(repack_B(B))
 tC = cl.tensor(np.zeros([M, N], np.float32))
 
-kernels = cl.kernels(src, f"-cmc -mdump_asm -g2 -D XXX_Src1Size={Src1Size} -D XXX_Src2Size={Src2Size} -D XXX_AccSize={AccSize} -D XXX_RepeatCount={RepeatCount}")
-kernels.enqueue("cm_dpas_check", [1,1],[1,1], tC, tB, tA)
+def pyeval(src):
+    result_src = ""
+    for line in src.splitlines():
+        if line.startswith("#pyeval"):
+            new_line = eval(line[8:])
+            result_src += new_line + "\n"
+            print(f"[pyeval] {new_line}")
+        else:
+            result_src += line + "\n"
+    return result_src
 
-cl.finish()
+# MAX-workgroups size for Xe2 is 64: 8 EUs x 8 HW-threads
+# when total number of HW-worker-threads are not enough to fully occupy all Xe-Cores
+# smaller work-group size allows driver to distribute threads more evenly among all Xe-cores
+wgM = 4
+wgN = 4
+GWS = [num_EUs * 8]
+LWS = [wgM * wgN]
 
+
+src = r'''
+#include <cm/cm.h>
+#include <cm/cmtl.h>
+
+#ifndef CM_HAS_LSC_UNTYPED_2D
+#error "CM_HAS_LSC_UNTYPED_2D is required!!!!"
+#endif
+
+// due to C++ headers cm.h, passing macro through compiler may cause naming conflict
+
+#pyeval f"#define wgM {wgM}"
+#pyeval f"#define wgN {wgN}"
+#pyeval f"#define regM {regM}"
+#pyeval f"#define regN {regN}"
+#pyeval f"#define Src1Size {Src1Size}"
+#pyeval f"#define Src2Size {Src2Size}"
+#pyeval f"#define RepeatCount {RepeatCount}"
+#pyeval f"#define SystolicDepth {SystolicDepth}"
+#pyeval f"#define AccSize {AccSize}"
+
+extern "C" _GENX_MAIN_ void cm_dpas_gemm(
+    svmptr_t pdst [[type("svmptr_t")]],
+    svmptr_t psrc1 [[type("svmptr_t")]],
+    svmptr_t psrc2 [[type("svmptr_t")]],
+    int PerfRepeat
+    ) {
+
+    constexpr uint REGM_SIZE = regM * RepeatCount * SystolicDepth * sizeof(int32_t);
+    constexpr uint REGN_SIZE = regN * 16 * SystolicDepth * sizeof(int32_t);
+
+    cm_slm_init(wgM * REGM_SIZE + wgN * REGN_SIZE);
+
+    auto slmA = cm_slm_alloc(wgM * REGM_SIZE);
+    auto slmB = cm_slm_alloc(wgN * REGN_SIZE);
+
+    auto wgM_id = cm_local_id(0) / wgN;
+    auto wgN_id = cm_local_id(0) % wgN;
+
+    matrix<float, regM * regN, AccSize> acc;// The matrix C
+    matrix<int32_t, regN, Src1Size> src1; // The matrix B
+    matrix<int32_t, regM, Src2Size> src2; // The matrix A
+
+    acc = 0;
+
+    //cm_svm_block_read(psrc1, src1);
+    //cm_svm_block_read(psrc2, src2);
+
+    #pragma unroll (1)
+    for(int r = 0; r < PerfRepeat; r++) {
+        cm_slm_block_read(slmA, GENX_DWALIGNED, wgM_id*REGM_SIZE, src2.format<int32_t>());
+        cm_slm_block_read(slmB, GENX_DWALIGNED, wgN_id*REGN_SIZE, src1.format<int32_t>());
+
+        //# copy from DDR into SLM
+        
+        //# insert more work-loads between barrier's signal & wait stage
+        //# helps to reduce the synchronization overhead, since the signal event
+        //# is non-blocking, big work-loads before wait ensure that when wait
+        //# is called, all signal events have been done, thus wait can be done very fast.
+        cm_sbarrier(1);
+
+        #pragma unroll (regM)
+        for(int m = 0; m < regM; m++) {
+            #pragma unroll (regN)
+            for(int n = 0; n < regN; n++) {
+                acc.row(m*regN + n) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                                                acc.row(m*regN + n),
+                                                src1.row(n),
+                                                src2.row(m));
+            }
+        }
+        //# wait
+        cm_sbarrier(0);
+    }
+    cm_svm_block_write(pdst, acc);
+
+    //printf("Hello,CM\n");
+}
+'''
+
+# increase loop count to reduce overhead
+kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
+total_M = int(GWS[0]**0.5) * regM * RepeatCount
+total_N = int(GWS[0]**0.5) * regN * 16
+
+for LoopCount in [100, 256, 1000, 2000, 10000, 20000]:
+    print(f"======== {LoopCount=} =============")
+    valid_test_cnt = 0
+    warm_up_time_thr = 0.1
+    tbase = time.time()
+    while valid_test_cnt < 1:
+        t0 = time.time()
+        kernels.enqueue("cm_dpas_gemm", GWS, LWS, tC, tB, tA, LoopCount)
+        cl.finish()
+        t1 = time.time()
+        
+        if (t1 - tbase > warm_up_time_thr):
+            dt = (t1 - t0)
+            total_K = K * LoopCount
+            tflops = M*N*K*2*LoopCount*GWS[0]/dt*1e-12
+            #tflops = total_M*total_N*total_K*2/dt*1e-12
+            print(f" {total_M=} {total_N=} {total_K=}  {dt*1e6:.3f} uS    {tflops:.3f} TFLOPS  /  {max_TFLOPS:.3f} TFLOPS = {tflops*100/max_TFLOPS:.1f}%")
+            valid_test_cnt += 1
 C1 = tC.numpy()
 print(C1.shape, C.shape)
 
 if not np.allclose(C, C1):
-    print(C)
-    print(C1)
+    #print(C)
+    #print(C1)
+    print("failed.")
 else:
     print("passed.")
