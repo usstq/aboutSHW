@@ -31,12 +31,12 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=core-avx2")
 #set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath=/opt/intel/oneapi/compiler/latest/lib")
 
 ############# onednn ##################
-if(DEFINED ENV{OV_DNNL_PATH})
-    message("++++++++++ $ENV{OV_DNNL_PATH} ++++++++++++++++ ")
+if(DEFINED ENV{OV_BUILD_PATH})
+    message("++++++++++ $ENV{OV_BUILD_PATH} ++++++++++++++++ ")
     add_library(onednn_gpu STATIC IMPORTED) # or STATIC instead of SHARED
     set_target_properties(onednn_gpu PROPERTIES
-        IMPORTED_LOCATION "$ENV{OV_DNNL_PATH}lib/libopenvino_onednn_gpu.a"
-        INTERFACE_INCLUDE_DIRECTORIES "$ENV{OV_DNNL_PATH}include/"
+        IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/libopenvino_onednn_gpu.a"
+        INTERFACE_INCLUDE_DIRECTORIES "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/include/"
     )
     target_link_libraries(csrc PRIVATE onednn_gpu)
     target_compile_definitions(csrc PRIVATE WITH_ONEDNN=1)

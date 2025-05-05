@@ -47,6 +47,7 @@ void _write_all(std::ostream& os, TS&&... args) {
 #include <sycl/sycl.hpp>
 using namespace sycl;
 struct ocl_queue {
+    cl_platform_id platform;
     cl_context context;
     cl_device_id device;
     cl_command_queue queue;
@@ -146,6 +147,15 @@ struct ocl_queue {
         context = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context());
         device = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_device());
         queue = sycl::get_native<sycl::backend::opencl>(sycl_queue);
+        platform = sycl::get_native<sycl::backend::opencl>(sycl_queue.get_context().get_platform());
+    }
+
+    template<typename RET, typename... Args>
+    void call_ext(const char * func_name, Args&&... args) {
+        using ext_func_t = RET (*)(Args...);
+        ext_func_t ext_func = clGetExtensionFunctionAddressForPlatform(platform, func_name);
+        ASSERT(ext_func != nullptr, "clGetExtensionFunctionAddressForPlatform()", func_name, " returns nullptr");
+        return (*ext_func)(std::forward<Args>(args)...);
     }
 };
 
@@ -171,6 +181,7 @@ inline std::string getDeviceInfo<std::string>(cl_device_id device, cl_device_inf
 }
 
 struct ocl_queue {
+    cl_platform_id platform;
     cl_device_id device;
     cl_context context;
     cl_command_queue queue;
@@ -237,7 +248,8 @@ struct ocl_queue {
         std::vector<cl_platform_id> ids(n);
         clGetPlatformIDs(n, ids.data(), nullptr);
         int gpu_dev_index = 0;
-        std::vector<cl_device_id> device_ids;
+        platform = 0;
+        std::vector<std::pair<cl_device_id, cl_platform_id>> device_ids;
         for(int i = 0; i < n; i++) {
             auto platform_id = ids[i];
             cl_uint n_devs = 0;
@@ -256,11 +268,12 @@ struct ocl_queue {
                           << getDeviceInfo<cl_uint>(devid, CL_DEVICE_MAX_CLOCK_FREQUENCY) << " MHz "
                           << getDeviceInfo<cl_ulong>(devid, CL_DEVICE_LOCAL_MEM_SIZE) << " bytes SLM"
                           << std::endl;
-                device_ids.push_back(devid);
+                device_ids.push_back({devid, platform_id});
                 gpu_dev_index++;
             }
         }
-        device = device_ids[0];
+        device = device_ids[0].first;
+        platform = device_ids[0].second;
         context = clCreateContext(NULL, 1, &device, NULL, NULL, &error); ASSERT(error == 0);
         return;
     }
@@ -275,6 +288,14 @@ struct ocl_queue {
         cl_int error;
         queue = clCreateCommandQueueWithProperties(context, device, queue_properties, &error); ASSERT(error == 0);
     }
+
+    template<typename RET, typename... Args>
+    void call_ext(const char * func_name, Args&&... args) {
+        using ext_func_t = RET (*)(Args...);
+        ext_func_t ext_func = clGetExtensionFunctionAddressForPlatform(platform, func_name);
+        ASSERT(ext_func != nullptr, "clGetExtensionFunctionAddressForPlatform()", func_name, " returns nullptr");
+        return (*ext_func)(std::forward<Args>(args)...);
+    }    
 };
 #endif
 

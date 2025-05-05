@@ -58,9 +58,9 @@ def cm_xmx_int4(x, weight, scale, zp, K_group_size):
     
     pass
 
-
+linear_creator = None
 def test_mm(M, K, N, K_group_size, w_dtype):
-    if K_group_size <= 0: K_group_size = K
+    if K_group_size <= 0 and w_dtype != cl.onednn_dtype.f16: K_group_size = K
     np.random.seed(0)
     A = np.random.randint(-1,2,[M, K]).astype(np.float16)
     tA = cl.tensor(A)
@@ -72,8 +72,7 @@ def test_mm(M, K, N, K_group_size, w_dtype):
         weight_bytes = 0
         while weight_bytes < 1e9:
             tB = cl.tensor(weight.weight_q)
-            linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, -1, cl.onednn_matmul_type.none,
-                                      cl.onednn_dtype.f16, tB, cl.tensor(), cl.tensor())
+            linear = linear_creator(w_dtype, M, K, N, K_group_size, tB, cl.tensor(), cl.tensor())
             Layers.append(linear)
             weight_bytes += weight.nbytes
     elif w_dtype == cl.onednn_dtype.u8:
@@ -82,8 +81,7 @@ def test_mm(M, K, N, K_group_size, w_dtype):
             tB = cl.tensor(weight.weight_q)
             tBs = cl.tensor(weight.weight_scale)
             tBz = cl.tensor(weight.weight_zp)
-            linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, K_group_size, cl.onednn_matmul_type.none,
-                                      cl.onednn_dtype.u8, tB, tBs, tBz)
+            linear = linear_creator(w_dtype, M, K, N, K_group_size, tB, tBs, tBz)
             Layers.append(linear)
             weight_bytes += weight.nbytes
     elif w_dtype == cl.onednn_dtype.u4:
@@ -92,8 +90,7 @@ def test_mm(M, K, N, K_group_size, w_dtype):
             tBq4 = cl.tensor(weight.weight_q)
             tBs = cl.tensor(weight.weight_scale)
             tBz = cl.tensor(weight.weight_zp)
-            linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, M, K, N, K_group_size, cl.onednn_matmul_type.none,
-                                      cl.onednn_dtype.u4, tBq4, tBs, tBz)
+            linear = linear_creator(w_dtype, M, K, N, K_group_size, tBq4, tBs, tBz)
             Layers.append(linear)
             weight_bytes += weight.nbytes
 
@@ -110,21 +107,41 @@ def test_mm(M, K, N, K_group_size, w_dtype):
         else:
             print("================ PASSED ==================" , M, K, N, w_dtype)
     durs = []
-    for r in range(10):
+    for r in range(20):
         t0 = time.time()
         for linear in Layers:
             linear.forward(tA, tC, tP1)
         cl.finish()
         durs.append((time.time() - t0)/len(Layers))
-    dt = sum(durs[3:])/len(durs[3:])
-    print(f"{M=} {K=} {N=} {w_dtype} {weight_bytes*1e-9:.2f}GB : [{r}] {dt*1e3:.3f} ms {M*K*N*2*1e-12/dt:.3f} TFLOPS")
+    dt = sum(durs[10:])/len(durs[10:])
+    print(f"{M=} {K=} {N=} {w_dtype} x{len(Layers)} {weight_bytes*1e-9:.2f}GB : [{r}] {dt*1e3:.3f} ms {M*K*N*2*1e-12/dt:.3f} TFLOPS")
+
+def linear_creator_onednn(w_dtype, M, K, N, K_group_size, tB, tBs, tBz):
+    return cl.onednn_linear(cl.onednn_dtype.f16, w_dtype,
+                            M, K, N, K_group_size, cl.onednn_matmul_type.none,
+                            w_dtype, tB, tBs, tBz)
+
+linear_creator = linear_creator_onednn
 
 
-#for M in [200,400,600,1000]: test_mm(M=M, K=2048, N=768, K_group_size=128, w_dtype=cl.onednn_dtype.f16)
+
+
+
+MList = [200,400,600,1000, 4000]
+MList = [128, 256, 512, 1024, 4096]
+
+for M in MList: test_mm(M=M, K=2048, N=768, K_group_size=-1, w_dtype=cl.onednn_dtype.f16)
+for M in MList: test_mm(M=M, K=2048, N=2048, K_group_size=-1, w_dtype=cl.onednn_dtype.f16)
+for M in MList: test_mm(M=M, K=4096, N=4096, K_group_size=-1, w_dtype=cl.onednn_dtype.f16)
 #for M in [200,400,600,1000]: test_mm(M=M, K=2048, N=768, K_group_size=-1, w_dtype=cl.onednn_dtype.u8)
-for M in [200,400,600,1000]: test_mm(M=M, K=2048, N=768, K_group_size=128, w_dtype=cl.onednn_dtype.u4)
+#for M in [200,400,600,1000, 4000, 8000]: test_mm(M=M, K=2048, N=768, K_group_size=128, w_dtype=cl.onednn_dtype.u4)
+#for M in [200,400,600,1000]: test_mm(M=M, K=2048, N=768*2, K_group_size=128, w_dtype=cl.onednn_dtype.u4)
 
 log = r'''
+
+$ ~/tingqian/tools/clintercept-3.0.6-Linux/bin/cliloader -cdt --dump-dir ~/tingqian/cli-dumps python onegemm.py 
+although M changes, cliloader confirms that the latency of following gemm is almost fixed to 40 us
+
 ================ PASSED ================== 200 2048 768 onednn_dtype.f16
 M=200 K=2048 N=768 onednn_dtype.f16 1.00GB : [9] 0.019 ms 32.999 TFLOPS
 M=400 K=2048 N=768 onednn_dtype.f16 1.00GB : [9] 0.043 ms 28.988 TFLOPS

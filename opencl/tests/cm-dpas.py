@@ -60,9 +60,6 @@ Src1Size = K*16//2
 Src2Size = RepeatCount*K//2
 
 print(f" {M=} {K=} {N=} {Src1Size=} {Src2Size=} ")
-B = np.random.randint(-4,5,[K, N]).astype(np.float16)
-A = np.random.randint(-4,5,[M, K]).astype(np.float16)
-C = A @ B
 
 def repack_B(B):
     K, N = B.shape
@@ -73,17 +70,13 @@ def repack_B(B):
             newB[k, 2*n+1] = B[2*k+1, n]
     return newB
 
-tA = cl.tensor(A)
-tB = cl.tensor(repack_B(B))
-tC = cl.tensor(np.zeros([M, N], np.float32))
-
 def pyeval(src):
     result_src = ""
     for line in src.splitlines():
         if line.startswith("#pyeval"):
             new_line = eval(line[8:])
             result_src += new_line + "\n"
-            print(f"[pyeval] {new_line}")
+            # print(f"[pyeval] {new_line}")
         else:
             result_src += line + "\n"
     return result_src
@@ -91,11 +84,31 @@ def pyeval(src):
 # MAX-workgroups size for Xe2 is 64: 8 EUs x 8 HW-threads
 # when total number of HW-worker-threads are not enough to fully occupy all Xe-Cores
 # smaller work-group size allows driver to distribute threads more evenly among all Xe-cores
-wgM = 4
-wgN = 4
-GWS = [num_EUs * 8]
-LWS = [wgM * wgN]
+# thus work-group size must be easily configurable
+wgM = 2
+wgN = 2
 
+# keep work-group size fixed, GWS is work-group size x work-group count
+# each work-group produces BM x BN output :
+#   BM = wgM * regM * RepeatCount
+#   BN = wgN * regN * 16
+BM = wgM * regM * RepeatCount
+BN = wgN * regN * 16
+
+# sometime M * N are small but K is big, choose small wgM & wgN and split along K dimension
+# can produce more threads and use all Xe-cores
+
+# we need enough of threads to use all Xe-cores 
+nBM = 20
+nBN = 16
+
+total_M = nBM * wgM * regM * RepeatCount
+total_N = nBN * wgN * regN * 16
+
+GWS = [nBM * wgM, nBN * wgN]
+LWS = [wgM, wgN]
+
+total_threads = GWS[0] * GWS[1]
 
 src = r'''
 #include <cm/cm.h>
@@ -116,14 +129,15 @@ src = r'''
 #pyeval f"#define RepeatCount {RepeatCount}"
 #pyeval f"#define SystolicDepth {SystolicDepth}"
 #pyeval f"#define AccSize {AccSize}"
+#pyeval f"#define total_N {total_N}"
+#pyeval f"#define total_K {total_K}"
+#pyeval f"#define numBK {numBK}"
 
 extern "C" _GENX_MAIN_ void cm_dpas_gemm(
-    svmptr_t pdst [[type("svmptr_t")]],
-    svmptr_t psrc1 [[type("svmptr_t")]],
-    svmptr_t psrc2 [[type("svmptr_t")]],
-    int PerfRepeat
+    svmptr_t pdst [[type("svmptr_t")]],     // C-matrix
+    svmptr_t psrc1 [[type("svmptr_t")]],    // B-matrix
+    svmptr_t psrc2 [[type("svmptr_t")]]     // A-matrix
     ) {
-
     constexpr uint REGM_SIZE = regM * RepeatCount * SystolicDepth * sizeof(int32_t);
     constexpr uint REGN_SIZE = regN * 16 * SystolicDepth * sizeof(int32_t);
 
@@ -132,25 +146,35 @@ extern "C" _GENX_MAIN_ void cm_dpas_gemm(
     auto slmA = cm_slm_alloc(wgM * REGM_SIZE);
     auto slmB = cm_slm_alloc(wgN * REGN_SIZE);
 
-    auto wgM_id = cm_local_id(0) / wgN;
-    auto wgN_id = cm_local_id(0) % wgN;
+    auto local_id_M = cm_local_id(0);
+    auto local_id_N = cm_local_id(1);
+
+    auto group_id_M = cm_group_id(0);
+    auto group_id_N = cm_group_id(1);
+
+    uint M_off = (group_id_M * wgM + local_id_M) * regM * RepeatCount;
+    uint N_off = (group_id_N * wgN + local_id_N) * regN * 16;
+
+    //# output
+    pdst += (M_off * total_N + N_off) * sizeof(float);
 
     matrix<float, regM * regN, AccSize> acc;// The matrix C
     matrix<int32_t, regN, Src1Size> src1; // The matrix B
     matrix<int32_t, regM, Src2Size> src2; // The matrix A
 
-    acc = 0;
-
     //cm_svm_block_read(psrc1, src1);
     //cm_svm_block_read(psrc2, src2);
 
-    #pragma unroll (1)
-    for(int r = 0; r < PerfRepeat; r++) {
-        cm_slm_block_read(slmA, GENX_DWALIGNED, wgM_id*REGM_SIZE, src2.format<int32_t>());
-        cm_slm_block_read(slmB, GENX_DWALIGNED, wgN_id*REGN_SIZE, src1.format<int32_t>());
+    acc = 0.0f;
 
+    #pragma unroll (1)
+    for(int nbK = 0; nbK < numBK; nbK++) {
         //# copy from DDR into SLM
-        
+        //# sync 
+
+        cm_slm_block_read(slmA, GENX_DWALIGNED, local_id_M*REGM_SIZE, src2.format<int32_t>());
+        cm_slm_block_read(slmB, GENX_DWALIGNED, local_id_N*REGN_SIZE, src1.format<int32_t>());
+
         //# insert more work-loads between barrier's signal & wait stage
         //# helps to reduce the synchronization overhead, since the signal event
         //# is non-blocking, big work-loads before wait ensure that when wait
@@ -175,36 +199,63 @@ extern "C" _GENX_MAIN_ void cm_dpas_gemm(
     //printf("Hello,CM\n");
 }
 '''
+cl.profiling(True)
 
-# increase loop count to reduce overhead
-kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
-total_M = int(GWS[0]**0.5) * regM * RepeatCount
-total_N = int(GWS[0]**0.5) * regN * 16
+dt_ker_overhead = None
 
-for LoopCount in [100, 256, 1000, 2000, 10000, 20000]:
-    print(f"======== {LoopCount=} =============")
+# set LoopCount to 0 to estimate kernel overhead 
+for numBK in [0, 100, 256, 512]:
+#for LoopCount in [0, 0, 0]:
+    total_K = numBK * K
+    B = np.random.randint(-4,5,[total_K, total_N]).astype(np.float16)
+    A = np.random.randint(-4,5,[total_M, total_K]).astype(np.float16)
+    if numBK < 200:
+        C = A @ B
+    else:
+        C = None
+
+    tA = cl.tensor(A)
+    #tB = cl.tensor(repack_B(B))
+    tB = cl.tensor(B)
+    tC = cl.tensor(np.zeros([total_M, total_N], np.float32))
+
+    # increase loop count to reduce overhead
+    kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
+
+    print(f"======== {numBK=} =============")
     valid_test_cnt = 0
     warm_up_time_thr = 0.1
     tbase = time.time()
     while valid_test_cnt < 1:
         t0 = time.time()
-        kernels.enqueue("cm_dpas_gemm", GWS, LWS, tC, tB, tA, LoopCount)
-        cl.finish()
+        kernels.enqueue("cm_dpas_gemm", GWS, LWS, tC, tB, tA)
+        ns = cl.finish()[0]
         t1 = time.time()
         
         if (t1 - tbase > warm_up_time_thr):
             dt = (t1 - t0)
-            total_K = K * LoopCount
-            tflops = M*N*K*2*LoopCount*GWS[0]/dt*1e-12
-            #tflops = total_M*total_N*total_K*2/dt*1e-12
-            print(f" {total_M=} {total_N=} {total_K=}  {dt*1e6:.3f} uS    {tflops:.3f} TFLOPS  /  {max_TFLOPS:.3f} TFLOPS = {tflops*100/max_TFLOPS:.1f}%")
-            valid_test_cnt += 1
-C1 = tC.numpy()
-print(C1.shape, C.shape)
+            dt_ker = ns / 1e9
+            if not dt_ker_overhead:
+                dt_ker_overhead = dt_ker * 0.95
+            dt_ker -= dt_ker_overhead
+            dt_host_overhead = dt - dt_ker - dt_ker_overhead
 
-if not np.allclose(C, C1):
-    #print(C)
-    #print(C1)
-    print("failed.")
-else:
-    print("passed.")
+            if C is not None:
+                C1 = tC.numpy()
+                if not np.allclose(C, C1):
+                    #print(C)
+                    #print(C1)
+                    accinfo = "failed."
+                else:
+                    accinfo = "passed."
+            else:
+                accinfo = "______"
+
+            total_K = K * numBK
+            tflops = M*N*K*2*numBK*total_threads/dt_ker*1e-12
+            #tflops = total_M*total_N*total_K*2/dt*1e-12
+            print(f"[{accinfo}]  M,N,K={total_M},{total_N},{total_K}  {dt*1e6:.2f} = {dt_ker*1e6:.2f} + {dt_ker_overhead*1e6:.2f} + {dt_host_overhead*1e6:.2f} uS    {tflops:.3f} TFLOPS  /  {max_TFLOPS:.3f} TFLOPS = {tflops*100/max_TFLOPS:.1f}% ")
+            valid_test_cnt += 1
+
+
+print(f"{total_threads=}   Hyper-Threads: x {total_threads/num_EUs:.2f}")
