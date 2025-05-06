@@ -87,7 +87,11 @@ struct ocl_queue {
         return ret;        
     }
 
-    void* malloc(size_t sz) {
+    void* malloc_host(size_t sz) {
+        return sycl::malloc_host(sz, sycl_queue);
+    }
+
+    void* malloc_device(size_t sz) {
         return sycl::malloc_device(sz, sycl_queue);
     }
 

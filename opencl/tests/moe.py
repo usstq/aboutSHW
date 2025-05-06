@@ -162,14 +162,15 @@ SUBGROUP_SIZE = 16
 SUBGROUP_SIZE = 32
 SUBGROUP_NUM = 8
 N_BLOCK = 16
-N_EXPERTS = 8*2
-N_LAYERS = 24*8
+N_EXPERTS = 8*3
+N_LAYERS = 48*16
 SZ_LAYOUT = 1
 PERF_TEST_ROUNDS = N_LAYERS
 kernel_name = "mlp_down_n2" #sys.argv[1]
 
 M = 1
-
+# TEST `CL_OUT_OF_RESOURCES (-5)`
+#fake = np.ones([1024*1024*1024*2]).astype(np.float32)
 A = np.random.randint(-1,2,[M, K]).astype(np.float16)
 tA = cl.tensor(A)
 tC = cl.tensor(np.zeros([M, N], dtype=np.float16))
@@ -257,6 +258,9 @@ cl.profiling(True)
 for r in range(0, PERF_TEST_ROUNDS):
     cl.finish()
     for i in range(N_LAYERS):
+        # TEST `CL_OUT_OF_RESOURCES (-5)`
+        # if i % 128 == 0:
+        #     fake[:] = 0
         ocl_kernels.enqueue(kernel_name,
                             [N_EXPERTS, SUBGROUP_SIZE, HIDDEN_SIZE//N_BLOCK],[1, SUBGROUP_SIZE, SUBGROUP_NUM],
                             weight_ptrs, i*N_EXPERTS, tA, tC, None)

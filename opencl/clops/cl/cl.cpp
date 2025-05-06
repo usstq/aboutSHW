@@ -51,6 +51,7 @@ static auto CLDEBUG = std::getenv("CLDEBUG") ? atoi(std::getenv("CLDEBUG")) : 0;
 
 #define DEBUG_MEMPOOL_SUMMARY (CLDEBUG & 1)
 #define DEBUG_MEMPOOL_VERBOSE (CLDEBUG & 2)
+#define DEBUG_MEMPOOL_HOST (CLDEBUG & 4)
 
 ocl_queue g_queue;
 
@@ -77,7 +78,11 @@ struct buffer_pool {
         total_alloc_size += sz;
         total_alloc_count++;
 
-        void* p = g_queue.malloc(sz);
+        void* p;
+        if (DEBUG_MEMPOOL_HOST)
+            p = g_queue.malloc_host(sz);
+        else
+            p = g_queue.malloc_device(sz);
         if (DEBUG_MEMPOOL_VERBOSE)
             std::cout << "[buffer_pool] alloc new " << sz << " bytes @ " << p << std::endl;
         return p;
@@ -90,7 +95,7 @@ struct buffer_pool {
     }
 
     void show() {
-        std::cout << "=== buffer_pool ===" << std::endl;
+        std::cout << "=== buffer_pool(using '" << (DEBUG_MEMPOOL_HOST ? "malloc_host" : "malloc_device") << "') ===" << std::endl;
         size_t pool_size = 0;
         std::map<size_t, int> summary;
         for (auto const& p : pool) {

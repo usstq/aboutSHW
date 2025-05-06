@@ -9,7 +9,7 @@ if os.name == 'nt':
     '''
     for path in [#"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\redist\\intel64_win\\compiler",
                  #"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\windows\\bin",
-                 #"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
+                 r"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
                  r"C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\bin",
                  r"C:\Program Files (x86)\Common Files\intel\Shared Libraries\bin"
                  #'C:\\Program Files (x86)\\Intel\\oneAPI\\tbb\\latest\\bin'
