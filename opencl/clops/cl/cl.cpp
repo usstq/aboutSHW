@@ -358,6 +358,21 @@ void cl_kernels::enqueue(cl_kernel kernel, const std::vector<size_t>& global_siz
     return;
 }
 
+#define CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL      0x4200
+#define CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL    0x4201
+#define CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL    0x4202
+
+int cl_kernels::SetKernelExecInfo(std::string kernel_name, int i, bool enable) {
+    auto kernel = get_kernel(kernel_name);
+    cl_uint param = enable ? CL_TRUE : CL_FALSE;
+    return clSetKernelExecInfo(
+    //return g_queue.call_ext<cl_int>("clSetKernelExecInfo",
+                             kernel,
+                             CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL + i,
+                             sizeof(param),
+                             &param);
+}
+
 void cl_kernels::enqueue_py(std::string kernel_name, const std::vector<size_t>& global_size, const std::vector<size_t>& local_size, py::args args) {
     cl_int err = CL_SUCCESS;
     auto kernel = get_kernel(kernel_name);
@@ -479,6 +494,7 @@ PYBIND11_MODULE(csrc, m) {
         .def(py::init<py::bytes, std::string>(), py::arg("bin_bytes"), py::arg("options") = "")
         .def(py::init<std::string, std::string, std::string>(), py::arg("source") = "", py::arg("options") = "", py::arg("dump_dir") = "")
         .def("enqueue", &cl_kernels::enqueue_py)
+        .def("SetKernelExecInfo", &cl_kernels::SetKernelExecInfo)
         .def("info", &cl_kernels::info)
         .def(py::pickle(
             [](cl_kernels& p) {  // __getstate__

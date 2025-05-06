@@ -151,9 +151,9 @@ struct ocl_queue {
     }
 
     template<typename RET, typename... Args>
-    void call_ext(const char * func_name, Args&&... args) {
+    RET call_ext(const char * func_name, Args&&... args) {
         using ext_func_t = RET (*)(Args...);
-        ext_func_t ext_func = clGetExtensionFunctionAddressForPlatform(platform, func_name);
+        ext_func_t ext_func = reinterpret_cast<ext_func_t>(clGetExtensionFunctionAddressForPlatform(platform, func_name));
         ASSERT(ext_func != nullptr, "clGetExtensionFunctionAddressForPlatform()", func_name, " returns nullptr");
         return (*ext_func)(std::forward<Args>(args)...);
     }
@@ -212,10 +212,12 @@ struct ocl_queue {
         return ret;
     }
 
-    void* malloc(size_t sz) {
+    void* malloc_host(size_t sz) {
         return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
     }
-
+    void* malloc_device(size_t sz) {
+        return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
+    }
     void memcpy_HtoD(void* pdst, void* psrc, size_t bytes) {
         ASSERT(clFinish(queue) == CL_SUCCESS);
         clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr);
@@ -290,9 +292,9 @@ struct ocl_queue {
     }
 
     template<typename RET, typename... Args>
-    void call_ext(const char * func_name, Args&&... args) {
+    RET call_ext(const char * func_name, Args&&... args) {
         using ext_func_t = RET (*)(Args...);
-        ext_func_t ext_func = clGetExtensionFunctionAddressForPlatform(platform, func_name);
+        ext_func_t ext_func = reinterpret_cast<ext_func_t>(clGetExtensionFunctionAddressForPlatform(platform, func_name));
         ASSERT(ext_func != nullptr, "clGetExtensionFunctionAddressForPlatform()", func_name, " returns nullptr");
         return (*ext_func)(std::forward<Args>(args)...);
     }    
@@ -380,6 +382,8 @@ struct cl_kernels {
     void set_arg(cl_kernel kernel, int idx, int arg);
     void set_arg(cl_kernel kernel, int idx, float arg);
     void set_arg(cl_kernel kernel, int idx, void* arg);
+
+    int SetKernelExecInfo(std::string kernel_name, int i, bool enable);
 
     template<typename... Ts>
     void set_args(cl_kernel kernel, Ts... args) {
