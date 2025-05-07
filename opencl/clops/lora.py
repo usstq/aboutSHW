@@ -41,7 +41,7 @@ cl_kernel_sources_ref = r'''
             sum += temp_C[m_idx*cnt*N + i*N + n_idx];
         C[m_idx * N + n_idx] = sum;
     }
-    
+
     __kernel void gemmB(__global half * main_input, __global half * A, __global half *B,  __global half *CC, __global half * alpha, int N, int K, int M) {
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
@@ -76,7 +76,7 @@ opt_lora_kernel_2nd = r'''
         int wg_k_len = (k_start_wg + bk_wg) > K ?  (K - k_start_wg) : bk_wg;
         int sgK = (wg_k_len + GEMMA_SG_BK - 1) / GEMMA_SG_BK;
 
-        // store each sg accumulation result into SLM. Will reduce sg result into wg result. 
+        // store each sg accumulation result into SLM. Will reduce sg result into wg result.
         __local half fma_buff[MAX_GEMMA_SGK * MAX_LORA_RANK];
         __local half *sg_fma_buff = fma_buff + sgid_k * MAX_LORA_RANK;
 
@@ -214,7 +214,7 @@ class LORA_2ND:
         assert gemma_sg_BK % self.sg_sz == 0, f"'gemma_sg_BK' { gemma_sg_BK} is not multiple of SG_SZ {self.sg_sz}"
         assert self.gemmb_wg_sz % self.sg_sz == 0, f"'gemmb_wg_sz' {self.gemmb_wg_sz} is not multiple of SG_SZ {self.sg_sz}"
         self.gemma_wg_BK = gemma_sg_BK * gemma_sgK
-        
+
         options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs}'
         self.cl_kernels_opt = kernel_cache(opt_lora_kernel_2nd, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
@@ -233,16 +233,16 @@ class LORA_2ND:
 
         if self.use_ref:
             tA_output_ref = cl.tensor([1, self.rank], np.dtype(np.float16))
-            
+
             # self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank],[1, self.rank], loraInput, stataA,
             #                             tA_output_ref, self.rank, self.input_state, self.input_state_per_wg, self.batch)
-            
-                        
+
+
             self.cl_kernels_ref.enqueue("gemmA", [1, self.rank],[1, self.rank], loraInput, stataA,
                                         tA_output_ref, self.rank, self.input_state, self.gemma_wg_BK, 1)
             REF_LOCAL_SIZE = 16
             assert self.output_state % REF_LOCAL_SIZE == 0, f"'OUTPUT_STATE' {self.output_state} is not multiple of LOCAL_SIZE {REF_LOCAL_SIZE}"
-            
+
             # self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
             #                             mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, self.batch)
             self.cl_kernels_ref.enqueue("gemmB", [1, self.output_state],[1, REF_LOCAL_SIZE],
@@ -251,11 +251,11 @@ class LORA_2ND:
             cl_kernels = self.cl_kernels_opt
             # GEMMA: ONE WG would has {self.gemma_sgK*self.rank/SG_SZ}subgroups. self.rank/SG_SZ subgroups on N dimension, self.gemma_sgK on K dimension
             # Total {self.gemma_wg} WGS
-            cl_kernels.enqueue("gemmA", self.gemma_gws, self.gemma_lws, 
+            cl_kernels.enqueue("gemmA", self.gemma_gws, self.gemma_lws,
                                         loraInput, stataA, Aoutput, self.input_state)
             # GEMMB: ONE WG would has {gemmb_wg_sz/SG_SZ}subgroups.
             # Total {output_state/gemmb_wg_sz} WGS
-            cl_kernels.enqueue("gemmB", self.gemmb_gws, self.gemmb_lws, 
+            cl_kernels.enqueue("gemmB", self.gemmb_gws, self.gemmb_lws,
                                         mainInput, Aoutput, stateB, result, stateAlpha, self.output_state)
         # cl.finish()
         return result
@@ -285,7 +285,7 @@ def generate_store_C(regM, regN, withscale, withSum):
         # read out `regN` mainInput
         if withSum:
             src += "\n\t".join([f'main_N{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
-                    ''' 
+                    '''
         for n in range(regN):
             if withscale:
                 src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}*alpha_{n}));"
@@ -313,7 +313,7 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
 
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void 
+    __kernel void
     ''' + f'{func}' + r'''(__global half * A, __global half *B,  __global half *C, __global half *alpha,  __global half *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
@@ -338,12 +338,12 @@ def generate_gemm_src(regM, regN, withscale = False, withSum=False):
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
 
         for(int i = 0; i < K; i += SG_SZ) {
-                
+
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
 
                 //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
-            
+
                      '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
                      '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
                      ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
@@ -366,21 +366,21 @@ class LORA_1ST:
         self.input_state = input_state
         self.output_state = output_state
         self.sg_sz = 16
-        
+
         assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
         assert rank % self.sg_sz == 0 , f'rank:{rank} is not multiple of SG_SZ:{self.sg_sz}'
         assert output_state % self.sg_sz == 0 , f'output_state:{output_state} is not multiple of SG_SZ:{self.sg_sz}'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
         assert output_state >= B_regN * self.sg_sz, f'output_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
-        
-        
+
+
         A_BM = A_regM*A_sgM
         A_BN = A_regN*A_sgN*self.sg_sz
         B_BM = B_regM*B_sgM
         B_BN = B_regN*B_sgN*self.sg_sz
-        
-        
+
+
         gemma_func, gemma_kernel_src = generate_gemm_src(A_regM, A_regN,  True, False)
         gemmb_func, gemmb_kernel_src = generate_gemm_src(B_regM, B_regN,  False, True)
         self.gemma_func = gemma_func
@@ -389,11 +389,11 @@ class LORA_1ST:
         self.gemma_GWS = [ALIGN_UP(batch, A_BM)//A_regM , ALIGN_UP(rank, A_BN)//(A_regN)]
         self.gemma_LWS = [A_sgM, A_sgN * self.sg_sz]
         assert A_sgM *A_sgN * self.sg_sz <= 1024, f" A_LWS:{self.gemma_LWS} exceed 1024 limitation"
-        
+
         self.gemmb_GWS = [ALIGN_UP(batch, B_BM)//B_regM , ALIGN_UP(output_state, B_BN)//(B_regN)]
         self.gemmb_LWS = [B_sgM, B_sgN *  self.sg_sz]
         assert B_sgM *B_sgN *  self.sg_sz <= 1024, f" B_LWS:{self.gemmb_LWS} exceed 1024 limitation"
-        
+
         self.kernel_opt_gemma = kernel_cache(gemma_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
         self.kernel_opt_gemmb = kernel_cache(gemmb_kernel_src, options=f"-DSG_SZ={self.sg_sz}")
 
@@ -412,9 +412,9 @@ class LORA_1ST:
         if self.use_ref:
             tA_output_ref = cl.tensor([self.batch, self.rank], np.dtype(np.float16))
             REF_LOCAL_SIZE = 16
-                        
+
             self.cl_kernels_ref.enqueue("gemmA", [self.batch, self.rank],[1, REF_LOCAL_SIZE], loraInput, stataA,
-                                        tA_output_ref, self.rank, self.input_state, self.sg_sz, self.batch)            
+                                        tA_output_ref, self.rank, self.input_state, self.sg_sz, self.batch)
             self.cl_kernels_ref.enqueue("gemmB", [self.batch, self.output_state],[1, REF_LOCAL_SIZE],
                                         mainInput, tA_output_ref, stateB, result, stateAlpha, self.output_state, self.rank, self.batch)
         else:
@@ -443,27 +443,27 @@ def test_lora_2nd(input_state, rank, output_state, gemma_sgK = 8, gemma_sg_BK = 
     else:
         REPEAT = 200
     # for GEMMA, K decides how many WGs are needed.
-    gemma_wgs = ALIGN_UP(input_state, gemma_sg_BK *gemma_sgK)
+    gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank]).astype(np.float16)
     alpha = np.random.rand(rank).astype(np.float16)
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
     loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)
     mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state]).astype(np.float16)
-    Aoutput = np.zeros([gemma_wgs, rank]).astype(np.float16) 
-    
+    Aoutput = np.zeros([gemma_wgs, rank]).astype(np.float16)
+
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
     alpha_list = [cl.tensor(alpha) for _ in range(REPEAT)]
     stateB_list = [cl.tensor(stateB)for _ in range(REPEAT)]
     loraInput_list = [cl.tensor(loraInput)for _ in range(REPEAT)]
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
-    #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
+    #Must set the output to be zeros to avoid not all the data is updated in GEMMA.
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
     res_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
     ref_list = [cl.tensor([1, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
 
     ref = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
     opt = LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
-    
+
     if check_acc:
         opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
         ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], ref_list[0])
@@ -508,21 +508,21 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
     stateB = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
     loraInput = np.random.randint(-vRANGE, vRANGE+1, [batch, input_state]).astype(np.float16)
     mainInput = np.random.randint(-vRANGE, vRANGE+1, [batch, output_state]).astype(np.float16)
-    Aoutput = np.zeros([batch, rank]).astype(np.float16) 
-    
+    Aoutput = np.zeros([batch, rank]).astype(np.float16)
+
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
     alpha_list = [cl.tensor(alpha) for _ in range(REPEAT)]
     stateB_list = [cl.tensor(stateB)for _ in range(REPEAT)]
     loraInput_list = [cl.tensor(loraInput)for _ in range(REPEAT)]
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
-    #Must set the output to be zeros to avoid not all the data is updated in GEMMA. 
+    #Must set the output to be zeros to avoid not all the data is updated in GEMMA.
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
     res_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
     ref_list = [cl.tensor([batch, output_state], np.dtype(np.float16))for _ in range(REPEAT)]
 
     ref = LORA_1ST(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,True)
     opt = LORA_1ST( batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,False)
-    
+
     if check_acc:
         opt(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], res_list[0])
         ref(mainInput_list[0], loraInput_list[0], stateA_list[0], alpha_list[0], stateB_list[0], A_output_list[0], ref_list[0])
@@ -539,7 +539,7 @@ def test_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM
         flops_b = batch*rank*output_state*2 + batch*output_state
         # loarinput + stateA + scale
         rd_bytes_a = (rank*input_state + input_state*batch + rank)*2
-        # maininput + Aoutput + stateB 
+        # maininput + Aoutput + stateB
         rd_bytes_b = (rank*output_state + output_state*batch + rank*batch)*2
 
         for i in range(1, REPEAT):
@@ -562,13 +562,13 @@ def blocking_2nd(rank, input_state, output_state):
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
 def blocking_1nd(batch, rank, input_state, output_state):
-    assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"     
-# GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m, 
-#                                     2, choose[sgN], 
+    assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
+# GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m,
+#                                     2, choose[sgN],
 #                                     3  sgM = 16//sgN or sgM = 8//sgN
-# seems regM and regN influences FPS more than sgM, sgN. 
+# seems regM and regN influences FPS more than sgM, sgN.
 # If rank is 128, 256, and M >= 2000, can try[16, 2]??
-# GEMMA rank == 64, use regM, regN for  [8,2] , sgM = 16, sgN = 2, when M >= 2048. 
+# GEMMA rank == 64, use regM, regN for  [8,2] , sgM = 16, sgN = 2, when M >= 2048.
 # other wise,  choose regM = 4, regN = 1, sgM = ?, sgN = 1/2/8.
     if batch >= 2000:
         if rank == 64:
@@ -600,7 +600,7 @@ if __name__ == "__main__":
 
     # test_lora_2nd(2048, 128, 256, gemma_sgK = 4,  gemma_sg_BK=48, gemmb_sgN=32 , check_acc=True)
     # test_lora_2nd(2048, 128, 256, gemma_sgK=2,  gemma_sg_BK=48, gemmb_sgN=32 , check_acc=True)
-    
+
     test_lora_2nd(3840, 128, 176, gemma_sgK=4,  gemma_sg_BK=32, gemmb_sgN=32 , check_acc=True)
 
 
@@ -617,7 +617,7 @@ if __name__ == "__main__":
                         A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = blocking_1nd(batch, rank, input_state, output_state_idx*16)
                         test_lora_1st(batch, rank ,input_state,  output_state_idx*16, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                       B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
-    
+
     """
     test 2nd acc:
     """
@@ -630,7 +630,7 @@ if __name__ == "__main__":
                     #         test_lora_2nd(input_state, rank, out_state, gemma_sgK = min(sgk, 512 // rank), gemma_sg_BK=bk, gemmb_sgN=32 , check_acc=True)
                     gemma_sg_BK, gemma_sgK, gemmb_sgN = blocking_2nd(rank, input_state, out_state)
                     test_lora_2nd(input_state, rank, out_state, gemma_sgK = gemma_sgK, gemma_sg_BK=gemma_sg_BK, gemmb_sgN=gemmb_sgN, check_acc=True)
-                            
+
     """
     test acc of minicpm and qwen2.5:
     """
