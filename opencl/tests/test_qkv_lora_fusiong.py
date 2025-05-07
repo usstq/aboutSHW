@@ -253,7 +253,7 @@ class QKV_LORA_2ND:
         self.gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
         self.gemma_sgK = gemma_sgK
 
-        assert gemmb_sgN <=64, f'gemmb_sgN:{gemmb_sgN} bigger than 64 limitation'
+        assert gemmb_sgN <=1024//self.sg_sz, f'gemmb_sgN:{gemmb_sgN} bigger than {1024//self.sg_sz} limitation'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.kv_state % self.sg_sz == 0, f"'input kv_state' {self.kv_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.rank % self.sg_sz == 0, f"'RANK' {self.rank} is not multiple of SG_SZ {self.sg_sz}"
@@ -559,7 +559,7 @@ class QKV_LORA_1ST:
         ##one SG calculation in N dimension can't cross Q,K,V should only one of Q,K,V . For both GEMMA and GEMMB.
         ##the blocking parameter logic would ensure this. Here just double check.
         assert (rank%(self.sg_sz*A_regN)) == 0
-        assert self.kv_state %(B_regN*self.sg_sz) == 0, f'kvstate:{kvstate}, B_regN:{B_regN}'
+        assert self.kv_state %(B_regN*self.sg_sz) == 0, f'kvstate:{kv_state}, B_regN:{B_regN}'
 
         A_BM = A_regM*A_sgM
         A_BN = A_regN*A_sgN*self.sg_sz
@@ -703,11 +703,11 @@ def test_qkv_lora_1st(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def qkv_blocking_1st(batch, rank, input_state, kvstate):
-    max_sg_num = 64
+    sg_sz = 16
+    max_sg_num = 1024//sg_sz
     lora_cnt = 3
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
 # GEMMA
-    sg_sz = 16
     if batch >= 1000:
         if rank == 64:
             A_regM, A_regN = [8, 2]
