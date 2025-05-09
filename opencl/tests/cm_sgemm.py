@@ -17,7 +17,7 @@ extern "C" _GENX_MAIN_ void sgemm(svmptr_t srcA [[type("svmptr_t")]],
                                   svmptr_t dstC [[type("svmptr_t")]],
                                   int M, int N, int K) {
     constexpr int BK = SGEMM_BLOCK_K;
-    cm_slm_init(1024*128);
+    cm_slm_init(1024*64);
 
     // the offset returned is the same for all threads within current group
 
@@ -148,7 +148,7 @@ FP32 : 160*2.67*16(SIMD-width)*2(MAD)/1e3 = 13.67 TFLOPS
 FP16 : 160*2.67*32(SIMD-width)*2(MAD)/1e3 = 27.34 TFLOPS
 
 SIMD-16 means GRF width: 16x4= 64bytes
-GRF size per HW-thread: 8KB 
+GRF size per HW-thread: 8KB
 GRF height(rows or count): 8192/64 = 128
 
 total_threads: 160:       4.3 TFLOPS
@@ -166,8 +166,8 @@ import numpy as np
 cl.profiling(True)
 
 def test(K, chk_accuracy = False):
-    regM = 48
-    regN = 64
+    regM = 16
+    regN = 48
 
     nthrM = 8
     nthrN = 8
@@ -186,7 +186,7 @@ def test(K, chk_accuracy = False):
     np.random.seed(0)
     A = np.random.randint(-1,2,[M, K]).astype(np.float16)
     B = np.random.randint(-1,2,[K, N]).astype(np.float16)
-    
+
     if chk_accuracy:
         C = A @ B
         print(f"refernce is calculated")
@@ -202,7 +202,7 @@ def test(K, chk_accuracy = False):
         k.enqueue("trans", [K],[1], tA0, tA, M, K)
         print(f"A is transposed")
 
-    # 
+    #
     for _ in range(20):
         k.enqueue("sgemm", [global_nthrM, global_nthrN],[nthrM, nthrN], tA, tB, tC, M, N, K)
 
@@ -218,6 +218,6 @@ def test(K, chk_accuracy = False):
             print(tC.numpy())
             assert False
 
-#test(256, chk_accuracy=True)
+test(256, chk_accuracy=True)
 #test(4096, chk_accuracy=False)
-test(40960, chk_accuracy=False)
+# test(40960, chk_accuracy=False)
