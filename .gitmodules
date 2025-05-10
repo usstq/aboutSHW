@@ -7,3 +7,6 @@
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "onednn/csrc/oneDNN"]
+	path = onednn/csrc/oneDNN
+	url = https://github.com/openvinotoolkit/oneDNN.git
