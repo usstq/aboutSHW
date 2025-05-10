@@ -45,3 +45,8 @@ subprocess.run(["cmake", "--build", build_path, "--config", btype, "-j32"], shel
 
 from .csrc import *
 
+# ================================================================
+# Boilerplate
+import numpy as np
+np.random.seed(0)
+np.set_printoptions(linewidth=1024)

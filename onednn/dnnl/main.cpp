@@ -163,7 +163,8 @@ struct onednn_matmul {
         return *this;
     }
 
-    void create(const engine &aengine, memory::desc exist_wei_md = {}) {
+    void create(memory::desc exist_wei_md = {}) {
+        const engine &aengine = g_ctx.eng;
         if (postops.len() > 0) {
             attr.set_post_ops(postops);
         }
@@ -174,9 +175,10 @@ struct onednn_matmul {
         //memory::desc wei_md = memory::desc(memory::dims({m_K, m_N}), m_w_type, memory::format_tag::ba);
 
         if (m_use_ip) {
-            memory::desc wei_md = exist_wei_md ? exist_wei_md : memory::desc(memory::dims({m_N, m_K}), m_w_type, memory::format_tag::any);
+            bool use_exist_wei_md = exist_wei_md && exist_wei_md.get_ndims() > 0;
+            memory::desc wei_md = use_exist_wei_md ? exist_wei_md : memory::desc(memory::dims({m_N, m_K}), m_w_type, memory::format_tag::any);
             //memory::desc wei_md = memory::desc(memory::dims({m_N, m_K}), m_w_type, memory::format_tag::any);
-            std::cout << __LINE__ << "," << m_M << "," << m_N<< "," << m_K << "," << std::endl;
+            //std::cout << __LINE__ << "," << m_M << "," << m_N<< "," << m_K << "," << std::endl;
             auto ip_md = inner_product_forward::primitive_desc(aengine, dnnl::prop_kind::forward_inference,
                                                                src_md, wei_md, dst_md, attr);
             
@@ -190,17 +192,13 @@ struct onednn_matmul {
         }
     }
 
-    void exec(const engine &aengine, const stream &astream,
-              void* p_input,
-              void* p_output,
+    void exec(memory& src_mem,
+              memory& dst_mem,
               memory& weight,
               memory& scale,
               memory& zp,
               memory& bin_mem) {
-        auto src_mem = memory(m_input_md, aengine, (void *)(p_input));
-        auto dst_mem = memory(m_output_md, aengine, (void *)(p_output));
         //auto bias_mem = memory(bias_md, m_engine);
-
         std::unordered_map<int, memory> args;
         args.insert({DNNL_ARG_SRC, src_mem});
         args.insert({DNNL_ARG_WEIGHTS, weight});
@@ -225,7 +223,7 @@ struct onednn_matmul {
             */
             args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
         }
-        m_prim.execute(astream, args);
+        m_prim.execute(g_ctx.strm, args);
     }
 };
 
@@ -289,6 +287,22 @@ py::array as_numpy(memory& mem) {
     return py::array(dt, md.get_dims(), strides, mem.get_data_handle());
 }
 
+memory to_u4(memory& src) {
+    auto src_md = src.get_desc();
+    OPENVINO_ASSERT(src_md.get_data_type() == memory::data_type::u8);
+    OPENVINO_ASSERT(src_md.get_inner_nblks() == 0);
+    OPENVINO_ASSERT(src_md.get_padded_dims() == src_md.get_dims());
+    memory dst({src_md.get_dims(), memory::data_type::u4, src_md.get_strides()}, g_ctx.eng);
+    auto* psrc = reinterpret_cast<uint8_t*>(src.get_data_handle());
+    auto* pdst = reinterpret_cast<uint8_t*>(dst.get_data_handle());
+    int cnt = 1;
+    for(auto& v : src_md.get_dims()) cnt *= v;
+    for(int i = 0; i < cnt; i+=2) {
+        *pdst++ = (psrc[i] & 0xF) | (psrc[i+1] << 4);
+    }
+    return dst;
+}
+
 memory reorder_to(memory& src, const memory::desc& md) {
     memory dst(md, g_ctx.eng);
     dnnl::reorder(src, dst).execute(g_ctx.strm, src, dst);
@@ -327,8 +341,14 @@ std::ostream& operator<<(std::ostream& os, const memory::desc& md) {
     auto padded = md.get_padded_dims();
     if (padded != dims)
         os << ",padded_dims:" << padded;
-    if (md.get_inner_nblks())
-        os << ",inner_blks:" << md.get_inner_blks();
+    if (md.get_inner_nblks()) {
+        os << ",inner_blks:";
+        auto idx = md.get_inner_idxs();
+        auto dims = md.get_inner_blks();
+        for(int i = 0; i < idx.size(); i++) {
+            os << static_cast<char>(idx[i] + 'a') << dims[i];
+        }
+    }
     os << ",strides:" << md.get_strides();
     os << ")";    
     return os;
@@ -347,6 +367,7 @@ PYBIND11_MODULE(csrc, m) {
         .value("f32", memory::data_type::f32);
 
     py::enum_<memory::format_tag>(m, "format_tag", py::arithmetic())
+        .value("any", memory::format_tag::any)
         .value("ab", memory::format_tag::ab)
         .value("ba", memory::format_tag::ba);
 
@@ -382,11 +403,12 @@ PYBIND11_MODULE(csrc, m) {
         .def(py::init<>())
         .def(py::init<>([](const memory::desc &md){
             return memory(md, g_ctx.eng);
-        }))
+         }))
         .def(py::init<>(&memory_from_numpy))
         .def_property_readonly("md", &memory::get_desc)
         .def("numpy", &as_numpy)
         .def("reorder", &reorder_to)
+        .def("to_u4", &to_u4)
         .def("__repr__", [](const memory & mem) {
             std::stringstream ss;
             ss << "memory:" << reinterpret_cast<uintptr_t>(mem.get_data_handle())
@@ -401,4 +423,41 @@ PYBIND11_MODULE(csrc, m) {
 
     py::class_<engine>(m, "engine")
         .def(py::init<engine::kind, size_t>());
+    
+    py::class_<onednn_matmul>(m, "onednn_matmul")
+        .def(py::init<>())
+        .def("init", &onednn_matmul::init)
+        .def("w_scale", &onednn_matmul::w_scale)
+        .def("w_zp", &onednn_matmul::w_zp)
+        .def("post_op_silu", &onednn_matmul::post_op_silu)
+        .def("post_op_bin_mul", &onednn_matmul::post_op_bin_mul)
+        .def("post_op_sum", &onednn_matmul::post_op_sum)
+        .def("create", &onednn_matmul::create)
+        .def("exec", &onednn_matmul::exec)
+        .def_readonly("input_md", &onednn_matmul::m_input_md)
+        .def_readonly("output_md", &onednn_matmul::m_output_md)
+        .def_readonly("wei_md", &onednn_matmul::m_wei_md)
+        .def_readonly("sc_md", &onednn_matmul::m_sc_md)
+        .def_readonly("zp_md", &onednn_matmul::m_zp_md)
+        .def_readonly("bin_md", &onednn_matmul::m_bin_md)
+        .def_readonly("w_type", &onednn_matmul::m_w_type)
+        .def_readonly("a_type", &onednn_matmul::m_a_type)
+        .def_readonly("sc_dtype", &onednn_matmul::m_sc_dtype)
+        .def_readonly("zp_type", &onednn_matmul::m_zp_dtype)
+        .def_readonly("a_type", &onednn_matmul::m_a_type)
+        .def_readonly("ic", &onednn_matmul::m_K)
+        .def_readonly("oc", &onednn_matmul::m_N)
+        .def_readonly("batch", &onednn_matmul::m_M)
+        .def_readonly("ic_groups", &onednn_matmul::m_K_groups)
+        .def("__repr__", [](const onednn_matmul & mm) {
+            std::stringstream ss;
+            ss << "onednn_matmul: batch,oc,ic=" << mm.m_M << "," << mm.m_N << "," << mm.m_K << "g" << mm.m_K_groups << "\n"
+               << "\t input:" << mm.m_input_md << "\n"
+               << "\t output:" << mm.m_output_md << "\n"
+               << "\t weight:" << mm.m_wei_md << "\n"
+               << "\t scale:" << mm.m_sc_md << "\n"
+               << "\t zp:" << mm.m_zp_md << "\n"
+               ;
+            return ss.str();
+        });
 }
