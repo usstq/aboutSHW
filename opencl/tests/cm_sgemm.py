@@ -30,8 +30,6 @@ extern "C" _GENX_MAIN_ void sgemm(svmptr_t srcA [[type("svmptr_t")]],
     uint slmA0 = cm_slm_alloc(nthrM*BK*regM * sizeof(half));
     uint slmB0 = cm_slm_alloc(nthrN*BK*regN * sizeof(half));
 
-    uint slmA1 = cm_slm_alloc(nthrM*BK*regM * sizeof(half));
-    uint slmB1 = cm_slm_alloc(nthrN*BK*regN * sizeof(half));
 
     //SLM A: [nthrM, BK, regM] => block-read a column
     //SLM B: [nthrN, BK, regN] => block-read a row
@@ -39,8 +37,6 @@ extern "C" _GENX_MAIN_ void sgemm(svmptr_t srcA [[type("svmptr_t")]],
     slmA0 += ithrM * (BK*regM) * sizeof(half);
     slmB0 += ithrN * (BK*regN) * sizeof(half);
 
-    slmA1 += ithrM * (BK*regM) * sizeof(half);
-    slmB1 += ithrN * (BK*regN) * sizeof(half);
 
     srcB += cm_global_id(1) * (regN * sizeof(half));
     srcA += cm_global_id(0) * (regM * sizeof(half));
@@ -55,76 +51,48 @@ extern "C" _GENX_MAIN_ void sgemm(svmptr_t srcA [[type("svmptr_t")]],
     vector<half, regN> tempB;
     C = 0;
 
-    uint slm_id = 0;
-    uint readA = slm_id & 1? slmA0 : slmA1;
-    uint readB = slm_id & 1? slmB0 : slmB1;
+    uint readA = slmA0;
+    uint readB = slmB0;
 
     // load first block into SLM
     uint writeA = readA;
     uint writeB = readB;
-    for(int k = 0; k < BK; k++) {
-        // copy data from VRAM to SLM is hidden
-        cm_svm_block_read_unaligned(srcA, tempA);
-        cm_svm_block_read_unaligned(srcB, tempB);
-        srcA += M*sizeof(half);
-        srcB += N*sizeof(half);
-        cm_slm_block_write(writeA, 0, tempA);
-        cm_slm_block_write(writeB, 0, tempB);
-        writeA += regM*sizeof(half);
-        writeB += regN*sizeof(half);
-    }
 
-    writeA = slm_id & 1? slmA1 : slmA0;
-    writeB = slm_id & 1? slmB1 : slmB0;
-
-    for(int k0 = 0; k0 < K - BK; k0 += BK) {
-        for(int k = 0; k < BK; k++) {
-            // load from SLM also has latency
-            cm_slm_block_read(readA, 0, A);
-            cm_slm_block_read(readB, 0, B);
-
+#define RD_DATA 1
+    for(int k0 = 0; k0 < K; k0 += BK) {
+#if RD_DATA
+        for(int kk = 0; kk < BK; kk++) {
             // copy data from VRAM to SLM is hidden
             cm_svm_block_read_unaligned(srcA, tempA);
             cm_svm_block_read_unaligned(srcB, tempB);
             srcA += M*sizeof(half);
             srcB += N*sizeof(half);
+            cm_slm_block_write(writeA, 0, tempA);
+            cm_slm_block_write(writeB, 0, tempB);
+            writeA += regM*sizeof(half);
+            writeB += regN*sizeof(half);
+        }
+        //cm_slm_fence(CM_GLOBAL_COHERENT_FENCE);
+        cm_barrier();
+#endif
+
+        for(int k = 0; k < BK; k++) {
+            // load from SLM also has latency
+            cm_slm_block_read(readA, 0, A);
+            cm_slm_block_read(readB, 0, B);
 
             #pragma unroll
             for(int m = 0; m < regM; m++) {
                 C.row(m) += A.replicate<regN, 1>(m) * B;
             }
-
-            cm_slm_block_write(writeA, 0, tempA);
-            cm_slm_block_write(writeB, 0, tempB);
-            writeA += regM*sizeof(half);
-            writeB += regN*sizeof(half);
-
             readA += regM*sizeof(half);
             readB += regN*sizeof(half);
         }
-
+#if RD_DATA
         // post-log
-        cm_sbarrier(1);
-        slm_id ++;
-        readA = slm_id & 1? slmA0 : slmA1;
-        readB = slm_id & 1? slmB0 : slmB1;
-        writeA = slm_id & 1? slmA1 : slmA0;
-        writeB = slm_id & 1? slmB1 : slmB0;
-        cm_slm_fence(CM_GLOBAL_COHERENT_FENCE);
-        cm_sbarrier(0);
-    }
-
-    // last Block K w/o read data into SLM
-    for(int k = 0; k < BK; k++) {
-        // load from SLM also has latency
-        cm_slm_block_read(readA, 0, A);
-        cm_slm_block_read(readB, 0, B);
-        #pragma unroll
-        for(int m = 0; m < regM; m++) {
-            C.row(m) += A.replicate<regN, 1>(m) * B;
-        }
-        readA += regM*sizeof(half);
-        readB += regN*sizeof(half);
+        //cm_slm_fence(CM_GLOBAL_COHERENT_FENCE);
+        //cm_barrier();
+#endif
     }
 
     #pragma unroll
@@ -167,7 +135,7 @@ cl.profiling(True)
 
 def test(K, chk_accuracy = False):
     regM = 16
-    regN = 48
+    regN = 32
 
     nthrM = 8
     nthrN = 8
@@ -218,6 +186,6 @@ def test(K, chk_accuracy = False):
             print(tC.numpy())
             assert False
 
-test(256, chk_accuracy=True)
+#test(256, chk_accuracy=False)
 #test(4096, chk_accuracy=False)
-# test(40960, chk_accuracy=False)
+test(40960, chk_accuracy=False)

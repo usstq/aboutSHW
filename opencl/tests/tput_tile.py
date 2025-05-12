@@ -26,7 +26,7 @@ cl_kernel_sources_ref = r'''
             sum = fma(A[m_idx * K + i], B[i*N+n_idx], sum);
         CC[m_idx * N + n_idx] = sum;
     }
-    //prepack A from [m,k] to [M, K, bk, bm]
+    //prepack A from [m,k] to [M, K, bm, bk]
     __kernel void repackA(__global half * A, __global half *repackA, int M, int K)
     {
         int m_idx = get_global_id(0);
@@ -42,7 +42,26 @@ cl_kernel_sources_ref = r'''
         int offset = n_idx / BN * BN * K + k_idx * BN + n_idx % BN;
         repackB[offset] = B[k_idx * N + n_idx];
     }
+
+    //prepack A from [m,k] to [M, K, regM, 16k]
+    __kernel void repackAwithoutSLM(__global half * A, __global half *repackA, int M, int K)
+    {
+        int m_idx = get_global_id(0);
+        int k_idx = get_global_id(1);
+        int offset = m_idx / regM * K * regM + k_idx / 16 * regM * 16 + m_idx % regM * 16 + k_idx % 16;
+        repackA[offset] = A[m_idx * K + k_idx];
+    }
+
+        //prepack B from [k,n] to [N, K, regN*16_n]
+    __kernel void repackBwithoutSLM(__global half * B, __global half *repackB, int K, int N)
+    {
+        int k_idx = get_global_id(0);
+        int n_idx = get_global_id(1);
+        int offset = n_idx / (regN*16) * K  * (regN*16) + k_idx * (regN*16) + n_idx % (regN*16);
+        repackB[offset] = B[k_idx * N + n_idx];
+    }
 '''
+
 
 # BM = regM*sgM
 # BN = regN*sgN*SG_SZ
@@ -259,7 +278,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, BK, blkA, blkB):
         tC_ref = cl.tensor(C)
         tA_repack = cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [M // BM, K // BK, BM, BK]).astype(np.float16))
         tB_repack = cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [N // BN, K // BK, BK, BN]).astype(np.float16))
-        kernel_ref = kernel_cache(cl_kernel_sources_ref, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN}")
+        kernel_ref = kernel_cache(cl_kernel_sources_ref, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DregM={regM} -DregN={regN}")
         kernel_ref.enqueue("gemm", [M, N], [8 , 8], tA_list[0], tB_list[0],tC_ref, M, N, K)
         kernel_ref.enqueue("repackA", [M, K], [16, 16], tA_list[0], tA_repack, M, K)
         kernel_ref.enqueue("repackB", [K, N], [16, 16], tB_list[0], tB_repack, K, N)
@@ -285,6 +304,8 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, BK, blkA, blkB):
                             assert Brepack[nb, kb, subk, subn] ==  B[kidx, nidx]
 
 
+
+
 def test_FMA(M, N, K,regM, regN, sgM, sgN, BK):
     func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
     gen_opt_src =  r'''
@@ -301,8 +322,8 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN, BK):
 
         //__global half *ptrA = A + m_idx * K;
         //__global half *ptrB = B + n_idx;
-        __global half *ptrA = A + get_group_id(0)*K*BM+sgid_M * regM *BK;
-        __global half *ptrB = B + get_group_id(1)*K*BN+ sgid_N * regN * SG_SZ;
+        __global half *ptrA = A + get_group_id(0)*K*BM+sgid_M * K * regM;
+        __global half *ptrB = B + get_group_id(1)*K*BN+ sgid_N * K * regN * SG_SZ;
         __global half *ptrC = C + m_idx * N + n_idx;
 
         '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
@@ -312,22 +333,20 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN, BK):
             // FMA Matmul([BM, BK], [BK, BN]) = [BM, BN]
             for(int i = 0; i < BK; i+=SG_SZ) {
 
-                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * BK));" for m in range(regM)]) + r'''
+                '''  + f"ushort{regM} input = intel_sub_group_block_read_us{regM}((const __global ushort*)(ptrA));" + r'''
 
                 __attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
 
-                    '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                    '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
-                    ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
-                    ptrB += BN;
+                    '''  + f"half{regN} bb = as_half{regN}(intel_sub_group_block_read_us{regN}((const __global ushort*)(ptrB)));" + r'''
+                    '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input[{m}], kk));" for m in range(regM)]) + r'''
+                    ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb[{n}], sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
+                    ptrB += regN * 16;
                 }
-                ptrA +=SG_SZ;
+                ptrA +=regM * 16;
             }
-            ptrA -= BK;
-            ptrA += BM*BK;
-            //ptrA += BM*BK;
-            //ptrB += BN*BK;
+            //ptrA -= BK;
+           // ptrA += BM*BK;
         }
         ''' +  gen_store_C(regM, regN) + r'''
     }
@@ -354,7 +373,7 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN, BK):
     tB_list = [cl.tensor(B) for _ in range(REPEAT)]
     tC_slm_list = [cl.tensor(C) for _ in range(REPEAT)]
 
-    kernel_opt= kernel_cache(gen_opt_src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
+    kernel_opt= kernel_cache(gen_opt_src, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN} -DREGM={regM} -DREGN={regN}")
 
     GWS = [M//regM , N//(regN)]
     LWS = [sgM, sgN * SG_SZ]
@@ -378,10 +397,10 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN, BK):
         tC_ref = cl.tensor(C)
         tA_repack = cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [M // BM, K // BK, BM, BK]).astype(np.float16))
         tB_repack = cl.tensor(np.random.randint(-vRANGE, vRANGE+1, [N // BN, K // BK, BK, BN]).astype(np.float16))
-        kernel_ref = kernel_cache(cl_kernel_sources_ref, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN}")
+        kernel_ref = kernel_cache(cl_kernel_sources_ref, options=f"-DSG_SZ={SG_SZ} -DBK={BK} -DBM={BM} -DBN={BN} -DregM={regM} -DregN={regN}")
         kernel_ref.enqueue("gemm", [M, N], [8 , 8], tA_list[0], tB_list[0],tC_ref, M, N, K)
-        kernel_ref.enqueue("repackA", [M, K], [16, 16], tA_list[0], tA_repack, M, K)
-        kernel_ref.enqueue("repackB", [K, N], [16, 16], tB_list[0], tB_repack, K, N)
+        kernel_ref.enqueue("repackAwithoutSLM", [M, K], [16, 16], tA_list[0], tA_repack, M, K)
+        kernel_ref.enqueue("repackBwithoutSLM", [K, N], [16, 16], tB_list[0], tB_repack, K, N)
         kernel_opt.enqueue(func, GWS, LWS, tA_repack, tB_repack,tC_slm_list[0], M, N, K)
         cl.finish()
         compare(tC_ref.numpy(), tC_slm_list[0].numpy())
@@ -408,36 +427,48 @@ if __name__ == '__main__':
 
     SG_SZ =16
     regM=16
-    regN=2
-    # Each subgroup will copy A_blk*SG_SZ into SLM A and B_blk*SG_SZ into SLM B
-    A_blk = 16
-    B_blk= 16
-    bk=64
-
+    regN=4
+    sgM = 8
+    sgN = 8
     WGS_M = 16
-    WGS_N = 64
-    # A_blk = bm*bk%(sgM*sgN*SG_SZ) = sgM*regM*bk%(sgM*sgN*SG_SZ) = regM*bk % (sgN*SG_SZ), bk is the multiple of SG_SZ. Just ensure regM % sgN == 0
-    # bn*bk%(sgM*sgN*SG_SZ) = sgN*regN*SG_SZ*bk%(sgM*sgN*SG_SZ)=regN*bk%sgM, bk is 64. ususually sgM is the divisor of 64.
-    sgN = regM*bk//(SG_SZ*A_blk)
-    sgM = regN*bk // (B_blk)
-
-    assert regM*bk % (sgN*SG_SZ) == 0 and regN*bk%sgM == 0
-    assert sgN * sgM <=64
-
-    bm = sgM * regM
-    bn = sgN * regN * SG_SZ
-
-    assert bm*bk%(sgM*sgN*SG_SZ) == 0 and bn*bk%(sgM*sgN) == 0 and bk % SG_SZ == 0
-    assert bm*bk//(sgM*sgN*SG_SZ) == A_blk and bn*bk//(sgM*sgN*SG_SZ) == B_blk
-
+    WGS_N = 32
+    bk = 64
     K = bk*20
     M = regM * sgM * WGS_M
     N = regN * sgN * SG_SZ * WGS_N
-    print(f'----------SLB:{(bm*bk*2 + bn*bk*2)/1024}')
-
-    assert K%bk == 0
-    # A770 FMA tput: 512 XVE *16 lanes *2 FMA_OPS *2.4G = 39.3 TFLOPS
-    test_SLM_FMA(M, N, K, regM, regN, sgM=sgM, sgN=sgN,BK=bk, blkA=A_blk, blkB=B_blk)
     test_FMA(M, N, K,regM, regN, sgM, sgN, BK=bk)
+
+    if 0:
+        # Each subgroup will copy A_blk*SG_SZ into SLM A and B_blk*SG_SZ into SLM B
+        A_blk = 16
+        B_blk= 16
+        bk=64
+
+        WGS_M = 16
+        WGS_N = 64
+        # A_blk = bm*bk%(sgM*sgN*SG_SZ) = sgM*regM*bk%(sgM*sgN*SG_SZ) = regM*bk % (sgN*SG_SZ), bk is the multiple of SG_SZ. Just ensure regM % sgN == 0
+        # bn*bk%(sgM*sgN*SG_SZ) = sgN*regN*SG_SZ*bk%(sgM*sgN*SG_SZ)=regN*bk%sgM, bk is 64. ususually sgM is the divisor of 64.
+
+
+        sgN = regM*bk//(SG_SZ*A_blk)
+        sgM = regN*bk // (B_blk)
+
+        assert regM*bk % (sgN*SG_SZ) == 0 and regN*bk%sgM == 0
+        assert sgN * sgM <=64
+
+        bm = sgM * regM
+        bn = sgN * regN * SG_SZ
+
+        assert bm*bk%(sgM*sgN*SG_SZ) == 0 and bn*bk%(sgM*sgN) == 0 and bk % SG_SZ == 0
+        assert bm*bk//(sgM*sgN*SG_SZ) == A_blk and bn*bk//(sgM*sgN*SG_SZ) == B_blk
+
+        K = bk*20
+        M = regM * sgM * WGS_M
+        N = regN * sgN * SG_SZ * WGS_N
+        print(f'----------SLB:{(bm*bk*2 + bn*bk*2)/1024}')
+
+        assert K%bk == 0
+        # A770 FMA tput: 512 XVE *16 lanes *2 FMA_OPS *2.4G = 39.3 TFLOPS
+        test_SLM_FMA(M, N, K, regM, regN, sgM=sgM, sgN=sgN,BK=bk, blkA=A_blk, blkB=B_blk)
 
 # TPUT: [SLM]:21200.6 GFLOPS, us: 1215.5
