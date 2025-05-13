@@ -65,7 +65,7 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN):
 
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * K));" for m in range(regM)]) + r'''
 
-                //__attribute__((opencl_unroll_hint))
+                __attribute__((opencl_unroll_hint()))
                 for (int kk = 0; kk < SG_SZ; kk++) {
 
                      '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
@@ -97,7 +97,7 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN):
     tB_list = [cl.tensor(B) for _ in range(REPEAT)]
     tC_slm_list = [cl.tensor(C) for _ in range(REPEAT)]
 
-    kernel_opt = kernel_cache(gen_src, options=f"-DSG_SZ={SG_SZ}  -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}")
+    kernel_opt = kernel_cache(gen_src, options=f"-DSG_SZ={SG_SZ}  -DBM={BM} -DBN={BN} -DsgM={sgM} -DsgN={sgN}", dump="./dump/")
 
     GWS = [M//regM , N//(regN)]
     LWS = [sgM, sgN * SG_SZ]
@@ -122,7 +122,7 @@ def test_FMA(M, N, K,regM, regN, sgM, sgN):
 
 
 def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, BK):
-    func = f'gemm_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
+    func = f'gemm_SLM_rM{regM}_rN{regN}_sM{sgM}_sN{sgN}_M{M}_N{N}_K{K}'
     gen_slm_src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void
@@ -171,7 +171,7 @@ def test_SLM_FMA(M, N, K,regM, regN, sgM, sgN, BK):
 
                 '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __local ushort*)(lA_ptr + {m} * BK));" for m in range(regM)]) + r'''
 
-                //__attribute__((opencl_unroll_hint))
+                __attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
 
                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __local ushort*)(lB_ptr + {n} * SG_SZ)));" for n in range(regN)]) + r'''
@@ -242,7 +242,7 @@ regN=2
 sgN=8
 
 WGS_M = 16
-WGS_N = 16
+WGS_N = 64
 
 bk=64
 K = bk*100

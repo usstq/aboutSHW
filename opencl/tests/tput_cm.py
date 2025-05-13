@@ -71,7 +71,7 @@ def test_FMA_basic_fp16():
     '''
     REPEAT = 10
     regM = 16
-    regN = 16
+    regN = 32
     nthrM = 8
     nthrN = 8
     WGS_M = 8
@@ -94,7 +94,7 @@ def test_FMA_basic_fp16():
     tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
 
     SG_SZ = 16
-    kernel = kernel_cache(src, options=f"-cmc -march=BMG -Qxcm_opt_report -mdump_asm -g2 -DregM={regM} -DregN={regN} -DSG_SZ=16")
+    kernel = kernel_cache(src, options=f"-cmc -march=DG2 -Qxcm_opt_report -mdump_asm -g2 -DregM={regM} -DregN={regN} -DSG_SZ=16")
     for i in range(0, REPEAT):
         kernel.enqueue("gemm", [global_nthrM, global_nthrN],[nthrM, nthrN], tA_list[i], tB_list[i],tC_list[i], K, N)
     ns = cl.finish()
