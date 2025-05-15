@@ -15,6 +15,11 @@ def ALIGN_UP(a, b):
     return ((a + (b -1)) // b *b)
 def DIV_UP(a, b):
     return ((a + (b -1)) // b)
+"""
+------------------------------------------------------------------------------------------------------------------
+qkv lora reference kernel
+------------------------------------------------------------------------------------------------------------------
+"""
 mlp_lora_ref_kernel =  r'''
         __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
@@ -58,12 +63,17 @@ mlp_lora_ref_kernel =  r'''
         CC[m_idx *stride_C + n_idx] = sum + main_input[m_idx *stride_C + n_idx];
     }
     '''
+"""
+------------------------------------------------------------------------------------------------------------------
+qkv lora 2nd token
+------------------------------------------------------------------------------------------------------------------
+"""
 mlp_lora_opt =  r'''
+//SLM :32KB for GEMMA,  1KB for GEMMB.
 #define LORA_CNT 2
 #define MAX_GEMMA_SGK (64/LORA_CNT)
 #define MAX_LORA_RANK (256)
-#define MAX_N (MAX_LORA_RANK*LORA_CNT)
-#define MAX_GEMMA_SG_BK 256
+#define MAX_GEMMA_N (MAX_LORA_RANK*LORA_CNT)
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void gemmA(__global half * A, __global half *B0, __global half *B1,  __global half *C, int K) {
 
@@ -86,19 +96,8 @@ mlp_lora_opt =  r'''
         int sgK = (wg_k_len + GEMMA_SG_BK - 1) / GEMMA_SG_BK;
 
         // store each sg accumulation result into SLM. Will reduce sg result into wg result.
-        __local half fma_buff[MAX_GEMMA_SGK * MAX_N];
-        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_N;
-
-        //put all need input activation into SLM. 'sgN' sgs would share same input.
-        __local half local_input[MAX_GEMMA_SGK * MAX_GEMMA_SG_BK];
-        int local_sz = get_num_sub_groups() * SG_SZ;
-        //sg could diverge here. not all the sgs can satisfy 'offset < k_len'.
-        for (int offset = sgid * SG_SZ; offset < wg_k_len; offset += local_sz) {
-            __global half *input_ptr = A + k_start_wg + offset;
-            half copy_val = as_half(intel_sub_group_block_read_us((const __global ushort*)input_ptr));
-            local_input[offset + lid] = copy_val;
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+        __local half fma_buff[MAX_GEMMA_SGK * MAX_GEMMA_N];
+        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_GEMMA_N;
         int k_offset = sgid_k * GEMMA_SG_BK;
         int k_idx = k_start_wg + k_offset;
 
@@ -106,10 +105,10 @@ mlp_lora_opt =  r'''
         if (sgid_k * GEMMA_SG_BK  <  wg_k_len) {
             int klen_sg =  (k_offset + GEMMA_SG_BK) > wg_k_len ? (wg_k_len - k_offset) : GEMMA_SG_BK;
             __global half *B_ptr = B + k_idx * RANK;
-            __local half *A_ptr = local_input + k_offset;
+            __global half *A_ptr = A + k_start_wg + k_offset;
             half sum = 0.f;
             for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
-                ushort input = intel_sub_group_block_read_us((const __local ushort*)(A_ptr + kk));
+                ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr + kk));
                 __attribute__((opencl_unroll_hint))
                 for (int j = 0; j < SG_SZ; j++) {
                     half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
@@ -130,12 +129,12 @@ mlp_lora_opt =  r'''
             //unroll
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < GEMMA_SGK; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_N + n_idx)));
+                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
             }
         } else {
             //can't unroll, tail handling
             for (int i = 0;  i < sgK; i++)
-            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_N + n_idx)));
+            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
         }
         intel_sub_group_block_write_us((const __global ushort*)(C_ptr + n_idx), as_short(sum));
     }
@@ -147,7 +146,9 @@ mlp_lora_opt =  r'''
         int sg_num = get_num_sub_groups();
         int n_idx = (wg_id * sg_num  +  sg_id) * SG_SZ;
         int id_sg_local = get_sub_group_local_id();
-        __local half reduce[MAX_N];
+        //ONE WG maybe output both  MLP GATE and MLP UP output, So reduce the 2 A matrice in each WG for easiness.
+
+        __local half reduce[MAX_GEMMA_N];
         int slm_offset = 0;
         __global half *B_ptr = B0 + n_idx;
          __global half* alpha = alpha0;
@@ -162,7 +163,7 @@ mlp_lora_opt =  r'''
         //1. Reduce
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
         int local_sz = get_local_size(0);
-        for (int offset = sg_id * SG_SZ; offset < MAX_N; offset += local_sz) {
+        for (int offset = sg_id * SG_SZ; offset < MAX_GEMMA_N; offset += local_sz) {
             __global half *A_ptr = A + offset;
             half sum = 0.f;
             __attribute__((opencl_unroll_hint))
@@ -202,8 +203,9 @@ mlp_lora_opt =  r'''
     '''
 
 
-# GEMMA has a big K but small N(rank), GEMMA kernel  would divide K by WGs and K diemsnion SGs.
-# GEMMB only divide N by WGs and SGs because N is big and K(Rank) is small..
+# GEMMA has a big K but small N(rank*2), GEMMA kernel  would divide K by WGs and K diemsnion SGs.
+# GEMMB only divide N by WGs and SGs because N is big and K(Rank) is small.
+# output_state: MLP intermediate_dim
 # gemma_sg_BK: the Number of K accumuated in one sg for GEMMA.
 # gemma_sgK: the number of sg in K dimension for GEMMA.
 # gemmb_sgN: the number of sg in N dimension for GEMMB
@@ -215,17 +217,18 @@ class MLP_LORA_2ND:
         self.fused_out_state = output_state*2
 
         self.sg_sz = 16
-        assert gemmb_sgN <=64, f'gemmb_sgN:{gemmb_sgN} bigger than 64 limitation'
         self.gemmb_wg_sz = gemmb_sgN * self.sg_sz
         self.use_ref = use_ref
         # WGs would divide K dimension. N would not divided by WGs
         self.gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
         self.gemma_sgK = gemma_sgK
-
+        assert gemmb_sgN <=1024//self.sg_sz, f'gemmb_sgN:{gemmb_sgN} bigger than {1024//self.sg_sz} limitation'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
+        assert self.output_state % self.sg_sz == 0, f"'output_state' {self.output_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.rank % self.sg_sz == 0, f"'RANK' {self.rank} is not multiple of SG_SZ {self.sg_sz}"
         assert gemma_sg_BK % self.sg_sz == 0, f"'gemma_sg_BK' { gemma_sg_BK} is not multiple of SG_SZ {self.sg_sz}"
         assert self.gemmb_wg_sz % self.sg_sz == 0, f"'gemmb_wg_sz' {self.gemmb_wg_sz} is not multiple of SG_SZ {self.sg_sz}"
+        # gemma_wg_BK only used for refrence kernel
         self.gemma_wg_BK = gemma_sg_BK * gemma_sgK
 
         options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs} -DN0={self.output_state}'
@@ -250,25 +253,29 @@ class MLP_LORA_2ND:
             tA_output_ref = cl.tensor([1, self.rank*2], np.dtype(np.float16))
             self.cl_kernels_ref.enqueue("gemmA", [1, self.rank*2],[1, self.rank], loraInput, stateA,
                                         tA_output_ref, self.rank*2, self.input_state, self.gemma_wg_BK, 1)
-            REF_LOCAL_SIZE = 16
             self.cl_kernels_ref.enqueue("gemmB", [1, self.fused_out_state],[1, min(self.fused_out_state, 1024)],
                                         mainInput, tA_output_ref, stateB0, stateB1, result, stateAlpha, self.rank)
-            # print("======================ref:")
-            # print(tA_output_ref.numpy())
+
         else:
             cl_kernels = self.cl_kernels_opt
-            # GEMMA: ONE WG would has {self.gemma_sgK*self.rank/SG_SZ}subgroups. self.rank/SG_SZ subgroups on N dimension, self.gemma_sgK on K dimension
-            # Total {self.gemma_wg} WGS
+
             cl_kernels.enqueue("gemmA", self.gemma_gws, self.gemma_lws,
                                         loraInput, stateA0, stateA1, Aoutput, self.input_state)
-            # GEMMB: ONE WG would has {gemmb_wg_sz/SG_SZ}subgroups.
             cl_kernels.enqueue("gemmB", self.gemmb_gws, self.gemmb_lws,
                                         mainInput, Aoutput, stateB0, stateB1, result, stateAlpha0, stateAlpha1, self.fused_out_state)
-            # print("======================opt:")
-            # print(Aoutput.numpy())
-        # cl.finish()
         return result
 
+def mlp_blocking_2nd(rank, input_state, output_state):
+    SG_SZ = 16
+    lora_cnt = 2
+    fused_output = output_state*2
+
+    # The MAX_WG_SZ should be bigger than MAXRANK*2=512. Use 1024 for now.
+    MAX_WG_SZ = 1024
+    gemma_sg_BK = 64
+    gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
+    gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
+    return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
 def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
     cl.profiling(True)
@@ -278,7 +285,7 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
         REPEAT = 1
     else:
         REPEAT = 200
-    np.random.seed(0)
+    # np.random.seed(0)
 
     # for GEMMA, K decides how many WGs are needed.
     gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
@@ -325,7 +332,7 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
                 stateB0_list[0],stateB1_list[0], None, ref_list[0])
         cl.finish()
         compare(ref_list[0].numpy(), res_list[0].numpy())
-        print(f'INPUT_STATE:{input_state}, RANK:{rank}, ACC PASS!')
+        print(f'INPUT_STATE:{input_state}, RANK:{rank}, OUTPUT_STATE:{output_state}ACC PASS!')
     else:
         for i in range(0, REPEAT):
             opt(mainInput_list[0], loraInput_list[0], stateA0_list[0], stateA1_list[0], None, alpha0_list[0], alpha1_list[0], None,
@@ -351,18 +358,9 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 
-def mlp_blocking_2nd(rank, input_state, output_state):
-    # 512 or 1024? First try 512
-    MAX_WG_SZ = 1024
-    gemma_sg_BK = 32
-    gemma_sgK = MAX_WG_SZ//(rank*2)
-    gemmb_sgN = min(output_state*2, MAX_WG_SZ)//16
-    return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
-
-
 """
 ------------------------------------------------------------------------------------------------------------------
-opt lora 1st token
+mlp lora 1st token
 ------------------------------------------------------------------------------------------------------------------
 """
 def mlp_generate_store_C(regM, regN, withscale, withSum):
@@ -486,8 +484,10 @@ def mlp_generate_gemm_src(regM, regN, withscale = False, withSum=False):
     '''
     return [func, src]
 
- #A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
- #B_regM, B_regN, B_sgM, B_sgN: GEMMB register blocking in one sg and sg number in M and N dimesnion.
+#A_regM, A_regN, A_sgM, A_sgN: GEMMA register blocking in one sg and sg number in M and N dimesnion.
+#B_regM, B_regN, B_sgM, B_sgN: GEMMB register blocking in one sg and sg number in M and N dimesnion.
+#output_state: MLP intermediate_dim
+
 class MLP_LORA_1ST:
     def __init__(self, batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN, use_ref = False):
         self.batch = batch
@@ -505,6 +505,10 @@ class MLP_LORA_1ST:
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert rank >= A_regN * self.sg_sz, f'rank:{rank} is smaller than :A_regN * SG_SZ {A_regN*self.sg_sz}'
         assert output_state >= B_regN * self.sg_sz, f'kv_state:{output_state} is smaller than :B_regN * SG_SZ {B_regN*self.sg_sz}'
+        ##one SG calculation in N dimension can't cross gate and up outpu. For both GEMMA and GEMMB.
+        ##the mlp_blocking_1st() would ensure alignment. Here just double check.
+        assert (rank%(self.sg_sz*A_regN)) == 0
+        assert self.kv_state %(B_regN*self.sg_sz) == 0, f'kvstate:{kv_state}, B_regN:{B_regN}'
 
         A_BM = A_regM*A_sgM
         A_BN = A_regN*A_sgN*self.sg_sz
@@ -642,80 +646,68 @@ def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def mlp_blocking_1st(batch, rank, input_state, outstate):
+    sg_sz = 16
+    max_sg_num = 1024//sg_sz
     lora_cnt = 2
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
-# GEMMA will not divide N across WGs. 1. choose[regM, regN] based on rank and m,
-#                                     2, choose[sgN],
-#                                     3  sgM = 16//sgN or sgM = 8//sgN
-# seems regM and regN influences FPS more than sgM, sgN.
-# If rank is 128, 256, and M >= 2000, can try[16, 2]??
-# GEMMA rank == 64, use regM, regN for  [8,2] , sgM = 16, sgN = 2, when M >= 2048.
-# other wise,  choose regM = 4, regN = 1, sgM = ?, sgN = 1/2/8.
-    sg_sz = 16
-    if batch >= 2000:
+# GEMMA:
+    if batch >=1000:
         if rank == 64:
             A_regM, A_regN = [8, 2]
         elif rank == 128 or rank == 256:
             A_regM, A_regN = [16, 2]
         else:
             A_regM, A_regN = [4, 1]
-        A_sgN = rank*lora_cnt//(sg_sz*A_regN)
-        A_sgM = 64 // A_sgN
     else:
         A_regM, A_regN = [4, 1]
-        A_sgN = rank*lora_cnt//(sg_sz*A_regN)
-        A_sgM = 64 // A_sgN
-# GEMMB: M < 256 regM=8, regN=2, sgM=16, sgN=4, small M() fits into
-#        M >= 256, regM=16, regN=2, sgM=8, sgN=4
-    if batch < 256:
-        B_regM, B_regN = [8, 2]
-        B_sgM, B_sgN = [16, 4]
-
+    A_sgN = rank*lora_cnt//(sg_sz*A_regN)
+    A_sgM = max_sg_num // A_sgN
+# GEMMB:
+    # check whether kv state can use 2 registers in N dim.
+    if outstate % (2*sg_sz) == 0:
+        if batch < 256:
+            B_regM, B_regN = [8, 2]
+            B_sgM, B_sgN = [16, 4]
+        else:
+            B_regM, B_regN = [16, 2]
+            B_sgM, B_sgN = [8, 4]
     else:
-        B_regM, B_regN = [16, 2]
-        B_sgM, B_sgN = [8, 4]
+        B_regM, B_regN = [8, 1]
+        B_sgM, B_sgN = [8, 8]
     ##one SG calculation can't cross Gate projection and Up projecion. For both GEMMA and GEMMB.
     assert (rank%(sg_sz*A_regN)) == 0
     assert outstate %(B_regN*sg_sz) == 0, f'outstate:{outstate}, B_regN:{B_regN}'
     return [A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN]
 
 
-
-# for batch in (2066,):
-#     for input_state in (2560,):
-#         for rank in (256,):
-#             for output_state in (8960,):
-#                 A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, rank, input_state, output_state)
-#                 test_mlp_lora_1st(batch, rank, input_state, output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-#                             B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
-
-#2nd acc
-if 0:
-    for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
-        for rank in (16, 32, 64, 128, 256):
-            for output_state in (1024, 1536, 3840, 8960):
-                gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
-                test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
-#2nd perf based on qwen MLP,
-if 0:
-    rank=64
-    input_state=1536
-    output_state=8960
-    gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
-    test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
-
-if 0:
-    for batch in(1024, 3192):
-        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, 64, 1536, 1536)
-        test_mlp_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                            B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
-
-if 1:
-    for batch in range(2054, 2069):
-        for input_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 2048, 2560, 3072, 3840, 4096,):
+if __name__ == '__main__':
+    #2nd acc
+    if 1:
+        for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
-                for output_state in (7*32, 11*32, 13*32, 15*32, 12*32,17*32, 1024, 1536, 3840, 8960,):
-                    A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, rank, input_state, output_state)
-                    test_mlp_lora_1st(batch, rank, input_state, output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
-print("-------------------------")
+                for output_state in (1024, 1536, 3840, 8960, input_state*8,):
+                    gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
+                    test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+    #2nd perf based on qwen MLP,
+    if 0:
+        rank=64
+        input_state=1536
+        output_state=8960
+        gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
+        test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+
+    if 0:
+        for batch in(1024, 3192):
+            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, 64, 1536, 1536)
+            test_mlp_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+
+    if 1:
+        for batch in range(2054, 2069):
+            for input_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 2048, 2560, 3072, 3840, 4096,):
+                for rank in (16, 32, 64, 128, 256):
+                    for output_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 3840, 8960,input_state*8,input_state*16,):
+                        A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, rank, input_state, output_state)
+                        test_mlp_lora_1st(batch, rank, input_state, output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                    B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    print("-------------------------")
