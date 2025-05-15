@@ -226,7 +226,7 @@ class LORA_2ND:
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
             print(f'| BATCH = 1 INPUT_STATE:{input_state}, RANK:{rank}, OUPUT_STATE:{output_state}:')
             print(f'| [2ND_GEMMA]: GWS:{self.gemma_gws}, LWS:{self.gemma_lws} SG_BK:{gemma_sg_BK} SGK:{gemma_sgK}')
-            print(f'| [2ND_GEMMB]: GWS:{self.gemmb_lws}, LWS:{self.gemmb_lws} SGN:{gemmb_sgN}')
+            print(f'| [2ND_GEMMB]: GWS:{self.gemmb_gws}, LWS:{self.gemmb_lws} SGN:{gemmb_sgN}')
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
     def __call__(self, mainInput, loraInput, stataA, stateAlpha, stateB, Aoutput, result):
