@@ -294,7 +294,7 @@ def qkv_blocking_2nd(rank, input_state, kv_state):
     fused_output = input_state+kv_state*2
     # The MAX_WG_SZ should be bigger than MAXRANK*3=768. Use 1024 for now.
     MAX_WG_SZ = 1024
-    gemma_sg_BK = 64
+    gemma_sg_BK = 32
     gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
     gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
@@ -698,14 +698,13 @@ def qkv_blocking_1st(batch, rank, input_state, kvstate):
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
 # GEMMA
     if batch >= 1000:
-        if rank == 64:
-            A_regM, A_regN = [8, 2]
-        elif rank == 128 or rank == 256:
-            A_regM, A_regN = [16, 2]
+        if rank ==16:
+            A_regM, A_regN = [8, 1]
+
         else:
-            A_regM, A_regN = [4, 1]
+            A_regM, A_regN = [16, 2]
     else:
-        A_regM, A_regN = [4, 1]
+        A_regM, A_regN = [8, 1]
     A_sgN = rank*lora_cnt//(sg_sz*A_regN)
     A_sgM = max_sg_num // A_sgN
 
@@ -740,20 +739,6 @@ if __name__ == '__main__':
                         kv_state = input_state // kv_groups
                         gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
                         test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
-    #2nd perf based on qwen QKV,
-    if 0:
-        rank=64
-        input_state=1536
-        kv_state=256
-        gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
-        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
-
-    #1st perf based on qwen QKV,
-    if 0:
-        for batch in(1024, 3192):
-            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = qkv_blocking_1st(batch, 64, 1536, 256)
-            test_qkv_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
     #1st acc test.,
     if 1:
         for batch in range(2054, 2069):
@@ -770,3 +755,17 @@ if __name__ == '__main__':
                             A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = qkv_blocking_1st(batch, rank, input_state, kv_state)
                             test_qkv_lora_1st(batch, rank, input_state, kv_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                 B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    #2nd perf based on qwen QKV,
+    if 0:
+        rank=64
+        input_state=1536
+        kv_state=256
+        gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
+        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+
+    #1st perf based on qwen QKV,
+    if 0:
+        for batch in(1024, 3192):
+            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = qkv_blocking_1st(batch, 64, 1536, 256)
+            test_qkv_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)

@@ -272,7 +272,7 @@ def mlp_blocking_2nd(rank, input_state, output_state):
 
     # The MAX_WG_SZ should be bigger than MAXRANK*2=512. Use 1024 for now.
     MAX_WG_SZ = 1024
-    gemma_sg_BK = 64
+    gemma_sg_BK = 32
     gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
     gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
@@ -508,7 +508,7 @@ class MLP_LORA_1ST:
         ##one SG calculation in N dimension can't cross gate and up outpu. For both GEMMA and GEMMB.
         ##the mlp_blocking_1st() would ensure alignment. Here just double check.
         assert (rank%(self.sg_sz*A_regN)) == 0
-        assert self.kv_state %(B_regN*self.sg_sz) == 0, f'kvstate:{kv_state}, B_regN:{B_regN}'
+        assert self.output_state %(B_regN*self.sg_sz) == 0, f'kvstate:{output_state}, B_regN:{B_regN}'
 
         A_BM = A_regM*A_sgM
         A_BN = A_regN*A_sgN*self.sg_sz
@@ -651,15 +651,13 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
     lora_cnt = 2
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
 # GEMMA:
-    if batch >=1000:
-        if rank == 64:
-            A_regM, A_regN = [8, 2]
-        elif rank == 128 or rank == 256:
-            A_regM, A_regN = [16, 2]
+    if batch >= 1000:
+        if rank ==16:
+            A_regM, A_regN = [8, 1]
         else:
-            A_regM, A_regN = [4, 1]
+            A_regM, A_regN = [16, 2]
     else:
-        A_regM, A_regN = [4, 1]
+        A_regM, A_regN = [8, 1]
     A_sgN = rank*lora_cnt//(sg_sz*A_regN)
     A_sgM = max_sg_num // A_sgN
 # GEMMB:
@@ -681,27 +679,14 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
 
 
 if __name__ == '__main__':
-    #2nd acc
+    #2nd acc:
     if 1:
         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
                 for output_state in (1024, 1536, 3840, 8960, input_state*8,):
                     gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
                     test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
-    #2nd perf based on qwen MLP,
-    if 0:
-        rank=64
-        input_state=1536
-        output_state=8960
-        gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
-        test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
-
-    if 0:
-        for batch in(1024, 3192):
-            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, 64, 1536, 1536)
-            test_mlp_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
-                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
-
+    #1st acc:
     if 1:
         for batch in range(2054, 2069):
             for input_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 2048, 2560, 3072, 3840, 4096,):
@@ -710,4 +695,19 @@ if __name__ == '__main__':
                         A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, rank, input_state, output_state)
                         test_mlp_lora_1st(batch, rank, input_state, output_state, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                     B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN, check_acc=True)
+    #2nd perf based on qwen MLP
+    if 0:
+        rank=64
+        input_state=1536
+        output_state=8960
+        gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
+        test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+    #2nd perf based on qwen MLP
+    if 0:
+        for batch in(3192,):
+            A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, 64, 1536, 8960)
+            test_mlp_lora_1st(batch, 64, 1536, 8960, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
+                                B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+
+
     print("-------------------------")
