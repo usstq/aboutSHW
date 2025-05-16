@@ -41,7 +41,7 @@ if cmake_need_config:
                     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
                     generator], shell=False, check=True)
 
-subprocess.run(["cmake", "--build", build_path, "--config", btype], shell=False, check=True)
+subprocess.run(["cmake", "--build", build_path, "--config", btype, "-j8"], shell=False, check=True)
 
 from .csrc import *
 
