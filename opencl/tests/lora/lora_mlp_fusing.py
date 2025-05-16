@@ -21,14 +21,14 @@ qkv lora reference kernel
 ------------------------------------------------------------------------------------------------------------------
 """
 mlp_lora_ref_kernel =  r'''
-        __kernel void gemmA(__global half * A, __global half *B,  __global half *CC, int N, int K, int k_blk, int M) {
+        __kernel void gemmA(__global float * A, __global float *B,  __global float *CC, int N, int K, int k_blk, int M) {
         // Seems kblocks accumulation would introduce error. So ref kernel accumulation should behave same with target.
         int m_idx = get_global_id(0);
         int n_idx = get_global_id(1);
         size_t blk_num = (K + k_blk -1 )/ k_blk;
-        half sum = 0.f;
+        float sum = 0.f;
         for (int i = 0; i < blk_num; i++) {
-            half sub_sum = 0.f;
+            float sub_sum = 0.f;
             int k_idx = i*k_blk;
             // incase K%k_blk != 0;
             if ((k_idx + k_blk) > K)
@@ -42,12 +42,12 @@ mlp_lora_ref_kernel =  r'''
         CC[m_idx * N + n_idx] = sum;
     }
 
-    __kernel void gemmB(__global half * main_input, __global half * lora_input, __global half *B_0,  __global half *B_1, __global half *CC, __global half * alpha, int rank) {
+    __kernel void gemmB(__global float * main_input, __global float * lora_input, __global float *B_0,  __global float *B_1, __global float *CC, __global float * alpha, int rank) {
         const int m_idx = get_global_id(0);
         const int n_idx = get_global_id(1);
-        __global half *A_ptr = lora_input + m_idx * rank * 2;
-        __global half* scale_ptr = alpha;
-        __global half *B_ptr = B_0 + n_idx;
+        __global float *A_ptr = lora_input + m_idx * rank * 2;
+        __global float* scale_ptr = alpha;
+        __global float *B_ptr = B_0 + n_idx;
         int stride_B = N_0;
         int stride_C = N_0 * 2;
         if (n_idx >= N_0) {
@@ -57,7 +57,7 @@ mlp_lora_ref_kernel =  r'''
             B_ptr = B_1 + n_idx - N_0;
         }
 
-        half sum = 0.f;
+        float sum = 0.f;
         for (int k = 0; k < rank; k++)
             sum = fma(A_ptr[k]*scale_ptr[k], B_ptr[k*stride_B], sum);
         CC[m_idx *stride_C + n_idx] = sum + main_input[m_idx *stride_C + n_idx];
@@ -75,7 +75,7 @@ mlp_lora_opt =  r'''
 #define MAX_LORA_RANK (256)
 #define MAX_GEMMA_N (MAX_LORA_RANK*LORA_CNT)
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmA(__global half * A, __global half *B0, __global half *B1,  __global half *C, int K) {
+    __kernel void gemmA(__global float * A, __global float *B0, __global float *B1,  __global float *C, int K) {
 
         int gid0 =  get_group_id(0);
         int sgid = get_sub_group_id();
@@ -85,7 +85,7 @@ mlp_lora_opt =  r'''
         int n_idx = sgid % sgN * SG_SZ;
         int n_off = n_idx % RANK;
         int B_idx = n_idx / RANK;
-        __global half *B = B_idx == 0 ? B0 : B1;
+        __global float *B = B_idx == 0 ? B0 : B1;
         B += n_off;
 
         int lid =  get_sub_group_local_id();
@@ -96,23 +96,23 @@ mlp_lora_opt =  r'''
         int sgK = (wg_k_len + GEMMA_SG_BK - 1) / GEMMA_SG_BK;
 
         // store each sg accumulation result into SLM. Will reduce sg result into wg result.
-        __local half fma_buff[MAX_GEMMA_SGK * MAX_GEMMA_N];
-        __local half *sg_fma_buff = fma_buff + sgid_k * MAX_GEMMA_N;
+        __local float fma_buff[MAX_GEMMA_SGK * MAX_GEMMA_N];
+        __local float *sg_fma_buff = fma_buff + sgid_k * MAX_GEMMA_N;
         int k_offset = sgid_k * GEMMA_SG_BK;
         int k_idx = k_start_wg + k_offset;
 
         //The sg is needs to accumulate. Otherwise, sg not needed. sg_k diverge here.
         if (sgid_k * GEMMA_SG_BK  <  wg_k_len) {
             int klen_sg =  (k_offset + GEMMA_SG_BK) > wg_k_len ? (wg_k_len - k_offset) : GEMMA_SG_BK;
-            __global half *B_ptr = B + k_idx * RANK;
-            __global half *A_ptr = A + k_start_wg + k_offset;
-            half sum = 0.f;
+            __global float *B_ptr = B + k_idx * RANK;
+            __global float *A_ptr = A + k_start_wg + k_offset;
+            float sum = 0.f;
             for (int kk = 0;  kk < klen_sg; kk += SG_SZ) {
-                ushort input = intel_sub_group_block_read_us((const __global ushort*)(A_ptr + kk));
+                uint input = intel_sub_group_block_read((const __global uint*)(A_ptr + kk));
                 __attribute__((opencl_unroll_hint))
                 for (int j = 0; j < SG_SZ; j++) {
-                    half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)(B_ptr)));
-                    half aa = as_half(intel_sub_group_broadcast(input, j));
+                    float bb = as_float(intel_sub_group_block_read((const __global uint*)(B_ptr)));
+                    float aa = as_float(sub_group_broadcast(input, j));
                     sum = fma(aa, bb, sum);
                     B_ptr += RANK;
                 }
@@ -120,27 +120,27 @@ mlp_lora_opt =  r'''
             *(sg_fma_buff + n_idx + lid) = sum;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
-        __global half *C_ptr = C + RANK * LORA_CNT * gid0;
+        __global float *C_ptr = C + RANK * LORA_CNT * gid0;
         //only need sg on N dimenion to update data.
         if (sgid_k != 0)
             return;
-        half sum = 0.f;
+        float sum = 0.f;
         if (sgK == GEMMA_SGK) {
             //unroll
             __attribute__((opencl_unroll_hint))
             for (int i = 0;  i < GEMMA_SGK; i++) {
-                sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
+                sum += as_float(intel_sub_group_block_read((const __local uint*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
             }
         } else {
             //can't unroll, tail handling
             for (int i = 0;  i < sgK; i++)
-            sum += as_half(intel_sub_group_block_read_us((const __local ushort*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
+            sum += as_float(intel_sub_group_block_read((const __local uint*)(fma_buff + i * MAX_GEMMA_N + n_idx)));
         }
-        intel_sub_group_block_write_us((const __global ushort*)(C_ptr + n_idx), as_short(sum));
+        intel_sub_group_block_write((const __global uint*)(C_ptr + n_idx), as_int(sum));
     }
 
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
-    __kernel void gemmB(__global half * main_input, __global half *A,  __global half *B0, __global half *B1,  __global half *C, __global half * alpha0, __global half * alpha1, int N) {
+    __kernel void gemmB(__global float * main_input, __global float *A,  __global float *B0, __global float *B1,  __global float *C, __global float * alpha0, __global float * alpha1, int N) {
         int wg_id = get_group_id(0);
         int sg_id = get_sub_group_id();
         int sg_num = get_num_sub_groups();
@@ -148,10 +148,10 @@ mlp_lora_opt =  r'''
         int id_sg_local = get_sub_group_local_id();
         //ONE WG maybe output both  MLP GATE and MLP UP output, So reduce the 2 A matrice in each WG for easiness.
 
-        __local half reduce[MAX_GEMMA_N];
+        __local float reduce[MAX_GEMMA_N];
         int slm_offset = 0;
-        __global half *B_ptr = B0 + n_idx;
-         __global half* alpha = alpha0;
+        __global float *B_ptr = B0 + n_idx;
+         __global float* alpha = alpha0;
         int B_stride = N0;
         if (n_idx >= N0) {
             // K projection
@@ -164,11 +164,11 @@ mlp_lora_opt =  r'''
         //EACH WG would reduce input activation and save into local memory `reduce[RANK]`.
         int local_sz = get_local_size(0);
         for (int offset = sg_id * SG_SZ; offset < MAX_GEMMA_N; offset += local_sz) {
-            __global half *A_ptr = A + offset;
-            half sum = 0.f;
+            __global float *A_ptr = A + offset;
+            float sum = 0.f;
             __attribute__((opencl_unroll_hint))
             for (int part_idx = 0; part_idx < GEMMB_PART_NUM; part_idx++) {
-                half partial_val = as_half(intel_sub_group_block_read_us((const __global ushort*)A_ptr));
+                float partial_val = as_float(intel_sub_group_block_read((const __global uint*)A_ptr));
                 sum += partial_val;
                 A_ptr += RANK*LORA_CNT;
             }
@@ -179,26 +179,26 @@ mlp_lora_opt =  r'''
         if (n_idx >= N)
             return;
         //2.  GEMMB
-        __global half *C_ptr = C + n_idx;
-        __local half* reduce_ptr = reduce + slm_offset;
-        half sum = 0;
+        __global float *C_ptr = C + n_idx;
+        __local float* reduce_ptr = reduce + slm_offset;
+        float sum = 0;
         __attribute__((opencl_unroll_hint))
         for (int kk = 0; kk < RANK; kk += SG_SZ) {
-            half scale = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha + kk)));
-            half input = as_half(intel_sub_group_block_read_us((const __local ushort*)(reduce_ptr + kk)));
+            float scale = as_float(intel_sub_group_block_read((const __global uint*)(alpha + kk)));
+            float input = as_float(intel_sub_group_block_read((const __local uint*)(reduce_ptr + kk)));
 
             input *= scale;
             __attribute__((opencl_unroll_hint))
             for (int j = 0; j < SG_SZ; j++) {
-                half bb = as_half(intel_sub_group_block_read_us((const __global ushort*)B_ptr));
-                half aa = as_half(intel_sub_group_broadcast(as_ushort(input), j));
+                float bb = as_float(intel_sub_group_block_read((const __global uint*)B_ptr));
+                float aa = as_float(sub_group_broadcast(as_uint(input), j));
                 sum = fma(aa, bb, sum);
                 B_ptr += B_stride;
             }
         }
-        __global half *main_input_ptr = main_input + n_idx;
-        half m_input = as_half(intel_sub_group_block_read_us((const __global ushort*)main_input_ptr));
-        intel_sub_group_block_write_us((const __global ushort*)C_ptr, as_short(sum+m_input));
+        __global float *main_input_ptr = main_input + n_idx;
+        float m_input = as_float(intel_sub_group_block_read((const __global uint*)main_input_ptr));
+        intel_sub_group_block_write((const __global uint*)C_ptr, as_int(sum+m_input));
     }
     '''
 
@@ -216,7 +216,7 @@ class MLP_LORA_2ND:
         self.output_state = output_state
         self.fused_out_state = output_state*2
 
-        self.sg_sz = 16
+        self.sg_sz = 8
         self.gemmb_wg_sz = gemmb_sgN * self.sg_sz
         self.use_ref = use_ref
         # WGs would divide K dimension. N would not divided by WGs
@@ -250,7 +250,7 @@ class MLP_LORA_2ND:
     def __call__(self, mainInput, loraInput, stateA0, stateA1, stateA, stateAlpha0, stateAlpha1, stateAlpha, stateB0, stateB1, Aoutput, result):
 
         if self.use_ref:
-            tA_output_ref = cl.tensor([1, self.rank*2], np.dtype(np.float16))
+            tA_output_ref = cl.tensor([1, self.rank*2], np.dtype(np.float32))
             self.cl_kernels_ref.enqueue("gemmA", [1, self.rank*2],[1, self.rank], loraInput, stateA,
                                         tA_output_ref, self.rank*2, self.input_state, self.gemma_wg_BK, 1)
             self.cl_kernels_ref.enqueue("gemmB", [1, self.fused_out_state],[1, min(self.fused_out_state, 1024)],
@@ -266,7 +266,7 @@ class MLP_LORA_2ND:
         return result
 
 def mlp_blocking_2nd(rank, input_state, output_state):
-    SG_SZ = 16
+    SG_SZ = 8
     lora_cnt = 2
     fused_output = output_state*2
 
@@ -279,7 +279,7 @@ def mlp_blocking_2nd(rank, input_state, output_state):
 
 def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
     cl.profiling(True)
-    SG_SZ = 16
+    SG_SZ = 8
     vRANGE = 1
     if check_acc:
         REPEAT = 1
@@ -289,8 +289,8 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
 
     # for GEMMA, K decides how many WGs are needed.
     gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
-    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*2]).astype(np.float16)
-    alpha = np.random.rand(2, rank).astype(np.float16)
+    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*2]).astype(np.float32)
+    alpha = np.random.rand(2, rank).astype(np.float32)
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
 
     alpha0 = alpha[0:1, :].flatten().reshape(1, rank)
@@ -299,12 +299,12 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
     stateA_0 = stateA[:, 0:rank].flatten().reshape(input_state, rank)
     stateA_1 = stateA[:, rank:2*rank].flatten().reshape(input_state, rank)
 
-    stateB0 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
-    stateB1 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
+    stateB0 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
+    stateB1 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
 
-    loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)
-    mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state*2]).astype(np.float16)
-    Aoutput = np.zeros([gemma_wgs, rank*2]).astype(np.float16)
+    loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float32)
+    mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state*2]).astype(np.float32)
+    Aoutput = np.zeros([gemma_wgs, rank*2]).astype(np.float32)
 
     stateA0_list = [cl.tensor(stateA_0)for _ in range(REPEAT)]
     stateA1_list = [cl.tensor(stateA_1)for _ in range(REPEAT)]
@@ -320,8 +320,8 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA.
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([1, output_state*2], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref_list = [cl.tensor([1, output_state*2], np.dtype(np.float16))for _ in range(REPEAT)]
+    res_list = [cl.tensor([1, output_state*2], np.dtype(np.float32))for _ in range(REPEAT)]
+    ref_list = [cl.tensor([1, output_state*2], np.dtype(np.float32))for _ in range(REPEAT)]
     ref = MLP_LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
     opt = MLP_LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
 
@@ -368,26 +368,26 @@ def mlp_generate_store_C(regM, regN, withscale, withSum):
     if withscale:
         # read all needed scale.
         src += r'''
-        ''' + "\n\t".join([f'half alpha_{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(alpha_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+        ''' + "\n\t".join([f'float alpha_{n} = as_float(intel_sub_group_block_read((const __global uint*)(alpha_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
         '''
     elif withSum:
         src += r'''
-        __global half *main_ptr = mainInput + m_idx * N + n_idx;
-        ''' + "\n\t".join([f'half main_N{n} = 0;' for n in range(regN)]) + r'''
+        __global float *main_ptr = mainInput + m_idx * N + n_idx;
+        ''' + "\n\t".join([f'float main_N{n} = 0;' for n in range(regN)]) + r'''
         '''
 
     for m in range(regM):
         # read out `regN` mainInput
         if withSum:
-            src += "\n\t".join([f'main_N{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
+            src += "\n\t".join([f'main_N{n} = as_float(intel_sub_group_block_read((const __global uint*)(main_ptr + SG_SZ * {n})));' for n in range(regN)]) + r'''
                     '''
         for n in range(regN):
             if withscale:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}*alpha_{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}*alpha_{n}));"
             elif withSum:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}+main_N{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}+main_N{n}));"
             else:
-                src +=  f"\n\tintel_sub_group_block_write_us((__global ushort*)(ptrC + SG_SZ * {n}), as_short(sum{m}_{n}));"
+                src +=  f"\n\tintel_sub_group_block_write((__global uint*)(ptrC + SG_SZ * {n}), as_int(sum{m}_{n}));"
         if withSum:
             src += f"\n\tmain_ptr+= N;"
         src += f"\n\tptrC += N;\n\n"
@@ -401,9 +401,9 @@ def mlp_generate_A_B(withscale, withSum):
         int rank = N / 2;
         int strideA=K;
         int strideB=rank;
-        __global half *ptrA = A + m_idx * strideA;
-        __global half *ptrB = B0 + n_idx;
-        __global half *alpha_ptr = alpha0 + n_idx;
+        __global float *ptrA = A + m_idx * strideA;
+        __global float *ptrB = B0 + n_idx;
+        __global float *alpha_ptr = alpha0 + n_idx;
         if (n_idx >= rank) {
             ptrB = B1 + n_idx-rank;
             alpha_ptr = alpha1 + n_idx - rank;
@@ -414,8 +414,8 @@ def mlp_generate_A_B(withscale, withSum):
         //rank*2
         int strideA=K*2;
         int strideB=N0;
-        __global half *ptrA = A + m_idx * strideA;
-        __global half *ptrB = B0 + n_idx;
+        __global float *ptrA = A + m_idx * strideA;
+        __global float *ptrB = B0 + n_idx;
         if (n_idx >= N0) {
             // K projection
             ptrB = B1 + n_idx - N0;
@@ -441,7 +441,7 @@ def mlp_generate_gemm_src(regM, regN, withscale = False, withSum=False):
     src =  r'''
     __attribute__((intel_reqd_sub_group_size(SG_SZ)))
     __kernel void
-    ''' + f'{func}' + r'''(__global half * A, __global half *B0, __global half *B1, __global half *C, __global half *alpha0, __global half *alpha1,   __global half *mainInput, int M, int N, int K) {
+    ''' + f'{func}' + r'''(__global float * A, __global float *B0, __global float *B1, __global float *C, __global float *alpha0, __global float *alpha1,   __global float *mainInput, int M, int N, int K) {
         int sgid = get_sub_group_id();
         int sgN = get_local_size(1) / SG_SZ;
         int sgM = get_local_size(0);
@@ -459,20 +459,20 @@ def mlp_generate_gemm_src(regM, regN, withscale = False, withSum=False):
         if (n_idx + regN * SG_SZ > N)
             n_idx = N - regN * SG_SZ;
 
-        __global half *ptrC = C + m_idx * N + n_idx;
+        __global float *ptrC = C + m_idx * N + n_idx;
         ''' + mlp_generate_A_B(withscale, withSum) + r'''
 
-        '''  + "\n\t ".join([f"half sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
+        '''  + "\n\t ".join([f"float sum{m}_{n} = 0;" for m in range(regM) for n in range(regN)]) + r''';
 
         for(int i = 0; i < K; i += SG_SZ) {
 
-                '''  + "\n\t\t ".join([f"ushort input{m} = intel_sub_group_block_read_us((const __global ushort*)(ptrA + {m} * strideA));" for m in range(regM)]) + r'''
+                '''  + "\n\t\t ".join([f"uint input{m} = intel_sub_group_block_read((const __global uint*)(ptrA + {m} * strideA));" for m in range(regM)]) + r'''
 
                 //__attribute__((opencl_unroll_hint))
                 for (int kk = 0; kk < SG_SZ; kk++) {
 
-                     '''  + "\n\t\t\t ".join([f"half bb{n} = as_half(intel_sub_group_block_read_us((const __global ushort*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
-                     '''  + "\n\t\t\t ".join([f"half aa{m} = as_half(intel_sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"float bb{n} = as_float(intel_sub_group_block_read((const __global uint*)(ptrB + {n} * SG_SZ)));" for n in range(regN)]) + r'''
+                     '''  + "\n\t\t\t ".join([f"float aa{m} = as_float(sub_group_broadcast(input{m}, kk));" for m in range(regM)]) + r'''
                      ''' + "\n\t\t\t".join([f"sum{m}_{n} = fma(aa{m}, bb{n}, sum{m}_{n});" for m in range(regM) for n in range(regN)]) + r'''
                     ptrB += strideB;
                 }
@@ -496,7 +496,7 @@ class MLP_LORA_1ST:
         self.q_state = input_state
         self.output_state = output_state
         self.fused_output_state = output_state*2
-        self.sg_sz = 16
+        self.sg_sz = 8
         self.lora_cnt=2
 
         assert batch >= A_regM and batch >=B_regM , f'batch:{batch} is smaller than A_regM/B_regM:{A_regM}/{B_regM}'
@@ -525,7 +525,7 @@ class MLP_LORA_1ST:
 
         if use_ref:
             self.cl_kernels_ref = kernel_cache(mlp_lora_ref_kernel,  options=f"-DN_0={self.output_state}")
-            self.tA_output_ref = cl.tensor([batch, self.rank*3], np.dtype(np.float16))
+            self.tA_output_ref = cl.tensor([batch, self.rank*3], np.dtype(np.float32))
 
         else:
             gemma_func, gemma_kernel_src = mlp_generate_gemm_src(A_regM, A_regN,  True, False)
@@ -567,15 +567,15 @@ class MLP_LORA_1ST:
 
 def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN, check_acc = False):
     cl.profiling(True)
-    SG_SZ = 16
+    SG_SZ = 8
     vRANGE = 1
     if check_acc:
         REPEAT = 1
     else:
         REPEAT = 100
     # np.random.seed(0)
-    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*2]).astype(np.float16)
-    alpha = np.random.rand(2, rank).astype(np.float16)
+    stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*2]).astype(np.float32)
+    alpha = np.random.rand(2, rank).astype(np.float32)
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
 
     stateA_0 = stateA[:, 0:rank].flatten().reshape(input_state, rank)
@@ -584,12 +584,12 @@ def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A
     alpha0 = alpha[0:1, :].flatten().reshape(1, rank)
     alpha1 = alpha[1:2, :].flatten().reshape(1, rank)
 
-    stateB0 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
-    stateB1 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float16)
+    stateB0 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
+    stateB1 = np.random.randint(-vRANGE, vRANGE+1, [rank, output_state]).astype(np.float32)
 
-    loraInput = np.random.randint(-vRANGE, vRANGE+1, [batch, input_state]).astype(np.float16)
-    mainInput = np.random.randint(-vRANGE, vRANGE+1, [batch, output_state*2]).astype(np.float16)
-    Aoutput = np.ones([batch, rank*2]).astype(np.float16)
+    loraInput = np.random.randint(-vRANGE, vRANGE+1, [batch, input_state]).astype(np.float32)
+    mainInput = np.random.randint(-vRANGE, vRANGE+1, [batch, output_state*2]).astype(np.float32)
+    Aoutput = np.ones([batch, rank*2]).astype(np.float32)
 
     stateA0_list = [cl.tensor(stateA_0)for _ in range(REPEAT)]
     stateA1_list = [cl.tensor(stateA_1)for _ in range(REPEAT)]
@@ -606,8 +606,8 @@ def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A
     mainInput_list = [cl.tensor(mainInput)for _ in range(REPEAT)]
     #Must set the output to be zeros to avoid not all the data is updated in GEMMA.
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
-    res_list = [cl.tensor([batch, output_state*2], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref_result = cl.tensor([batch, output_state*2], np.dtype(np.float16))
+    res_list = [cl.tensor([batch, output_state*2], np.dtype(np.float32))for _ in range(REPEAT)]
+    ref_result = cl.tensor([batch, output_state*2], np.dtype(np.float32))
 
 
     ref = MLP_LORA_1ST(batch, rank, input_state, output_state,  A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN,True)
@@ -646,7 +646,7 @@ def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def mlp_blocking_1st(batch, rank, input_state, outstate):
-    sg_sz = 16
+    sg_sz = 8
     max_sg_num = 1024//sg_sz
     lora_cnt = 2
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
@@ -655,7 +655,7 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
         if rank ==16:
             A_regM, A_regN = [8, 1]
         else:
-            A_regM, A_regN = [16, 2]
+            A_regM, A_regN = [8, 2]
     else:
         A_regM, A_regN = [8, 1]
     A_sgN = rank*lora_cnt//(sg_sz*A_regN)
@@ -667,7 +667,7 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
             B_regM, B_regN = [8, 2]
             B_sgM, B_sgN = [16, 4]
         else:
-            B_regM, B_regN = [16, 2]
+            B_regM, B_regN = [8, 2]
             B_sgM, B_sgN = [8, 4]
     else:
         B_regM, B_regN = [8, 1]
@@ -688,7 +688,7 @@ if __name__ == '__main__':
                     test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
     #1st acc:
     if 1:
-        for batch in range(2054, 2069):
+        for batch in range(2055, 2069):
             for input_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 2048, 2560, 3072, 3840, 4096,):
                 for rank in (16, 32, 64, 128, 256):
                     for output_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 3840, 8960,input_state*8,input_state*16,):
