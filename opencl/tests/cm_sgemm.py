@@ -134,13 +134,13 @@ import numpy as np
 cl.profiling(True)
 
 def test(K, chk_accuracy = False):
-    regM = 16
+    regM = 48
     regN = 32
 
     nthrM = 8
     nthrN = 8
-    global_nthrM = nthrM*5
-    global_nthrN = nthrN*4
+    global_nthrM = nthrM*16
+    global_nthrN = nthrN*16
     M = regM*global_nthrM
     N = regN*global_nthrN
     SGEMM_BLOCK_K = 32
