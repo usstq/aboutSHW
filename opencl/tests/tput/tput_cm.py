@@ -41,30 +41,63 @@ def test_FMA_basic_fp16():
         auto nthrN = cm_local_size(1);
         auto ithrM = cm_local_id(0);
         auto ithrN = cm_local_id(1);
+
+#define DUMMY_READ 0
+#if DUMMY_READ
+        cm_slm_init(1024*64);
+        uint slmA0 = cm_slm_alloc(nthrM*BK*regM * sizeof(half));
+        uint slmB0 = cm_slm_alloc(nthrN*BK*regN * sizeof(half));
+
+        slmA0 += ithrM * (BK*regM) * sizeof(half);
+        slmB0 += ithrN *regN * sizeof(half);
+#else
         B += cm_global_id(1) * (regN * sizeof(half));
         A += cm_global_id(0) * regM * sizeof(half) * K;
+#endif
 
         C += cm_global_id(0) * (regM * sizeof(half) * N);
         C += cm_global_id(1) * regN * sizeof(half);
-        for (int kk = 0; kk < K; kk+=16){
-            #pragma unroll
-            for (int idx = 0; idx < regM; idx++) {
-                cm_svm_block_read(A + idx * K * sizeof(half), matA.row(idx));
-            }
-            #pragma unroll
-            for (int j = 0; j < 16; j++) {
-                cm_svm_block_read(B,matB.format<half>());
+        for (int kkk = 0; kkk < K; kkk += BK) {
+            for (int kk = 0; kk < BK; kk+=16){
                 #pragma unroll
-                for (int idx_m = 0; idx_m < regM; idx_m++) {
-                    vector<half,16> bastA = matA.row(idx_m).replicate<16, 1>(j);
-                    #pragma unroll
-                    for (int idx_n = 0; idx_n < regN/16; idx_n++) {
-                        sum.row(idx_m*regN/16 + idx_n) = madd(matB.row(idx_n), bastA, sum.row(idx_m*regN/16 + idx_n));
-                    }
+                for (int idx = 0; idx < regM; idx++) {
+#if DUMMY_READ
+                    cm_svm_block_read_unaligned(slmA0 + idx*BK*sizeof(half), matA.row(idx));
+#else
+                    cm_svm_block_read(A + idx * K * sizeof(half), matA.row(idx));
+#endif
                 }
-                B += N*sizeof(half);
+                #pragma unroll
+                for (int j = 0; j < 16; j++) {
+#if DUMMY_READ
+                    cm_svm_block_read_unaligned(slmB0,matB.format<half>());
+#else
+                    cm_svm_block_read(B,matB.format<half>());
+#endif
+                    #pragma unroll
+                    for (int idx_m = 0; idx_m < regM; idx_m++) {
+                        vector<half,16> bastA = matA.row(idx_m).replicate<16, 1>(j);
+                        #pragma unroll
+                        for (int idx_n = 0; idx_n < regN/16; idx_n++) {
+                            sum.row(idx_m*regN/16 + idx_n) = madd(matB.row(idx_n), bastA, sum.row(idx_m*regN/16 + idx_n));
+                        }
+                    }
+ #if DUMMY_READ
+                    slmB0 += nthrN*regN*sizeof(half);
+#else
+                    B += N*sizeof(half);
+#endif
+                }
+#if DUMMY_READ
+                slmA0 += 16*sizeof(half);
+#else
+                A += 16*sizeof(half);
+#endif
             }
-            A += 16*sizeof(half);
+#if DUMMY_READ
+        slmB0 -= BK*nthrN*regN*sizeof(half);
+        slmA0 -= BK*sizeof(half);
+#endif
         }
 
         matrix_ref<half, regM, regN> sum_ref = sum.format<half, regM, regN>();
@@ -99,7 +132,7 @@ def test_FMA_basic_fp16():
     tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
 
     SG_SZ = 16
-    kernel = kernel_cache(src, options=f"-cmc -march=DG2 -Qxcm_opt_report -mdump_asm -g2 -DregM={regM} -DregN={regN} -DSG_SZ=16")
+    kernel = kernel_cache(src, options=f"-cmc -march=DG2 -Qxcm_opt_report -mdump_asm -g2 -DregM={regM} -DregN={regN} -DBK={BK} -DSG_SZ=16")
 
     for i in range(0, REPEAT):
         kernel.enqueue("gemm", [global_nthrM, global_nthrN],[nthrM, nthrN], tA_list[i], tB_list[i],tC_list[i], K, N)
