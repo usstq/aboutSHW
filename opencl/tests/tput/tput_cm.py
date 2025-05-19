@@ -35,8 +35,8 @@ def test_FMA_basic_fp16():
                                   svmptr_t C [[type("svmptr_t")]],
                                   int K, int N) {
         matrix<half, regM, 16> matA;
-        vector<half, regN> vecB;
-        matrix<half, regM, regN> sum = 0;
+        matrix<half, regN/16, 16> matB;
+        matrix<half, regM*regN/16, 16> sum = 0;
         auto nthrM = cm_local_size(0);
         auto nthrN = cm_local_size(1);
         auto ithrM = cm_local_id(0);
@@ -49,28 +49,33 @@ def test_FMA_basic_fp16():
         for (int kk = 0; kk < K; kk+=16){
             #pragma unroll
             for (int idx = 0; idx < regM; idx++) {
-                cm_svm_block_read_unaligned(A + idx * K * sizeof(half), matA.row(idx));
+                cm_svm_block_read(A + idx * K * sizeof(half), matA.row(idx));
             }
             #pragma unroll
             for (int j = 0; j < 16; j++) {
-                cm_svm_block_read_unaligned(B,vecB);
+                cm_svm_block_read(B,matB.format<half>());
                 #pragma unroll
                 for (int idx_m = 0; idx_m < regM; idx_m++) {
                     vector<half,16> bastA = matA.row(idx_m).replicate<16, 1>(j);
-                    sum.row(idx_m) = madd(vecB, matA.row(idx_m).replicate<regN, 1>(j), sum.row(idx_m));
+                    #pragma unroll
+                    for (int idx_n = 0; idx_n < regN/16; idx_n++) {
+                        sum.row(idx_m*regN/16 + idx_n) = madd(matB.row(idx_n), bastA, sum.row(idx_m*regN/16 + idx_n));
+                    }
                 }
                 B += N*sizeof(half);
             }
             A += 16*sizeof(half);
         }
+
+        matrix_ref<half, regM, regN> sum_ref = sum.format<half, regM, regN>();
         #pragma unroll
         for (int idx_m = 0; idx_m < regM; idx_m++) {
-            cm_svm_block_write<half, regN>(C + idx_m*N*sizeof(half), sum.row(idx_m));
+            cm_svm_block_write<half, regN>(C + idx_m*N*sizeof(half), sum_ref.row(idx_m));
         }
     }
     '''
-    REPEAT = 10
-    regM = 16
+    REPEAT = 20
+    regM = 24
     regN = 32
     nthrM = 8
     nthrN = 8
@@ -83,7 +88,7 @@ def test_FMA_basic_fp16():
     # N = regN*global_nthrN
     M = regM*global_nthrM
     N = regN*global_nthrN
-    K = 3072
+    K = BK*16
     # np.random.seed(0)
     vRANGE = 2
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
@@ -95,6 +100,7 @@ def test_FMA_basic_fp16():
 
     SG_SZ = 16
     kernel = kernel_cache(src, options=f"-cmc -march=DG2 -Qxcm_opt_report -mdump_asm -g2 -DregM={regM} -DregN={regN} -DSG_SZ=16")
+
     for i in range(0, REPEAT):
         kernel.enqueue("gemm", [global_nthrM, global_nthrN],[nthrM, nthrN], tA_list[i], tB_list[i],tC_list[i], K, N)
     ns = cl.finish()
@@ -105,7 +111,7 @@ def test_FMA_basic_fp16():
     for time_opt in ns:
         print(f'TPUT: [W/O SLM]:{flops/time_opt:.1f} GFLOPS, us: {time_opt*1e-3:.1f}')
 
-    # compare(C_ref, tC_list[0].numpy())
+    compare(C_ref, tC_list[0].numpy())
 
 cl.profiling(True)
 test_FMA_basic_fp16()
