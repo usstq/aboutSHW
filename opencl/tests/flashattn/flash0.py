@@ -223,6 +223,10 @@ import time
 q = q.transpose(1,2)
 k = k.transpose(1,2)
 v = v.transpose(1,2)
+print("q:", q.shape, q.dtype)
+print("k:", k.shape, k.dtype)
+print("v:", v.shape, v.dtype)
+print("attention_mask:", attention_mask.shape, attention_mask.dtype)
 
 def pyeval(src):
     result_src = ""
@@ -243,7 +247,7 @@ ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 
 scale_factor = 1.0/(head_size**0.5)
 
-WG_SIZE = 4
+WG_SIZE = 8
 
 src1 = r'''
 //# CM kernel for flash attn, reference
@@ -318,7 +322,6 @@ CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
 }
 
 extern "C" _GENX_MAIN_ void cm_sdpa(
-    int batch,
     int q_len,
     int kv_len,
     half* query [[type("svmptr_t")]],
@@ -347,22 +350,21 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
     
-    auto b = cm_group_id(0);
+    auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
     auto i = (cm_group_id(2) * WG_SIZE + cm_local_id(2)) * q_step;
     auto q_offset = cm_local_id(2) * q_step * head_size * sizeof(half);
     auto o_offset = cm_local_id(2) * q_step * head_size * sizeof(float);
 
     //# debugging stage
-    lsc::block_2d_desc<float, 1, REG_N, REG_M> b2dMask(mask, q_len - 1, kv_len*sizeof(float) - 1, kv_len*sizeof(float) - 1, 0, 0);
+    lsc::block_2d_desc<float, 1, REG_N, REG_M> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(float) - 1, kv_len*sizeof(float) - 1, 0, 0);
 
     //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
-    lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(query + h*head_size),
-                                                                        q_len - 1, head_size*sizeof(half) - 1, num_heads*head_size*sizeof(half) - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_M, REG_K> b2dK(key + h*head_size,   kv_len - 1, head_size*sizeof(half) - 1, num_heads*head_size*sizeof(half) - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + h*head_size, kv_len - 1, head_size*sizeof(half) - 1, num_heads*head_size*sizeof(half) - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + h*head_size,   q_len - 1, head_size*sizeof(half) - 1, num_heads*head_size*sizeof(half) - 1, 0, 0);
-
+    uint qkvo_pitch = num_heads * head_size * sizeof(half);
+    lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(query + (batch*num_heads*q_len + h)*head_size), q_len - 1, head_size*sizeof(half) - 1, qkvo_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_M, REG_K> b2dK(key + (batch*num_heads*kv_len + h)*head_size,   kv_len - 1, head_size*sizeof(half) - 1, qkvo_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + (batch*num_heads*kv_len + h)*head_size, kv_len - 1, head_size*sizeof(half) - 1, qkvo_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qkvo_pitch - 1, 0, 0);
 
     //# load Qt into register & pack as VNNI & store to SLM (as dpas-B tile)
     {
@@ -385,6 +387,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         //# load K into SLM as dpas-A tile (shared by all hw within same WG)
         //# load V into SLM as dpas-B tile (shared by all hw within same WG)
         {
+            if (j > 0) cm_barrier();
             matrix<half, REG_M, REG_K> temp0;
             matrix<half, REG_M, REG_K> temp1;
             uint offset = 0;
@@ -572,7 +575,7 @@ t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc")
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, batch, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
+cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
 
 f1 = torch.from_numpy(t_out.numpy())
 
@@ -581,7 +584,7 @@ print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
 
 
 all_layers = []
-for i in range(100):
+for i in range(30):
     all_layers.append([
         cl.tensor(q.detach().numpy()),
         cl.tensor(k.detach().numpy()),
@@ -590,8 +593,8 @@ for i in range(100):
         cl.tensor(attention_mask.detach().numpy())
     ])
 
-for i in range(100):
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, batch, q_len, kv_len, all_layers[i][0], all_layers[i][1], all_layers[i][2], all_layers[i][3], all_layers[i][4])
+for i in range(30):
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, all_layers[i][0], all_layers[i][1], all_layers[i][2], all_layers[i][3], all_layers[i][4])
 
 latency = cl.finish()
 for ns in latency:
