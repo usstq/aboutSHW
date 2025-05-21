@@ -7,72 +7,88 @@ torch.manual_seed(0)
 device = "cpu"
 
 class SdpaAttention(nn.Module):
-    def __init__(self, hidden_size, num_heads=16) -> None:
+    def __init__(self, hidden_size, num_heads, num_kv_heads) -> None:
         super().__init__()
+        head_size = hidden_size // num_heads
         self.num_heads = num_heads
-        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.num_kv_heads = num_kv_heads
+        self.enable_gqa = self.num_heads > self.num_kv_heads
+        self.q_proj = nn.Linear(hidden_size, head_size * num_heads, bias=False)
+        self.k_proj = nn.Linear(hidden_size, head_size * num_kv_heads, bias=False)
+        self.v_proj = nn.Linear(hidden_size, head_size * num_kv_heads, bias=False)
         with torch.no_grad():
             self.k_proj.weight[1:, :] = 0
             self.v_proj.weight[1:, :] = 0
 
     def forward(self, hidden_states, attention_mask):
-        seq_length = hidden_states.shape[0]
+        batch, seq_length, n_states = hidden_states.shape
         
         #q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        k = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        v = self.v_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+        q = self.q_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_kv_heads, -1)
+        v = self.v_proj(hidden_states).reshape(batch, seq_length, self.num_kv_heads, -1)
 
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        
-        with_sdpa_fix = True
-        if with_sdpa_fix:
-            q = q.unsqueeze(0)
-            k = k.unsqueeze(0)
-            v = v.unsqueeze(0)
+        q = q.transpose(2, 1)
+        k = k.transpose(2, 1)
+        v = v.transpose(2, 1)
 
-        print("[q]:", q.shape)
-        print("[k]:", k.shape)
-        print("[v]:", v.shape)
-        print("[attention_mask]:", attention_mask.shape)
+        print("  [q]:", q.shape)
+        print("  [k]:", k.shape)
+        print("  [v]:", v.shape)
+        print("  [attention_mask]:", attention_mask.shape)
 
         attn_output = F.scaled_dot_product_attention(
             q, k, v, attention_mask, dropout_p=0.0
         )
-        if with_sdpa_fix:
-            attn_output = attn_output.squeeze(0)
-        #attn_output = attn_output.transpose(0, 1)
 
-        print("===", attn_output.shape)
+        attn_output = attn_output.transpose(2, 1).reshape(batch, seq_length, n_states)
+
+        print("  [attn_output]:", attn_output.shape)
         return attn_output
 
+class MLSdpaAttention(nn.Module):
+    def __init__(self, hidden_size, num_heads, num_kv_heads) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([SdpaAttention(hidden_size, num_heads, num_kv_heads) for _ in range(4)])
 
-seq_length = 8192
-attention_mask = torch.zeros([1, seq_length, seq_length], device=device, dtype=torch.float32) + torch.finfo(torch.float16).min
+    def forward(self, hidden_states, attention_mask):
+        for blk in self.blocks:
+            hidden_states = blk.forward(hidden_states, attention_mask)
+        return hidden_states
 
-print("[attention_mask]:", attention_mask.shape)
-
-num_heads = 16
-head_size = 80
+num_heads = 28
+num_kv_heads = 28
+head_size = 128
 hidden_size = num_heads * head_size
-model = SdpaAttention(hidden_size, num_heads)
-hidden_states = torch.ones([seq_length, hidden_size], device=device, dtype=torch.float32)
+
+model = MLSdpaAttention(hidden_size, num_heads, num_kv_heads)
+
+seq_length = 1024
+attention_mask = torch.zeros([1, seq_length, seq_length], device=device, dtype=torch.float32) + torch.finfo(torch.float16).min
+hidden_states = torch.ones([1, seq_length, hidden_size], device=device, dtype=torch.float32)
+
 print("[hidden_states]:", hidden_states.shape)
+print("[attention_mask]:", attention_mask.shape)
 ref = model(hidden_states, attention_mask)
 ref = ref.detach().numpy()
 
 
 import openvino
-
-ovm = openvino.convert_model(model, example_input=[hidden_states, attention_mask], verbose=True)
-# openvino.serialize(ovm, "ovm.xml")
+print("openvino.convert_model ...")
+ovm = openvino.convert_model(model,
+                             input=[("hidden_states",[-1, -1, hidden_size]),("attention_mask",[-1, -1, -1])],
+                             example_input=[hidden_states, attention_mask],
+                             verbose=True)
+#openvino.serialize(ovm, "ovm.xml")
+print("openvino.compile_model ...")
 ov_model = openvino.compile_model(ovm, device_name="GPU")
 
-for i in range(30):
+seq_length = 8192
+attention_mask = torch.zeros([1, seq_length, seq_length], device=device, dtype=torch.float32) + torch.finfo(torch.float16).min
+hidden_states = torch.ones([1, seq_length, hidden_size], device=device, dtype=torch.float32)
+
+print("openvino.infer ...")
+for i in range(10):
     output = ov_model([hidden_states.numpy(), attention_mask.numpy()])
 
 res = output[0]
