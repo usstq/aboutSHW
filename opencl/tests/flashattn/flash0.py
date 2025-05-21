@@ -633,7 +633,7 @@ for i in range(30):
     ])
 
 for i in range(30):
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, all_layers[0][0], all_layers[0][1], all_layers[0][2], all_layers[0][3], all_layers[0][4])
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, all_layers[i][0], all_layers[i][1], all_layers[i][2], all_layers[i][3], all_layers[i][4])
 
 latency = cl.finish()
 for ns in latency:
