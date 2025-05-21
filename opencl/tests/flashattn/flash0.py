@@ -46,7 +46,7 @@ k = torch.randint(low, high, [batch, kv_len, num_heads, head_size]).to(dtype=act
 v = torch.randint(low, high, [batch, kv_len, num_heads, head_size]).to(dtype=act_dtype)/high
 
 # random attnmask
-attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min)
+attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
 attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
 #attention_mask[...] = 0
 
@@ -247,7 +247,18 @@ ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 
 scale_factor = 1.0/(head_size**0.5)
 
-WG_SIZE = 8
+WG_SIZE = 16
+
+
+#========================================================================
+# Optimization Log
+r'''
+increase WG_SIZE to 16 (-70ms)
+use GRF to store temp Output(rO) instead of SLM, requires `-Qxcm_register_file_size=256` (-40ms)
+avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mul<float>(St, (float)scale_factor);   (-10ms) 
+change dtype of attention_mask from float to half (-14ms)
+'''
+#========================================================================
 
 src1 = r'''
 //# CM kernel for flash attn, reference
@@ -321,6 +332,11 @@ CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
   out.row(15) = bBuf.template select<4, 1, 4, 4>(12, 3); // f
 }
 
+CM_INLINE uint64_t get_clock() {
+    auto clk = cm_clock();
+    return ((uint64_t)clk[1]) << 32 | clk[0];
+}
+
 extern "C" _GENX_MAIN_ void cm_sdpa(
     int q_len,
     int kv_len,
@@ -328,7 +344,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]],
-    float* mask [[type("svmptr_t")]]
+    half* mask [[type("svmptr_t")]]
     ) {
     //# query [batch, q_len, num_heads, S]
     //#   key [batch, kv_len, num_heads, S]
@@ -338,26 +354,30 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(half));
     constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
     constexpr uint Q_SLM_SIZE = (q_step * head_size * sizeof(half)) * WG_SIZE;
-    constexpr uint O_SLM_SIZE = (q_step * head_size * sizeof(float)) * WG_SIZE;
+    constexpr uint O_SLM_SIZE = 0;//(q_step * head_size * sizeof(float)) * WG_SIZE;
 
     cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE + O_SLM_SIZE);
 
     auto slm_K = cm_slm_alloc(K_SLM_SIZE);
     auto slm_V = cm_slm_alloc(V_SLM_SIZE);
     auto slm_Q = cm_slm_alloc(Q_SLM_SIZE);
-    auto slm_O = cm_slm_alloc(O_SLM_SIZE);
+    //auto slm_O = cm_slm_alloc(O_SLM_SIZE);
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
-    
+
+    cur_max = -1e9;
+    cur_sum = 0;
+
     auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
-    auto i = (cm_group_id(2) * WG_SIZE + cm_local_id(2)) * q_step;
-    auto q_offset = cm_local_id(2) * q_step * head_size * sizeof(half);
-    auto o_offset = cm_local_id(2) * q_step * head_size * sizeof(float);
+    auto wg_local_id = cm_local_id(2);
+    auto i = (cm_group_id(2) * WG_SIZE + wg_local_id) * q_step;
+    auto q_offset = wg_local_id * q_step * head_size * sizeof(half);
+    auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
     //# debugging stage
-    lsc::block_2d_desc<float, 1, REG_N, REG_M> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(float) - 1, kv_len*sizeof(float) - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
 
     //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
     uint qkvo_pitch = num_heads * head_size * sizeof(half);
@@ -378,35 +398,45 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         }
     }
 
-    b2dMask.set_block_y(i);
-
+    matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
     for(int j = 0; j < kv_len; j += kv_step) {
-        if (args_verbose >= 0)
-            printf("======== %d =========\n", j);
+        // if (args_verbose >= 0) printf("======== %d =========\n", j);
 
+        //===========================================================
         //# load K into SLM as dpas-A tile (shared by all hw within same WG)
         //# load V into SLM as dpas-B tile (shared by all hw within same WG)
         {
+            //# 1849 ~ 3259
             if (j > 0) cm_barrier();
-            matrix<half, REG_M, REG_K> temp0;
-            matrix<half, REG_M, REG_K> temp1;
-            uint offset = 0;
-            for(int k = 0; k < head_size; k += REG_K) {
-                b2dK.set_block_x(k);
-                cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(j));
-                cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(j + REG_M));
-                cm_slm_block_write(slm_K, offset, temp0.format<half>()); offset += REG_M * REG_K * sizeof(half);
-                cm_slm_block_write(slm_K, offset, temp1.format<half>()); offset += REG_M * REG_K * sizeof(half);
+            {
+                // auto clk0 = get_clock();
+                if (wg_local_id < WG_SIZE/2) {
+                    matrix<half, REG_M, REG_K> temp0;
+                    matrix<half, REG_M, REG_K> temp1;
+                    for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(WG_SIZE/2)) {
+                        b2dK.set_block_x(k);
+                        cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(j));
+                        cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(j + REG_M));
+                        uint offset = k * 2 * REG_M * sizeof(half);
+                        cm_slm_block_write(slm_K, offset, temp0.format<half>());
+                        offset += REG_M * REG_K * sizeof(half);
+                        cm_slm_block_write(slm_K, offset, temp1.format<half>());
+                    }
+                } else {
+                    matrix<half, REG_K, REG_N> temp2;
+                    b2dV.set_block_y(j);
+                    for(int k = REG_K*(wg_local_id-WG_SIZE/2); k < head_size; k += REG_K*(WG_SIZE/2)) {
+                        cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k));
+                        cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
+                    }
+                }
             }
-            matrix<half, REG_K, REG_N> temp2;
-            offset = 0;
-            b2dV.set_block_y(j);
-            for(int k = 0; k < head_size; k += REG_K) {
-                cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k));
-                cm_slm_block_write(slm_V, offset, temp2.format<half>()); offset += REG_K * REG_N * sizeof(half);
-            }
+            // printf(" diff= %lu\n", get_clock() - clk0);
+
             cm_barrier();
         }
+
+        //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
         matrix<float, 2*REG_M, REG_N> St = 0;
         matrix<half, 2, REG_M * REG_K> Kmat;
@@ -431,15 +461,22 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                         Kmat[1].format<int32_t>());
         }
         //show(St);
-        matrix<float, 2, REG_M * REG_N> Maskmat;
-        cm_load<lsc::Transpose>(Maskmat[0].format<float>(), b2dMask.set_block_x(j));
-        cm_load<lsc::Transpose>(Maskmat[1].format<float>(), b2dMask.set_block_x(j + REG_M));
-        //show(Maskmat);
-        St *= scale_factor;
-        St2[0] += Maskmat[0];
-        St2[1] += Maskmat[1];
-        //show(St);
+        //=========================================================== 361
 
+        matrix<half, 2, REG_M * REG_N> Maskmat;
+        b2dMask.set_block_x(j);
+        cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(i));
+        cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(i + REG_M));
+
+        matrix<float, 2*REG_M, REG_N> MaskT;
+        Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
+
+        //show(Maskmat);
+        St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
+        St = cm_add<float>(St, MaskT);
+
+        //show(St);
+#if 1
         vector<float, REG_N> new_max_t;
         new_max_t = cm_max<float>(St[0], St[1]);
         for(int r = 2; r < St.n_rows(); r++) {
@@ -447,11 +484,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         }
         //show(new_max_t.format<float, 1, REG_N>()); return;
 
-        if (j == 0) {
-            cur_max = new_max_t;
-        } else {
-            new_max_t = cm_max<float>(new_max_t, cur_max);
-        }
+        new_max_t = cm_max<float>(new_max_t, cur_max);
 
         constexpr float log2e = 1.4426950408889634f;
         // Pt = torch.exp(St - new_max)
@@ -459,7 +492,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             St[r] = cm_exp((St[r] - new_max_t)*log2e);
         }
         //show(St); return;
-        
+
         vector<float, REG_N> row_sum_t;
         row_sum_t = cm_add<float>(St[0], St[1]);
         for(int r = 2; r < St.n_rows(); r++) {
@@ -467,74 +500,82 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         }
 
         vector<float, REG_N> max_comp;
-        if (j == 0) {
-            cur_sum = row_sum_t;
-        } else {
-            max_comp = cm_exp((cur_max - new_max_t)*log2e);
-            cur_sum = cm_mul<float>(cur_sum, max_comp);
-            cur_sum = cm_add<float>(cur_sum, row_sum_t);
-        }
-        //show(cur_sum.format<float, 1, REG_N>()); return;
+        max_comp = cm_exp((cur_max - new_max_t)*log2e);
+        cur_sum = cm_mul<float>(cur_sum, max_comp);
+        cur_sum = cm_add<float>(cur_sum, row_sum_t);
+#endif
 
         matrix<half, 2*REG_M, REG_K> P;
         Transpose_16x16(St, P);
 
+        //show(cur_sum.format<float, 1, REG_N>()); return;
+        //============================================================== 1074
+
+
+        //============================================================== 666
         //show(P);return;
-        
+        //auto clk0 = get_clock();
+
         auto P2 = P.format<half, 2, REG_M * REG_K>();
         matrix<float, 2, REG_M*REG_N> cur_O;
         if (j == 0) {
             matrix<float, REG_M, REG_N> zero_O = 0;
             matrix<half, REG_K/2, REG_N*2> Vmat;
             uint offset = o_offset;
-            for(int k = 0; k < head_size; k += REG_K) {
+            for(int k = 0, ri = 0; k < head_size; k += REG_K, ri += 2) {
                 // V has been VNNI-prepacked
                 cm_slm_block_read(slm_V, GENX_NONE, REG_N*k*sizeof(half), Vmat.format<half>());
                 
-                cur_O[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 zero_O.format<float>(),
                                 Vmat.format<int32_t>(),
                                 P2[0].format<int32_t>());
-                cur_O[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                rO[ri+1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 zero_O.format<float>(),
                                 Vmat.format<int32_t>(),
                                 P2[1].format<int32_t>());
-                cm_slm_block_write(slm_O, offset, cur_O[0]); offset += REG_M * REG_N * sizeof(float);
-                cm_slm_block_write(slm_O, offset, cur_O[1]); offset += REG_M * REG_N * sizeof(float);
+                
+                //cm_slm_block_write(slm_O, offset, cur_O[0]); offset += REG_M * REG_N * sizeof(float);
+                //cm_slm_block_write(slm_O, offset, cur_O[1]); offset += REG_M * REG_N * sizeof(float);
                 //show(cur_O.format<float, 2*REG_M, REG_N>());
             }
         } else {
             matrix<half, REG_K/2, REG_N*2> Vmat;
             uint offset = o_offset;
-            for(int k = 0; k < head_size; k += REG_K) {
+            for(int k = 0, ri=0; k < head_size; k += REG_K, ri+=2) {
                 // V has been VNNI-prepacked
                 cm_slm_block_read(slm_V, GENX_NONE, REG_N*k*sizeof(half), Vmat.format<half>());
 
-                cm_slm_block_read(slm_O, GENX_NONE, offset,
-                                    cur_O[0].format<half>());
-                cm_slm_block_read(slm_O, GENX_NONE, offset + REG_M * REG_N * sizeof(float),
-                                    cur_O[1].format<half>());
+                //cm_slm_block_read(slm_O, GENX_NONE, offset, cur_O[0].format<half>());
+                //cm_slm_block_read(slm_O, GENX_NONE, offset + REG_M * REG_N * sizeof(float), cur_O[1].format<half>());
+                
                 //# compensate cur_O
-                auto cO = cur_O.format<float, 2*REG_M, REG_N>();
+                auto cO = rO[ri].format<float, REG_M, REG_N>();
                 for(int r = 0; r < cO.n_rows(); r++) {
                     cO[r] *= max_comp[r];
                 }
+                auto cO2 = rO[ri+1].format<float, REG_M, REG_N>();
+                for(int r = 0; r < cO2.n_rows(); r++) {
+                    cO2[r] *= max_comp[r + REG_M];
+                }
                 //# show(cur_O.format<float, 2*REG_M, REG_N>()); return;
                 
-                cur_O[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                cur_O[0].format<float>(),
+                rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                                rO[ri].format<float>(),
                                 Vmat.format<int32_t>(),
                                 P2[0].format<int32_t>());
-                cur_O[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                cur_O[1].format<float>(),
+                rO[ri+1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                                rO[ri+1].format<float>(),
                                 Vmat.format<int32_t>(),
                                 P2[1].format<int32_t>());
-                cm_slm_block_write(slm_O, offset, cur_O[0]); offset += REG_M * REG_N * sizeof(float);
-                cm_slm_block_write(slm_O, offset, cur_O[1]); offset += REG_M * REG_N * sizeof(float);
+                //cm_slm_block_write(slm_O, offset, cur_O[0]); offset += REG_M * REG_N * sizeof(float);
+                //cm_slm_block_write(slm_O, offset, cur_O[1]); offset += REG_M * REG_N * sizeof(float);
                 // if (j == args_verbose) show(cur_O.format<float, 2*REG_M, REG_N>());
             }
             // if (j == args_verbose) return;
         }
+        //============================================================== 1168
+
         cur_max = new_max_t;
     }//# for(int j = 0; j < kv_len; j += kv_step) {
     
@@ -542,23 +583,25 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     matrix<float, 2, REG_M*REG_N> cur_O;
     matrix<half, 2*REG_M, REG_N> cur_O_f16;
     uint offset = o_offset;
-    for(int k = 0; k < head_size; k += REG_K) {
-        cm_slm_block_read(slm_O, GENX_NONE, offset, cur_O[0].format<half>()); offset += REG_M * REG_N * sizeof(float);
-        cm_slm_block_read(slm_O, GENX_NONE, offset, cur_O[1].format<half>()); offset += REG_M * REG_N * sizeof(float);
+    for(int k = 0, ri=0; k < head_size; k += REG_K, ri+=2) {
+        //cm_slm_block_read(slm_O, GENX_NONE, offset, cur_O[0].format<half>()); offset += REG_M * REG_N * sizeof(float);
+        //cm_slm_block_read(slm_O, GENX_NONE, offset, cur_O[1].format<half>()); offset += REG_M * REG_N * sizeof(float);
 
-        auto cO = cur_O.format<float, 2*REG_M, REG_N>();
+        auto cO = rO[ri].format<float, REG_M, REG_N>();
         for(int r = 0; r < cO.n_rows(); r++) {
             cur_O_f16[r] = cm_div_ieee(cO[r], cur_sum[r]);
         }
-        
-        if (i == args_verbose) {
-            show(cur_O_f16);
+        auto cO2 = rO[ri+1].format<float, REG_M, REG_N>();
+        for(int r = 0; r < cO2.n_rows(); r++) {
+            cur_O_f16[r + REG_M] = cm_div_ieee(cO2[r], cur_sum[r+REG_M]);
         }
+
+        // if (i == args_verbose) show(cur_O_f16);
 
         cm_store(b2dO.set_block_x(k).set_block_y(i), cur_O_f16.format<half, 2, REG_M*REG_N>()[0]);
         cm_store(b2dO.set_block_x(k).set_block_y(i + REG_M), cur_O_f16.format<half, 2, REG_M*REG_N>()[1]);
     }
-    if (i == args_verbose) return;
+    // if (i == args_verbose) return;
 }
 '''
 
@@ -574,14 +617,10 @@ t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
 t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc")
+cm_kernels = cl.kernels(pyeval(src1), f"-cmc -mdump_asm -g2 -Qxcm_register_file_size=256")
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
 
 f1 = torch.from_numpy(t_out.numpy())
-
-check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
-print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
-
 
 all_layers = []
 for i in range(30):
@@ -594,10 +633,13 @@ for i in range(30):
     ])
 
 for i in range(30):
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, all_layers[i][0], all_layers[i][1], all_layers[i][2], all_layers[i][3], all_layers[i][4])
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, all_layers[0][0], all_layers[0][1], all_layers[0][2], all_layers[0][3], all_layers[0][4])
 
 latency = cl.finish()
 for ns in latency:
     print(f"  {ns*1e-6:.3f} ms")
+
+check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
+print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
 
 sys.exit(0)
