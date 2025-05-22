@@ -26,6 +26,7 @@ cmake_search_dir=":".join([pybind11.get_cmake_dir()])
 
 # on windows, custom compiler requires Ninja instead of VC++
 generator="-GNinja" if os.name == 'nt' else ""
+generator="" # when there is no Ninja install
 
 btype = "RelWithDebInfo"
 #btype = "Debug"
@@ -42,6 +43,7 @@ if cmake_need_config:
                     generator], shell=False, check=True)
 
 subprocess.run(["cmake", "--build", build_path, "--config", btype, "-j8"], shell=False, check=True)
+subprocess.run(["cmake", "--install", build_path, "--config", btype, "--prefix", dir_path], shell=False, check=True)
 
 from .csrc import *
 

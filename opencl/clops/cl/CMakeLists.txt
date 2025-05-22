@@ -64,7 +64,16 @@ if(IntelSYCL_FOUND)
     target_include_directories(csrc PRIVATE sycl/xetla)
     target_link_libraries(csrc PRIVATE OpenCL IntelSYCL::SYCL_CXX)
 else()
-    target_link_libraries(csrc PRIVATE OpenCL)
+    if (WIN32)
+        # install OpenCL SDK from https://github.com/KhronosGroup/OpenCL-SDK/releases
+        find_package(OpenCL REQUIRED
+        PATHS  "C:\\Users\\openvino-adlh\\Downloads\\OpenCL-SDK-v2024.10.24-Win-x64\\OpenCL-SDK-v2024.10.24-Win-x64\\share\\cmake"
+        )
+        target_include_directories(csrc PRIVATE ${OpenCL_INCLUDE_DIRS})
+        target_link_libraries(csrc PRIVATE OpenCL::OpenCL)
+    else()
+        target_link_libraries(csrc PRIVATE OpenCL)
+    endif()
 endif()
 
 target_compile_definitions(csrc PRIVATE CL_TARGET_OPENCL_VERSION=300)
@@ -86,3 +95,5 @@ if(DNNL_FOUND)
 install(TARGETS csrc LIBRARY DESTINATION lib)
 install(IMPORTED_RUNTIME_ARTIFACTS DNNL::dnnl DESTINATION lib)
 endif()
+
+install(TARGETS csrc LIBRARY DESTINATION .)
