@@ -263,12 +263,16 @@ struct ocl_queue {
 
             for(int k = 0; k < n_devs; k++) {
                 auto devid = dev_ids[k];
+                auto dev_ext = getDeviceInfo<std::string>(devid, CL_DEVICE_EXTENSIONS);
                 std::cout << " GPU device [" << gpu_dev_index << "] : "
                           << getDeviceInfo<std::string>(devid, CL_DEVICE_NAME)
                           << " by \"" << getDeviceInfo<std::string>(devid, CL_DEVICE_VENDOR) << "\" : "
                           << getDeviceInfo<cl_uint>(devid, CL_DEVICE_MAX_COMPUTE_UNITS) << " EUs "
                           << getDeviceInfo<cl_uint>(devid, CL_DEVICE_MAX_CLOCK_FREQUENCY) << " MHz "
-                          << getDeviceInfo<cl_ulong>(devid, CL_DEVICE_LOCAL_MEM_SIZE) << " bytes SLM"
+                          << getDeviceInfo<cl_ulong>(devid, CL_DEVICE_LOCAL_MEM_SIZE) << " bytes SLM "
+                          << (dev_ext.find("cl_intel_subgroup_matrix_multiply_accumulate") != std::string::npos ? "[DPAS]":"")
+                          << (dev_ext.find("cl_intel_subgroup_split_matrix_multiply_accumulate") != std::string::npos ? "[DPASW]":"")
+                          << (dev_ext.find("cl_intel_split_work_group_barrier") != std::string::npos ? "[sbarrier]":"")
                           << std::endl;
                 device_ids.push_back({devid, platform_id});
                 gpu_dev_index++;

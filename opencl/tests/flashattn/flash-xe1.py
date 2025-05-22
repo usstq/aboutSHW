@@ -32,7 +32,7 @@ def vprint(*all_args):
 
 
 batch = args.batch
-q_len, q_step = args.q_len, 16
+q_len, q_step = args.q_len, 8
 kv_len, kv_step = args.kv_len, 16
 num_heads = args.num_heads
 num_kv_heads = args.num_kv_heads
@@ -198,7 +198,7 @@ def get_flash0(query, key, value, attention_mask):
                         cur_O = (cur_O * max_comp.transpose(0, 1))
                         vprint("cur_O1=", cur_O)
                         cur_O += partial_attn_weight @ rV
-                    vprint("cur_O2=", cur_O)
+                    vprint("cur_O2=", cur_O.shape, cur_O)
 
                     cur_max = rowmax
                     if (j == args.verbose): assert 0
@@ -255,7 +255,7 @@ ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 scale_factor = 1.0/(head_size**0.5)
 
 GWS=[batch, num_heads, q_len//q_step]
-WG_SIZE = min(q_len//q_step, 8)
+WG_SIZE = min(q_len//q_step, 16)
 LWS=[1, 1, WG_SIZE]
 
 print("GWS=", GWS)
@@ -290,9 +290,9 @@ src1 = r'''
 #define VNNI_WIDTH 2
 #define REG_K (SystolicDepth * VNNI_WIDTH)
 #define REG_M RepeatCount
-#define REG_N 16
+#define REG_N 8
 
-static_assert(q_step == 16);
+static_assert(q_step == 8);
 static_assert(kv_step == 16);
 
 template<typename T, int M, int N>
@@ -307,43 +307,43 @@ void show(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-template <typename T1, typename T2>
-CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
-                               matrix_ref<T2, 16, 16> out) {
-  matrix<T2, 16, 16> bBuf;
-  bBuf.row(0) = in.template select<4, 1, 4, 4>(0, 0);   // 0,4,8,c
-  bBuf.row(1) = in.template select<4, 1, 4, 4>(4, 0);   // 0,4,8,c
-  bBuf.row(2) = in.template select<4, 1, 4, 4>(8, 0);   // 0,4,8,c
-  bBuf.row(3) = in.template select<4, 1, 4, 4>(12, 0);  // 0,4,8,c
-  bBuf.row(4) = in.template select<4, 1, 4, 4>(0, 1);   // 1,5,9,d
-  bBuf.row(5) = in.template select<4, 1, 4, 4>(4, 1);   // 1,5,9,d
-  bBuf.row(6) = in.template select<4, 1, 4, 4>(8, 1);   // 1,5,9,d
-  bBuf.row(7) = in.template select<4, 1, 4, 4>(12, 1);  // 1,5,9,d
-  bBuf.row(8) = in.template select<4, 1, 4, 4>(0, 2);   // 2,6,a,e
-  bBuf.row(9) = in.template select<4, 1, 4, 4>(4, 2);   // 2,6,a,e
-  bBuf.row(10) = in.template select<4, 1, 4, 4>(8, 2);  // 2,6,a,e
-  bBuf.row(11) = in.template select<4, 1, 4, 4>(12, 2); // 2,6,a,e
-  bBuf.row(12) = in.template select<4, 1, 4, 4>(0, 3);  // 3,7,b,f
-  bBuf.row(13) = in.template select<4, 1, 4, 4>(4, 3);  // 3,7,b,f
-  bBuf.row(14) = in.template select<4, 1, 4, 4>(8, 3);  // 3,7,b,f
-  bBuf.row(15) = in.template select<4, 1, 4, 4>(12, 3); // 3,7,b,f
 
-  out.row(0) = bBuf.template select<4, 1, 4, 4>(0, 0);   // 0
-  out.row(1) = bBuf.template select<4, 1, 4, 4>(4, 0);   // 1
-  out.row(2) = bBuf.template select<4, 1, 4, 4>(8, 0);   // 2
-  out.row(3) = bBuf.template select<4, 1, 4, 4>(12, 0);  // 3
-  out.row(4) = bBuf.template select<4, 1, 4, 4>(0, 1);   // 4
-  out.row(5) = bBuf.template select<4, 1, 4, 4>(4, 1);   // 5
-  out.row(6) = bBuf.template select<4, 1, 4, 4>(8, 1);   // 6
-  out.row(7) = bBuf.template select<4, 1, 4, 4>(12, 1);  // 7
-  out.row(8) = bBuf.template select<4, 1, 4, 4>(0, 2);   // 8
-  out.row(9) = bBuf.template select<4, 1, 4, 4>(4, 2);   // 9
-  out.row(10) = bBuf.template select<4, 1, 4, 4>(8, 2);  // a
-  out.row(11) = bBuf.template select<4, 1, 4, 4>(12, 2); // b
-  out.row(12) = bBuf.template select<4, 1, 4, 4>(0, 3);  // c
-  out.row(13) = bBuf.template select<4, 1, 4, 4>(4, 3);  // d
-  out.row(14) = bBuf.template select<4, 1, 4, 4>(8, 3);  // e
-  out.row(15) = bBuf.template select<4, 1, 4, 4>(12, 3); // f
+template <typename T1, typename T2>
+CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) {
+  matrix<T2, 8, 8> temp;
+  temp.row(0) = in.template select<2, 1, 4, 2>(0, 0);
+  temp.row(1) = in.template select<2, 1, 4, 2>(2, 0);
+  temp.row(2) = in.template select<2, 1, 4, 2>(4, 0);
+  temp.row(3) = in.template select<2, 1, 4, 2>(6, 0);
+  temp.row(4) = in.template select<2, 1, 4, 2>(0, 1);
+  temp.row(5) = in.template select<2, 1, 4, 2>(2, 1);
+  temp.row(6) = in.template select<2, 1, 4, 2>(4, 1);
+  temp.row(7) = in.template select<2, 1, 4, 2>(6, 1);
+
+  out.row(0) = temp.template select<4, 1, 2, 4>(0, 0);
+  out.row(2) = temp.template select<4, 1, 2, 4>(0, 1);
+  out.row(4) = temp.template select<4, 1, 2, 4>(0, 2);
+  out.row(6) = temp.template select<4, 1, 2, 4>(0, 3);
+  out.row(1) = temp.template select<4, 1, 2, 4>(4, 0);
+  out.row(3) = temp.template select<4, 1, 2, 4>(4, 1);
+  out.row(5) = temp.template select<4, 1, 2, 4>(4, 2);
+  out.row(7) = temp.template select<4, 1, 2, 4>(4, 3);
+}
+
+template <typename T, int M, int N>
+CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++, base += pitch) {
+        cm_svm_block_read(base, out[i]);
+    }
+}
+
+template <typename T, int M, int N>
+CM_INLINE void svm_write_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++, base += pitch) {
+        cm_svm_block_write(base, out[i]);
+    }
 }
 
 CM_INLINE uint64_t get_clock() {
@@ -367,9 +367,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
     constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(half));
     constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
-    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * WG_SIZE;
 
-    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE);
 
     auto slm_K = cm_slm_alloc(K_SLM_SIZE);
     auto slm_V = cm_slm_alloc(V_SLM_SIZE);
@@ -389,29 +388,34 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
     //# debugging stage
-    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
+    //lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
 
     //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
     uint qo_pitch = num_heads * head_size * sizeof(half);
     uint kv_pitch = num_kv_heads * head_size * sizeof(half);
-    lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(query + (batch*num_heads*q_len + h)*head_size), q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_M, REG_K> b2dK(key + (batch*num_kv_heads*kv_len + hkv)*head_size,   kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + (batch*num_kv_heads*kv_len + hkv)*head_size, kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
+
+    //lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(query + (batch*num_heads*q_len + h)*head_size), q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
+    //lsc::block_2d_desc<half, 1, REG_M, REG_K> b2dK(key + (batch*num_kv_heads*kv_len + hkv)*head_size,   kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    //lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + (batch*num_kv_heads*kv_len + hkv)*head_size, kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    //lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
 
     //# load Qt into register & pack as VNNI & store to SLM (as dpas-B tile)
-
     matrix<half, head_size/REG_K, REG_K*REG_N> rQ;
     {
-        //matrix<uint, REG_K/2, REG_N> Qmat;
+        matrix<uint, REG_N, REG_K/2> Qmat;
+        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
+
         #pragma unroll
-        for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
-            b2dQ.set_block_x(k);
+        for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++, q_base += 16*sizeof(half)) {
 
             //# DWORD transposed load == (transposed + VNNI) load
-            cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
+            svm_read_2d(Qmat, q_base, qo_pitch);
+            Transpose_8x8(Qmat, rQ[ri].format<uint, REG_K/2, REG_N>());
 
-            //# show(Qmat.format<half, REG_K/2, REG_N*2>());
+            //b2dQ.set_block_x(k);
+            //cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
+
+            // show(rQ[ri].format<half, REG_K/2, REG_N*2>()); //# vnni
         }
     }
 
@@ -419,74 +423,90 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     int kv_stop = kv_len;
 
     matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
-        // if (args_verbose >= 0) printf("======== %d =========\n", kv_pos);
+    
+    auto k_base0 = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
+    auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
+    auto mask_base = reinterpret_cast<svmptr_t>(mask + (batch * q_len + q_start) * kv_len);
+    auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
 
-        //===========================================================
-        //# load K into SLM as dpas-A tile (shared by all hw within same WG)
-        //# load V into SLM as dpas-B tile (shared by all hw within same WG)
+    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
+            k_base0 += kv_step * kv_pitch,
+            v_base += kv_step * kv_pitch) {
         {
-            //# 1849 ~ 3259
             if (kv_pos > 0) cm_barrier();
-            {
-                // auto clk0 = get_clock();
 #if WG_SIZE == 1
-                    matrix<half, REG_M, REG_K> temp0;
-                    matrix<half, REG_M, REG_K> temp1;
-                    for(int k = 0; k < head_size; k += REG_K) {
-                        b2dK.set_block_x(k);
-                        cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                        cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
+            matrix<half, REG_M, REG_K> temp0;
+            matrix<half, REG_M, REG_K> temp1;
+            auto k_base1 = k_base0 + REG_M * kv_pitch;
+            for(int k = 0; k < head_size; k += REG_K) {
+                //b2dK.set_block_x(k);
+                //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
+                //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
-                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
+                svm_read_2d(temp0, k_base0 + k*sizeof(half), kv_pitch);
+                svm_read_2d(temp1, k_base1 + k*sizeof(half), kv_pitch);
 
-                        show(temp0); return;
-                        
-                        uint offset = k * 2 * REG_M * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp0.format<half>());
-                        offset += REG_M * REG_K * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp1.format<half>());
-                    }
-                    matrix<half, REG_K, REG_N> temp2;
-                    b2dV.set_block_y(kv_pos);
-                    for(int k = 0; k < head_size; k += REG_K) {
-                        cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
-                        //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
+                // show(temp0); show(temp1);
 
-                        cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
-                    }
-#else
-                if (wg_local_id < WG_SIZE/2) {
-                    matrix<half, REG_M, REG_K> temp0;
-                    matrix<half, REG_M, REG_K> temp1;
-                    for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(WG_SIZE/2)) {
-                        b2dK.set_block_x(k);
-                        cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                        cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
-
-                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
-                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
-
-                        uint offset = k * 2 * REG_M * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp0.format<half>());
-                        offset += REG_M * REG_K * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp1.format<half>());
-                    }
-                } else {
-                    matrix<half, REG_K, REG_N> temp2;
-                    b2dV.set_block_y(kv_pos);
-                    for(int k = REG_K*(wg_local_id-WG_SIZE/2); k < head_size; k += REG_K*(WG_SIZE/2)) {
-                        cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
-                        //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
-
-                        cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
-                    }
-                }
-#endif
+                uint offset = k * 2 * REG_M * sizeof(half);
+                cm_slm_block_write(slm_K, offset, temp0.format<half>());
+                offset += REG_M * REG_K * sizeof(half);
+                cm_slm_block_write(slm_K, offset, temp1.format<half>());
             }
-            // printf(" diff= %lu\n", get_clock() - clk0);
 
+            matrix<half, REG_K, REG_N> temp2;
+            matrix<half, REG_K/2, REG_N*2> temp_vnni;
+            //b2dV.set_block_y(kv_pos);
+            for(int k = 0; k < head_size; k += REG_N) {
+                //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
+
+                svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
+
+                temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
+                temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
+
+                // show(temp_vnni);
+                cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
+            }
+#else
+            if (wg_local_id < WG_SIZE/2) {
+                matrix<half, REG_M, REG_K> temp0;
+                matrix<half, REG_M, REG_K> temp1;
+                auto k_base1 = k_base0 + REG_M * kv_pitch;
+                for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(WG_SIZE/2)) {
+                    //b2dK.set_block_x(k);
+                    //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
+                    //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
+
+                    svm_read_2d(temp0, k_base0 + k*sizeof(half), kv_pitch);
+                    svm_read_2d(temp1, k_base1 + k*sizeof(half), kv_pitch);
+
+                    // show(temp0); show(temp1);
+
+                    uint offset = k * 2 * REG_M * sizeof(half);
+                    cm_slm_block_write(slm_K, offset, temp0.format<half>());
+                    offset += REG_M * REG_K * sizeof(half);
+                    cm_slm_block_write(slm_K, offset, temp1.format<half>());
+                }
+            } else {
+                matrix<half, REG_K, REG_N> temp2;
+                matrix<half, REG_K/2, REG_N*2> temp_vnni;
+                //b2dV.set_block_y(kv_pos);
+                for(int k = REG_N*(wg_local_id-WG_SIZE/2); k < head_size; k += REG_N*(WG_SIZE/2)) {
+                    //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                    //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
+
+                    svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
+
+                    temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
+                    temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
+
+                    // show(temp_vnni);
+                    cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
+                }
+            }
+#endif
             cm_barrier();
         }
 
@@ -513,21 +533,22 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                         Kmat[1].format<int32_t>());
         }
         //show(St);
-        //=========================================================== 361
 
-        matrix<half, 2, REG_M * REG_N> Maskmat;
-        b2dMask.set_block_x(kv_pos);
-        cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
-        cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
+        matrix<half, REG_M, REG_N + REG_N> Maskmat;
+        //b2dMask.set_block_x(kv_pos);
+        //cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
+        //cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
+        svm_read_2d(Maskmat, mask_base + kv_pos * sizeof(half), kv_len*sizeof(half));
 
         matrix<float, 2*REG_M, REG_N> MaskT;
-        Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
+        Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,0), MaskT.select<REG_M, 1, REG_N, 1>(0,0));
+        Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,REG_N), MaskT.select<REG_M, 1, REG_N, 1>(REG_M,0));
 
-        //show(Maskmat);
+        //show(MaskT);
         St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
         St = cm_add<float>(St, MaskT);
 
-        //show(St);
+        // show(St);
 
         vector<float, REG_N> new_max_t;
         new_max_t = cm_max<float>(St[0], St[1]);
@@ -540,6 +561,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         constexpr float log2e = 1.4426950408889634f;
         // Pt = torch.exp(St - new_max)
         for(int r = 0; r < St.n_rows(); r++) St[r] = cm_exp((St[r] - new_max_t)*log2e);
+
         //show(St); return;
 
         vector<float, REG_N> row_sum_t;
@@ -551,96 +573,79 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         cur_sum = cm_mul<float>(cur_sum, max_comp);
         cur_sum = cm_add<float>(cur_sum, row_sum_t);
 
-        matrix<half, 2*REG_M, REG_K> P;
-        Transpose_16x16(St, P);
+        //show(cur_sum.format<float, 1, REG_N>());
 
-        //show(cur_sum.format<float, 1, REG_N>()); return;
-        //============================================================== 1074
+        // [2*REG_M, REG_N] => [REG_M, REG_K = REG_N + REG_N]
+        matrix<half, REG_M, REG_K> P; // REG_K = REG_N + REG_N
+        Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(0,0), P.select<REG_M, 1, REG_N, 1>(0,0));
+        Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(REG_M,0), P.select<REG_M, 1, REG_N, 1>(0,REG_N));
 
-
-        //============================================================== 666
         //show(P);return;
-        //auto clk0 = get_clock();
 
-        auto P2 = P.format<half, 2, REG_M * REG_K>();
-        matrix<float, 2, REG_M*REG_N> cur_O;
         if (kv_pos == 0) {
             matrix<float, REG_M, REG_N> zero_O = 0;
             matrix<half, REG_K/2, REG_N*2> Vmat;
             uint offset = o_offset;
             #pragma unroll
-            for(int k = 0, ri = 0; k < head_size; k += REG_K, ri += 2) {
+            for(int k = 0, ri = 0; k < head_size; k += REG_N, ri++) {
                 // V has been VNNI-prepacked
-                cm_slm_block_read(slm_V, GENX_NONE, REG_N*k*sizeof(half), Vmat.format<half>());
+                cm_slm_block_read(slm_V, GENX_NONE, REG_K*k*sizeof(half), Vmat.format<half>());
+                //show(Vmat); return;
                 
                 rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 zero_O.format<float>(),
                                 Vmat.format<int32_t>(),
-                                P2[0].format<int32_t>());
-                rO[ri+1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                zero_O.format<float>(),
-                                Vmat.format<int32_t>(),
-                                P2[1].format<int32_t>());
-                //show(cur_O.format<float, 2*REG_M, REG_N>());
+                                P.format<int32_t>());
+                //show(rO[ri].format<float, REG_M, REG_N>());
             }
         } else {
             matrix<half, REG_K/2, REG_N*2> Vmat;
             uint offset = o_offset;
             #pragma unroll
-            for(int k = 0, ri=0; k < head_size; k += REG_K, ri+=2) {
+            for(int k = 0, ri=0; k < head_size; k += REG_N, ri++) {
                 // V has been VNNI-prepacked
-                cm_slm_block_read(slm_V, GENX_NONE, REG_N*k*sizeof(half), Vmat.format<half>());
+                cm_slm_block_read(slm_V, GENX_NONE, REG_K*k*sizeof(half), Vmat.format<half>());
 
                 //# compensate cur_O
                 //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
                 auto cO = rO[ri].format<float, REG_M, REG_N>();
+                #pragma unroll
                 for(int r = 0; r < REG_M; r++)
                     cO.row(r) = cm_mul<float>(cO.row(r), max_comp[r]);
-                auto cO2 = rO[ri+1].format<float, REG_M, REG_N>();
-                for(int r = 0; r < REG_M; r++)
-                    cO2.row(r) = cm_mul<float>(cO2.row(r), max_comp[r + REG_M]);
 
                 //# show(cur_O.format<float, 2*REG_M, REG_N>()); return;
                 
                 rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 rO[ri].format<float>(),
                                 Vmat.format<int32_t>(),
-                                P2[0].format<int32_t>());
-                rO[ri+1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                rO[ri+1].format<float>(),
-                                Vmat.format<int32_t>(),
-                                P2[1].format<int32_t>());
-
+                                P.format<int32_t>());
+                //show(rO[ri].format<float, REG_M, REG_N>());
                 // if (kv_pos == args_verbose) show(cur_O.format<float, 2*REG_M, REG_N>());
             }
             // if (kv_pos == args_verbose) return;
         }
         //============================================================== 1168
-
         cur_max = new_max_t;
     }//# for(int kv_pos = 0; kv_pos < kv_len; kv_pos += kv_step) {
-    
+
     //# save cur_O/cur_sum.transpose(0, 1)
-    matrix<float, 2, REG_M*REG_N> cur_O;
-    matrix<half, 2*REG_M, REG_N> cur_O_f16;
+    matrix<float, REG_M, REG_N> cur_O;
+    matrix<half, REG_M, REG_N> cur_O_f16;
     uint offset = o_offset;
+    cur_sum = cm_inv(cur_sum);
     #pragma unroll
-    for(int k = 0, ri=0; k < head_size; k += REG_K, ri+=2) {
+    for(int k = 0, ri=0; k < head_size; k += REG_N, ri++) {
         auto cO = rO[ri].format<float, REG_M, REG_N>();
         for(int r = 0; r < cO.n_rows(); r++) {
-            cur_O_f16[r] = cm_div_ieee(cO[r], cur_sum[r]);
-        }
-        auto cO2 = rO[ri+1].format<float, REG_M, REG_N>();
-        for(int r = 0; r < cO2.n_rows(); r++) {
-            cur_O_f16[r + REG_M] = cm_div_ieee(cO2[r], cur_sum[r+REG_M]);
+            cur_O_f16[r] = cm_mul<float>(cO[r], cur_sum[r]);
         }
 
         // if (i == args_verbose) show(cur_O_f16);
+        svm_write_2d(cur_O_f16, o_base + k*sizeof(half), qo_pitch);
 
-        cm_store(b2dO.set_block_x(k).set_block_y(q_start), cur_O_f16.format<half, 2, REG_M*REG_N>()[0]);
-        cm_store(b2dO.set_block_x(k).set_block_y(q_start + REG_M), cur_O_f16.format<half, 2, REG_M*REG_N>()[1]);
+        // cm_store(b2dO.set_block_x(k).set_block_y(q_start), cur_O_f16.format<half, 2, REG_M*REG_N>()[0]);
+        // cm_store(b2dO.set_block_x(k).set_block_y(q_start + REG_M), cur_O_f16.format<half, 2, REG_M*REG_N>()[1]);
     }
-    // if (i == args_verbose) return;
 }
 '''
 
