@@ -2,12 +2,14 @@
 from clops import cl
 import numpy as np
 import time
+from clops import compare
+
 
 '''
 Xe2 register width: 512 bit
 16x 32bits accumulation destinations
 
-each systolic step do a VNNI-style dot-product: 
+each systolic step do a VNNI-style dot-product:
     // bf16/fp16
     dest[i] +=  src2[i*2+0] * src1[i*2+0]
               + src2[i*2+1] * src1[i*2+1]
@@ -24,7 +26,7 @@ so K dimension is 8*2 for bf16/fp16 and 8*4 for s8/u8
 https://www.techpowerup.com/gpu-specs/arc-b580.c4244
  - 160 EU
  - SIMD-16 ALU (32 flops)
- - frequency: 2.67HGz, clinfo MAX 2.9GHz   
+ - frequency: 2.67HGz, clinfo MAX 2.9GHz
  - SLM: 131072 (128*1024 = 128 KiB)
 
 FP32    : 160*2.67*16(SIMD-width)*2(MAD)/1e3 = 13.67 TFLOPS
@@ -98,7 +100,7 @@ BN = wgN * regN * 16
 # sometime M * N are small but K is big, choose small wgM & wgN and split along K dimension
 # can produce more threads and use all Xe-cores
 
-# we need enough of threads to use all Xe-cores 
+# we need enough of threads to use all Xe-cores
 nBM = 20
 nBN = 16
 
@@ -170,7 +172,7 @@ extern "C" _GENX_MAIN_ void cm_dpas_gemm(
     #pragma unroll (1)
     for(int nbK = 0; nbK < numBK; nbK++) {
         //# copy from DDR into SLM
-        //# sync 
+        //# sync
 
         cm_slm_block_read(slmA, GENX_DWALIGNED, local_id_M*REGM_SIZE, src2.format<int32_t>());
         cm_slm_block_read(slmB, GENX_DWALIGNED, local_id_N*REGN_SIZE, src1.format<int32_t>());
@@ -199,11 +201,119 @@ extern "C" _GENX_MAIN_ void cm_dpas_gemm(
     //printf("Hello,CM\n");
 }
 '''
+
+def tput_WO_SLM_FP16():
+    src =  r'''
+#ifdef CM_HAS_LSC_UNTYPED_2D
+#pragma message (">>>>>> CM_HAS_LSC_UNTYPED_2D OK")
+#else
+#error "----------------------------"
+#endif
+#define SystolicDepth 8
+#define regN 16
+#define regK 16
+
+    extern "C" _GENX_MAIN_ void gemm(svmptr_t A [[type("svmptr_t")]],
+                                  svmptr_t B [[type("svmptr_t")]],
+                                  svmptr_t C [[type("svmptr_t")]],
+                                  unsigned int M, unsigned int K, unsigned int N) {
+        int m_idx = cm_global_id(0) * regM * tileM;
+        int n_idx = cm_global_id(1) * regN * tileN;
+        matrix<half, tileM, regM * regK> matA;
+        matrix<half, tileN, regK*regN> matB;
+        matrix<half, tileM*tileN, regM*regN> matC = 0;
+        lsc::block_2d_desc<half, 1, regM, regK> descA{(half*)A, M-1, K*2-1, K*2-1, 0, m_idx};
+        lsc::block_2d_desc<half, tileN, regK, regN> descB{(half*)B, K-1, 2*N-1, 2*N-1, n_idx, 0};
+        lsc::block_2d_desc<half, 1, regM, regN> descC{(half*)C, M-1, 2*N-1, 2*N-1, n_idx, m_idx};
+
+        for (int kb = 0; kb < K; kb+= BK) {
+            #pragma unroll
+            for (int ki = 0; ki < BK ; ki+=regK) {
+                descB.set_block_y(kb+ki);
+                cm_load<lsc::LoadOp::VNNI>(matB.format<half>(), descB);
+                descA.set_block_x(kb+ki);
+                #pragma unroll
+                for (int mt_idx = 0; mt_idx <  tileM; mt_idx ++) {
+                    descA.set_block_y(m_idx + mt_idx* regM);
+                    cm_load<lsc::LoadOp::Normal>(matA[mt_idx].format<half>(), descA);
+                }
+                int tileC_idx = 0;
+                #pragma unroll
+                for (int mt_idx = 0; mt_idx <  tileM; mt_idx ++) {
+                    #pragma unroll
+                    for (int nt_idx = 0; nt_idx <  tileN; nt_idx ++) {
+                        matC.row(mt_idx*tileN + nt_idx).format<half>() = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, regM>(
+                                matC.row(tileC_idx).format<half>(),
+                                matB[nt_idx].format<int32_t>(),
+                                matA[mt_idx].format<int32_t>());
+                        tileC_idx++;
+                    }
+                }
+            }
+        }
+        #pragma unroll
+        for (int mt_idx = 0; mt_idx <  tileM; mt_idx ++) {
+            descC.set_block_y(m_idx + mt_idx*regM);
+            #pragma unroll
+            for (int nt_idx = 0; nt_idx <  tileN; nt_idx ++) {
+                descC.set_block_x(n_idx + nt_idx*regN);
+                cm_store(descC, matC[mt_idx*tileN + nt_idx].format<half>());
+            }
+        }
+    }
+    '''
+    REPEAT = 10
+    regM = 8
+    regN = 16
+    BK = 64
+    tileM = 8
+    tileN = 2
+
+    nthrM = 8
+    nthrN = 8
+
+    BM = nthrM* regM * tileM
+    BN = nthrN* regN * tileN
+
+    WGS_M = 8
+    WGS_N = 8
+    global_nthrM = nthrM*WGS_M
+    global_nthrN = nthrN*WGS_N
+
+    M = regM*tileM*global_nthrM
+    N = regN*tileN*global_nthrN
+    K = BK*32
+    # np.random.seed(0)
+    vRANGE = 2
+    A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
+    B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
+    C_ref = np.matmul(A, B)
+    tA_list = [cl.tensor(A) for _ in range(REPEAT)]
+    tB_list = [cl.tensor(B) for _ in range(REPEAT)]
+    tC_list = [cl.tensor([M, N], np.dtype(np.float16)) for _ in range(REPEAT)]
+
+    SG_SZ = 16
+    kernel =  cl.kernels(src, options=f"-cmc -mdump_asm -g2 -DregM={regM} -DregN={regN} -DtileM={tileM} -DtileN={tileN} -DBK={BK} -BM={BM} -BN={BN}")
+
+    for i in range(0, REPEAT):
+        kernel.enqueue("gemm", [global_nthrM, global_nthrN],[nthrM, nthrN], tA_list[i], tB_list[i],tC_list[i], M, K, N)
+    ns = cl.finish()
+    flops = M * N * K * 2
+    print("----------------------------------------------------")
+    print(f'M:{M}, N:{N}, K:{K}')
+    print("----------------------------------------------------")
+    for time_opt in ns:
+        print(f'TPUT: [W/O SLM]:{flops/time_opt:.1f} GFLOPS, us: {time_opt*1e-3:.1f}')
+
+    compare(C_ref, tC_list[0].numpy())
+
+
 cl.profiling(True)
+
 
 dt_ker_overhead = None
 
-# set LoopCount to 0 to estimate kernel overhead 
+# set LoopCount to 0 to estimate kernel overhead
 for numBK in [0, 100, 256, 512]:
 #for LoopCount in [0, 0, 0]:
     total_K = numBK * K
@@ -231,7 +341,7 @@ for numBK in [0, 100, 256, 512]:
         kernels.enqueue("cm_dpas_gemm", GWS, LWS, tC, tB, tA)
         ns = cl.finish()[0]
         t1 = time.time()
-        
+
         if (t1 - tbase > warm_up_time_thr):
             dt = (t1 - t0)
             dt_ker = ns / 1e9
@@ -259,3 +369,9 @@ for numBK in [0, 100, 256, 512]:
 
 
 print(f"{total_threads=}   Hyper-Threads: x {total_threads/num_EUs:.2f}")
+
+
+
+
+# test tput.
+tput_WO_SLM_FP16()
