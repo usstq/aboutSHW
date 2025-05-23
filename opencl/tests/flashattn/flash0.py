@@ -16,6 +16,7 @@ parser.add_argument('-ql', "--q-len", type=int, default=32)
 parser.add_argument('-kvl', "--kv-len", type=int, default=512)
 parser.add_argument('-hs', "--head-size", type=int, default=80)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
+parser.add_argument('-m', "--has-attention-mask", type=int, default=1)
 
 #parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
 #parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
@@ -38,6 +39,7 @@ num_heads = args.num_heads
 num_kv_heads = args.num_kv_heads
 head_size = args.head_size
 enable_gqa = num_heads > num_kv_heads
+HAS_ATTN_MASK_INPUT = args.has_attention_mask
 
 #q_len, q_step = 160, 16
 #kv_len, kv_step = 800, 16
@@ -51,7 +53,9 @@ v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
 attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
-#attention_mask[...] = 0
+print(f'{HAS_ATTN_MASK_INPUT=}')
+if HAS_ATTN_MASK_INPUT is 0:
+    attention_mask[...] = 0
 
 # BLHS=>BHLS
 q = q.transpose(1,2)
@@ -284,6 +288,7 @@ src1 = r'''
 #pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
 #pyeval f"#define WG_SIZE {WG_SIZE}"
+#pyeval f"#define HAS_ATTN_MASK_INPUT {HAS_ATTN_MASK_INPUT}"
 
 #define SystolicDepth 8
 #define RepeatCount 8
@@ -352,13 +357,15 @@ CM_INLINE uint64_t get_clock() {
 }
 
 extern "C" _GENX_MAIN_ void cm_sdpa(
-    int q_len,
-    int kv_len,
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
+#if HAS_ATTN_MASK_INPUT
+    half* mask [[type("svmptr_t")]],
+#endif
     half* output [[type("svmptr_t")]],
-    half* mask [[type("svmptr_t")]]
+    int q_len,
+    int kv_len
     ) {
     //# query [batch, q_len, num_heads, S]
     //#   key [batch, kv_len, num_heads, S]
@@ -389,7 +396,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
     //# debugging stage
+#if HAS_ATTN_MASK_INPUT
     lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
+#endif
 
     //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
     uint qo_pitch = num_heads * head_size * sizeof(half);
@@ -514,7 +523,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         }
         //show(St);
         //=========================================================== 361
-
+#if HAS_ATTN_MASK_INPUT
         matrix<half, 2, REG_M * REG_N> Maskmat;
         b2dMask.set_block_x(kv_pos);
         cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
@@ -524,8 +533,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
 
         //show(Maskmat);
+#endif
         St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
+#if HAS_ATTN_MASK_INPUT
         St = cm_add<float>(St, MaskT);
+#endif
 
         //show(St);
 
@@ -654,9 +666,14 @@ t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
 print("compiling ...")
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
+src = pyeval(src1)
+# print(src)
+cm_kernels = cl.kernels(src, f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
 print("first call ...")
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
+if HAS_ATTN_MASK_INPUT:
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_mask, t_out, q_len, kv_len)
+else:
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_out, q_len, kv_len)
 
 f1 = torch.from_numpy(t_out.numpy())
 
@@ -676,12 +693,21 @@ while len(all_layers) < 100 and mem_size < 8e9:
 
 for i in range(50):
     j  = i % len(all_layers)
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len,
-                       all_layers[j][0],
-                       all_layers[j][1],
-                       all_layers[j][2],
-                       all_layers[j][3],
-                       t_mask)
+    if HAS_ATTN_MASK_INPUT:
+        cm_kernels.enqueue("cm_sdpa", GWS, LWS,
+                        all_layers[j][0],
+                        all_layers[j][1],
+                        all_layers[j][2],
+                        t_mask,
+                        all_layers[j][3],
+                        q_len, kv_len)
+    else:
+        cm_kernels.enqueue("cm_sdpa", GWS, LWS,
+                        all_layers[j][0],
+                        all_layers[j][1],
+                        all_layers[j][2],
+                        all_layers[j][3],
+                        q_len, kv_len)
 
 latency = cl.finish()
 for ns in latency:
