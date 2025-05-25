@@ -8,14 +8,15 @@ torch.manual_seed(0)
 torch.set_printoptions(linewidth=1024)
 
 parser = argparse.ArgumentParser('')
-parser.add_argument('-i', "--impl", type=int, default=0)
+parser.add_argument('-i', "--impl", type=int, default=1)
 parser.add_argument('-b', "--batch", type=int, default=1)
-parser.add_argument('-nh', "--num-heads", type=int, default=16)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=16)
-parser.add_argument('-ql', "--q-len", type=int, default=32)
-parser.add_argument('-kvl', "--kv-len", type=int, default=512)
-parser.add_argument('-hs', "--head-size", type=int, default=80)
+parser.add_argument('-nh', "--num-heads", type=int, default=28)
+parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=4)
+parser.add_argument('-ql', "--q-len", type=int, default=8192)
+parser.add_argument('-kvl', "--kv-len", type=int, default=8192)
+parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
+parser.add_argument('-c', "--causal-mask", action="store_true")
 
 #parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
 #parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
@@ -36,8 +37,11 @@ q_len, q_step = args.q_len, 8
 kv_len, kv_step = args.kv_len, 16
 num_heads = args.num_heads
 num_kv_heads = args.num_kv_heads
+if num_kv_heads <= 0:
+    num_kv_heads = num_heads
 head_size = args.head_size
 enable_gqa = num_heads > num_kv_heads
+causal_mask = int(args.causal_mask)
 
 #q_len, q_step = 160, 16
 #kv_len, kv_step = 800, 16
@@ -50,7 +54,16 @@ v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=
 
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
-attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
+
+
+# causal attn-mask
+if causal_mask:
+    for i in range(q_len):
+        attention_mask[:, :, i, 0:(kv_len - q_len + i + 1)] = 0
+    print(attention_mask[0,0,:10, :10])
+else:
+    attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0    
+
 #attention_mask[...] = 0
 
 # BLHS=>BHLS
@@ -254,13 +267,41 @@ ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 
 scale_factor = 1.0/(head_size**0.5)
 
-GWS=[batch, num_heads, q_len//q_step]
-WG_SIZE = min(q_len//q_step, 16)
-LWS=[1, 1, WG_SIZE]
+if 1:
+    # only 116 ms since adjacent query-heads shares same KV-heads
+    # dispatch them together can help increase cache-usage
+    GWS=[batch, num_heads, q_len//(2*q_step)]
+    WG_SIZE = min(GWS[-1], 16)
+    LWS=[1, 1, WG_SIZE]
+
+    dim_batch = 0
+    dim_head = 1
+    dim_q_batch = 2
+else:
+    # 140 ms + 
+    GWS=[q_len//q_step, num_heads, batch]
+    WG_SIZE = min(q_len//q_step, 16)
+    LWS=[WG_SIZE, 1, 1]
+
+    dim_batch = 2
+    dim_head = 1
+    dim_q_batch = 0
+
+if False:
+    # for GQA/multi-query, invoke all heads sharing same KV can further help cache-hit-rate
+    # but it's not helping, WHY?
+    num_heads_share_kv = num_heads//num_kv_heads
+    GWS=[batch, num_heads_share_kv, q_len//q_step]
+    WG_SIZE = min(q_len//q_step, 16)
+    LWS=[1, 1, WG_SIZE]
+
+    dim_batch = 0
+    dim_head = 1
+    dim_q_batch = 2
 
 print("GWS=", GWS)
 print("LWS=", LWS)
-
+print(f"total HW threads: {batch} x {num_heads} x {q_len//q_step} = {batch * num_heads * (q_len//q_step)}")
 #========================================================================
 # Optimization Log
 r'''
@@ -270,10 +311,62 @@ avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mu
 change dtype of attention_mask from float to half (-14ms)
 avoid indirect register access: unroll for loop which access matrix rows using loop-index
 use GRF to store temp Input rQ instead of SLM, this allows more Work-Groups to be packed into same Xe-core!!!
+
+in Xe1, GRF is only half size of Xe2, so reduce q_step to fit rO/rQ into GRF
+reading V into SLM is slow due to smaller REG_N of Xe1 DPAS (8 vs 16), increase the consecutive read width to 16 helps cache-line usage
+
+keep all other parameter unchanged, if head-size is 128, latency is 11ms, if head-size is 144, latency increases to 24ms
+
+
+ head-size : latency(ms) @kv-length 1024/512
+     96 : 8
+    112 : 8     5
+    128 : 11    6
+    144 : 24    12
+    160 : 69    34
+    176 : 63
+
+ql 8192: 115ms
+   4096: 58ms
+   2048: 29ms <===========
+   1024: 14ms <===========
+    512: 8.6
+    256: 4.5
+    128: 2.0
+
+kvl 8192: 118
+    4096: 59
+    2048: 23.5 <===========
+    1024: 11.3 <===========
+     512: 5.99
+     256: 3.7
+     128: 2.5 (error)
+
+nkvh 28: 145ms
+     14: 122ms
+      7: 118 <=============
+      4: 118 <=============
+      2: 125 ?????
+      1: 130 ?????
+
+nh   28: 145
+     14: 66.8
+      7: 30
+      4: 18
+      2: 9.3
+      1: 5.1
+
+no-attn-mask: 100 ms 
+
+query/output-size : 8192*128*28*2   ~  56 MB
+KV-cache size     : 8192 * 128*4 *2 ~   8 MB
+attn-mask size    : 8192 * 8192  *2 ~ 128 MB
+
 '''
 #========================================================================
 
-src1 = r'''
+
+src1 = cl.CMTracer.code + r'''
 //# CM kernel for flash attn, reference
 
 #pyeval f"#define num_heads {num_heads}"
@@ -284,6 +377,13 @@ src1 = r'''
 #pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
 #pyeval f"#define WG_SIZE {WG_SIZE}"
+
+#pyeval f"#define dim_batch {dim_batch}"
+#pyeval f"#define dim_head {dim_head}"
+#pyeval f"#define dim_q_batch {dim_q_batch}"
+
+#pyeval f"#define causal_mask {causal_mask}"
+
 
 #define SystolicDepth 8
 #define RepeatCount 8
@@ -333,8 +433,8 @@ CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) 
 template <typename T, int M, int N>
 CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
     #pragma unroll
-    for(int i = 0; i < out.n_rows(); i++, base += pitch) {
-        cm_svm_block_read(base, out[i]);
+    for(int i = 0; i < out.n_rows(); i++) {
+        cm_svm_block_read(base + i * pitch, out[i]);
     }
 }
 
@@ -351,53 +451,35 @@ CM_INLINE uint64_t get_clock() {
     return ((uint64_t)clk[1]) << 32 | clk[0];
 }
 
-extern "C" _GENX_MAIN_ void cm_sdpa(
+
+void row_kernel(
+    uint slm_K,
+    uint slm_V,
+    int batch,
+    int h,
+    int hkv,
+    int wg_local_id,    
+    int q_start,
+    int kv_stop,
+    int head_base_id,
     int q_len,
     int kv_len,
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]],
-    half* mask [[type("svmptr_t")]]
-    ) {
-    //# query [batch, q_len, num_heads, S]
-    //#   key [batch, kv_len, num_heads, S]
-    //# value [batch, kv_len, num_heads, S]
-    //# to load Q
+    half* mask [[type("svmptr_t")]]) {
+    //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
 
-    constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(half));
-    constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
+    auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
-    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE);
-
-    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
-    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
-
+    uint qo_pitch = num_heads * head_size * sizeof(half);
+    uint kv_pitch = num_kv_heads * head_size * sizeof(half);
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
 
     cur_max = -1e9;
     cur_sum = 0;
-
-    auto batch = cm_group_id(0);
-    auto h = cm_group_id(1);
-    auto hkv = h / (num_heads/num_kv_heads);
-    auto wg_local_id = cm_local_id(2);
-    auto q_start = (cm_group_id(2) * WG_SIZE + wg_local_id) * q_step;
-    auto q_offset = wg_local_id * q_step * head_size * sizeof(half);
-    auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
-
-    //# debugging stage
-    //lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
-
-    //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
-    uint qo_pitch = num_heads * head_size * sizeof(half);
-    uint kv_pitch = num_kv_heads * head_size * sizeof(half);
-
-    //lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(query + (batch*num_heads*q_len + h)*head_size), q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
-    //lsc::block_2d_desc<half, 1, REG_M, REG_K> b2dK(key + (batch*num_kv_heads*kv_len + hkv)*head_size,   kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    //lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + (batch*num_kv_heads*kv_len + hkv)*head_size, kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    //lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
 
     //# load Qt into register & pack as VNNI & store to SLM (as dpas-B tile)
     matrix<half, head_size/REG_K, REG_K*REG_N> rQ;
@@ -411,6 +493,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             //# DWORD transposed load == (transposed + VNNI) load
             svm_read_2d(Qmat, q_base, qo_pitch);
             Transpose_8x8(Qmat, rQ[ri].format<uint, REG_K/2, REG_N>());
+            rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
 
             //b2dQ.set_block_x(k);
             //cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
@@ -419,9 +502,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         }
     }
 
-    //int kv_stop = (cm_group_id(2) + 1) * WG_SIZE * q_step;
-    int kv_stop = kv_len;
-
     matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
     
     auto k_base0 = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
@@ -429,29 +509,25 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto mask_base = reinterpret_cast<svmptr_t>(mask + (batch * q_len + q_start) * kv_len);
     auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
 
+    int causal_left = q_start;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
             k_base0 += kv_step * kv_pitch,
             v_base += kv_step * kv_pitch) {
         {
             if (kv_pos > 0) cm_barrier();
 #if WG_SIZE == 1
-            matrix<half, REG_M, REG_K> temp0;
-            matrix<half, REG_M, REG_K> temp1;
-            auto k_base1 = k_base0 + REG_M * kv_pitch;
+            matrix<half, 2*REG_M, REG_K> temp;
             for(int k = 0; k < head_size; k += REG_K) {
                 //b2dK.set_block_x(k);
                 //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
                 //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                svm_read_2d(temp0, k_base0 + k*sizeof(half), kv_pitch);
-                svm_read_2d(temp1, k_base1 + k*sizeof(half), kv_pitch);
+                svm_read_2d(temp, k_base0 + k*sizeof(half), kv_pitch);
 
-                // show(temp0); show(temp1);
+                // show(temp);
 
                 uint offset = k * 2 * REG_M * sizeof(half);
-                cm_slm_block_write(slm_K, offset, temp0.format<half>());
-                offset += REG_M * REG_K * sizeof(half);
-                cm_slm_block_write(slm_K, offset, temp1.format<half>());
+                cm_slm_block_write(slm_K, offset, temp.format<half>());
             }
 
             matrix<half, REG_K, REG_N> temp2;
@@ -471,29 +547,25 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             }
 #else
             if (wg_local_id < WG_SIZE/2) {
-                matrix<half, REG_M, REG_K> temp0;
-                matrix<half, REG_M, REG_K> temp1;
-                auto k_base1 = k_base0 + REG_M * kv_pitch;
+                matrix<half, 2*REG_M, REG_K> temp;
                 for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(WG_SIZE/2)) {
                     //b2dK.set_block_x(k);
-                    //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
+                    //cm_load<lsc::Normal>(temp.format<half>(), b2dK.set_block_y(kv_pos));
                     //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                    svm_read_2d(temp0, k_base0 + k*sizeof(half), kv_pitch);
-                    svm_read_2d(temp1, k_base1 + k*sizeof(half), kv_pitch);
-
-                    // show(temp0); show(temp1);
-
-                    uint offset = k * 2 * REG_M * sizeof(half);
-                    cm_slm_block_write(slm_K, offset, temp0.format<half>());
-                    offset += REG_M * REG_K * sizeof(half);
-                    cm_slm_block_write(slm_K, offset, temp1.format<half>());
+                    svm_read_2d(temp, k_base0 + k*sizeof(half), kv_pitch);
+                    // show(temp);
+                    cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
                 }
             } else {
-                matrix<half, REG_K, REG_N> temp2;
+                matrix<half, REG_K, 2*REG_N> temp2;
                 matrix<half, REG_K/2, REG_N*2> temp_vnni;
+                matrix<half, REG_K/2, REG_N*2> temp_vnni2;
                 //b2dV.set_block_y(kv_pos);
-                for(int k = REG_N*(wg_local_id-WG_SIZE/2); k < head_size; k += REG_N*(WG_SIZE/2)) {
+
+                static_assert((head_size % (2*REG_N)) == 0);
+
+                for(int k = 2*REG_N*(wg_local_id-WG_SIZE/2); k < head_size; k += 2*REG_N*(WG_SIZE/2)) {
                     //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
                     //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
 
@@ -501,9 +573,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
                     temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
                     temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
-
                     // show(temp_vnni);
                     cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
+
+                    temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, REG_N);
+                    temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, REG_N);
+                    cm_slm_block_write(slm_V, (k + REG_N) * REG_K * sizeof(half), temp_vnni2.format<half>());
                 }
             }
 #endif
@@ -512,28 +587,32 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
-        matrix<float, 2*REG_M, REG_N> St = 0;
+        matrix<float, 2*REG_M, REG_N> St;
         matrix<half, 2, REG_M * REG_K> Kmat;
-        matrix<half, REG_K/2, REG_N*2> Qmat;
         auto St2 = St.format<float, 2, REG_M*REG_N>();
-        uint offset = 0;
+        cm_slm_block_read(slm_K, GENX_NONE, 0, Kmat.format<half>());
+        St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[0].format<int32_t>(), Kmat[0].format<int32_t>());
+        St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[0].format<int32_t>(), Kmat[1].format<int32_t>());
         #pragma unroll
-        for(int k = 0, ri = 0; k < head_size; k += REG_K, ri++) {
-            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[0]); offset += REG_M * REG_K * sizeof(half);
-            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[1]); offset += REG_M * REG_K * sizeof(half);
+        for(int k = REG_K, ri = 1; k < head_size; k += REG_K, ri++) {
+            cm_slm_block_read(slm_K, GENX_NONE, ri * Kmat.n_elems() * sizeof(half), Kmat.format<half>());
             //show(Kmat.format<half, 2*REG_M, REG_K>());
-
-            St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                        St2[0],
-                        rQ[ri].format<int32_t>(),
-                        Kmat[0].format<int32_t>());
-            St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                        St2[1],
-                        rQ[ri].format<int32_t>(),
-                        Kmat[1].format<int32_t>());
+            St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[0], rQ[ri].format<int32_t>(), Kmat[0].format<int32_t>());
+            St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[1], rQ[ri].format<int32_t>(), Kmat[1].format<int32_t>());
         }
         //show(St);
+#if causal_mask
+        auto cmask_off = kv_step - causal_left;
+        if (cmask_off > 0) {
+            //# full-attention: skip loading causal mask
+            if (cmask_off > 2*kv_step) cmask_off = 2*kv_step;
+            matrix<half, St.n_rows(), REG_N> temp;
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(mask + cmask_off * REG_N), temp.format<half>());
+            St = cm_add<float>(St, temp);
+        }
 
+        causal_left -= kv_step;
+#else
         matrix<half, REG_M, REG_N + REG_N> Maskmat;
         //b2dMask.set_block_x(kv_pos);
         //cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
@@ -545,9 +624,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,REG_N), MaskT.select<REG_M, 1, REG_N, 1>(REG_M,0));
 
         //show(MaskT);
-        St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
+        //St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
         St = cm_add<float>(St, MaskT);
-
+#endif
         // show(St);
 
         vector<float, REG_N> new_max_t;
@@ -583,7 +662,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         //show(P);return;
 
         if (kv_pos == 0) {
-            matrix<float, REG_M, REG_N> zero_O = 0;
             matrix<half, REG_K/2, REG_N*2> Vmat;
             uint offset = o_offset;
             #pragma unroll
@@ -591,11 +669,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                 // V has been VNNI-prepacked
                 cm_slm_block_read(slm_V, GENX_NONE, REG_K*k*sizeof(half), Vmat.format<half>());
                 //show(Vmat); return;
-                
-                rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                zero_O.format<float>(),
-                                Vmat.format<int32_t>(),
-                                P.format<int32_t>());
+
+                rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, Vmat.format<int32_t>(), P.format<int32_t>());
                 //show(rO[ri].format<float, REG_M, REG_N>());
             }
         } else {
@@ -647,6 +722,87 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         // cm_store(b2dO.set_block_x(k).set_block_y(q_start + REG_M), cur_O_f16.format<half, 2, REG_M*REG_N>()[1]);
     }
 }
+
+
+
+extern "C" _GENX_MAIN_ void cm_sdpa(
+    int head_base_id,
+    int q_len,
+    int kv_len,
+    half* query [[type("svmptr_t")]],
+    half* key [[type("svmptr_t")]],
+    half* value [[type("svmptr_t")]],
+    half* output [[type("svmptr_t")]],
+    half* mask [[type("svmptr_t")]],
+    __global uint64_t* cminfo [[type("svmptr_t")]]
+    ) {
+    CMTracer_begin(&cminfo);
+    //# query [batch, q_len, num_heads, S]
+    //#   key [batch, kv_len, num_heads, S]
+    //# value [batch, kv_len, num_heads, S]
+    //# to load Q
+
+    constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(half));
+    constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
+
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE);
+
+    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
+    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
+
+    auto batch = cm_group_id(dim_batch);
+    auto h = head_base_id + cm_group_id(dim_head);
+    auto hkv = h / (num_heads/num_kv_heads);
+    auto wg_local_id = cm_local_id(dim_q_batch);
+    int q_group_id = cm_group_id(dim_q_batch);
+    auto q_start = (q_group_id * WG_SIZE + wg_local_id) * q_step;
+    int kv_stop = kv_len;
+#if causal_mask
+    kv_stop = (q_group_id + 1) * WG_SIZE * q_step;
+    if (kv_stop > kv_len) kv_stop = kv_len;
+#endif
+
+    row_kernel(
+        slm_K,
+        slm_V,
+        batch,
+        h, hkv,
+        wg_local_id,
+        q_start,
+        kv_stop,
+        head_base_id,
+        q_len,
+        kv_len,
+        query,
+        key,
+        value,
+        output,
+        mask);
+
+    q_start = (q_len - q_group_id * WG_SIZE * q_step) - (WG_SIZE * q_step) + wg_local_id*q_step;
+#if causal_mask
+    kv_stop = (q_len - q_group_id * WG_SIZE * q_step);
+    if (kv_stop > kv_len) kv_stop = kv_len;
+#endif
+    row_kernel(
+        slm_K,
+        slm_V,
+        batch,
+        h, hkv,
+        wg_local_id,
+        q_start,
+        kv_stop,
+        head_base_id,
+        q_len,
+        kv_len,
+        query,
+        key,
+        value,
+        output,
+        mask);
+
+    CMTracer_end(&cminfo);
+}
 '''
 
 cl.profiling(True)
@@ -655,13 +811,24 @@ t_q = cl.tensor(q.detach().numpy())
 t_k = cl.tensor(k.detach().numpy())
 t_v = cl.tensor(v.detach().numpy())
 t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
-t_mask = cl.tensor(attention_mask.detach().numpy())
+t_cminfo = cl.tensor([GWS[0]*GWS[1]*GWS[2]//WG_SIZE, 3], np.dtype(np.uint64))
+
+if causal_mask:
+    # build a [q_step, 2*kv_step] causal mask
+    c_mask = torch.full([3*kv_step, q_step], torch.finfo(act_dtype).min).to(dtype=act_dtype)
+    for i in range(q_step):
+        c_mask[0:(kv_step + i + 1), i] = 0
+    t_mask = cl.tensor(c_mask.detach().numpy())
+else:
+    t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
 print("compiling ...")
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
 print("first call ...")
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
+
+
+cm_kernels.enqueue("cm_sdpa", GWS, LWS, 0, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_cminfo)
 
 f1 = torch.from_numpy(t_out.numpy())
 
@@ -679,20 +846,24 @@ while len(all_layers) < 100 and mem_size < 8e9:
     mem_size += v.numel() * v.element_size()
     print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
 
-for i in range(50):
+for i in range(100):
     j  = i % len(all_layers)
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len,
-                       all_layers[j][0],
-                       all_layers[j][1],
-                       all_layers[j][2],
-                       all_layers[j][3],
-                       t_mask)
-
+    j = 0
+    cm_kernels.enqueue("cm_sdpa", GWS, LWS,
+                    0, q_len, kv_len,
+                    all_layers[j][0],
+                    all_layers[j][1],
+                    all_layers[j][2],
+                    all_layers[j][3],
+                    t_mask,
+                    t_cminfo)
 latency = cl.finish()
-for ns in latency:
-    print(f"  {ns*1e-6:.3f} ms")
+for i,ns in enumerate(latency):
+    print(f"[{i}]  {ns*1e-6:.3f} ms")
+print(f" average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
+
+cl.CMTracer.dump(t_cminfo.numpy(), 2250e6, "cm.json")
 
 check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
 print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
-
 sys.exit(0)
