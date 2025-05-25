@@ -369,6 +369,12 @@ attn-mask size    : 8192 * 8192  *2 ~ 128 MB
 src1 = cl.CMTracer.code + r'''
 //# CM kernel for flash attn, reference
 
+//# CM-compiler is C++17
+static_assert(__cplusplus >= 201703L);
+
+//# static_assert(__cplusplus >= 202002L);
+//# static_assert(__cplusplus >= 202302L);
+
 #pyeval f"#define num_heads {num_heads}"
 #pyeval f"#define num_kv_heads {num_kv_heads}"
 #pyeval f"#define head_size {head_size}"
@@ -376,7 +382,6 @@ src1 = cl.CMTracer.code + r'''
 #pyeval f"#define kv_step {kv_step}"
 #pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
-#pyeval f"#define WG_SIZE {WG_SIZE}"
 
 #pyeval f"#define dim_batch {dim_batch}"
 #pyeval f"#define dim_head {dim_head}"
@@ -390,8 +395,9 @@ src1 = cl.CMTracer.code + r'''
 #define VNNI_WIDTH 2
 #define REG_K (SystolicDepth * VNNI_WIDTH)
 #define REG_M RepeatCount
-#define REG_N 8
+#define REG_N (CM_GRF_WIDTH/32)
 
+static_assert(CM_HAS_DPAS);
 static_assert(q_step == 8);
 static_assert(kv_step == 16);
 
@@ -451,32 +457,27 @@ CM_INLINE uint64_t get_clock() {
     return ((uint64_t)clk[1]) << 32 | clk[0];
 }
 
-
+template<bool USE_CAUSAL_MASK>
 void row_kernel(
     uint slm_K,
     uint slm_V,
-    int batch,
-    int h,
-    int hkv,
-    int wg_local_id,    
+    int local_id,    
     int q_start,
     int kv_stop,
     int head_base_id,
-    int q_len,
     int kv_len,
-    half* query [[type("svmptr_t")]],
-    half* key [[type("svmptr_t")]],
-    half* value [[type("svmptr_t")]],
-    half* output [[type("svmptr_t")]],
-    half* mask [[type("svmptr_t")]]) {
-    //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
-
-    auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
+    svmptr_t q_base [[type("svmptr_t")]],
+    svmptr_t k_base [[type("svmptr_t")]],
+    svmptr_t v_base [[type("svmptr_t")]],
+    svmptr_t o_base [[type("svmptr_t")]],
+    svmptr_t mask_base [[type("svmptr_t")]]) {
 
     uint qo_pitch = num_heads * head_size * sizeof(half);
     uint kv_pitch = num_kv_heads * head_size * sizeof(half);
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
+
+    const int local_size = cm_linear_local_size();
 
     cur_max = -1e9;
     cur_sum = 0;
@@ -485,11 +486,9 @@ void row_kernel(
     matrix<half, head_size/REG_K, REG_K*REG_N> rQ;
     {
         matrix<uint, REG_N, REG_K/2> Qmat;
-        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
 
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++, q_base += 16*sizeof(half)) {
-
             //# DWORD transposed load == (transposed + VNNI) load
             svm_read_2d(Qmat, q_base, qo_pitch);
             Transpose_8x8(Qmat, rQ[ri].format<uint, REG_K/2, REG_N>());
@@ -503,69 +502,33 @@ void row_kernel(
     }
 
     matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
-    
-    auto k_base0 = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
-    auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
-    auto mask_base = reinterpret_cast<svmptr_t>(mask + (batch * q_len + q_start) * kv_len);
-    auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
 
     int causal_left = q_start;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base0 += kv_step * kv_pitch,
+            k_base += kv_step * kv_pitch,
             v_base += kv_step * kv_pitch) {
         {
             if (kv_pos > 0) cm_barrier();
-#if WG_SIZE == 1
-            matrix<half, 2*REG_M, REG_K> temp;
-            for(int k = 0; k < head_size; k += REG_K) {
-                //b2dK.set_block_x(k);
-                //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                svm_read_2d(temp, k_base0 + k*sizeof(half), kv_pitch);
-
-                // show(temp);
-
-                uint offset = k * 2 * REG_M * sizeof(half);
-                cm_slm_block_write(slm_K, offset, temp.format<half>());
-            }
-
-            matrix<half, REG_K, REG_N> temp2;
-            matrix<half, REG_K/2, REG_N*2> temp_vnni;
-            //b2dV.set_block_y(kv_pos);
-            for(int k = 0; k < head_size; k += REG_N) {
-                //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
-                //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
-
-                svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
-
-                temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
-                temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
-
-                // show(temp_vnni);
-                cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
-            }
-#else
-            if (wg_local_id < WG_SIZE/2) {
+            if (local_size == 1) {
                 matrix<half, 2*REG_M, REG_K> temp;
-                for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(WG_SIZE/2)) {
+                for(int k = 0; k < head_size; k += REG_K) {
                     //b2dK.set_block_x(k);
-                    //cm_load<lsc::Normal>(temp.format<half>(), b2dK.set_block_y(kv_pos));
+                    //cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
                     //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                    svm_read_2d(temp, k_base0 + k*sizeof(half), kv_pitch);
+                    svm_read_2d(temp, k_base + k*sizeof(half), kv_pitch);
+
                     // show(temp);
-                    cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
+
+                    uint offset = k * 2 * REG_M * sizeof(half);
+                    cm_slm_block_write(slm_K, offset, temp.format<half>());
                 }
-            } else {
-                matrix<half, REG_K, 2*REG_N> temp2;
+
+                matrix<half, REG_K, REG_N> temp2;
                 matrix<half, REG_K/2, REG_N*2> temp_vnni;
-                matrix<half, REG_K/2, REG_N*2> temp_vnni2;
                 //b2dV.set_block_y(kv_pos);
-
-                static_assert((head_size % (2*REG_N)) == 0);
-
-                for(int k = 2*REG_N*(wg_local_id-WG_SIZE/2); k < head_size; k += 2*REG_N*(WG_SIZE/2)) {
+                for(int k = 0; k < head_size; k += REG_N) {
                     //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
                     //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
 
@@ -573,60 +536,96 @@ void row_kernel(
 
                     temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
                     temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
+
                     // show(temp_vnni);
                     cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
+                }
+            } else {
+                if (local_id < local_size/2) {
+                    matrix<half, 2*REG_M, REG_K> temp;
+                    for(int k = REG_K * local_id; k < head_size; k += REG_K*(local_size/2)) {
+                        //b2dK.set_block_x(k);
+                        //cm_load<lsc::Normal>(temp.format<half>(), b2dK.set_block_y(kv_pos));
+                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
 
-                    temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, REG_N);
-                    temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, REG_N);
-                    cm_slm_block_write(slm_V, (k + REG_N) * REG_K * sizeof(half), temp_vnni2.format<half>());
+                        svm_read_2d(temp, k_base + k*sizeof(half), kv_pitch);
+                        // show(temp);
+                        cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
+                    }
+                } else {
+                    matrix<half, REG_K, 2*REG_N> temp2;
+                    matrix<half, REG_K/2, REG_N*2> temp_vnni;
+                    matrix<half, REG_K/2, REG_N*2> temp_vnni2;
+                    //b2dV.set_block_y(kv_pos);
+
+                    static_assert((head_size % (2*REG_N)) == 0);
+
+                    for(int k = 2*REG_N*(local_id-local_size/2); k < head_size; k += 2*REG_N*(local_size/2)) {
+                        //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                        //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
+
+                        svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
+
+                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, 0);
+                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, 0);
+                        // show(temp_vnni);
+                        cm_slm_block_write(slm_V, k * REG_K * sizeof(half), temp_vnni.format<half>());
+
+                        temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, REG_N);
+                        temp_vnni2.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, REG_N);
+                        cm_slm_block_write(slm_V, (k + REG_N) * REG_K * sizeof(half), temp_vnni2.format<half>());
+                    }
                 }
             }
-#endif
             cm_barrier();
         }
 
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
         matrix<float, 2*REG_M, REG_N> St;
-        matrix<half, 2, REG_M * REG_K> Kmat;
         auto St2 = St.format<float, 2, REG_M*REG_N>();
-        cm_slm_block_read(slm_K, GENX_NONE, 0, Kmat.format<half>());
-        St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[0].format<int32_t>(), Kmat[0].format<int32_t>());
-        St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[0].format<int32_t>(), Kmat[1].format<int32_t>());
         #pragma unroll
-        for(int k = REG_K, ri = 1; k < head_size; k += REG_K, ri++) {
+        for(int k = 0, ri = 0; k < head_size; k += REG_K, ri++) {
+            matrix<half, 2, REG_M * REG_K> Kmat;
             cm_slm_block_read(slm_K, GENX_NONE, ri * Kmat.n_elems() * sizeof(half), Kmat.format<half>());
             //show(Kmat.format<half, 2*REG_M, REG_K>());
-            St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[0], rQ[ri].format<int32_t>(), Kmat[0].format<int32_t>());
-            St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[1], rQ[ri].format<int32_t>(), Kmat[1].format<int32_t>());
+            if (k == 0) {
+                St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[ri].format<int32_t>(), Kmat[0].format<int32_t>());
+                St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, rQ[ri].format<int32_t>(), Kmat[1].format<int32_t>());
+            } else {
+                St2[0] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[0], rQ[ri].format<int32_t>(), Kmat[0].format<int32_t>());
+                St2[1] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(St2[1], rQ[ri].format<int32_t>(), Kmat[1].format<int32_t>());
+            }
         }
         //show(St);
-#if causal_mask
-        auto cmask_off = kv_step - causal_left;
-        if (cmask_off > 0) {
-            //# full-attention: skip loading causal mask
-            if (cmask_off > 2*kv_step) cmask_off = 2*kv_step;
-            matrix<half, St.n_rows(), REG_N> temp;
-            cm_svm_block_read(reinterpret_cast<svmptr_t>(mask + cmask_off * REG_N), temp.format<half>());
-            St = cm_add<float>(St, temp);
+
+        if constexpr (USE_CAUSAL_MASK) {
+            auto cmask_off = kv_step - causal_left;
+            if (cmask_off > 0) {
+                //# full-attention: skip loading causal mask
+                if (cmask_off > 2*kv_step) cmask_off = 2*kv_step;
+                matrix<half, St.n_rows(), REG_N> temp;
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(mask_base + cmask_off * REG_N  * sizeof(half)), temp.format<half>());
+                St = cm_add<float>(St, temp);
+            }
+
+            causal_left -= kv_step;
+        } else {
+            matrix<half, REG_M, REG_N + REG_N> Maskmat;
+            //b2dMask.set_block_x(kv_pos);
+            //cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
+            //cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
+            svm_read_2d(Maskmat, mask_base + kv_pos * sizeof(half), kv_len*sizeof(half));
+
+            matrix<float, 2*REG_M, REG_N> MaskT;
+            Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,0), MaskT.select<REG_M, 1, REG_N, 1>(0,0));
+            Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,REG_N), MaskT.select<REG_M, 1, REG_N, 1>(REG_M,0));
+
+            //show(MaskT);
+            //St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
+            St = cm_add<float>(St, MaskT);
         }
 
-        causal_left -= kv_step;
-#else
-        matrix<half, REG_M, REG_N + REG_N> Maskmat;
-        //b2dMask.set_block_x(kv_pos);
-        //cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
-        //cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
-        svm_read_2d(Maskmat, mask_base + kv_pos * sizeof(half), kv_len*sizeof(half));
-
-        matrix<float, 2*REG_M, REG_N> MaskT;
-        Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,0), MaskT.select<REG_M, 1, REG_N, 1>(0,0));
-        Transpose_8x8(Maskmat.select<REG_M, 1, REG_N, 1>(0,REG_N), MaskT.select<REG_M, 1, REG_N, 1>(REG_M,0));
-
-        //show(MaskT);
-        //St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
-        St = cm_add<float>(St, MaskT);
-#endif
         // show(St);
 
         vector<float, REG_N> new_max_t;
@@ -663,19 +662,14 @@ void row_kernel(
 
         if (kv_pos == 0) {
             matrix<half, REG_K/2, REG_N*2> Vmat;
-            uint offset = o_offset;
             #pragma unroll
             for(int k = 0, ri = 0; k < head_size; k += REG_N, ri++) {
                 // V has been VNNI-prepacked
                 cm_slm_block_read(slm_V, GENX_NONE, REG_K*k*sizeof(half), Vmat.format<half>());
-                //show(Vmat); return;
-
                 rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, Vmat.format<int32_t>(), P.format<int32_t>());
-                //show(rO[ri].format<float, REG_M, REG_N>());
             }
         } else {
             matrix<half, REG_K/2, REG_N*2> Vmat;
-            uint offset = o_offset;
             #pragma unroll
             for(int k = 0, ri=0; k < head_size; k += REG_N, ri++) {
                 // V has been VNNI-prepacked
@@ -699,14 +693,12 @@ void row_kernel(
             }
             // if (kv_pos == args_verbose) return;
         }
-        //============================================================== 1168
         cur_max = new_max_t;
     }//# for(int kv_pos = 0; kv_pos < kv_len; kv_pos += kv_step) {
 
     //# save cur_O/cur_sum.transpose(0, 1)
     matrix<float, REG_M, REG_N> cur_O;
     matrix<half, REG_M, REG_N> cur_O_f16;
-    uint offset = o_offset;
     cur_sum = cm_inv(cur_sum);
     #pragma unroll
     for(int k = 0, ri=0; k < head_size; k += REG_N, ri++) {
@@ -753,53 +745,71 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto batch = cm_group_id(dim_batch);
     auto h = head_base_id + cm_group_id(dim_head);
     auto hkv = h / (num_heads/num_kv_heads);
-    auto wg_local_id = cm_local_id(dim_q_batch);
+    auto local_id = cm_local_id(dim_q_batch);
     int q_group_id = cm_group_id(dim_q_batch);
-    auto q_start = (q_group_id * WG_SIZE + wg_local_id) * q_step;
+    const int local_size = cm_linear_local_size();
     int kv_stop = kv_len;
 #if causal_mask
-    kv_stop = (q_group_id + 1) * WG_SIZE * q_step;
+    kv_stop = (q_group_id + 1) * local_size * q_step;
     if (kv_stop > kv_len) kv_stop = kv_len;
 #endif
+    {
+        auto q_start = (q_group_id * local_size + local_id) * q_step;
+        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
+        auto k_base = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
+        svmptr_t mask_base;
+        if (causal_mask)
+            mask_base = reinterpret_cast<svmptr_t>(mask);
+        else
+            mask_base = reinterpret_cast<svmptr_t>(mask + (batch * q_len + q_start) * kv_len);
 
-    row_kernel(
-        slm_K,
-        slm_V,
-        batch,
-        h, hkv,
-        wg_local_id,
-        q_start,
-        kv_stop,
-        head_base_id,
-        q_len,
-        kv_len,
-        query,
-        key,
-        value,
-        output,
-        mask);
+        row_kernel<causal_mask>(
+            slm_K,
+            slm_V,
+            local_id,
+            q_start,
+            kv_stop,
+            head_base_id,
+            kv_len,
+            q_base,
+            k_base,
+            v_base,
+            o_base,
+            mask_base);
+    }
 
-    q_start = (q_len - q_group_id * WG_SIZE * q_step) - (WG_SIZE * q_step) + wg_local_id*q_step;
-#if causal_mask
-    kv_stop = (q_len - q_group_id * WG_SIZE * q_step);
-    if (kv_stop > kv_len) kv_stop = kv_len;
-#endif
-    row_kernel(
-        slm_K,
-        slm_V,
-        batch,
-        h, hkv,
-        wg_local_id,
-        q_start,
-        kv_stop,
-        head_base_id,
-        q_len,
-        kv_len,
-        query,
-        key,
-        value,
-        output,
-        mask);
+    {
+        auto q_start = (q_len - q_group_id * local_size * q_step) - (local_size * q_step) + local_id*q_step;
+        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
+        auto k_base = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
+        svmptr_t mask_base;
+        if (causal_mask)
+            mask_base = reinterpret_cast<svmptr_t>(mask);
+        else
+            mask_base = reinterpret_cast<svmptr_t>(mask + (batch * q_len + q_start) * kv_len);
+
+    #if causal_mask
+        kv_stop = (q_len - q_group_id * local_size * q_step);
+        if (kv_stop > kv_len) kv_stop = kv_len;
+    #endif
+        row_kernel<causal_mask>(
+            slm_K,
+            slm_V,
+            local_id,
+            q_start,
+            kv_stop,
+            head_base_id,
+            kv_len,
+            q_base,
+            k_base,
+            v_base,
+            o_base,
+            mask_base);
+    }
 
     CMTracer_end(&cminfo);
 }

@@ -219,3 +219,86 @@ class SGTracer:
                                 "sub-group" : sg_id
                             })
 
+
+class CMTracer:
+    code = r'''
+        CM_INLINE uint64_t _get_clock() {
+            auto clk = cm_clock();
+            return ((uint64_t)clk[1]) << 32 | clk[0];
+        }
+    
+        CM_INLINE void CMTracer_begin(__global uint64_t** psg_info) {
+            if (*psg_info && cm_linear_local_id() == 0) {
+                *psg_info += cm_linear_group_id() * 3;
+
+                uint gid0 = cm_group_id(0);
+                uint gid1 = cm_group_id(1);
+                uint gid2 = cm_group_id(2);
+                uint group_id = cm_linear_group_id();
+                uint64_t geuid = (gid0 & 0xFFFF);
+                geuid = (geuid << 16) | (gid1 & 0xFFFF);
+                geuid = (geuid << 16) | (gid2 & 0xFFFF);
+                geuid = (geuid << 16) | (group_id & 0xFFFF);
+                (*psg_info)[0] = geuid;
+                (*psg_info)[1] = _get_clock();
+            }
+        }
+        CM_INLINE void CMTracer_end(__global uint64_t** psg_info) {
+            if (*psg_info && cm_linear_local_id() == 0) {
+                (*psg_info)[2] = _get_clock();
+            }
+        }
+    '''
+
+    @classmethod
+    def dump(cls, sg_info, gpu_freq = None, json_file_name = "ocl.json"):
+
+        cycle2us = None
+        if gpu_freq:
+            cycle2us = 1e6/gpu_freq
+            
+        def cycle_cvt(cycle):
+            if cycle2us: return cycle * cycle2us
+            return cycle
+
+        with ChromeTraceDumpper(json_file_name) as ctd:
+            #ctd.phb("name","cat", 1, "100", "1", 0, 1000, {"EV": 1.78, "xxx":"hwllo"})
+            #ctd.phb("name","cat", 2, "100", "1", 100, 1200)
+            #ctd.phX("name","catXXX", "100", "1", 100, 1200)
+            ts_base = sg_info[:,1].min()
+            sg_info[:,1:] -= ts_base
+
+            for sg_id in range(sg_info.shape[0]):
+                loc = int(sg_info[sg_id,0])
+                group_id = loc & 0xFFFF; loc = loc >> 16
+                gid2 = loc & 0xFFFF; loc = loc >> 16
+                gid1 = loc & 0xFFFF; loc = loc >> 16
+                gid0 = loc & 0xFFFF; loc = loc >> 16
+
+                cycle_start = cycle_cvt(sg_info[sg_id,1])
+                cycle_end = cycle_cvt(sg_info[sg_id,2])
+                if 0:
+                    ctd.phb(name = f"{wg_id}",
+                            cat = f"{wg_id}",
+                            pid = f"SubSlice:{slice_id}.{sub_slice_id}",
+                            tid = f"EU-thread:{eu_id}.{eu_tid}",
+                            begin_us = float(cycle_start)/1e3,
+                            end_us = float(cycle_end)/1e3,
+                            args = {
+                                "cycle_start":int(cycle_start),
+                                "cycle_end":int(cycle_end),
+                                "loc" : f"{slice_id}.{sub_slice_id}.{eu_id}.{eu_tid}",
+                                "work-group":wg_id,
+                                "sub-group" : sg_id
+                            })
+                else:
+                    ctd.phX(name = f"{group_id}",
+                            cat = f"{group_id}",
+                            pid = f"SubSlice:{gid0}.{gid1}.{gid2}",
+                            tid = f"EU-thread:{gid2}",
+                            begin_us = float(cycle_start)/1e3,
+                            end_us = float(cycle_end)/1e3,
+                            args = {
+                                "cycle_start":int(cycle_start),
+                                "cycle_end":int(cycle_end),
+                            })
