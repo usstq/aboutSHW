@@ -1,74 +1,20 @@
 import argparse
 import sys
+import numpy as np
+import time
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-torch.manual_seed(0)
-torch.set_printoptions(linewidth=1024)
 
-parser = argparse.ArgumentParser('')
-parser.add_argument('-i', "--impl", type=int, default=0)
-parser.add_argument('-b', "--batch", type=int, default=1)
-parser.add_argument('-nh', "--num-heads", type=int, default=16)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=16)
-parser.add_argument('-ql', "--q-len", type=int, default=32)
-parser.add_argument('-kvl', "--kv-len", type=int, default=512)
-parser.add_argument('-hs', "--head-size", type=int, default=80)
-parser.add_argument('-v', "--verbose", type=int, default=-1)
-parser.add_argument('-m', "--has-attention-mask", type=int, default=1)
-
-#parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
-#parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
-#parser.add_argument('--save', type=str, nargs='?', default=None)
-#parser.add_argument('--load', type=str, nargs='?', default=None)
-args = parser.parse_args()
-print(args)
+from clops import cl
+from clops.utils import *
 
 enable_vprint = False
 def vprint(*all_args):
     global enable_vprint
     if enable_vprint:
         print(*all_args)
-
-
-batch = args.batch
-q_len, q_step = args.q_len, 16
-kv_len, kv_step = args.kv_len, 16
-num_heads = args.num_heads
-num_kv_heads = args.num_kv_heads
-head_size = args.head_size
-enable_gqa = num_heads > num_kv_heads
-HAS_ATTN_MASK_INPUT = args.has_attention_mask
-
-#q_len, q_step = 160, 16
-#kv_len, kv_step = 800, 16
-low = -7
-high = 8
-act_dtype = torch.float16
-q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
-k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-
-# random attnmask
-attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
-attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
-print(f'{HAS_ATTN_MASK_INPUT=}')
-if HAS_ATTN_MASK_INPUT is 0:
-    attention_mask[...] = 0
-
-# BLHS=>BHLS
-q = q.transpose(1,2)
-k = k.transpose(1,2)
-v = v.transpose(1,2)
-
-#q[:,:,:,:] = q[:,:,2,:]
-#attention_mask[:,:,:,:] = attention_mask[:,:,2,:]
-
-print("q:", q.shape, q.dtype)
-print("k:", k.shape, k.dtype)
-print("v:", v.shape, v.dtype)
-print("attention_mask:", attention_mask.shape, attention_mask.dtype)
 
 def get_org(Q, K, V, attention_mask):
     B,H,L,S = Q.shape
@@ -86,9 +32,6 @@ def get_org(Q, K, V, attention_mask):
             out[b,h,:,:] = attn_weights @ V[b, hkv, :, :].to(dtype=torch.float32)
     return out
 
-ref = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0, enable_gqa = enable_gqa)
-org = get_org(q,k,v,attention_mask)
-
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
     rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
@@ -103,13 +46,8 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-check_close(ref, org, atol=1e-3, rtol=1e-2)
-
-# [batch, seq-len, heads, size] BLHS
-print("ref:", ref.shape, ref.dtype)
-
 # blocking on kv-len dimension with online-softmax
-def get_flash0(query, key, value, attention_mask):
+def get_flash0(query, key, value, attention_mask, q_step = 16, kv_step = 16):
     global enable_vprint
     B,H,q_len,hs = query.shape
     _,Hkv,kv_len,_ = key.shape
@@ -217,54 +155,6 @@ def get_flash0(query, key, value, attention_mask):
                 out[b, h, i:i1, :] = cur_O_f16
     return out
 
-if args.impl == 0:
-    f0 = get_flash0(q,k,v,attention_mask)
-    check_close(org, f0, atol=1e-2, rtol=1e-3)
-    print("=========== PASS ===========")
-    sys.exit(0)
-
-#====================================================================================================
-# using the same parameter & inputs, develop cm kernels which produces the same output
-# prototyping CM kernels
-from clops import cl
-import numpy as np
-import time
-
-# transpose back to orginal shape: [batch, q_len, num_heads, head_size]
-q = q.transpose(1,2)
-k = k.transpose(1,2)
-v = v.transpose(1,2)
-print("q:", q.shape, q.dtype)
-print("k:", k.shape, k.dtype)
-print("v:", v.shape, v.dtype)
-print("attention_mask:", attention_mask.shape, attention_mask.dtype)
-
-def pyeval(src):
-    result_src = ""
-    for line in src.splitlines():
-        if line.startswith("#pyeval"):
-            new_line = eval(line[8:])
-            result_src += new_line + "\n"
-            # print(f"[pyeval] {new_line}")
-        else:
-            result_src += line + "\n"
-    return result_src
-
-'''
-ugemm_qk: [q_step, head_size] x [head_size, kv_step]
-ugemm_kq: [kv_step, head_size] x [head_size, q_step]
-ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
-'''
-
-scale_factor = 1.0/(head_size**0.5)
-
-GWS=[batch, num_heads, q_len//q_step]
-WG_SIZE = min(q_len//q_step, 8)
-LWS=[1, 1, WG_SIZE]
-
-print("GWS=", GWS)
-print("LWS=", LWS)
-
 #========================================================================
 # Optimization Log
 r'''
@@ -276,6 +166,16 @@ avoid indirect register access: unroll for loop which access matrix rows using l
 use GRF to store temp Input rQ instead of SLM, this allows more Work-Groups to be packed into same Xe-core!!!
 '''
 #========================================================================
+def pyeval(src, WG_SIZE): #//workaround for WG_SIZE...not sure why it is said undefined even though it is.
+    result_src = ""
+    for line in src.splitlines():
+        if line.startswith("#pyeval"):
+            new_line = eval(line[8:])
+            result_src += new_line + "\n"
+            # print(f"[pyeval] {new_line}")
+        else:
+            result_src += line + "\n"
+    return result_src
 
 src1 = r'''
 //# CM kernel for flash attn, reference
@@ -288,7 +188,7 @@ src1 = r'''
 #pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
 #pyeval f"#define WG_SIZE {WG_SIZE}"
-#pyeval f"#define HAS_ATTN_MASK_INPUT {HAS_ATTN_MASK_INPUT}"
+#pyeval f"#define HAS_ATTN_MASK_INPUT {args.has_attention_mask}"
 
 #define SystolicDepth 8
 #define RepeatCount 8
@@ -365,7 +265,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 #endif
     half* output [[type("svmptr_t")]],
     int q_len,
-    int kv_len
+    int kv_len,
+    int q_stride,   //# stride in same unit of q_len
+    int kv_stride
     ) {
     //# query [batch, q_len, num_heads, S]
     //#   key [batch, kv_len, num_heads, S]
@@ -387,11 +289,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     cur_max = -1e9;
     cur_sum = 0;
 
-    auto batch = cm_group_id(0);
-    auto h = cm_group_id(1);
+    auto batch = cm_global_id(0);
+    auto h = cm_global_id(1);
     auto hkv = h / (num_heads/num_kv_heads);
     auto wg_local_id = cm_local_id(2);
-    auto q_start = (cm_group_id(2) * WG_SIZE + wg_local_id) * q_step;
+    auto q_start = cm_global_id(2) * q_step;
     auto q_offset = wg_local_id * q_step * head_size * sizeof(half);
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
@@ -420,7 +322,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             //# DWORD transposed load == (transposed + VNNI) load
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
 
-            //# show(Qmat.format<half, REG_K/2, REG_N*2>());
+            //show(Qmat.format<half, REG_K/2, REG_N*2>());
         }
     }
 
@@ -656,64 +558,161 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 }
 '''
 
-cl.profiling(True)
+class FlashAttentionV2_CM:
+    def __init__(self, batch, q_len, num_heads, head_size, q_step, kv_step):
+        self.batch, self.q_len, self.num_heads, self.head_size, self.q_step, self.kv_step = batch, q_len, num_heads, head_size, q_step, kv_step
+        # f"-cmc -mdump_asm -g2 "
+        WG_SIZE = min(self.q_len//self.q_step, 8)
+        self.WG_SIZE = WG_SIZE
 
-t_q = cl.tensor(q.detach().numpy())
-t_k = cl.tensor(k.detach().numpy())
-t_v = cl.tensor(v.detach().numpy())
-t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
-t_mask = cl.tensor(attention_mask.detach().numpy())
+        print("WG_SIZE=", WG_SIZE)
 
-# f"-cmc -mdump_asm -g2 "
-print("compiling ...")
-src = pyeval(src1)
-# print(src)
-cm_kernels = cl.kernels(src, f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
-print("first call ...")
-if HAS_ATTN_MASK_INPUT:
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_mask, t_out, q_len, kv_len)
-else:
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_out, q_len, kv_len)
+        print("compiling ...")
+        src = pyeval(src1, WG_SIZE)
+        print(src)
+        self.cm_kernels = kernel_cache(src, f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2", "./dump/")
 
-f1 = torch.from_numpy(t_out.numpy())
+    def __call__(self, q, k, v, attention_mask):
+        t_q = cl.tensor(q.detach().numpy())
+        t_k = cl.tensor(k.detach().numpy())
+        t_v = cl.tensor(v.detach().numpy())
+        t_out = cl.tensor([self.batch, self.q_len, self.num_heads, self.head_size], np.dtype(np.float16))
+        t_mask = cl.tensor(attention_mask.detach().numpy())
 
-all_layers = []
-mem_size = 0
-while len(all_layers) < 100 and mem_size < 8e9:
-    all_layers.append([
-        cl.tensor(q.detach().numpy()),
-        cl.tensor(k.detach().numpy()),
-        cl.tensor(v.detach().numpy()),
-        cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
-    ])
-    mem_size += q.numel() * q.element_size()
-    mem_size += k.numel() * k.element_size()
-    mem_size += v.numel() * v.element_size()
-    print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
+        GWS=[self.batch, self.num_heads, self.q_len//self.q_step]
+        LWS=[1, 1, self.WG_SIZE]
+        print("GWS=", GWS)
+        print("LWS=", LWS)
 
-for i in range(50):
-    j  = i % len(all_layers)
-    if HAS_ATTN_MASK_INPUT:
-        cm_kernels.enqueue("cm_sdpa", GWS, LWS,
-                        all_layers[j][0],
-                        all_layers[j][1],
-                        all_layers[j][2],
-                        t_mask,
-                        all_layers[j][3],
-                        q_len, kv_len)
-    else:
-        cm_kernels.enqueue("cm_sdpa", GWS, LWS,
-                        all_layers[j][0],
-                        all_layers[j][1],
-                        all_layers[j][2],
-                        all_layers[j][3],
-                        q_len, kv_len)
+        print("first call ...")
+        if args.has_attention_mask:
+            self.cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_mask, t_out, q_len, kv_len, q_len, kv_len)
+        else:
+            self.cm_kernels.enqueue("cm_sdpa", GWS, LWS, t_q, t_k, t_v, t_out, q_len, kv_len, q_len, kv_len)
 
-latency = cl.finish()
-for ns in latency:
-    print(f"  {ns*1e-6:.3f} ms")
+        f1 = torch.from_numpy(t_out.numpy())
+        return f1, GWS, LWS
 
-check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
-print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    torch.set_printoptions(linewidth=1024)
 
-sys.exit(0)
+    parser = argparse.ArgumentParser('')
+    parser.add_argument('-i', "--impl", type=int, default=0)
+    parser.add_argument('-b', "--batch", type=int, default=1)
+    parser.add_argument('-nh', "--num-heads", type=int, default=16)
+    parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=16)
+    parser.add_argument('-ql', "--q-len", type=int, default=32)
+    parser.add_argument('-kvl', "--kv-len", type=int, default=512)
+    parser.add_argument('-hs', "--head-size", type=int, default=80)
+    parser.add_argument('-v', "--verbose", type=int, default=-1)
+    parser.add_argument('-m', "--has-attention-mask", type=int, default=1)
+
+    #parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
+    #parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
+    #parser.add_argument('--save', type=str, nargs='?', default=None)
+    #parser.add_argument('--load', type=str, nargs='?', default=None)
+    args = parser.parse_args()
+    print(args)
+
+    batch = args.batch
+    q_len, q_step = args.q_len, 16
+    kv_len, kv_step = args.kv_len, 16
+    num_heads = args.num_heads
+    num_kv_heads = args.num_kv_heads
+    head_size = args.head_size
+    enable_gqa = num_heads > num_kv_heads
+
+    #q_len, q_step = 160, 16
+    #kv_len, kv_step = 800, 16
+    low = -7
+    high = 8
+    act_dtype = torch.float16
+    q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
+    k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+    v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+
+    # random attnmask
+    attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
+    attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
+    print(f'HAS_ATTN_MASK_INPUT={args.has_attention_mask}')
+    if args.has_attention_mask is 0:
+        attention_mask[...] = 0
+
+    # BLHS=>BHLS
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+    v = v.transpose(1,2)
+
+    #q[:,:,:,:] = q[:,:,2,:]
+    #attention_mask[:,:,:,:] = attention_mask[:,:,2,:]
+
+    print("q:", q.shape, q.dtype)
+    print("k:", k.shape, k.dtype)
+    print("v:", v.shape, v.dtype)
+    print("attention_mask:", attention_mask.shape, attention_mask.dtype)
+
+    ref = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0, enable_gqa = enable_gqa)
+    org = get_org(q,k,v,attention_mask)
+    check_close(ref, org, atol=1e-3, rtol=1e-2)
+
+    # [batch, seq-len, heads, size] BLHS
+    print("ref:", ref.shape, ref.dtype)
+
+    if args.impl == 0:
+        f0 = get_flash0(q,k,v,attention_mask, q_step, kv_step)
+        check_close(org, f0, atol=1e-2, rtol=1e-3)
+        print("=========== PASS ===========")
+        sys.exit(0)
+
+    #====================================================================================================
+    # using the same parameter & inputs, develop cm kernels which produces the same output
+    # prototyping CM kernels
+    cl.profiling(True)
+
+    # transpose back to orginal shape: [batch, q_len, num_heads, head_size]
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+    v = v.transpose(1,2)
+    print("q:", q.shape, q.dtype)
+    print("k:", k.shape, k.dtype)
+    print("v:", v.shape, v.dtype)
+    print("attention_mask:", attention_mask.shape, attention_mask.dtype)
+
+    '''
+    ugemm_qk: [q_step, head_size] x [head_size, kv_step]
+    ugemm_kq: [kv_step, head_size] x [head_size, q_step]
+    ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
+    '''
+
+    scale_factor = 1.0/(head_size**0.5)
+
+    fla_cm = FlashAttentionV2_CM(batch, q_len, num_heads, head_size, q_step, kv_step)
+    f1, GWS, LWS = fla_cm(q, k, v, attention_mask)
+
+    all_layers = []
+    mem_size = 0
+    while len(all_layers) < 100 and mem_size < 8e9:
+        all_layers.append([
+            cl.tensor(q.detach().numpy()),
+            cl.tensor(k.detach().numpy()),
+            cl.tensor(v.detach().numpy()),
+            cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
+        ])
+        mem_size += q.numel() * q.element_size()
+        mem_size += k.numel() * k.element_size()
+        mem_size += v.numel() * v.element_size()
+        print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
+
+    for i in range(50):
+        j  = i % len(all_layers)
+        fla_cm(q, k, v, attention_mask)
+
+    latency = cl.finish()
+    for ns in latency:
+        print(f"  {ns*1e-6:.3f} ms")
+
+    check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
+    print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
+
+    sys.exit(0)
