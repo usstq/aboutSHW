@@ -51,14 +51,14 @@ CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) 
 }
 template <typename T, int N>
 CM_INLINE void read_1d(vector_ref<T, N> out, svmptr_t base) {
-    cm_svm_block_read(base, out);
+    cm_ptr_block_read((T*)base, out);
 }
 
 template <typename T, int M, int N>
 CM_INLINE void read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
 #pragma unroll
     for (int i = 0; i < out.n_rows(); i++, base += pitch) {
-        cm_svm_block_read(base, out.row(i));
+        cm_ptr_block_read((T*)base, out.row(i));
     }
 }
 
@@ -66,7 +66,7 @@ template <typename TSRC, int M, int N>
 CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, svmptr_t base, uint pitch) {
 #pragma unroll
     for (int i = 0; i < out.n_rows(); i++, base += pitch) {
-        cm_svm_block_write(base, out.row(i));
+        cm_ptr_block_write((TSRC*)base, out.row(i));
     }
 }
 
@@ -162,8 +162,19 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
 
     int slm_offset_wg_a = id_sg_m * BLOCK_SG_M * BLOCK_WG_K * sizeof(TYPE_SRC);
     int slm_offset_wg_b = id_sg_n * BLOCK_SG_N * BLOCK_WG_K * sizeof(TYPE_SRC) + slm_b_offset;
+
+    // for load slm
+    const int BLOCK_REG_M_LOAD_A = BLOCK_WG_M / (SG_M * SG_N);
+    const uint lda_bytes = lda * sizeof(TYPE_SRC);
+    auto offset_sg_a = (id_wg_m * BLOCK_WG_M +                                          // workgroup
+                        id_sg_mn * BLOCK_REG_M_LOAD_A) * lda_bytes;                     // subgroup
+    const int BLOCK_REG_M_LOAD_B = BLOCK_WG_K * VNNI * BLOCK_WG_N / (SG_M * SG_N);
+    uint offset_sg_b = id_wg_n * K / BLOCK_WG_K * BLOCK_WG_K * VNNI * BLOCK_WG_N +      // workgroup
+                       id_sg_mn * BLOCK_REG_M_LOAD_B;                                   // subgroup
+    auto offset_slm_sg_b = slm_b_offset + id_sg_mn * BLOCK_REG_M_LOAD_B;
+
     // compute K dimension inside one EU
-    for (uint k = 0; k < K; k += BLOCK_WG_K) {
+    for (uint k = 0; k < K / BLOCK_WG_K; k++) {
         // src_a[BLOCK_SG_M, BLOCK_WG_K] -> slm
         // slm layout:
         // struct reg {                                 // --> one DPAS op
@@ -177,28 +188,24 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
         // };
         {
             // TODO(tune): each EU will read serveral lines
-            const int BLOCK_REG_M_LOAD_A = BLOCK_WG_M / (SG_M * SG_N);
             matrix<TYPE_SRC, BLOCK_REG_M_LOAD_A, BLOCK_WG_K> data;
-            uint offset_sg = (id_wg_m * BLOCK_WG_M +                   // workgroup
-                              id_sg_mn * BLOCK_REG_M_LOAD_A) * lda;    // subgroup
-            offset_sg += k;
-            read_2d(data.select_all(), (svmptr_t)((TYPE_SRC*)src_a + offset_sg), lda * sizeof(TYPE_SRC));
+            read_2d(data.format<int, BLOCK_REG_M_LOAD_A, BLOCK_WG_K * sizeof(TYPE_SRC) / sizeof(int)>(), (svmptr_t)src_a + offset_sg_a, lda_bytes);
+            offset_sg_a += BLOCK_WG_K * sizeof(TYPE_SRC);
 #pragma unroll
             for (uint m = 0; m < BLOCK_REG_M_LOAD_A; m++) {
                 auto m_in_sg = id_sg_mn * BLOCK_REG_M_LOAD_A + m;
                 auto sg_m = m_in_sg / BLOCK_SG_M;
                 auto reg_m = m_in_sg % BLOCK_SG_M / BLOCK_REG_M;
                 auto m_in_reg = m_in_sg % BLOCK_SG_M % BLOCK_REG_M;
+                uint offset = sg_m * (BLOCK_WG_K / BLOCK_REG_K * REG_M * BLOCK_REG_A) +                     // block[x]
+                              reg_m * BLOCK_REG_A +                                                         // regs[y][z]
+                              m_in_reg * BLOCK_REG_K;                                                       // data[m]
+                offset *= sizeof(TYPE_SRC);
 #pragma unroll
                 for (uint block_reg_k = 0; block_reg_k < BLOCK_WG_K; block_reg_k += BLOCK_REG_K) {
                     auto tmp = data.select<1, 1, BLOCK_REG_K, 1>(m, block_reg_k);
-                    auto reg_k = block_reg_k / BLOCK_REG_K;
-                    uint offset = sg_m * BLOCK_WG_K / BLOCK_REG_K * REG_M * BLOCK_REG_A +                       // block[x]
-                                  reg_k * REG_M * BLOCK_REG_A +                                                 // regs[y]
-                                  reg_m * BLOCK_REG_A +                                                         // regs[y][z]
-                                  m_in_reg * BLOCK_REG_K;                                                       // data[m]
-                    offset *= sizeof(TYPE_SRC);
                     cm_slm_block_write(slm, offset, tmp.format<int>());
+                    offset += REG_M * BLOCK_REG_A * sizeof(TYPE_SRC);                                       // regs[y]
                 }
             }
         }
@@ -221,13 +228,10 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
         {
             // because src_b is prepacked, only simple copy is needed
             // TODO(tune): each EU will read serveral lines
-            const int BLOCK_REG_M_LOAD_B = BLOCK_WG_K * VNNI * BLOCK_WG_N / (SG_M * SG_N) / sizeof(int);
-            vector<int, BLOCK_REG_M_LOAD_B> data;
-            uint offset = (id_wg_n * K / BLOCK_WG_K + k / BLOCK_WG_K) * BLOCK_WG_K * VNNI * BLOCK_WG_N / sizeof(int) + // workgroup
-                           id_sg_mn * BLOCK_REG_M_LOAD_B;    // subgroup
-            read_1d(data.select_all(), (svmptr_t)((int*)src_b + offset));
-            offset = slm_b_offset + id_sg_mn * BLOCK_REG_M_LOAD_B * sizeof(int);
-            cm_slm_block_write(slm, offset, data);
+            vector<int, BLOCK_REG_M_LOAD_B / sizeof(int)> data;
+            read_1d(data.select_all(), (svmptr_t)src_b + offset_sg_b);
+            offset_sg_b += BLOCK_WG_K * VNNI * BLOCK_WG_N;
+            cm_slm_block_write(slm, offset_slm_sg_b, data);
         }
         cm_barrier();
 
@@ -235,15 +239,12 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
         matrix<TYPE_SRC, REG_N, BLOCK_REG_B> B;
 #pragma unroll
         for (uint reg_k = 0; reg_k < BLOCK_WG_K / BLOCK_REG_K; reg_k++) {
-            for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
-                int offset = slm_offset_wg_a + (reg_k * REG_M * BLOCK_REG_A + reg_m * BLOCK_REG_A) * sizeof(TYPE_SRC);
-                cm_slm_block_read(slm, offset, A.row(reg_m));
-            }
-#pragma unroll
-            for (uint reg_n = 0; reg_n < REG_N; reg_n++) {
-                int offset = slm_offset_wg_b + (reg_k * REG_N * BLOCK_REG_B + reg_n * BLOCK_REG_B) * sizeof(TYPE_SRC);
-                cm_slm_block_read(slm, offset, B.row(reg_n));
-            }
+            int offset = slm_offset_wg_a + (reg_k * REG_M * BLOCK_REG_A) * sizeof(TYPE_SRC);
+            cm_slm_block_read(slm, offset, A.format<int>());
+
+            offset = slm_offset_wg_b + (reg_k * REG_N * BLOCK_REG_B) * sizeof(TYPE_SRC);
+            cm_slm_block_read(slm, offset, B.format<int>());
+
 #pragma unroll
             for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
 #pragma unroll
@@ -256,6 +257,11 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
         cm_barrier();
     }
     // store
+    auto ldc_bytes = ldc * sizeof(TYPE_DST);
+    auto offset_c = id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + 
+                    (id_wg_m * BLOCK_WG_M +        // workgroup
+                     id_sg_m * BLOCK_SG_M) * ldc;  // subgroup
+    offset_c *= sizeof(TYPE_DST);
 #pragma unroll
     for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
         matrix<TYPE_DST, BLOCK_REG_M, REG_N * BLOCK_REG_N> tmp;
@@ -265,11 +271,8 @@ CM_INLINE void gemm_xmx(uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, 
             tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(0, reg_n * BLOCK_REG_N) =
                 acc.row(reg_m * REG_N + reg_n);
         }
-        uint offset = (id_wg_m * BLOCK_WG_M +        // workgroup
-                       id_sg_m * BLOCK_SG_M +        // subgroup
-                       reg_m   * BLOCK_REG_M) * ldc; // reg-blocks
-        offset += id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N;
-        write_2d(tmp.select_all(), (svmptr_t)((TYPE_DST*)dst + offset), ldc * sizeof(TYPE_DST));
+        write_2d(tmp.select_all(), (svmptr_t)dst + offset_c, ldc_bytes);
+        offset_c += BLOCK_REG_M * ldc_bytes;
     }
 }
 

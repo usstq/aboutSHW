@@ -32,15 +32,15 @@ _GENX_MAIN_ void repack_f16(int K, int N, half* src ATTR, half* dst ATTR) {
 src = '\n'.join(src)
 
 SG_SIZE = 8
-BLOCK_SG_M = 32
-BLOCK_SG_N = 16
+BLOCK_SG_M = 32 #16
+BLOCK_SG_N = 16 #64
 SG_M = 4
 SG_N = 8
-BLOCK_WG_K = 128
+BLOCK_WG_K = 128 #32
 BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
 
-kernels = cl.kernels(src, f'''-cmc -Qxcm_register_file_size=256 -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
+kernels = cl.kernels(src, f'''-cmc -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
                      -D_SG_M={SG_M} -D_SG_N={SG_N} -D_BLOCK_WG_K={BLOCK_WG_K}''')
 cl.profiling(True)
 
@@ -64,12 +64,19 @@ cl.finish()
 if K < 1024:
     C_ref = np.matmul(A, B)
     compare(C_ref, tC.numpy())
-print("----------------------------------------------------")
-print(f'M:{M}, N:{N}, K:{K}')
-print("----------------------------------------------------")
+print("-----------------------------------------------------------------------------")
+A_SIZE = M*K*2//1024//1024
+B_SIZE = K*N*2//1024//1024
+C_SIZE = M*N*2//1024//1024
+ALL_SZIE = A_SIZE + B_SIZE + C_SIZE
+print(f'{M=} {N=} {K=} {A_SIZE=}MB {B_SIZE=}MB {C_SIZE=}MB {ALL_SZIE=}MB')
+print("-----------------------------------------------------------------------------")
 for i in range(0, 50):
     kernels.enqueue("gemm", [M // BLOCK_SG_M, N // BLOCK_SG_N], [SG_M, SG_N], tA, tB_pack, tC, M, N, K, K, N, N)
     ns = cl.finish()
     flops = M * N * K * 2
+    repeat_size = (N/BLOCK_WG_N*M*K+K*N+M*N)*2
+    #repeat_size1 = (M*K+M/BLOCK_WG_M*K*N+M*N)*2
     for time_opt in ns:
-        print(f'TPUT:{flops/time_opt:,.0f} GFLOPS, us: {time_opt*1e-3:,.0f}')
+        print(f'TPUT:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+#print(f'loop M first {repeat_size//1024//1024/1024:.2f} GB loop N first {repeat_size1//1024//1024/1024:.2f} GB')
