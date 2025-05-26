@@ -32,25 +32,26 @@ _GENX_MAIN_ void repack_f16(int K, int N, half* src ATTR, half* dst ATTR) {
 src = '\n'.join(src)
 
 SG_SIZE = 8
-BLOCK_SG_M = 16
+BLOCK_SG_M = 32
 BLOCK_SG_N = 16
-SG_M = 8
+SG_M = 4
 SG_N = 8
-BLOCK_WG_K = 64
+BLOCK_WG_K = 128
 BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
 
-kernels = cl.kernels(src, f'''-cmc -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
+kernels = cl.kernels(src, f'''-cmc -Qxcm_register_file_size=256 -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
                      -D_SG_M={SG_M} -D_SG_N={SG_N} -D_BLOCK_WG_K={BLOCK_WG_K}''')
 cl.profiling(True)
 
-M = 128*2
-N = 128*2
-K = 64*2
-B = np.random.randint(-2,2,[K, N]).astype(np.float16)
-A = np.random.randint(-2,2,[M, K]).astype(np.float16)
-C_ref = np.matmul(A, B)
-
+M = 4096
+N = 2048
+K = 128*16
+B = np.random.randint(-1,2,[K, N]).astype(np.float16)
+A = np.random.randint(-1,2,[M, K]).astype(np.float16)
+SLM_SIZE_A=BLOCK_WG_M * BLOCK_WG_K * 2 // 1024
+SLM_SIZE_B=BLOCK_WG_N * BLOCK_WG_K * 2 // 1024
+print(f'SLM used A: {SLM_SIZE_A}KB + B: {SLM_SIZE_B}KB = {SLM_SIZE_A+SLM_SIZE_B}KB')
 tA = cl.tensor(A)
 tB = cl.tensor(B)
 tB_pack = cl.tensor(np.zeros([K, N], np.float16))
@@ -60,13 +61,15 @@ cl.finish()
 kernels.enqueue("gemm", [M // BLOCK_SG_M, N // BLOCK_SG_N], [SG_M, SG_N], tA, tB_pack, tC, M, N, K, K, N, N)
 cl.finish()
 
-compare(C_ref, tC.numpy())
+if K < 1024:
+    C_ref = np.matmul(A, B)
+    compare(C_ref, tC.numpy())
 print("----------------------------------------------------")
 print(f'M:{M}, N:{N}, K:{K}')
 print("----------------------------------------------------")
-for i in range(0, 10):
+for i in range(0, 50):
     kernels.enqueue("gemm", [M // BLOCK_SG_M, N // BLOCK_SG_N], [SG_M, SG_N], tA, tB_pack, tC, M, N, K, K, N, N)
     ns = cl.finish()
     flops = M * N * K * 2
     for time_opt in ns:
-        print(f'TPUT:{flops/time_opt:.1f} GFLOPS, us: {time_opt*1e-3:.1f}')
+        print(f'TPUT:{flops/time_opt:,.0f} GFLOPS, us: {time_opt*1e-3:,.0f}')

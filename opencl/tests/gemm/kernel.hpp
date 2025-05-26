@@ -292,11 +292,11 @@ void repack_f16(int K, int N, half* src, half* dst) {
     const int BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const int BLOCK_WG_N = BLOCK_SG_N * SG_N;
     // register blocking
-    const int REG_N = BLOCK_SG_M / BLOCK_REG_M;
-    const int REG_M = BLOCK_SG_N / BLOCK_REG_N;
+    const int REG_M = BLOCK_SG_M / BLOCK_REG_M;
+    const int REG_N = BLOCK_SG_N / BLOCK_REG_N;
     // packed memory layout:
     struct reg {                                        // --> one DPAS op
-        half data[BLOCK_REG_K / 2][BLOCK_REG_N * 2];        // BLOCK_REG_K=16, BLOCK_REG_N=8, aka half[8,16]
+        half data[BLOCK_REG_K / 2][BLOCK_REG_N * 2];    // BLOCK_REG_K=16, BLOCK_REG_N=8, aka half[8,16]
     };
     struct sg_block {                                   // --> one EU
         reg regs[BLOCK_WG_K / BLOCK_REG_K][REG_N];        // REG_N==2, BLOCK_WG_K/BLOCK_REG_K==4

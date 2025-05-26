@@ -5,9 +5,9 @@ namespace x {
 const int SG_SIZE = 8;
 const int BLOCK_REG_N = SG_SIZE;
 // sg blocking
-const int BLOCK_SG_M = 16;
+const int BLOCK_SG_M = 32;
 const int BLOCK_SG_N = 16;
-const int SG_M = 8;
+const int SG_M = 4;
 const int SG_N = 8;
 const int BLOCK_WG_K = 64;	// same in sg
 
