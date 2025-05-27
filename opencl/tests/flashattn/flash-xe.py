@@ -23,25 +23,28 @@ parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 parser.add_argument('-c', "--causal-mask", action="store_true")
 
+def get_xe_version():
+    cm_kernels = cl.kernels(r'''
+    extern "C" _GENX_MAIN_ void cm_check_platform(int * info [[type("svmptr_t")]]) {
+        info[0] = CM_GRF_WIDTH;
+    #ifdef CM_HAS_LSC_UNTYPED_2D
+        info[1] = 1;
+    #else
+        info[1] = 0;
+    #endif
+    }''', f"-cmc")
+    t_info = cl.tensor([2], np.dtype(np.int32))
+    cm_kernels.enqueue("cm_check_platform", [1], [1], t_info)
+    t_info = t_info.numpy()
 
-cm_kernels = cl.kernels(r'''
-extern "C" _GENX_MAIN_ void cm_check_platform(int * info [[type("svmptr_t")]]) {
-    info[0] = CM_GRF_WIDTH;
-#ifdef CM_HAS_LSC_UNTYPED_2D
-    info[1] = 1;
-#else
-    info[1] = 0;
-#endif
-}''', f"-cmc")
-t_info = cl.tensor([2], np.dtype(np.int32))
-cm_kernels.enqueue("cm_check_platform", [1], [1], t_info)
-t_info = t_info.numpy()
+    assert(t_info[0] == 512 or t_info[0] == 256)
+    xe_version = 1
+    if t_info[0] == 512:
+        assert(t_info[1] == 1)
+        xe_version = 2
+    return xe_version
 
-assert(t_info[0] == 512 or t_info[0] == 256)
-xe_version = 1
-if t_info[0] == 512:
-    assert(t_info[1] == 1)
-    xe_version = 2
+xe_version = get_xe_version()
 
 args = parser.parse_args()
 print(args, f"xe_version={xe_version}")
@@ -74,7 +77,6 @@ v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=
 
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
-
 
 # causal attn-mask
 if causal_mask:
@@ -277,34 +279,18 @@ def pyeval(src):
             result_src += line + "\n"
     return result_src
 
-'''
-ugemm_qk: [q_step, head_size] x [head_size, kv_step]
-ugemm_kq: [kv_step, head_size] x [head_size, q_step]
-ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
-'''
-
 scale_factor = 1.0/(head_size**0.5)
 
-if 1:
-    # only 116 ms since adjacent query-heads shares same KV-heads
-    # dispatch them together can help increase cache-usage
-    q_threads = q_len//(q_step) if xe_version > 1 else q_len//(2*q_step)
-    GWS=[batch, num_heads, q_threads]
-    WG_SIZE = min(GWS[-1], 8)
-    LWS=[1, 1, WG_SIZE]
+# adjacent query-heads may share same KV-heads
+# dispatch them together can help increase cache-usage
+q_threads = q_len//(q_step) if xe_version > 1 else q_len//(2*q_step)
+GWS=[batch, num_heads, q_threads]
+WG_SIZE = min(GWS[-1], 16 if xe_version == 1 else 8)
+LWS=[1, 1, WG_SIZE]
 
-    dim_batch = 0
-    dim_head = 1
-    dim_q_batch = 2
-else:
-    # 140 ms + 
-    GWS=[q_len//q_step, num_heads, batch]
-    WG_SIZE = min(q_len//q_step, 16)
-    LWS=[WG_SIZE, 1, 1]
-
-    dim_batch = 2
-    dim_head = 1
-    dim_q_batch = 0
+dim_batch = 0
+dim_head = 1
+dim_q_batch = 2
 
 if False:
     # for GQA/multi-query, invoke all heads sharing same KV can further help cache-hit-rate

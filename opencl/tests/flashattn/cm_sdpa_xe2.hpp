@@ -1,5 +1,61 @@
 #include "cm_sdpa_common.hpp"
 
+#ifdef CM_HAS_LSC_UNTYPED_2D 
+#define cm_load_normal cm_load<lsc::Normal>
+#define cm_load_transpose cm_load<lsc::Transpose>
+#define cm_load_vnni cm_load<lsc::VNNI>
+#define cm_store_normal cm_store
+
+#else
+template <typename T = int, unsigned NBlocks = 1, unsigned BlockH = 1, unsigned BlockW = 1>
+void cm_load_normal(vector_ref<T, NBlocks*BlockH*BlockW> Res, const lsc::block_2d_desc<T, NBlocks, BlockH, BlockW> &Desc, int16_t Pred = 1) {
+    static_assert(NBlocks == 1);
+    auto pitch = Desc.get_pitch() + 1;
+    auto base = reinterpret_cast<svmptr_t>(Desc.get_base() + Desc.get_block_y()*pitch + Desc.get_block_x() * sizeof(T));
+    #pragma unroll
+    for(int i = 0; i < BlockH; i++) {
+        cm_svm_block_read(base + i * pitch, Res.select<BlockW, 1>(i*BlockW));
+    }
+}
+
+template <typename T = int, unsigned NBlocks = 1, unsigned BlockH = 1, unsigned BlockW = 1>
+void cm_load_transpose(vector_ref<T, NBlocks*BlockW*BlockH> Res, const lsc::block_2d_desc<T, NBlocks, BlockH, BlockW> &Desc, int16_t Pred = 1) {
+    static_assert(NBlocks == 1);
+    auto pitch = Desc.get_pitch() + 1;
+    auto base = reinterpret_cast<svmptr_t>(Desc.get_base() + Desc.get_block_y()*pitch + Desc.get_block_x() * sizeof(T));
+    matrix<T, BlockH, BlockW> temp;
+    #pragma unroll
+    for(int i = 0; i < BlockH; i++) {
+        cm_svm_block_read(base + i * pitch, temp[i]);
+    }
+    Transpose_2DMatrix<T, T, BlockH, BlockW>::trans(temp, Res.format<T, BlockW, BlockH>());
+}
+
+template <typename T = int, unsigned NBlocks = 1, unsigned BlockH = 1, unsigned BlockW = 1>
+void cm_load_vnni(vector_ref<T, NBlocks*BlockW*BlockH> Res, const lsc::block_2d_desc<T, NBlocks, BlockH, BlockW> &Desc, int16_t Pred = 1) {
+    static_assert(NBlocks == 1);
+    auto pitch = Desc.get_pitch() + 1;
+    auto base = reinterpret_cast<svmptr_t>(Desc.get_base() + Desc.get_block_y()*pitch + Desc.get_block_x() * sizeof(T));
+    matrix<T, BlockH, BlockW> temp;
+    #pragma unroll
+    for(int i = 0; i < BlockH; i++) {
+        cm_svm_block_read(base + i * pitch, temp[i]);
+    }
+    Transpose_2DMatrix<T, T, BlockH, BlockW>::trans(temp, Res.format<T, BlockW, BlockH>());
+}
+
+template <typename T = int, unsigned NBlocks = 1, unsigned BlockH = 1, unsigned BlockW = 1>
+void cm_store_normal(const lsc::block_2d_desc<T, NBlocks, BlockH, BlockW> &Desc, vector_ref<T, NBlocks*BlockW*BlockH> Res) {
+    static_assert(NBlocks == 1);
+    auto pitch = Desc.get_pitch() + 1;
+    auto base = reinterpret_cast<svmptr_t>(Desc.get_base() + Desc.get_block_y()*pitch + Desc.get_block_x() * sizeof(T));
+    #pragma unroll
+    for(int i = 0; i < BlockH; i++) {
+        cm_svm_block_write(base + i * pitch, Res.select<BlockW, 1>(i*BlockW));
+    }
+}
+#endif
+
 static_assert(REG_N == 16);
 static_assert(q_step == 16);
 
@@ -66,7 +122,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             b2dQ.set_block_x(k);
 
             //# DWORD transposed load == (transposed + VNNI) load
-            cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
+            cm_load_transpose(rQ[ri].format<uint>(), b2dQ.set_block_y(q_start));
 
             //# show(Qmat.format<half, REG_K/2, REG_N*2>());
         }
@@ -96,8 +152,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                 matrix<half, REG_M, REG_K> temp1;
                 for(int k = 0; k < head_size; k += REG_K) {
                     b2dK.set_block_x(k);
-                    cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                    cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
+                    cm_load_normal(temp0.format<half>(), b2dK.set_block_y(kv_pos));
+                    cm_load_normal(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
 
                     //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
                     //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
@@ -112,7 +168,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                 matrix<half, REG_K, REG_N> temp2;
                 b2dV.set_block_y(kv_pos);
                 for(int k = 0; k < head_size; k += REG_K) {
-                    cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                    cm_load_vnni(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
                     //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
 
                     cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
@@ -123,8 +179,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                     matrix<half, REG_M, REG_K> temp1;
                     for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
                         b2dK.set_block_x(k);
-                        cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                        cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
+                        cm_load_normal(temp0.format<half>(), b2dK.set_block_y(kv_pos));
+                        cm_load_normal(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
 
                         //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
                         //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
@@ -138,7 +194,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                     matrix<half, REG_K, REG_N> temp2;
                     b2dV.set_block_y(kv_pos);
                     for(int k = REG_K*(wg_local_id-local_size/2); k < head_size; k += REG_K*(local_size/2)) {
-                        cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                        cm_load_vnni(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
                         //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
 
                         cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
@@ -195,8 +251,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         } else {
             matrix<half, 2, REG_M * REG_N> Maskmat;
             b2dMask.set_block_x(kv_pos);
-            cm_load<lsc::Normal>(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
-            cm_load<lsc::Normal>(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
+            cm_load_normal(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
+            cm_load_normal(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
 
             matrix<float, 2*REG_M, REG_N> MaskT;
             Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
@@ -230,8 +286,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         cur_sum = cm_mul<float>(cur_sum, max_comp);
         cur_sum = cm_add<float>(cur_sum, row_sum_t);
 
-        matrix<half, 2*REG_M, REG_K> P;
-        Transpose_16x16(St, P);
+        matrix<half, REG_N, REG_K> P;
+        Transpose_2DMatrix<float, half, REG_K, REG_N>::trans(St, P);
+        //Transpose_16x16(St, P);
 
         //show(cur_sum.format<float, 1, REG_N>()); return;
         //============================================================== 1074
@@ -297,7 +354,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     }//# for(int kv_pos = 0; kv_pos < kv_len; kv_pos += kv_step) {
     
     //# save cur_O/cur_sum.transpose(0, 1)
-    matrix<float, 2, REG_M*REG_N> cur_O;
     matrix<half, 2*REG_M, REG_N> cur_O_f16;
     #pragma unroll
     for(int k = 0, ri=0; k < head_size; k += REG_K, ri+=2) {

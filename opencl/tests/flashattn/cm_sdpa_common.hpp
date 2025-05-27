@@ -34,7 +34,6 @@ void show(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-
 template <typename T1, typename T2>
 CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
                                matrix_ref<T2, 16, 16> out) {
@@ -95,6 +94,24 @@ CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) 
   out.row(5) = temp.template select<4, 1, 2, 4>(4, 2);
   out.row(7) = temp.template select<4, 1, 2, 4>(4, 3);
 }
+
+template <typename T1, typename T2, int M, int N>
+struct Transpose_2DMatrix;
+
+template <typename T1, typename T2>
+struct Transpose_2DMatrix<T1, T2, 16, 16> {
+    static inline void trans(matrix_ref<T1, 16, 16> in, matrix_ref<T2, 16, 16> out) {
+        Transpose_16x16(in, out);
+    }
+};
+
+template <typename T1, typename T2>
+struct Transpose_2DMatrix<T1, T2, 16, 8> {
+    static inline void trans(matrix_ref<T1, 16, 8> in, matrix_ref<T2, 8, 16> out) {
+        Transpose_8x8(in.select<8, 1, 8, 1>(0,0), out.select<8, 1, 8, 1>(0,0));
+        Transpose_8x8(in.select<8, 1, 8, 1>(8,0), out.select<8, 1, 8, 1>(0,8));
+    }
+};
 
 template <typename T, int M, int N>
 CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {

@@ -199,7 +199,7 @@ void row_kernel(
         //show(cur_sum.format<float, 1, REG_N>());
 
         // [2*REG_M, REG_N] => [REG_M, REG_K = REG_N + REG_N]
-        matrix<half, REG_M, REG_K> P; // REG_K = REG_N + REG_N
+        matrix<half, REG_N, REG_K> P; // REG_K = REG_N + REG_N
         Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(0,0), P.select<REG_M, 1, REG_N, 1>(0,0));
         Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(REG_M,0), P.select<REG_M, 1, REG_N, 1>(0,REG_N));
 
