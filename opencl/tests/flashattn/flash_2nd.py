@@ -58,7 +58,7 @@ q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_
 k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
-# print("k.shape:", k.shape, k.dtype)
+# print("v.shape:", v.shape, v.dtype)
 # for i in range(batch):
 #     for j in range(kv_len):
 #         for kk in range(num_kv_heads):
@@ -564,6 +564,8 @@ src1 = r'''
 #define REG_M RepeatCount
 #define REG_N 16
 
+#define USE_LSC_BLOCK_2D_DESC 0
+
 #define PRINT_THR_ID 1000
 #define PRINT_HEAD_ID 1000
 
@@ -585,6 +587,67 @@ void show(const matrix<T, M, N> mat) {
 CM_INLINE uint64_t get_clock() {
     auto clk = cm_clock();
     return ((uint64_t)clk[1]) << 32 | clk[0];
+}
+
+template <typename T1, typename T2>
+CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
+                               matrix_ref<T2, 16, 16> out) {
+  matrix<T2, 16, 16> bBuf;
+  bBuf.row(0) = in.template select<4, 1, 4, 4>(0, 0);   // 0,4,8,c
+  bBuf.row(1) = in.template select<4, 1, 4, 4>(4, 0);   // 0,4,8,c
+  bBuf.row(2) = in.template select<4, 1, 4, 4>(8, 0);   // 0,4,8,c
+  bBuf.row(3) = in.template select<4, 1, 4, 4>(12, 0);  // 0,4,8,c
+  bBuf.row(4) = in.template select<4, 1, 4, 4>(0, 1);   // 1,5,9,d
+  bBuf.row(5) = in.template select<4, 1, 4, 4>(4, 1);   // 1,5,9,d
+  bBuf.row(6) = in.template select<4, 1, 4, 4>(8, 1);   // 1,5,9,d
+  bBuf.row(7) = in.template select<4, 1, 4, 4>(12, 1);  // 1,5,9,d
+  bBuf.row(8) = in.template select<4, 1, 4, 4>(0, 2);   // 2,6,a,e
+  bBuf.row(9) = in.template select<4, 1, 4, 4>(4, 2);   // 2,6,a,e
+  bBuf.row(10) = in.template select<4, 1, 4, 4>(8, 2);  // 2,6,a,e
+  bBuf.row(11) = in.template select<4, 1, 4, 4>(12, 2); // 2,6,a,e
+  bBuf.row(12) = in.template select<4, 1, 4, 4>(0, 3);  // 3,7,b,f
+  bBuf.row(13) = in.template select<4, 1, 4, 4>(4, 3);  // 3,7,b,f
+  bBuf.row(14) = in.template select<4, 1, 4, 4>(8, 3);  // 3,7,b,f
+  bBuf.row(15) = in.template select<4, 1, 4, 4>(12, 3); // 3,7,b,f
+
+  out.row(0) = bBuf.template select<4, 1, 4, 4>(0, 0);   // 0
+  out.row(1) = bBuf.template select<4, 1, 4, 4>(4, 0);   // 1
+  out.row(2) = bBuf.template select<4, 1, 4, 4>(8, 0);   // 2
+  out.row(3) = bBuf.template select<4, 1, 4, 4>(12, 0);  // 3
+  out.row(4) = bBuf.template select<4, 1, 4, 4>(0, 1);   // 4
+  out.row(5) = bBuf.template select<4, 1, 4, 4>(4, 1);   // 5
+  out.row(6) = bBuf.template select<4, 1, 4, 4>(8, 1);   // 6
+  out.row(7) = bBuf.template select<4, 1, 4, 4>(12, 1);  // 7
+  out.row(8) = bBuf.template select<4, 1, 4, 4>(0, 2);   // 8
+  out.row(9) = bBuf.template select<4, 1, 4, 4>(4, 2);   // 9
+  out.row(10) = bBuf.template select<4, 1, 4, 4>(8, 2);  // a
+  out.row(11) = bBuf.template select<4, 1, 4, 4>(12, 2); // b
+  out.row(12) = bBuf.template select<4, 1, 4, 4>(0, 3);  // c
+  out.row(13) = bBuf.template select<4, 1, 4, 4>(4, 3);  // d
+  out.row(14) = bBuf.template select<4, 1, 4, 4>(8, 3);  // e
+  out.row(15) = bBuf.template select<4, 1, 4, 4>(12, 3); // f
+}
+
+template <typename T1, typename T2>
+CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) {
+  matrix<T2, 8, 8> temp;
+  temp.row(0) = in.template select<2, 1, 4, 2>(0, 0);
+  temp.row(1) = in.template select<2, 1, 4, 2>(2, 0);
+  temp.row(2) = in.template select<2, 1, 4, 2>(4, 0);
+  temp.row(3) = in.template select<2, 1, 4, 2>(6, 0);
+  temp.row(4) = in.template select<2, 1, 4, 2>(0, 1);
+  temp.row(5) = in.template select<2, 1, 4, 2>(2, 1);
+  temp.row(6) = in.template select<2, 1, 4, 2>(4, 1);
+  temp.row(7) = in.template select<2, 1, 4, 2>(6, 1);
+
+  out.row(0) = temp.template select<4, 1, 2, 4>(0, 0);
+  out.row(2) = temp.template select<4, 1, 2, 4>(0, 1);
+  out.row(4) = temp.template select<4, 1, 2, 4>(0, 2);
+  out.row(6) = temp.template select<4, 1, 2, 4>(0, 3);
+  out.row(1) = temp.template select<4, 1, 2, 4>(4, 0);
+  out.row(3) = temp.template select<4, 1, 2, 4>(4, 1);
+  out.row(5) = temp.template select<4, 1, 2, 4>(4, 2);
+  out.row(7) = temp.template select<4, 1, 2, 4>(4, 3);
 }
 
 extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
@@ -612,15 +675,23 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     auto wg_thread_id = cm_global_id(2);
     auto o_start = wg_thread_id * head_size;
 
-    uint qo_pitch = num_heads * head_size * sizeof(half);
     uint kv_pitch = num_kv_heads * head_size * sizeof(half);
+    uint qo_pitch = num_heads * head_size * sizeof(half);
 
+#if USE_LSC_BLOCK_2D_DESC
     //# vector load cannot be used for block_2d_desc
     //# note: candidate template ignored: deduced type 'details::Block2DRefTy<half, 1U, 16U, 1U, (LoadOp)0U>' (aka 'vector_ref<half,32>') of 1st parameter
     //# b2dK reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
     lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dK(reinterpret_cast<uint*>(key + (batch*num_kv_heads*kv_len + hkv)*head_size),   kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(value + (batch*num_kv_heads*kv_len + hkv)*head_size, kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
- 
+#else
+    uint kv_offset = (batch*num_kv_heads*kv_len + hkv)*head_size;
+    uint kv_stride = num_kv_heads * head_size;
+    uint kv_x0 = 0, kv_y0 = 0;
+    uint kv_x1 = head_size*sizeof(half);
+    uint kv_y1 = kv_len;
+#endif
+
     //# Load Q into register(as dpas-A tile)
     matrix <half, head_size/REG_K, REG_M*REG_K> Qmat;
     uint qo_offset = (batch*num_heads*q_len + h)*head_size;
@@ -638,15 +709,26 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     matrix<float, REG_M * split_block_num, REG_N> rS = 0;
     for(int kv_pos = 0, ki = 0; kv_pos < kv_split_len; kv_pos += kv_step, ki++) {
         auto rSvec = rS[ki].format<float>();
-        uint kv_offset = wg_thread_id * kv_split_len + kv_pos;
+        uint kv_offset_y = wg_thread_id * kv_split_len + kv_pos;
 
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri ++ ) {
+            matrix<half, REG_K, REG_N> Kt;
+        #if USE_LSC_BLOCK_2D_DESC
             //# Load Kt into register & pack as VNNI(as dpas-B tile)
             //# DWORD transposed load == (transposed + VNNI) load
-            matrix<half, REG_K, REG_N> Kt;
             b2dK.set_block_x(k);
-            cm_load<lsc::Transpose>(Kt.format<uint>(), b2dK.set_block_y(kv_offset));
+            cm_load<lsc::Transpose>(Kt.format<uint>(), b2dK.set_block_y(kv_offset_y));
+        #else
+            matrix<uint, REG_N, REG_K/2> temp;
+            uint cur_kv_offset = kv_offset + kv_offset_y * kv_stride + k * 2;// uint --> half
+            #pragma unroll
+            for(int kk = 0; kk < REG_N; kk++) {
+                cm_svm_block_read<uint, REG_K/2>((svmptr_t)(key + cur_kv_offset + kk * kv_stride), temp[kk].format<uint>());
+            }
+            Transpose_8x8(temp.select<8,1,8,1>(0,0), Kt.format<uint, REG_K/2, REG_N>().select<8,1,8,1>(0,0));
+            Transpose_8x8(temp.select<8,1,8,1>(8,0), Kt.format<uint, REG_K/2, REG_N>().select<8,1,8,1>(0,8));
+        #endif
 
             rSvec = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                         rSvec,
@@ -690,14 +772,28 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //# rO = P * V
     matrix <float, head_size/REG_K, REG_M*REG_N> Omat = 0;
     for(int kv_pos = 0, ki = 0; kv_pos < kv_split_len; kv_pos += kv_step, ki++) {
-        uint kv_offset = wg_thread_id * kv_split_len + kv_pos;
+        uint kv_offset_y = wg_thread_id * kv_split_len + kv_pos;
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size; k += REG_K, ri ++ ) {
             // Load V into register & pack as VNNI(as dpas-B tile)
             matrix<half, REG_M, REG_K*REG_N> Vmat;
+        #if USE_LSC_BLOCK_2D_DESC
             b2dV.set_block_x(k);
-            cm_load<lsc::VNNI>(Vmat[0].format<half>(), b2dV.set_block_y(kv_offset));
-
+            cm_load<lsc::VNNI>(Vmat[0].format<half>(), b2dV.set_block_y(kv_offset_y));
+        #else
+            matrix<half, REG_K, REG_N> temp;
+            uint cur_kv_offset = kv_offset + kv_offset_y * kv_stride + k;
+            #pragma unroll
+            for(int kk = 0; kk < REG_K; kk++) {
+                cm_svm_block_read<half, REG_N>((svmptr_t)(value + cur_kv_offset + kk * kv_stride), temp[kk].format<half>());
+            }
+            auto Vref = Vmat[0].format<half, REG_K/2, 2*REG_N>();
+            Vref.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp.select<REG_K/2, 2, REG_N, 1>(0, 0);
+            Vref.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp.select<REG_K/2, 2, REG_N, 1>(1, 0);
+        #endif
+            //if(wg_thread_id==0){
+            //    show(Vmat[0].format<half, REG_K, REG_N>());
+            //}
             Omat[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                         Omat[ri],
                         Vmat[0].format<int32_t>(),
