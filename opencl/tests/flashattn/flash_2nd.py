@@ -736,13 +736,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
 
         // load input, total_split_num = head_nums * split_num;
         matrix<half, 1, kv_split_data_size> out_mat = 0;
-        matrix<half, split_num, kv_split_data_size> data_mat;
+        matrix<half, 1, kv_split_data_size> data_mat;
         uint input_offset = batch * total_split_num * head_size + head * split_num * head_size + offset;
         #pragma unroll
         for(int k = 0; k < split_num; k ++) {
-            cm_svm_block_read<half, kv_split_data_size>((svmptr_t)(input + input_offset), data_mat[k].format<half>());
+            cm_svm_block_read<half, kv_split_data_size>((svmptr_t)(input + input_offset), data_mat.format<half>());
             input_offset += head_size;
-            out_mat += cm_mul<half>(data_mat[k], (float)(lse_vec[k]/total_lse));
+            out_mat += cm_mul<half>(data_mat, (float)(lse_vec[k]/total_lse));
         }
 
         // write output
