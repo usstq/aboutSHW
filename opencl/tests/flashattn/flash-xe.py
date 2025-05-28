@@ -85,8 +85,7 @@ if causal_mask:
     print(attention_mask[0,0,:10, :10])
 else:
     attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0    
-
-#attention_mask[...] = 0
+    attention_mask[...] = 0
 
 # BLHS=>BHLS
 q = q.transpose(1,2)
@@ -283,9 +282,16 @@ scale_factor = 1.0/(head_size**0.5)
 
 # adjacent query-heads may share same KV-heads
 # dispatch them together can help increase cache-usage
-q_threads = q_len//(q_step) if xe_version > 1 else q_len//(2*q_step)
+WG_SIZE = 16
+q_group_size = WG_SIZE * q_step
+def divide_round_up(numerator, denominator):
+    return (numerator + denominator - 1)//denominator * denominator
+q_threads = divide_round_up(q_len, q_group_size) // q_step
+if (q_threads < WG_SIZE): q_threads = WG_SIZE
+
 GWS=[batch, num_heads, q_threads]
-WG_SIZE = min(GWS[-1], 16 if xe_version == 1 else 8)
+#WG_SIZE = min(GWS[-1], 16 if xe_version == 1 else 8)
+
 LWS=[1, 1, WG_SIZE]
 
 dim_batch = 0
@@ -306,7 +312,7 @@ if False:
 
 print("GWS=", GWS)
 print("LWS=", LWS)
-print(f"total HW threads: {batch} x {num_heads} x {q_len//q_step} = {batch * num_heads * (q_len//q_step)}")
+print(f"total HW threads: {batch} x {num_heads} x {q_threads} = {batch * num_heads * q_threads}")
 #========================================================================
 # Optimization Log
 r'''
@@ -390,7 +396,7 @@ src1 = cl.CMTracer.code + r'''
 
 #pyeval f"#define causal_mask {causal_mask}"
 
-#include "cm_dpas_xe.hpp"
+#include "cm_sdpa_xe.hpp"
 '''
 
 cl.profiling(True)
@@ -401,29 +407,24 @@ t_v = cl.tensor(v.detach().numpy())
 t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
 t_cminfo = cl.tensor([GWS[0]*GWS[1]*GWS[2]//WG_SIZE, 3], np.dtype(np.uint64))
 
-if causal_mask:
-    # build a [q_step, 2*kv_step] causal mask
-    c_mask = torch.full([3*kv_step, q_step], torch.finfo(act_dtype).min).to(dtype=act_dtype)
-    for i in range(q_step):
-        c_mask[0:(kv_step + i + 1), i] = 0
-    t_mask = cl.tensor(c_mask.detach().numpy())
-else:
-    t_mask = cl.tensor(attention_mask.detach().numpy())
-
 # f"-cmc -mdump_asm -g2 "
 cwd = os.path.dirname(os.path.realpath(__file__))
 print(f"compiling {cwd} ...")
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -I{cwd} -mdump_asm -g2")
 print("first call ...")
 
-
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, 0, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_cminfo)
-
+cm_kernels.enqueue("cm_sdpa", GWS, LWS, 0, q_len, kv_len, t_q, t_k, t_v, t_out, t_cminfo)
 f1 = torch.from_numpy(t_out.numpy())
+
+if args.verbose >= 0:
+    check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
+    print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
+    sys.exit(0)
+
 
 all_layers = []
 mem_size = 0
-while len(all_layers) < 100 and mem_size < 8e9:
+while len(all_layers) < 100 and mem_size < 4e9:
     all_layers.append([
         cl.tensor(q.detach().numpy()),
         cl.tensor(k.detach().numpy()),
@@ -443,7 +444,6 @@ for i in range(100):
                     all_layers[j][1],
                     all_layers[j][2],
                     all_layers[j][3],
-                    t_mask,
                     t_cminfo)
 latency = cl.finish()
 for i,ns in enumerate(latency):

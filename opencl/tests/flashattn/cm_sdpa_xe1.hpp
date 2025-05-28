@@ -199,9 +199,8 @@ void row_kernel(
         //show(cur_sum.format<float, 1, REG_N>());
 
         // [2*REG_M, REG_N] => [REG_M, REG_K = REG_N + REG_N]
-        matrix<half, REG_N, REG_K> P; // REG_K = REG_N + REG_N
-        Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(0,0), P.select<REG_M, 1, REG_N, 1>(0,0));
-        Transpose_8x8(St.select<REG_M, 1, REG_N, 1>(REG_M,0), P.select<REG_M, 1, REG_N, 1>(0,REG_N));
+        matrix<half, REG_N, REG_K> P;
+        Transpose2DMatrix(St, P);
 
         //show(P);return;
 
@@ -325,6 +324,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             mask_base);
     }
 
+#if 0
     {
         auto q_start = (q_len - q_group_id * local_size * q_step) - (local_size * q_step) + local_id*q_step;
         auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
@@ -355,6 +355,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             o_base,
             mask_base);
     }
-
+#endif
     CMTracer_end(&cminfo);
 }
