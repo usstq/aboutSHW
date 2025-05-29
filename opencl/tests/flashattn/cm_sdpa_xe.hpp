@@ -68,48 +68,78 @@ void sdpa_kernel(
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
             k_base += kv_step * kv_pitch,
             v_base += kv_step * kv_pitch) {
-        // if (args_verbose >= 0) printf("======== %d =========\n", kv_pos);
-        //===========================================================
         //# load K into SLM as dpas-A tile (shared by all hw within same WG)
         //# load V into SLM as dpas-B tile (shared by all hw within same WG)
         {
             int kv_tokens = kv_stop - kv_pos;
-            //# 1849 ~ 3259
-            vector<uint, 2*REG_M> kv_offsets = 0;
-            #pragma unroll
-            for(int i = 0; i < kv_step; i++) {
-                kv_offsets[i] = (i < kv_tokens) ? (i * kv_pitch):0;
-            }
-            if (kv_pos > 0) cm_barrier();
-
-            if (wg_local_id < local_size/2) {
-                matrix<half, 2*REG_M, REG_K> temp;
+            if (kv_tokens < kv_step) {
+                // handle tails in kv-len
+                vector<uint, 2*REG_M> kv_offsets = 0;
                 #pragma unroll
-                for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                    svm_read_2d(temp, k_base + k*sizeof(half), kv_offsets);
-                    cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
+                for(int i = 0; i < kv_step; i++) {
+                    kv_offsets[i] = (i < kv_tokens) * i * kv_pitch;
+                }
+
+                if (kv_pos > 0) cm_barrier();
+                if (wg_local_id < local_size/2) {
+                    matrix<half, 2*REG_M, REG_K> temp;
+                    #pragma unroll
+                    for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
+                        svm_read_2d(temp, k_base + k*sizeof(half), kv_offsets);
+                        cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
+                    }
+                } else {
+                    // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
+                    constexpr int VK_STEP = 16;
+                    static_assert((VK_STEP % REG_N) == 0);
+                    matrix<half, REG_K, VK_STEP> temp2;
+                    matrix<half, REG_K/2, REG_N*2> temp_vnni;
+                    //b2dV.set_block_y(kv_pos);
+
+                    static_assert((head_size % VK_STEP) == 0);
+                    #pragma unroll
+                    for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
+                        svm_read_2d(temp2, v_base + k*sizeof(half), kv_offsets);
+
+                        #pragma unroll
+                        for(int p = 0; p < VK_STEP/REG_N; p++) {
+                            temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
+                            temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
+                            // show(temp_vnni);
+                            cm_slm_block_write(slm_V, (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
+                        }
+                    }
                 }
             } else {
-                // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
-                constexpr int VK_STEP = 16;
-                static_assert((VK_STEP % REG_N) == 0);
-                matrix<half, REG_K, VK_STEP> temp2;
-                matrix<half, REG_K/2, REG_N*2> temp_vnni;
-                //b2dV.set_block_y(kv_pos);
-
-                static_assert((head_size % VK_STEP) == 0);
-                #pragma unroll
-                for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
-                    //cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
-                    //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
-                    svm_read_2d(temp2, v_base + k*sizeof(half), kv_offsets);
-
+                // non-tail branch is faster
+                if (kv_pos > 0) cm_barrier();
+                if (wg_local_id < local_size/2) {
+                    matrix<half, 2*REG_M, REG_K> temp;
                     #pragma unroll
-                    for(int p = 0; p < VK_STEP/REG_N; p++) {
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
-                        // show(temp_vnni);
-                        cm_slm_block_write(slm_V, (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
+                    for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
+                        svm_read_2d(temp, k_base + k*sizeof(half), kv_pitch);
+                        cm_slm_block_write(slm_K, k * 2 * REG_M * sizeof(half), temp.format<half>());
+                    }
+                } else {
+                    // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
+                    constexpr int VK_STEP = 16;
+                    static_assert((VK_STEP % REG_N) == 0);
+                    matrix<half, REG_K, VK_STEP> temp2;
+                    matrix<half, REG_K/2, REG_N*2> temp_vnni;
+                    //b2dV.set_block_y(kv_pos);
+
+                    static_assert((head_size % VK_STEP) == 0);
+                    #pragma unroll
+                    for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
+                        svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
+
+                        #pragma unroll
+                        for(int p = 0; p < VK_STEP/REG_N; p++) {
+                            temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
+                            temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
+                            // show(temp_vnni);
+                            cm_slm_block_write(slm_V, (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
+                        }
                     }
                 }
             }
