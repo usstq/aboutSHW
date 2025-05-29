@@ -32,14 +32,24 @@ def vprint(*all_args):
 
 batch = args.batch
 q_len, q_step = args.q_len, 16
-kv_len, kv_step = args.kv_len, 16
+kv_len, kv_step = args.kv_len, 8
 num_heads = args.num_heads
 num_kv_heads = args.num_kv_heads
 head_size = args.head_size
 enable_gqa = num_heads > num_kv_heads
 
-# sdpa split size, must be multiple of kv_step and kv_len should be multiple of kv_split_len
-kv_split_len = 32
+#xe_arch: 1: xe, 2: xe2
+xe_arch=2
+
+if xe_arch == 1:
+    kv_step = 8
+    # sdpa split size, must be multiple of kv_step and kv_len should be multiple of kv_split_len
+    kv_split_len = 32
+else:
+    kv_step = 16
+    # sdpa split size, must be multiple of kv_step and kv_len should be multiple of kv_split_len
+    kv_split_len = 32
+
 # dpas number for each split_len
 split_block_num = kv_split_len // kv_step
 
@@ -49,8 +59,8 @@ split_num = kv_len // kv_split_len
 total_split_num = split_num * num_heads
 # lse_num = batch * split_num
 
-#q_len, q_step = 160, 16
-#kv_len, kv_step = 800, 16
+assert((kv_len//kv_split_len)%(kv_split_len//kv_step)==0)
+
 low = -7
 high = 8
 act_dtype = torch.float16
@@ -63,7 +73,7 @@ v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=
 #     for j in range(kv_len):
 #         for kk in range(num_kv_heads):
 #             for h in range(head_size):
-#                 k[i][j][kk][h] = (h + j*head_size)/100.0
+#                 v[i][j][kk][h] = (h + j*head_size)/100.0
 
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
@@ -122,117 +132,6 @@ check_close(ref, org, atol=1e-3, rtol=1e-2)
 
 # [batch, seq-len, heads, size] BLHS
 print("ref:", ref.shape, ref.dtype)
-
-# blocking on kv-len dimension with online-softmax
-# transpose Q@Kt to K@Qt
-def get_flash0(query, key, value, attention_mask):
-    global enable_vprint
-    B,H,q_len,hs = query.shape
-    _,Hkv,kv_len,_ = key.shape
-    out = torch.zeros([B,H,q_len,hs], dtype=value.dtype)
-    scale_factor = hs**(-0.5)
-    for b in range(B):
-        for h in range(H):
-            hkv = h // (H//Hkv)
-            Q = query[b, h, :, :]
-            K = key[b, hkv, :, :]
-            V = value[b, hkv, :, :]
-            mask = attention_mask[b,0,:,:]
-
-            # loop one time
-            # q_len == 1, q_step == 1
-            for i in range(0, q_len, q_step):
-                i1 = min(i + q_step, q_len)
-                # online softmax states:
-                #     per-row max-value     : [q_step, 1]
-                #     per-row sum           : [q_step, 1]
-                #     current accumulated V : [q_step, S]
-                #cur_max = torch.full([i1-i, 1], torch.finfo(torch.float32).min, dtype=torch.float32)
-                #cur_sum = torch.full([i1-i, 1], 0, dtype=torch.float32)
-                #cur_O = torch.full([i1-i, hs], 0, dtype=torch.float32)
-
-                # we prefer transposed S since:
-                #   1. per-column max/sum is easier than per-row in register, 
-                #   2. loop in K direction is inner-most, so load K in noraml
-                #      instead of VNNI is faster, load Q in transpose-VNNI is 
-                #      done only once at loop begin.
-                #   3. 
-                rQt = Q[i:i1, :].transpose(0,1)  # sub Q block only transposed & VNNI packed once
-
-                cur_O=torch.full([kv_len//kv_step, 1, hs], 0, dtype=torch.float32)
-                max_comp_0=torch.full([kv_len//kv_step], 1, dtype=torch.float32)
-                for j in range(0, kv_len, kv_step):
-                    j1 = min(j + kv_step, kv_len)
-
-                    if (j == args.verbose): enable_vprint = True
-                    # compute in local SRAM
-                    # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
-                    rK = K[j:j1,:] #[16,128]
-                    St = (rK @ rQt).to(dtype=torch.float32) #[16,1]
-                    MaskT = mask[i:i1, j:j1].transpose(0,1) #[16,1]
-
-                    vprint("rK=", rK.shape)
-                    vprint("rQt=",rQt.shape)
-                    vprint("St=",St.shape)
-                    vprint("MaskT=",MaskT.shape)
-
-                    St *= scale_factor
-                    St += mask[i:i1, j:j1].transpose(0,1)
-                    vprint("St=",St.shape)
-
-                    rowmax = St.max(0, keepdim=True).values # [1,1]
-                    if j == 0:
-                        cur_max = rowmax
-                    else:
-                        rowmax = torch.maximum(cur_max, rowmax)
-                    vprint("rowmax=", rowmax.shape)
-
-                    # compute in local SRAM
-                    St = torch.exp(St - rowmax) # [16,1]
-                    vprint("St(Pt)=", St.shape)
-
-                    rowsumP = St.sum(0, keepdim=True) # [1,1]
-                    vprint("rowsumP=", rowsumP.shape)
-
-                    # corrected sum of previous block
-                    if j > 0:
-                        max_comp = torch.exp(cur_max - rowmax)
-                        max_comp_0[j//kv_step] = max_comp
-
-                    if j == 0:
-                        cur_sum = rowsumP
-                    else:
-                        cur_sum = cur_sum * max_comp + rowsumP
-
-                    # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
-                    # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
-                    partial_attn_weight = St.to(dtype=torch.float16).transpose(0,1) # [1,16]
-                    
-                    vprint("P=", partial_attn_weight.shape)
-
-                    rV = V[j:j1, :] # [16,128]
-                    vprint("rV=",rV.shape)
-
-                    # correct last Output to current statistics
-                    cur_O[j//kv_step,:,:] = partial_attn_weight @ rV # [:,1,128]
-                    vprint("cur_O2=", cur_O.shape)
-
-                    cur_max = rowmax
-                    if (j == args.verbose): assert 0
-
-                cur_O_f32 = cur_O[0,:,:]
-                for j in range(1, kv_len//kv_step):
-                    cur_O_f32 = cur_O_f32 *  max_comp_0[j] + cur_O[j,:,:]
-                vprint("cur_O_f32=", cur_O_f32.shape)
-                cur_O_f16 = (cur_O_f32/cur_sum.transpose(0, 1)).to(torch.float16)
-
-                if (i == args.verbose):
-                    enable_vprint = True
-                    vprint("cur_O_f16=", cur_O_f16.shape, cur_O_f16)
-                    assert 0
-
-                out[b, h, i:i1, :] = cur_O_f16
-    return out
 
 # blocking on kv-len dimension with online-softmax
 # Softmax(Q@Kt)@V
@@ -394,8 +293,8 @@ def get_flash2(query, key, value, attention_mask):
                     vprint("rMask=",rMask)
 
                     rS *= scale_factor
+                    vprint("rS * scale_factor =",rS)
                     rS += rMask
-                    vprint("rS=",rS)
 
                     cur_lse += torch.exp(rS).sum(1, keepdim=True).item() # [1,1]
                     vprint("rS=", rS)
@@ -409,9 +308,11 @@ def get_flash2(query, key, value, attention_mask):
                         rowmax = torch.maximum(cur_max, rowmax)
                     vprint("rowmax=", rowmax.shape)
 
+                    print("rS=", rS)
                     # compute in local SRAM
                     rS = torch.exp(rS - rowmax) # [1,16]
-                    vprint("St(Pt)=", rS)
+                    print("rowmax = ", rowmax)
+                    print("St(Pt)=", rS)
 
                     rowsumP = rS.sum(1, keepdim=True) # [1,1]
                     vprint("rowsumP=", rowsumP)
@@ -441,8 +342,8 @@ def get_flash2(query, key, value, attention_mask):
                     else:
                         cur_O[i//kv_split_len,:,:] = cur_O[i//kv_split_len,:,:] * max_comp;
                         cur_O[i//kv_split_len,:,:] += partial_attn_weight @ rV # [:,1,128]
-                    vprint("j = ", j)
-                    vprint("cur_O2=",  cur_O[i//kv_split_len,:,:])
+                    print("j = ", j)
+                    print("cur_O2=",  cur_O[i//kv_split_len,:,:])
 
                     cur_max = rowmax
                     if (j == args.verbose): assert 0
@@ -457,7 +358,7 @@ def get_flash2(query, key, value, attention_mask):
                 for j in range(0, hs, kv_step):
                     stop = min(j + kv_step, hs)
                     print("i=", i, ", j = ", j, ": cur_O[i,:,:]=", cur_O[i,0,j:stop])
-            vprint("lse=", lse)
+            print("lse=", lse)
             # print("lse=", lse.shape) # [4]
             sum_lse = lse.sum(0)
             # print("cur_O=", cur_O.shape) # 
@@ -471,11 +372,124 @@ def get_flash2(query, key, value, attention_mask):
             # print("cur_O_f16=", cur_O_f16.shape) #
             # print("out=", out.shape) #
     #print("out = ", out[0,0,0,:])
-    print("out = ", out)
+    #print("out = ", out)
+    return out
+
+# Split KV online-softmax
+def get_flash3(query, key, value, attention_mask):
+    global enable_vprint
+    B,H,q_len,hs = query.shape
+    _,Hkv,kv_len,_ = key.shape
+    out = torch.zeros([B,H,q_len,hs], dtype=value.dtype)
+    scale_factor = hs**(-0.5)
+    for b in range(B):
+        for h in range(H):
+            hkv = h // (H//Hkv)
+            Q = query[b, h, :, :]
+            K = key[b, hkv, :, :]
+            V = value[b, hkv, :, :]
+            mask = attention_mask[b,0,:,:]
+
+            # loop kv_split
+            cur_O=torch.full([kv_len//kv_split_len, 1, hs], 0, dtype=torch.float32)
+            cur_O_f32=torch.full([1, hs], 0, dtype=torch.float32)
+            cur_O_f16=torch.full([1, hs], 0, dtype=torch.float16)
+            lse=torch.full([kv_len//kv_split_len], 0, dtype=torch.float32)
+            for i in range(0, kv_len, kv_split_len):
+                i1 = min(i + kv_split_len, kv_len)
+                # online softmax states:
+                #     per-row max-value     : [1, 1]
+                #     per-row sum           : [1, 1]
+                #     current accumulated V : [1, S]
+                #cur_max = torch.full([i1-i, 1], torch.finfo(torch.float32).min, dtype=torch.float32)
+                #cur_sum = torch.full([i1-i, 1], 0, dtype=torch.float32)
+                #cur_O = torch.full([i1-i, hs], 0, dtype=torch.float32)
+ 
+                rQ = Q[0, :].reshape(1,hs) # [1,128] sub Q block VNNI packed
+                vprint("rQ = ", rQ)
+                vprint("mask = ", mask)
+
+                cur_lse = 0.0
+                cur_sum = 0.0
+                for j in range(i, i1, kv_split_len):
+                    j1 = min(j + kv_split_len, kv_len)
+
+                    if (j == args.verbose): enable_vprint = True
+                    # compute in local SRAM
+                    # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
+                    rKt = K[j:j1,:].transpose(0,1) #[16,128]->[128,16]
+                    rS = (rQ @ rKt).to(dtype=torch.float32).reshape(1,kv_split_len) #[1,16]
+                    rMask = mask[0:1, j:j1] #[1,16]
+
+                    vprint("rK=", rKt)
+                    vprint("rQt=",rQ)
+                    vprint("rS=",rS)
+                    vprint("rMask=",rMask)
+
+                    rS *= scale_factor
+                    vprint("rS * scale_factor =",rS)
+                    rS += rMask
+
+                    cur_lse += torch.exp(rS).sum(1, keepdim=True).item() # [1,1]
+                    vprint("rS=", rS)
+                    vprint("exp(rS)=", torch.exp(rS))
+                    vprint("cur_lse=", cur_lse)
+
+                    rowmax = rS.max(1, keepdim=True).values # [1,1]
+
+                    # compute in local SRAM
+                    rS = torch.exp(rS - rowmax) # [1,16]
+                    vprint("rowmax = ", rowmax)
+                    vprint("St(Pt)=", rS)
+
+                    rowsumP = rS.sum(1, keepdim=True) # [1,1]
+                    vprint("rowsumP=", rowsumP)
+
+                    # corrected sum of previous block
+                    cur_sum = rowsumP
+
+                    # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
+                    # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
+                    partial_attn_weight = rS.to(dtype=torch.float16) # [1,16]
+                    
+                    vprint("P=", partial_attn_weight)
+
+                    rV = V[j:j1, :] # [16,128]
+                    vprint("rV=",rV)
+
+                    # correct last Output to current statistics
+                    cur_O[i//kv_split_len,:,:] = partial_attn_weight @ rV
+                    vprint("cur_O2=",  cur_O[i//kv_split_len,:,:])
+
+                lse[i//kv_split_len] = cur_lse
+                cur_O[i//kv_split_len,:,:] = cur_O[i//kv_split_len,:,:] / cur_sum
+                vprint("cur_sum=", cur_sum.shape)
+                vprint("cur_O=",  cur_O[i//kv_split_len,:,:])
+
+            # reduce
+            # for i in range(0, kv_len//kv_split_len, 1):
+            #     for j in range(0, hs, kv_step):
+            #         stop = min(j + kv_step, hs)
+            #         print("i=", i, ", j = ", j, ": cur_O[i,:,:]=", cur_O[i,0,j:stop])
+            # print("lse=", lse)
+            # print("lse=", lse.shape) # [4]
+            sum_lse = lse.sum(0)
+            # print("cur_O=", cur_O.shape) # 
+            # print("cur_O_f32=", cur_O_f32.shape) #
+            vprint("lse = ", lse)
+            vprint("sum_lse = ", sum_lse)
+            for i in range(0, kv_len//kv_split_len, 1):
+                cur_O_f32 += cur_O[i,:,:] * lse[i] / sum_lse
+            cur_O_f16 = cur_O_f32.to(torch.float16)
+            out[b, h, :, :] = cur_O_f16
+            # print("cur_O_f16=", cur_O_f16.shape) #
+            # print("out=", out.shape) #
+    #print("out = ", out[0,0,0,:])
+    #print("out = ", out)
     return out
 
 if args.impl == 0:
-    f0 = get_flash2(q,k,v,attention_mask)
+    f0 = get_flash3(q,k,v,attention_mask)
     check_close(org, f0, atol=1e-2, rtol=1e-3)
     print("=========== PASS ===========")
     sys.exit(0)
@@ -549,28 +563,36 @@ src1 = r'''
 #pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
 #pyeval f"#define WG_SIZE {WG_SIZE}"
+
 #pyeval f"#define kv_split_len {kv_split_len}"
 #pyeval f"#define kv_split_data_size {kv_split_data_size}"
-
 #pyeval f"#define split_num {split_num}"
 #pyeval f"#define split_block_num {split_block_num}"
 
 #pyeval f"#define total_split_num {total_split_num}"
+
+// xe-1:8, xe-2:16
+#pyeval f"#define xe_arch {xe_arch}"
+
+#if xe_arch==1
+#define REG_N 8
+#define USE_LSC_BLOCK_2D_DESC 0
+#else
+#define REG_N 16
+#define USE_LSC_BLOCK_2D_DESC 0
+#endif
 
 #define SystolicDepth 8
 #define RepeatCount 1
 #define VNNI_WIDTH 2
 #define REG_K (SystolicDepth * VNNI_WIDTH)
 #define REG_M RepeatCount
-#define REG_N 16
-
-#define USE_LSC_BLOCK_2D_DESC 0
 
 #define PRINT_THR_ID 1000
 #define PRINT_HEAD_ID 1000
 
 // static_assert(q_step == 16);
-static_assert(kv_step == 16);
+static_assert(kv_step == 8 || kv_step == 16);
 
 template<typename T, int M, int N>
 void show(const matrix<T, M, N> mat) {
@@ -671,7 +693,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     auto wg_local_id = cm_local_id(2);
 
     //# kv_split_len --> EU thread
-    // auto wg_thread_id = (cm_group_id(2) * WG_SIZE + wg_local_id);
     auto wg_thread_id = cm_global_id(2);
     auto o_start = wg_thread_id * head_size;
 
@@ -726,8 +747,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             for(int kk = 0; kk < REG_N; kk++) {
                 cm_svm_block_read<uint, REG_K/2>((svmptr_t)(key + cur_kv_offset + kk * kv_stride), temp[kk].format<uint>());
             }
+            #if xe_arch==1
+            Transpose_8x8(temp.select<8,1,8,1>(0,0), Kt.format<uint, REG_K/2, REG_N>().select<8,1,8,1>(0,0));
+            #else
             Transpose_8x8(temp.select<8,1,8,1>(0,0), Kt.format<uint, REG_K/2, REG_N>().select<8,1,8,1>(0,0));
             Transpose_8x8(temp.select<8,1,8,1>(8,0), Kt.format<uint, REG_K/2, REG_N>().select<8,1,8,1>(0,8));
+            #endif
         #endif
 
             rSvec = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
@@ -740,7 +765,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     // online softmax
     float cur_sum = 0.0f;
     float cur_lse = 0.0f;
+    #if xe_arch==1
+    matrix<half, split_block_num / 2 * REG_M, REG_K> Pmat = 0;
+    #else
     matrix<half, split_block_num * REG_M, REG_K> Pmat = 0;
+    #endif
     {
         //# Load Mask into register
         matrix<half, REG_M * split_block_num, REG_N> MaskMat;
@@ -762,19 +791,28 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             row_max = cm_max<float>(row_max, rSv[r]);
 
         // compute P = exp(rS - row_max)
+        #if xe_arch==1
+        Pmat= cm_exp((rS.format<float, split_block_num / 2 * REG_M, REG_K>() - row_max)*log2e);
+        #else
         Pmat= cm_exp((rS - row_max)*log2e);
+        #endif
 
         // compute row sum of P
         auto rPv = Pmat.format<half, 1, split_block_num * REG_N>();
         cur_sum = cm_sum<float>(rPv[0]);
     }
 
+    //if(wg_thread_id==1) {
+    //    printf("Pmat:\n");
+    //    show(Pmat);
+    //}
+
     //# rO = P * V
-    matrix <float, head_size/REG_K, REG_M*REG_N> Omat = 0;
-    for(int kv_pos = 0, ki = 0; kv_pos < kv_split_len; kv_pos += kv_step, ki++) {
+    matrix <float, head_size/REG_N, REG_M*REG_N> Omat = 0;
+    for(int kv_pos = 0, ki = 0; kv_pos < kv_split_len; kv_pos += REG_K, ki++) {
         uint kv_offset_y = wg_thread_id * kv_split_len + kv_pos;
         #pragma unroll
-        for(int k = 0, ri = 0; k < head_size; k += REG_K, ri ++ ) {
+        for(int k = 0, ri = 0; k < head_size; k += REG_N, ri ++ ) {
             // Load V into register & pack as VNNI(as dpas-B tile)
             matrix<half, REG_M, REG_K*REG_N> Vmat;
         #if USE_LSC_BLOCK_2D_DESC
@@ -787,13 +825,16 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             for(int kk = 0; kk < REG_K; kk++) {
                 cm_svm_block_read<half, REG_N>((svmptr_t)(value + cur_kv_offset + kk * kv_stride), temp[kk].format<half>());
             }
+            #if xe_arch==1
             auto Vref = Vmat[0].format<half, REG_K/2, 2*REG_N>();
             Vref.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp.select<REG_K/2, 2, REG_N, 1>(0, 0);
             Vref.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp.select<REG_K/2, 2, REG_N, 1>(1, 0);
+            #else
+            auto Vref = Vmat[0].format<half, REG_K/2, 2*REG_N>();
+            Vref.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp.select<REG_K/2, 2, REG_N, 1>(0, 0);
+            Vref.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp.select<REG_K/2, 2, REG_N, 1>(1, 0);
+            #endif
         #endif
-            //if(wg_thread_id==0){
-            //    show(Vmat[0].format<half, REG_K, REG_N>());
-            //}
             Omat[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                         Omat[ri],
                         Vmat[0].format<int32_t>(),
@@ -801,13 +842,23 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         }
     }
     
+    //if(wg_thread_id==0) {
+    //    printf("Omat:\n");
+    //    show(Omat);
+    //}
+
     //# save Output
     matrix<half, REG_M, REG_N> cur_O_f16;
     uint o_offset = batch * split_num * num_heads * head_size + split_num * h * head_size + wg_thread_id * head_size;
+    float div_cur_sum = 1.0/cur_sum;
     #pragma unroll
-    for(int k = 0, ri=0; k < head_size; k += REG_K, ri++) {
+    for(int k = 0, ri=0; k < head_size; k += REG_N, ri++) {
         auto cO = Omat[ri].format<float, REG_M, REG_N>();
+        #if xe_arch==1
+        cur_O_f16= cm_mul<float>(cO, div_cur_sum);
+        #else
         cur_O_f16= cm_div_ieee(cO, cur_sum);
+        #endif
         cm_svm_block_write<half, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f16.format<half>());
     }
     uint lse_offset = batch * num_heads * split_num + h * split_num + wg_thread_id;
@@ -864,7 +915,7 @@ print("first call ...")
 cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_lse)
 
 f0 = torch.from_numpy(t_out.numpy())
-print("f0 = ", f0.shape, f0.dtype)
+# print("f0 = ", f0.shape, f0.dtype)
 # for i in range(num_heads):
 #     for j in range(split_num):
 #         for k in range(0, head_size, kv_step):
