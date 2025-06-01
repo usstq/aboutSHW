@@ -67,7 +67,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]],
-    half* mask [[type("svmptr_t")]],
     __global uint64_t* cminfo [[type("svmptr_t")]]
     ) {
     //CMTracer_begin(&cminfo);
@@ -100,9 +99,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto q_start = (q_group_id * local_size + wg_local_id) * q_step;
     auto q_offset = wg_local_id * q_step * head_size * sizeof(half);
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
-
-    //# debugging stage
-    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
 
     //# b2dQ reinterpret as 32bit(DWORD) for transposed load(combined with VNNI)
     uint qo_pitch = num_heads * head_size * sizeof(half);
@@ -238,6 +234,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         //show(St);
         //=========================================================== 361
         if constexpr (causal_mask) {
+            /*
             auto cmask_off = kv_step - causal_left;
             St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
             if (cmask_off > 0) {
@@ -248,18 +245,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                 St = cm_add<float>(St, temp);
             }
             causal_left -= kv_step;
+            */
         } else {
-            matrix<half, 2, REG_M * REG_N> Maskmat;
-            b2dMask.set_block_x(kv_pos);
-            cm_load_normal(Maskmat[0].format<half>(), b2dMask.set_block_y(q_start));
-            cm_load_normal(Maskmat[1].format<half>(), b2dMask.set_block_y(q_start + REG_M));
-
-            matrix<float, 2*REG_M, REG_N> MaskT;
-            Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
-
-            //show(Maskmat);
             St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
-            St = cm_add<float>(St, MaskT);
         }
 
         //show(St);

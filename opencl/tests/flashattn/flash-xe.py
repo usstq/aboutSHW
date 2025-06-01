@@ -68,11 +68,11 @@ causal_mask = int(args.causal_mask)
 
 #q_len, q_step = 160, 16
 #kv_len, kv_step = 800, 16
-low = -7
-high = 8
+low = -1
+high = 2
 act_dtype = torch.float16
-q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
-k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)
+k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)
 v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
 # random attnmask
@@ -84,7 +84,7 @@ if causal_mask:
         attention_mask[:, :, i, 0:(kv_len - q_len + i + 1)] = 0
     print(attention_mask[0,0,:10, :10])
 else:
-    attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0    
+    attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
     attention_mask[...] = 0
 
 # BLHS=>BHLS
