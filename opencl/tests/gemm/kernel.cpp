@@ -49,6 +49,18 @@ _GENX_MAIN_ void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATT
         x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }
 
-_GENX_MAIN_ void repack_f16(int K, int N, half* src ATTR, half* dst ATTR) {
-    repack_f16<x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N, x::BLOCK_WG_K>(K, N, src, dst);
+_GENX_MAIN_ void repack_f16(half* src ATTR, half* dst ATTR, int K, int N) {
+    repack_f16<x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N, x::BLOCK_WG_K>(src, dst, K, N);
+}
+
+_GENX_MAIN_ void gemm_nocopy(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+    const uint BLOCK_WG_M = v2::BLOCK_SG_M * v2::SG_M;
+    const uint BLOCK_WG_N = v2::BLOCK_SG_N * v2::SG_N;
+    const uint size_slm_a = 0;
+    const uint size_slm_b = v2::BLOCK_WG_K * BLOCK_WG_N * sizeof(half);
+    cm_slm_init(size_slm_a + size_slm_b);
+    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+
+    gemm_64x16_no_slmb<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        v2::SG_SIZE, v2::BLOCK_SG_M, v2::BLOCK_SG_N, v2::SG_M, v2::SG_N>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }

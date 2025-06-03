@@ -24,8 +24,12 @@
 
 #if defined(SHIM) || defined(CMRT_EMU)
 #define ATTR
+#define ATTR_BUF
+#define CM_LOCAL_BARRIER 0x20
+
 #else
 #define ATTR [[type("svmptr_t")]]
+#define ATTR_BUF [[type("buffer_t")]]
 #endif
 
 template <typename T1, typename T2>
@@ -67,6 +71,14 @@ CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, svmptr_t base, uint pitch) {
 #pragma unroll
     for (int i = 0; i < out.n_rows(); i++, base += pitch) {
         cm_ptr_block_write((TSRC*)base, out.row(i));
+    }
+}
+
+template <typename TSRC, int M, int N>
+CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+#pragma unroll
+    for (int i = 0; i < out.n_rows(); i++, offset += pitch) {
+        cm_store(base, offset, out.row(i).format<int>());
     }
 }
 
@@ -285,7 +297,7 @@ template<
     int SG_N = 8,
     int BLOCK_WG_K = 64
 >
-void repack_f16(int K, int N, half* src, half* dst) {
+void repack_f16(half* src, half* dst, int K, int N) {
     const int DEPTH = 8;
     const int BLOCK_REG_M = 8;
     const int BLOCK_REG_N = SG_SIZE;
@@ -338,5 +350,247 @@ void repack_f16(int K, int N, half* src, half* dst) {
                 }
             }
         }
+    }
+}
+
+template<
+    typename TYPE_SRC = half,
+    typename TYPE_ACC = float,
+    typename TYPE_DST = half,
+    CmPrecisionType A_TYPE_PREC = CM_PRECISION_HF,
+    CmPrecisionType B_TYPE_PREC = CM_PRECISION_HF,
+    int SG_SIZE = 8,
+    // subgroup blocking
+    int BLOCK_SG_M = 64,
+    int BLOCK_SG_N = 16,
+    int SG_M = 2,
+    int SG_N = 16,
+    int BLOCK_WG_K = 64
+>
+CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+    // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
+    static constexpr int REPEAT = 8;
+    static constexpr int DEPTH = 8;
+    static constexpr int BLOCK_REG_M = REPEAT;
+    static constexpr int BLOCK_REG_N = SG_SIZE;
+    static constexpr int BLOCK_DPAS_C = BLOCK_REG_M * BLOCK_REG_N;
+    static constexpr int VNNI = sizeof(TYPE_SRC);
+    static constexpr int BLOCK_REG_K = DEPTH * sizeof(int) / VNNI;
+    static constexpr int BLOCK_REG_A = BLOCK_REG_M * BLOCK_REG_K;
+    static constexpr int BLOCK_REG_B = BLOCK_REG_N * BLOCK_REG_K;
+    static constexpr int BLOCK_WG_M = SG_M * BLOCK_SG_M;
+    static constexpr int BLOCK_WG_N = SG_N * BLOCK_SG_N;
+    // register blocking
+    static constexpr int REG_M = BLOCK_SG_M / BLOCK_REG_M;
+    static constexpr int REG_N = BLOCK_SG_N / BLOCK_REG_N;
+    static constexpr int REG_K = BLOCK_WG_K / BLOCK_REG_K;
+    static constexpr int REG_MN = REG_M * REG_N;
+    static constexpr uint size_slm_a = BLOCK_WG_M * BLOCK_WG_K * sizeof(TYPE_SRC);
+
+    matrix<TYPE_ACC, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;
+    uint id_wg_n = cm_group_id(0);
+    uint id_wg_m = cm_group_id(1);
+    uint id_sg_n = cm_local_id(0);
+    uint id_sg_m = cm_local_id(1);
+    uint id_sg_mn = id_sg_m * SG_N + id_sg_n;
+
+    // A memory->reg
+    static constexpr int LINE_REG_M_LOAD_A = BLOCK_WG_M / (SG_M * SG_N);
+    // A memory address, step is 16*2
+    vector<uint32_t, LINE_REG_M_LOAD_A> mem_addr_a;                                             // ---> 4 regs (addr for A)
+    {
+        auto offset = (id_wg_m * BLOCK_WG_M + id_sg_mn * LINE_REG_M_LOAD_A) * lda * sizeof(TYPE_SRC);
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mem_addr_a[m] = offset;
+            offset += lda * sizeof(TYPE_SRC);
+        }
+    }
+    // A reg->slm: slm address for store, step is (64*2)*16*2
+    uint slm_addr_store_a = id_sg_mn * (LINE_REG_M_LOAD_A * BLOCK_REG_K * sizeof(TYPE_SRC));   // ----> 1 reg (addr for A)
+    // A slm->reg: slm address for load, step is (64*2)*16*2
+    vector<uint, REG_M> slm_addr_load_a;                                                       // ----> 8 regs (addr for A)
+    auto slm_addr_load_a_sg = id_sg_m * (BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC)) + (id_sg_n & 1) * (BLOCK_REG_A / 2 * sizeof(TYPE_SRC));
+    {
+        auto offset = 0;
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            slm_addr_load_a[m] = slm_addr_load_a_sg + offset;
+            offset += BLOCK_REG_A * sizeof(TYPE_SRC);
+        }
+    }
+    // B memory->reg: step is 16*2
+    matrix<uint, REG_N, BLOCK_REG_N> mem_addr_b;                                                // ---> 2 regs (addr for B)
+    {
+        auto offset = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * ldb * sizeof(TYPE_SRC);
+#pragma unroll
+        for (uint reg_n = 0; reg_n < REG_N; reg_n++) {
+#pragma unroll
+            for (uint n = 0; n < BLOCK_REG_N; n++) {
+                mem_addr_b[reg_n][n] = offset;
+                offset += ldb * sizeof(TYPE_SRC);
+            }
+        }
+    }
+
+    matrix<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K> a_copy0, a_copy1;                      // ---> 8 regs (load for A)
+    auto load_a_mem = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K> mat_copy) {
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mat_copy.row(m).format<int>() = cm_load<int, BLOCK_REG_K/(sizeof(int)/sizeof(TYPE_SRC))>(src_a, mem_addr_a[m]);
+        }
+    };
+    auto inc_load_a_mem = [&]() {
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mem_addr_a[m] += BLOCK_REG_K * sizeof(TYPE_SRC);
+        }
+    };
+    auto store_a_slm = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K> mat_copy) {
+        cm_slm_block_write(slm, slm_addr_store_a, mat_copy.format<int>());
+    };
+    auto inc_store_a_slm = [&](const int k_idx) {
+        if (k_idx == REG_K - 1) {
+            slm_addr_store_a -= (REG_K - 1) * BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+        } else {
+            slm_addr_store_a += BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+        }
+    };
+
+    matrix<TYPE_SRC, REG_M, BLOCK_REG_A / 2> a_regs;                                    // ---> 32 regs (dpasw for A)
+    auto load_a_slm = [&](matrix_ref<TYPE_SRC, REG_M, BLOCK_REG_A / 2> mat_copy) {
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            cm_slm_block_read(slm, slm_addr_load_a[m], mat_copy.row(m).format<int>());
+        }
+    };
+    auto inc_load_a_slm = [&](const int k_idx) {
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            if (k_idx == REG_K - 1) {
+                slm_addr_load_a[m] -= (REG_K - 1) * BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            } else {
+                slm_addr_load_a[m] += BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            }
+        }
+    };
+    matrix<TYPE_SRC, REG_N, BLOCK_REG_B> b_regs0, b_regs1;                               // ---> 16*2 regs (dpasw for B)
+    auto load_b_mem = [&] (matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> mat_copy) {
+#pragma unroll
+        for (uint n = 0; n < REG_N; n++) {
+            mat_copy.row(n).format<int>() = cm_load<int, VectorSize::N8>(src_b, mem_addr_b.row(n));
+        }
+    };
+    auto inc_load_b_mem = [&]() {
+#pragma unroll
+        for (uint n = 0; n < REG_N; n++) {
+            mem_addr_b.row(n) += BLOCK_REG_K * sizeof(TYPE_SRC);
+        }
+    };
+
+    auto dot = [&](matrix_ref<TYPE_SRC, REG_M, BLOCK_REG_A / 2> A, matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> B) {
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+#pragma unroll
+            for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+                acc.row((ushort)(reg_m * REG_N + reg_n)) = cm_dpasw<B_TYPE_PREC, A_TYPE_PREC, DEPTH, REPEAT>(acc.row((ushort)(reg_m * REG_N + reg_n)),
+                    B.row((ushort)reg_n).format<int>(), A.row((ushort)reg_m).format<int>());
+            }
+        }
+    };
+    // warmup
+    load_a_mem(a_copy0);            // k0 --> r0
+    inc_load_a_mem();
+    load_a_mem(a_copy1);            // k1 --> r1
+    inc_load_a_mem();
+    store_a_slm(a_copy0);           // r0 --> s0
+    load_a_mem(a_copy0);            // k2 --> r0
+    inc_store_a_slm(0);
+    inc_load_a_mem();
+    cm_slm_fence(CM_LOCAL_BARRIER);
+    cm_sbarrier(1);
+    store_a_slm(a_copy1);           // r1 --> s1
+    load_a_mem(a_copy1);            // k3 --> r1
+    load_b_mem(b_regs0);            // k0'--> b0
+    inc_store_a_slm(1);
+    inc_load_a_mem();
+    inc_load_b_mem();
+    cm_sbarrier(0);
+    cm_slm_fence(CM_LOCAL_BARRIER);
+    cm_sbarrier(1);
+    store_a_slm(a_copy0);           // r0 --> s2
+
+    // main loop: K dimension inside one EU
+    for (uint k = 0; k < K / BLOCK_WG_K; k++) {
+        load_a_mem(a_copy0);        // k0 --> r1
+        load_b_mem(b_regs1);        // k1'--> b1
+        load_a_slm(a_regs);         // s0 --> a
+        inc_store_a_slm(2);
+        inc_load_a_slm(0);
+        inc_load_a_mem();
+        inc_load_b_mem();
+        dot(a_regs, b_regs0);       // compute k0
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_copy1);
+
+        load_a_mem(a_copy1);        // k1 --> r0
+        load_b_mem(b_regs0);        // k2'--> b0
+        load_a_slm(a_regs);         // s1 --> a
+        inc_store_a_slm(3);
+        inc_load_a_slm(1);
+        inc_load_a_mem();
+        inc_load_b_mem();
+        dot(a_regs, b_regs1);       // compute k1
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_copy0);
+
+        load_a_mem(a_copy0);        // k2 --> r1
+        load_b_mem(b_regs1);        // k3'--> b1
+        load_a_slm(a_regs);         // s0 --> a
+        inc_store_a_slm(0);
+        inc_load_a_slm(2);
+        inc_load_a_mem();
+        inc_load_b_mem();
+        dot(a_regs, b_regs0);       // compute k2
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_copy1);
+
+        load_a_mem(a_copy1);        // k3 --> r0
+        load_b_mem(b_regs0);        // k0'--> b0
+        load_a_slm(a_regs);         // s1 --> a
+        inc_store_a_slm(1);
+        inc_load_a_slm(3);
+        inc_load_a_mem();
+        inc_load_b_mem();
+        dot(a_regs, b_regs1);       // compute k3
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_copy0);
+    }
+    cm_sbarrier(0);
+    // store
+    auto ldc_bytes = ldc * sizeof(TYPE_DST);
+    auto offset_c = id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N +
+        (id_wg_m * BLOCK_WG_M +        // workgroup
+            id_sg_m * BLOCK_SG_M) * ldc;  // subgroup
+    offset_c *= sizeof(TYPE_DST);
+#pragma unroll
+    for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+        matrix<TYPE_DST, BLOCK_REG_M, REG_N* BLOCK_REG_N> tmp;
+        // TODO(TUNE): merge in N dimension
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+            tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(0, reg_n * BLOCK_REG_N) =
+                acc.row(reg_m * REG_N + reg_n);
+        }
+        write_2d(tmp.select_all(), dst, offset_c, ldc_bytes);
+        offset_c += BLOCK_REG_M * ldc_bytes;
     }
 }

@@ -74,6 +74,15 @@ void matmul(const PlainTensor& a, const PlainTensor& b, PlainTensor& c) {
     }
 }
 
+// [K, N] -> [N, K]
+void transpose(int K, int N, float16_t* src, float16_t* dst) {
+    for (int n = 0; n < N; n++) {
+        for (int k = 0; k < K; k++) {
+            dst[n * K + k] = src[k * N + n];
+        }
+    }
+}
+
 void repack_f16(int K, int N, float16_t* src, float16_t* dst) {
     const int DEPTH = 8;
     const int BLOCK_REG_M = 8;
@@ -141,34 +150,24 @@ void fill(PlainTensor& t) {
     }
 }
 
-int main( int argc, char* argv[])
-{
-    PlainTensor a, b, c_ref, c, b_repack_ref, b_repack;
-    uint32_t M = 128*2, N = 128*2, K = 64*2;
-    a.resize<float16_t>({ M, K });
-    b.resize<float16_t>({ K, N });
-    b_repack_ref.resize<float16_t>({ K, N });
-    b_repack.resize<float16_t>({ K, N });
-    c_ref.resize<float16_t>({ M, N });
+PlainTensor get_ref(PlainTensor& a, PlainTensor& b) {
+    PlainTensor c;
+    uint32_t M = a.size(0);
+    uint32_t N = b.size(1);
     c.resize<float16_t>({ M, N });
+    matmul(a, b, c);
+    return c;
+}
 
-    //a = float16_t{ 1.0f };
-    fill(a);
-    //b = float16_t{ 1.0f };
-    fill(b);
-    repack_f16(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_repack_ref.m_ptr.get());
-    matmul(a, b, c_ref);
+// initialize GPU
+cl_platform_id platform;  // OpenCL platform
+cl_device_id device;      // device ID
+cl_context context;       // context
+cl_command_queue queue;   // command queue
+cl_program program;       // program
 
-    // initialize GPU
-    cl_platform_id platform;  // OpenCL platform
-    cl_device_id device;      // device ID
-    cl_context context;       // context
-    cl_command_queue queue;   // command queue
-    cl_program program;       // program
-    cl_kernel kernel_gemm;    // kernel
-    cl_kernel kernel_repack;  // kernel
+void init_ocl() {
     cl_int err;
-
     CHECK(clGetPlatformIDs(1, &platform, NULL));
     CHECK(clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL));
     CHECK2(context = clCreateContext(NULL, 1, &device, NULL, NULL, &err));
@@ -182,7 +181,7 @@ int main( int argc, char* argv[])
     fprintf(stderr, "INFO: using device: %s\n", name_buffer);
 
     // read in and initialize kernel
-    FILE *fp = fopen(KERNEL, "rb");
+    FILE* fp = fopen(KERNEL, "rb");
     if (fp == NULL) {
         fprintf(stderr, "FAIL: unable to open %s\n", KERNEL);
         exit(-1);
@@ -191,96 +190,150 @@ int main( int argc, char* argv[])
     size_t sz = ftell(fp);
     rewind(fp);
 
-    unsigned char *code = (unsigned char *)malloc(sz);
+    unsigned char* code = (unsigned char*)malloc(sz);
     fread(code, 1, sz, fp);
     fclose(fp);
 
     cl_int errNum = 0;
-    const unsigned char *codes[1] = {code};
-    size_t sizes[1] = {sz};
+    const unsigned char* codes[1] = { code };
+    size_t sizes[1] = { sz };
     CHECK2(program = clCreateProgramWithBinary(context, 1, &device, sizes, codes, &err, &errNum));
     CHECK(clBuildProgram(program, 0, NULL, NULL, NULL, NULL));
-    CHECK2(kernel_gemm = clCreateKernel(program, "gemm", &err));
-    CHECK2(kernel_repack = clCreateKernel(program, "repack_f16", &err));
+}
 
-    // gemm
-    // kernel parameter initialization
-    // void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc)
-    cl_mem d_a, d_b, d_c;
-    d_a = clCreateBuffer(context, CL_MEM_READ_ONLY, M * K * sizeof(float16_t), NULL, NULL);
-    d_b = clCreateBuffer(context, CL_MEM_READ_ONLY, K * N * sizeof(float16_t), NULL, NULL);
-    d_c = clCreateBuffer(context, CL_MEM_WRITE_ONLY, M * N * sizeof(float16_t), NULL, NULL);
-    CHECK(clEnqueueWriteBuffer(queue, d_a, CL_TRUE, 0, M * K * sizeof(float16_t), a.m_ptr.get(), 0, NULL, NULL));
-    CHECK(clEnqueueWriteBuffer(queue, d_b, CL_TRUE, 0, K * N * sizeof(float16_t), b_repack_ref.m_ptr.get(), 0, NULL, NULL));
-    CHECK(clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &d_a));
-    CHECK(clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &d_b));
-    CHECK(clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &d_c));
-    CHECK(clSetKernelArg(kernel_gemm, 3, sizeof(M), &M));
-    CHECK(clSetKernelArg(kernel_gemm, 4, sizeof(N), &N));
-    CHECK(clSetKernelArg(kernel_gemm, 5, sizeof(K), &K));
-    CHECK(clSetKernelArg(kernel_gemm, 6, sizeof(K), &K));
-    CHECK(clSetKernelArg(kernel_gemm, 7, sizeof(N), &N));
-    CHECK(clSetKernelArg(kernel_gemm, 8, sizeof(N), &N));
+void uninit_ocl() {
+    clReleaseProgram(program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+}
 
-    // send to GPU
+void exec_kernel(std::string name, std::vector<PlainTensor> in_bufs, std::vector<PlainTensor> out_bufs, std::vector<uint32_t> scalars,
+    std::vector<size_t> globalSize, std::vector<size_t> localSize) {
+    cl_int err;
+    cl_kernel kernel;    // kernel
+
+    CHECK2(kernel = clCreateKernel(program, name.c_str(), &err));
+
+    std::vector<cl_mem> in_mems, out_mems;
+    in_mems.resize(in_bufs.size());
+    out_mems.resize(out_bufs.size());
+    for (size_t i = 0; i < in_bufs.size(); ++i) {
+        auto size = in_bufs[i].size(0) * in_bufs[i].size(1) * in_bufs[i].m_element_size;
+        in_mems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, size, NULL, NULL);
+        CHECK(clEnqueueWriteBuffer(queue, in_mems[i], CL_TRUE, 0, size, in_bufs[i].m_ptr.get(), 0, NULL, NULL));
+    }
+    for (size_t i = 0; i < out_bufs.size(); ++i) {
+        auto size = out_bufs[i].size(0) * out_bufs[i].size(1) * out_bufs[i].m_element_size;
+        out_mems[i] = clCreateBuffer(context, CL_MEM_WRITE_ONLY, size, NULL, NULL);
+    }
+
+    size_t arg_idx = 0;
+    for (size_t i = 0; i < in_mems.size(); i++) {
+        CHECK(clSetKernelArg(kernel, arg_idx++, sizeof(cl_mem), &in_mems[i]));
+    }
+    for (size_t i = 0; i < out_mems.size(); i++) {
+        CHECK(clSetKernelArg(kernel, arg_idx++, sizeof(cl_mem), &out_mems[i]));
+    }
+    for (size_t i = 0; i < scalars.size(); i++) {
+        CHECK(clSetKernelArg(kernel, arg_idx++, sizeof(uint32_t), &scalars[i]));
+    }
+    assert(globalSize.size() == localSize.size());
+    CHECK(clEnqueueNDRangeKernel(queue, kernel, globalSize.size(), NULL, globalSize.data(), localSize.data(), 0, NULL, NULL));
+    clFinish(queue);
+
+    for (size_t i = 0; i < out_bufs.size(); ++i) {
+        auto size = out_bufs[i].size(0) * out_bufs[i].size(1) * out_bufs[i].m_element_size;
+        clEnqueueReadBuffer(queue, out_mems[i], CL_TRUE, 0, size, out_bufs[i].m_ptr.get(), 0, NULL, NULL);
+        clReleaseMemObject(out_mems[i]);
+    }
+    for (size_t i = 0; i < in_bufs.size(); ++i) {
+        clReleaseMemObject(in_mems[i]);
+    }
+    clReleaseKernel(kernel);
+}
+
+void cmp(const char* prefix, PlainTensor& cur_t, PlainTensor& ref_t) {
+    for (int i = 0; i < cur_t.size(0); ++i) {
+        for (int j = 0; j < cur_t.size(1); ++j) {
+            float cur = cur_t.ptr<float16_t>(i)[j];
+            float ref = ref_t.ptr<float16_t>(i)[j];
+            if (std::abs(cur - ref) > 0.01f) {
+                fprintf(stderr, "FAIL: comparison '%s' at index[%d, %d], cur: %f, ref: %f\n", prefix, i, j, cur, ref);
+                exit(-1);
+            }
+        }
+    }
+}
+
+void check_v1(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
+    PlainTensor c;
+    PlainTensor b_repack, b_repack_ref;
+    uint32_t M = a.size(0);
+    uint32_t N = b.size(1);
+    uint32_t K = a.size(1);
+    b_repack_ref.resize<float16_t>({ K, N });
+    b_repack.resize<float16_t>({ K, N });
+    c.resize<float16_t>({ M, N });
+    repack_f16(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_repack_ref.m_ptr.get());
+    cl_int err;
     size_t BLOCK_SG_M = x::BLOCK_SG_M;
     size_t BLOCK_SG_N = x::BLOCK_SG_N;
     size_t SG_M = x::SG_M, SG_N = x::SG_N;
-    size_t globalSize[2] = { M / BLOCK_SG_M, N / BLOCK_SG_N };
-    size_t localSize[2] = { SG_M, SG_N };
-    CHECK(clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, globalSize, localSize, 0, NULL, NULL));
-    clFinish(queue);
-
-    // repack
-    // void repack(int K, int N, half* src ATTR, half* dst ATTR)
-    cl_mem d_b_org, d_b_pack;
+    std::vector<size_t> globalSize = { M / BLOCK_SG_M, N / BLOCK_SG_N };
+    std::vector<size_t> localSize = { SG_M, SG_N };
+    exec_kernel("gemm", { a, b_repack_ref }, { c }, { M, N, K, K, N, N }, globalSize, localSize);
+    cmp("gemm v1", c, c_ref);
     {
-        d_b_org = clCreateBuffer(context, CL_MEM_READ_ONLY, K * N * sizeof(float16_t), NULL, NULL);
-        d_b_pack = clCreateBuffer(context, CL_MEM_WRITE_ONLY, K * N * sizeof(float16_t), NULL, NULL);
-        CHECK(clEnqueueWriteBuffer(queue, d_b_org, CL_TRUE, 0, N * K * sizeof(float16_t), b.m_ptr.get(), 0, NULL, NULL));
-        CHECK(clSetKernelArg(kernel_repack, 0, sizeof(K), &K));
-        CHECK(clSetKernelArg(kernel_repack, 1, sizeof(N), &N));
-        CHECK(clSetKernelArg(kernel_repack, 2, sizeof(cl_mem), &d_b_org));
-        CHECK(clSetKernelArg(kernel_repack, 3, sizeof(cl_mem), &d_b_pack));
-
-        // send to GPU
         size_t BLOCK_SG_M = x::BLOCK_SG_M;
         size_t BLOCK_SG_N = x::BLOCK_SG_N;
         size_t SG_M = x::SG_M, SG_N = x::SG_N;
         size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
-        size_t globalSize[2] = { N / BLOCK_WG_N, K / x::BLOCK_WG_K };
-        size_t localSize[2] = { 1, 1 };
-        CHECK(clEnqueueNDRangeKernel(queue, kernel_repack, 2, NULL, globalSize, localSize, 0, NULL, NULL));
-        clFinish(queue);
+        std::vector<size_t> globalSize = { N / BLOCK_WG_N, K / x::BLOCK_WG_K };
+        std::vector<size_t> localSize  = { 1, 1 };
+        exec_kernel("repack_f16", { b }, { b_repack }, { K, N }, globalSize, localSize);
+        cmp("repack", b_repack, b_repack_ref);
     }
+}
 
-    // process output and cleanup
-    clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0, M * N * sizeof(float16_t), c.m_ptr.get(), 0, NULL, NULL);
-    clEnqueueReadBuffer(queue, d_b_pack, CL_TRUE, 0, K * N * sizeof(float16_t), b_repack.m_ptr.get(), 0, NULL, NULL);
-    clReleaseMemObject(d_a);
-    clReleaseMemObject(d_b);
-    clReleaseMemObject(d_c);
-    clReleaseProgram(program);
-    clReleaseKernel(kernel_gemm);
-    clReleaseKernel(kernel_repack);
-    clReleaseCommandQueue(queue);
-    clReleaseContext(context);
+// a: [M, K], b: [N, K]
+void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
+    PlainTensor c;
+    PlainTensor b_t;
+    uint32_t M = a.size(0);
+    uint32_t N = b.size(1);
+    uint32_t K = a.size(1);
+    b_t.resize<float16_t>({ K, N });
+    c.resize<float16_t>({ M, N });
+    transpose(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_t.m_ptr.get());
+    cl_int err;
+    size_t BLOCK_SG_M = v2::BLOCK_SG_M;
+    size_t BLOCK_SG_N = v2::BLOCK_SG_N;
+    size_t SG_M = v2::SG_M, SG_N = v2::SG_N;
+    std::vector<size_t> globalSize = { N / BLOCK_SG_N, M / BLOCK_SG_M};
+    std::vector<size_t> localSize = { SG_N, SG_M };
+    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N }, globalSize, localSize);
+    cmp("gemm_nocopy", c, c_ref);
+}
 
-    auto cmp = [](const char* prefix, PlainTensor& cur_t, PlainTensor& ref_t) {
-        for (int i = 0; i < cur_t.size(0); ++i) {
-            for (int j = 0; j < cur_t.size(1); ++j) {
-                float cur = cur_t.ptr<float16_t>(i)[j];
-                float ref = ref_t.ptr<float16_t>(i)[j];
-                if (std::abs(cur - ref) > 0.01f) {
-                    fprintf(stderr, "FAIL: comparison '%s' at index[%d, %d], cur: %f, ref: %f\n", prefix, i, j, cur, ref);
-                    exit(-1);
-                }
-            }
-        }
-    };
-    // verify results
-    cmp("result", c, c_ref);
-    cmp("pack", b_repack, b_repack_ref);
+int main( int argc, char* argv[])
+{
+    PlainTensor a, b, c, b_repack_ref, b_repack;
+    uint32_t M = 128*2, N = 128*4, K = 64*2;
+    a.resize<float16_t>({ M, K });
+    b.resize<float16_t>({ K, N });
+
+    //a = float16_t{ 1.0f };
+    fill(a);
+    //b = float16_t{ 1.0f };
+    fill(b);
+    auto c_ref = get_ref(a, b);
+
+    init_ocl();
+
+    //check_v1(a, b, c_ref);
+    check_v2(a, b, c_ref);
+
+    uninit_ocl();
 
     fprintf(stderr, "PASSED\n");
     return 0;
