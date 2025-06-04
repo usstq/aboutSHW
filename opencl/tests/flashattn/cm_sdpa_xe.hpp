@@ -1,16 +1,3 @@
-#if 0
-    #ifdef CM_HAS_LSC_UNTYPED_2D
-    #include "cm_sdpa_xe2.hpp"
-    #else
-    #include "cm_sdpa_xe1.hpp"
-    #endif
-#else
-
-
-/*
-    Xe1&2 unified version
-*/
-
 
 #include "cm_sdpa_common.hpp"
 
@@ -102,10 +89,12 @@ void sdpa_kernel(
     int head_base_id,
     int q_len,
     int kv_len,
-    svmptr_t q_base [[type("svmptr_t")]],
-    svmptr_t k_base [[type("svmptr_t")]],
-    svmptr_t v_base [[type("svmptr_t")]],
-    svmptr_t o_base [[type("svmptr_t")]]) {
+    SurfaceIndex query [[type("buffer_t")]],
+    SurfaceIndex key [[type("buffer_t")]],
+    SurfaceIndex value [[type("buffer_t")]],
+    SurfaceIndex output [[type("buffer_t")]],
+    uint qo_off,
+    uint kv_off) {
 
     uint qo_pitch = num_heads * head_size * sizeof(half);
     uint kv_pitch = num_kv_heads * head_size * sizeof(half);
@@ -126,10 +115,7 @@ void sdpa_kernel(
     if (q_tokens_left > 0) {
         // load as many as possible given one address
         matrix<uint, q_step, head_size/2> QmatI32;
-        if (q_tokens_left == q_step)
-            svm_read_2d(QmatI32, q_base, qo_pitch);
-        else
-            svm_read_2d(QmatI32, q_base, qo_pitch, q_tokens_left);
+        cm_load_2d(QmatI32, query, qo_off, qo_pitch);
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
             Transpose2DMatrix(QmatI32.select<q_step, 1, REG_K/2, 1>(0, k), rQ[ri].format<uint, REG_K/2, q_step>());
@@ -151,77 +137,41 @@ void sdpa_kernel(
         if (kv_tokens <= 0) return;
         uint slm_offset = (slm_buff_id_write & 3) * slm_buff_size;
         slm_buff_id_write ++;
-        if (kv_tokens < kv_step) {
-            // handle tails in kv-len
-            vector<uint, 2*REG_M> kv_offsets = 0;
-            #pragma unroll
-            for(int i = 0; i < kv_step; i++) {
-                kv_offsets[i] = (i < kv_tokens) * i * kv_pitch;
-            }
-            if (wg_local_id < local_size/2) {
-                matrix<half, 2*REG_M, REG_K> temp;
-                #pragma unroll
-                for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                    svm_read_2d(temp, k_base + k*sizeof(half), kv_offsets);
-                    cm_slm_block_write(slm_K, slm_offset + k * 2 * REG_M * sizeof(half), temp.format<half>());
-                }
-            } else {
-                // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
-                constexpr int VK_STEP = 16;
-                static_assert((VK_STEP % REG_N) == 0);
-                matrix<half, REG_K, VK_STEP> temp2;
-                matrix<half, REG_K/2, REG_N*2> temp_vnni;
-                //b2dV.set_block_y(kv_pos);
 
-                static_assert((head_size % VK_STEP) == 0);
-                #pragma unroll
-                for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
-                    svm_read_2d(temp2, v_base + k*sizeof(half), kv_offsets);
-
-                    #pragma unroll
-                    for(int p = 0; p < VK_STEP/REG_N; p++) {
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
-                        // show(temp_vnni);
-                        cm_slm_block_write(slm_V, slm_offset + (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
-                    }
-                }
+        // non-tail branch is faster
+        if (wg_local_id < local_size/2) {
+            //if (kv_pos > 1024000) {
+            matrix<half, 2*REG_M, REG_K> temp;
+            for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
+                cm_load_2d(temp, key, kv_off + k*sizeof(half), kv_pitch);
+                cm_slm_block_write(slm_K, 
+                                    slm_offset + k * 2 * REG_M * sizeof(half),
+                                    temp.format<half>());
             }
         } else {
-            // non-tail branch is faster
-            if (wg_local_id < local_size/2) {
-                matrix<half, 2*REG_M, REG_K> temp;
-                for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                    svm_read_2d(temp, k_base + k*sizeof(half), kv_pitch);
-                    cm_slm_block_write(slm_K, 
-                                       slm_offset + k * 2 * REG_M * sizeof(half),
-                                       temp.format<half>());
-                }
-            } else {
-                // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
-                constexpr int VK_STEP = 16;
-                static_assert((VK_STEP % REG_N) == 0);
-                matrix<half, REG_K, VK_STEP> temp2;
-                matrix<half, REG_K/2, REG_N*2> temp_vnni;
-                //b2dV.set_block_y(kv_pos);
+            //if (kv_pos > 1024000) {
+            // read 16x16 XMX-B matrix (1x REG_N in Xe2, 2x REG_N in Xe1)
+            constexpr int VK_STEP = 16;
+            static_assert((VK_STEP % REG_N) == 0);
+            matrix<half, REG_K, VK_STEP> temp2;
+            matrix<half, REG_K/2, REG_N*2> temp_vnni;
+            //b2dV.set_block_y(kv_pos);
 
-                static_assert((head_size % VK_STEP) == 0);
+            static_assert((head_size % VK_STEP) == 0);
+            #pragma unroll
+            for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
+                cm_load_2d(temp2, value, kv_off + k*sizeof(half), kv_pitch);
+
                 #pragma unroll
-                for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
-                    svm_read_2d(temp2, v_base + k*sizeof(half), kv_pitch);
-
-                    #pragma unroll
-                    for(int p = 0; p < VK_STEP/REG_N; p++) {
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
-                        temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
-                        // show(temp_vnni);
-                        cm_slm_block_write(slm_V, slm_offset + (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
-                    }
+                for(int p = 0; p < VK_STEP/REG_N; p++) {
+                    temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 0) = temp2.select<REG_K/2, 2, REG_N, 1>(0, p*REG_N);
+                    temp_vnni.select<REG_K/2, 1, REG_N, 2>(0, 1) = temp2.select<REG_K/2, 2, REG_N, 1>(1, p*REG_N);
+                    // show(temp_vnni);
+                    cm_slm_block_write(slm_V, slm_offset + (k + p*REG_N) * REG_K * sizeof(half), temp_vnni.format<half>());
                 }
             }
-            k_base += kv_step * kv_pitch;
-            v_base += kv_step * kv_pitch;
         }
+        kv_off += kv_step * kv_pitch;
         // printf(" diff= %lu\n", get_clock() - clk0);
     };
 
@@ -331,7 +281,7 @@ void sdpa_kernel(
             }
         }
         // if (i == args_verbose) show(cur_O_f16);
-        svm_write_2d(cur_O_f16, o_base + k*sizeof(half), qo_pitch, q_tokens_left);
+        cm_store_2d(cur_O_f16, output, qo_off + k*sizeof(half), qo_pitch);
     }
 }
 
@@ -522,12 +472,9 @@ void sdpa_kernel_lsc(
     }
 }
 
-#ifdef CM_HAS_LSC_UNTYPED_2D
-#define SDPA_KERNEL sdpa_kernel_lsc
-#else
-#define SDPA_KERNEL sdpa_kernel
-#endif
 
+
+#ifdef CM_HAS_LSC_UNTYPED_2D
 extern "C" _GENX_MAIN_ void cm_sdpa(
     int head_base_id,
     int q_len,
@@ -572,7 +519,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         if (kv_stop > kv_len) kv_stop = kv_len;
     }
 
-    SDPA_KERNEL<causal_mask, WG_SIZE_HINT>(
+    sdpa_kernel_lsc<causal_mask, WG_SIZE_HINT>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
@@ -585,6 +532,96 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                                 k_base,
                                 v_base,
                                 o_base);
+
+
+#if 0
+    {
+        auto q_start = (q_len - q_group_id * local_size * q_step) - (local_size * q_step) + wg_local_id*q_step;
+        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
+        auto k_base = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
+        auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
+        if constexpr (causal_mask) {
+            kv_stop = (q_len - q_group_id * local_size * q_step);
+            if (kv_stop > kv_len) kv_stop = kv_len;
+        }
+        SDPA_KERNEL<causal_mask, WG_SIZE_HINT>(   slm_K,
+                                    slm_V,
+                                    wg_local_id,
+                                    q_start,
+                                    kv_stop,
+                                    head_base_id,
+                                    q_len,
+                                    kv_len,
+                                    q_base,
+                                    k_base,
+                                    v_base,
+                                    o_base);
+    }
+#endif
+    // if (i == args_verbose) return;
+    CMTracer_end(&cminfo);
+}
+
+#else // no CM_HAS_LSC_UNTYPED_2D available
+
+extern "C" _GENX_MAIN_ void cm_sdpa(
+    int head_base_id,
+    int q_len,
+    int kv_len,
+    SurfaceIndex query [[type("buffer_t")]],
+    SurfaceIndex key [[type("buffer_t")]],
+    SurfaceIndex value [[type("buffer_t")]],
+    SurfaceIndex output [[type("buffer_t")]],
+    __global uint64_t* cminfo [[type("svmptr_t")]]
+    ) {
+    CMTracer_begin(&cminfo);
+    //# query [batch, q_len, num_heads, S]
+    //#   key [batch, kv_len, num_heads, S]
+    //# value [batch, kv_len, num_heads, S]
+    //# to load Q
+
+    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
+
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
+
+    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
+    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
+
+    auto batch = cm_group_id(0);
+    auto h = head_base_id + cm_group_id(1);
+    auto hkv = h / (num_heads/num_kv_heads);
+    auto wg_local_id = cm_local_id(2);
+    const int local_size = cm_local_size(2);
+    auto q_group_id = cm_group_id(2);
+    auto q_start = (q_group_id * local_size + wg_local_id) * q_step;
+
+    auto qo_off = ((batch * q_len + q_start) * num_heads + h)*head_size*sizeof(half);
+    auto kv_off = (batch * num_kv_heads*kv_len + hkv)*head_size*sizeof(half);
+
+    int kv_stop = kv_len;
+    if constexpr (causal_mask) {
+        kv_stop = (q_group_id + 1) * local_size * q_step;
+        if (kv_stop > kv_len) kv_stop = kv_len;
+    }
+
+    sdpa_kernel<causal_mask, WG_SIZE_HINT>(
+                                slm_K,
+                                slm_V,
+                                wg_local_id,
+                                q_start,
+                                kv_stop,
+                                head_base_id,
+                                q_len,
+                                kv_len,
+                                query,
+                                key,
+                                value,
+                                output,
+                                qo_off,
+                                kv_off);
 
 
 #if 0

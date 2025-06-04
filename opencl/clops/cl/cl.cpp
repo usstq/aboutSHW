@@ -479,6 +479,7 @@ PYBIND11_MODULE(csrc, m) {
         .def_property_readonly("addr", &tensor::addr)
         .def_property("offset", &tensor::get_offset, &tensor::set_offset)
         .def_property_readonly("shape", &tensor::get_shape)
+        .def_property_readonly("strides", &tensor::get_strides)
         .def_property_readonly("numel", &tensor::get_numel)
         .def_property_readonly("dtype", &tensor::get_dtype)
         .def(py::pickle(

@@ -323,6 +323,9 @@ struct tensor {
     const std::vector<cl_uint>& get_shape() const {
         return shape;
     }
+    const std::vector<cl_uint>& get_strides() const {
+        return strides;
+    }
     cl_uint get_numel() const {
         return numel;
     }

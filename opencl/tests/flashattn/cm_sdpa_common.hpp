@@ -124,6 +124,30 @@ CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
     }
 }
 
+template <int M, int N>
+CM_INLINE void cm_load_2d(matrix_ref<uint, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        out.row(i).format<uint>() = cm_load<uint, N>(base, offset + i * pitch);
+    }
+}
+
+template <int M, int N>
+CM_INLINE void cm_load_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        out.row(i).format<uint>() = cm_load<uint, N/2>(base, offset + i * pitch);
+    }
+}
+
+template <int M, int N>
+CM_INLINE void cm_store_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        cm_store<uint, N/2>(base, offset + i * pitch, out.row(i).format<uint>());
+    }
+}
+
 template <typename T, int M, int N>
 CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, vector_ref<uint, M> offsets) {
     #pragma unroll
