@@ -53,14 +53,60 @@ _GENX_MAIN_ void repack_f16(half* src ATTR, half* dst ATTR, int K, int N) {
     repack_f16<x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N, x::BLOCK_WG_K>(src, dst, K, N);
 }
 
-_GENX_MAIN_ void gemm_nocopy(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+#define ABS(x) (x) < 0 ? -(x) : (x)
+
+// if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+// if slice_no != 0, use wg blocking schema:
+//    slice > 0 means the slice is in M dimension else is in N dimension
+//    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+_GENX_MAIN_ void gemm_nocopy(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
     const uint BLOCK_WG_M = v2::BLOCK_SG_M * v2::SG_M;
     const uint BLOCK_WG_N = v2::BLOCK_SG_N * v2::SG_N;
-    const uint size_slm_a = 0;
-    const uint size_slm_b = v2::BLOCK_WG_K * BLOCK_WG_N * sizeof(half);
+    const uint size_slm_a = BLOCK_WG_M * v2::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
     cm_slm_init(size_slm_a + size_slm_b);
     auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+    uint id_wg_mn = cm_group_id(0);
+    uint id_wg_m;
+    uint id_wg_n;
+    if (slice_no == 0) {
+        if (slice == 0) {
+            // loop M first, N is shared, total = N/256*M+N
+            uint WG_MN = M / BLOCK_WG_M;
+            id_wg_m = id_wg_mn % WG_MN;
+            id_wg_n = id_wg_mn / WG_MN;
+        } else {
+            // loop N first, M is shared, total = M/128*N+M
+            uint WG_MN = N / BLOCK_WG_N;
+            id_wg_n = id_wg_mn % WG_MN;
+            id_wg_m = id_wg_mn / WG_MN;
+        }
+    } else {
+        uint wg_x = slice > 0 ? N / BLOCK_WG_N : M / BLOCK_WG_M;
+        uint slice_no_abs = ABS(slice_no);
+        uint slice_abs = ABS(slice);
+        int id_wg_mn_in_reminder = (int)id_wg_mn - (int)(slice_no_abs * slice_abs * wg_x);
+        uint slice_idx;
+        // in [slice_no x slice]
+        if (id_wg_mn_in_reminder < 0) {
+            slice_idx = id_wg_mn / (slice_abs * wg_x);
+            uint rem_in_slice = id_wg_mn % (slice_abs * wg_x);
+            uint x = rem_in_slice % slice_abs;
+            uint y = rem_in_slice / slice_abs;
+            id_wg_m = slice > 0 ? x + slice_idx * slice_abs : y;
+            id_wg_n = slice < 0 ? x + slice_idx * slice_abs : y;
+        } else {
+            uint slice_rem = slice_abs + (slice_no > 0 ? 1 : -1);
+            slice_idx = id_wg_mn_in_reminder / (slice_rem * wg_x);
+            uint rem_in_slice = id_wg_mn_in_reminder % (slice_rem * wg_x);
+            uint x = rem_in_slice % slice_rem;
+            uint y = rem_in_slice / slice_rem;
+            id_wg_m = slice > 0 ? x + slice_idx * slice_rem + slice_no_abs * slice_abs : y;
+            id_wg_n = slice < 0 ? x + slice_idx * slice_rem + slice_no_abs * slice_abs : y;
+        }
+    }
 
-    gemm_64x16_no_slmb<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
-        v2::SG_SIZE, v2::BLOCK_SG_M, v2::BLOCK_SG_N, v2::SG_M, v2::SG_N>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+    gemm_xe1_f16_no_slmb<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        v2::SG_SIZE, v2::BLOCK_SG_M, v2::BLOCK_SG_N, v2::SG_M, v2::SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }

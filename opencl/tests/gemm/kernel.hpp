@@ -78,7 +78,7 @@ template <typename TSRC, int M, int N>
 CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
 #pragma unroll
     for (int i = 0; i < out.n_rows(); i++, offset += pitch) {
-        cm_store(base, offset, out.row(i).format<int>());
+        cm_store<int, N / (sizeof(int) / sizeof(TSRC)), DataSize::Default, CacheHint::WriteBack, CacheHint::WriteBack>(base, offset, out.row(i).format<int>());
     }
 }
 
@@ -367,7 +367,7 @@ template<
     int SG_N = 16,
     int BLOCK_WG_K = 64
 >
-CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+CM_INLINE void gemm_xe1_f16_no_slmb(uint id_wg_m, uint id_wg_n, uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
     // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
     static constexpr int REPEAT = 8;
     static constexpr int DEPTH = 8;
@@ -388,8 +388,6 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     static constexpr uint size_slm_a = BLOCK_WG_M * BLOCK_WG_K * sizeof(TYPE_SRC);
 
     matrix<TYPE_ACC, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;
-    uint id_wg_n = cm_group_id(0);
-    uint id_wg_m = cm_group_id(1);
     uint id_sg_n = cm_local_id(0);
     uint id_sg_m = cm_local_id(1);
     uint id_sg_mn = id_sg_m * SG_N + id_sg_n;
@@ -397,32 +395,33 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     // A memory->reg
     static constexpr int LINE_REG_M_LOAD_A = BLOCK_WG_M / (SG_M * SG_N);
     // A memory address, step is 16*2
-    vector<uint32_t, LINE_REG_M_LOAD_A> mem_addr_a;                                             // ---> 4 regs (addr for A)
+    matrix<uint32_t, LINE_REG_M_LOAD_A, SG_SIZE> mem_addr_a;                                    // ---> 4 regs (addr for A)
     {
-        auto offset = (id_wg_m * BLOCK_WG_M + id_sg_mn * LINE_REG_M_LOAD_A) * lda * sizeof(TYPE_SRC);
+        uint offset = (id_wg_m * BLOCK_WG_M + id_sg_mn * LINE_REG_M_LOAD_A) * lda * sizeof(TYPE_SRC);
 #pragma unroll
         for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
-            mem_addr_a[m] = offset;
+            mem_addr_a[m][0] = offset;
             offset += lda * sizeof(TYPE_SRC);
         }
     }
     // A reg->slm: slm address for store, step is (64*2)*16*2
-    uint slm_addr_store_a = id_sg_mn * (LINE_REG_M_LOAD_A * BLOCK_REG_K * sizeof(TYPE_SRC));   // ----> 1 reg (addr for A)
+    uint slm_addr_store_a = id_sg_m * (BLOCK_SG_M * BLOCK_WG_K * sizeof(TYPE_SRC)) +
+        id_sg_n * (LINE_REG_M_LOAD_A * BLOCK_REG_K * sizeof(TYPE_SRC));                         // ----> 1 reg (addr for A)
     // A slm->reg: slm address for load, step is (64*2)*16*2
-    vector<uint, REG_M> slm_addr_load_a;                                                       // ----> 8 regs (addr for A)
-    auto slm_addr_load_a_sg = id_sg_m * (BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC)) + (id_sg_n & 1) * (BLOCK_REG_A / 2 * sizeof(TYPE_SRC));
+    matrix<uint, REG_M, SG_SIZE> slm_addr_load_a;                                               // ----> 8 regs (addr for A)
+    uint slm_addr_load_a_sg = id_sg_m * (BLOCK_SG_M * BLOCK_WG_K * sizeof(TYPE_SRC)) + (id_sg_n & 1) * (BLOCK_REG_A / 2 * sizeof(TYPE_SRC));
     {
-        auto offset = 0;
+        uint offset = 0;
 #pragma unroll
         for (uint m = 0; m < REG_M; m++) {
-            slm_addr_load_a[m] = slm_addr_load_a_sg + offset;
+            slm_addr_load_a[m][0] = slm_addr_load_a_sg + offset;
             offset += BLOCK_REG_A * sizeof(TYPE_SRC);
         }
     }
     // B memory->reg: step is 16*2
     matrix<uint, REG_N, BLOCK_REG_N> mem_addr_b;                                                // ---> 2 regs (addr for B)
     {
-        auto offset = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * ldb * sizeof(TYPE_SRC);
+        uint offset = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * ldb * sizeof(TYPE_SRC);
 #pragma unroll
         for (uint reg_n = 0; reg_n < REG_N; reg_n++) {
 #pragma unroll
@@ -437,13 +436,13 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     auto load_a_mem = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K> mat_copy) {
 #pragma unroll
         for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
-            mat_copy.row(m).format<int>() = cm_load<int, BLOCK_REG_K/(sizeof(int)/sizeof(TYPE_SRC))>(src_a, mem_addr_a[m]);
+            mat_copy.row(m).format<int>() = cm_load<int, BLOCK_REG_K / (sizeof(int) / sizeof(TYPE_SRC)), DataSize::Default, CacheHint::Cached, CacheHint::Cached>(src_a, mem_addr_a[m][0]);
         }
     };
     auto inc_load_a_mem = [&]() {
 #pragma unroll
         for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
-            mem_addr_a[m] += BLOCK_REG_K * sizeof(TYPE_SRC);
+            mem_addr_a[m][0] += BLOCK_REG_K * sizeof(TYPE_SRC);
         }
     };
     auto store_a_slm = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K> mat_copy) {
@@ -451,9 +450,9 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     };
     auto inc_store_a_slm = [&](const int k_idx) {
         if (k_idx == REG_K - 1) {
-            slm_addr_store_a -= (REG_K - 1) * BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            slm_addr_store_a -= (REG_K - 1) * BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
         } else {
-            slm_addr_store_a += BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            slm_addr_store_a += BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
         }
     };
 
@@ -461,16 +460,16 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     auto load_a_slm = [&](matrix_ref<TYPE_SRC, REG_M, BLOCK_REG_A / 2> mat_copy) {
 #pragma unroll
         for (uint m = 0; m < REG_M; m++) {
-            cm_slm_block_read(slm, slm_addr_load_a[m], mat_copy.row(m).format<int>());
+            cm_slm_block_read(slm, slm_addr_load_a[m][0], mat_copy.row(m).format<int>());
         }
     };
     auto inc_load_a_slm = [&](const int k_idx) {
 #pragma unroll
         for (uint m = 0; m < REG_M; m++) {
             if (k_idx == REG_K - 1) {
-                slm_addr_load_a[m] -= (REG_K - 1) * BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+                slm_addr_load_a[m][0] -= (REG_K - 1) * BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
             } else {
-                slm_addr_load_a[m] += BLOCK_WG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+                slm_addr_load_a[m][0] += BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
             }
         }
     };
@@ -478,7 +477,7 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     auto load_b_mem = [&] (matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> mat_copy) {
 #pragma unroll
         for (uint n = 0; n < REG_N; n++) {
-            mat_copy.row(n).format<int>() = cm_load<int, VectorSize::N8>(src_b, mem_addr_b.row(n));
+            mat_copy.row(n).format<int>() = cm_load<int, VectorSize::N8, DataSize::Default, CacheHint::Cached, CacheHint::Cached>(src_b, mem_addr_b.row(n));
         }
     };
     auto inc_load_b_mem = [&]() {
@@ -521,7 +520,7 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
     store_a_slm(a_copy0);           // r0 --> s2
 
     // main loop: K dimension inside one EU
-    for (uint k = 0; k < K / BLOCK_WG_K; k++) {
+    for (uint k = 0; k < K / BLOCK_WG_K - 1; k++) {
         load_a_mem(a_copy0);        // k0 --> r1
         load_b_mem(b_regs1);        // k1'--> b1
         load_a_slm(a_regs);         // s0 --> a
@@ -574,10 +573,41 @@ CM_INLINE void gemm_64x16_no_slmb(uint slm, SurfaceIndex src_a, SurfaceIndex src
         cm_sbarrier(1);
         store_a_slm(a_copy0);
     }
-    cm_sbarrier(0);
+    // last iteration
+    {
+        load_b_mem(b_regs1);        // k1'--> b1
+        load_a_slm(a_regs);         // s0 --> a
+        inc_store_a_slm(2);
+        inc_load_a_slm(0);
+        inc_load_b_mem();
+        dot(a_regs, b_regs0);       // compute k0
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_copy1);
+
+        load_b_mem(b_regs0);        // k2'--> b0
+        load_a_slm(a_regs);         // s1 --> a
+        inc_load_a_slm(1);
+        inc_load_b_mem();
+        dot(a_regs, b_regs1);       // compute k1
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+
+        load_b_mem(b_regs1);        // k3'--> b1
+        load_a_slm(a_regs);         // s0 --> a
+        inc_load_a_slm(2);
+        dot(a_regs, b_regs0);       // compute k2
+        cm_sbarrier(0);
+
+        load_a_slm(a_regs);         // s1 --> a
+        dot(a_regs, b_regs1);       // compute k3
+    }
+
     // store
-    auto ldc_bytes = ldc * sizeof(TYPE_DST);
-    auto offset_c = id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N +
+    uint ldc_bytes = ldc * sizeof(TYPE_DST);
+    uint offset_c = id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N +
         (id_wg_m * BLOCK_WG_M +        // workgroup
             id_sg_m * BLOCK_SG_M) * ldc;  // subgroup
     offset_c *= sizeof(TYPE_DST);

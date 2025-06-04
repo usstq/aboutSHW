@@ -252,13 +252,13 @@ void exec_kernel(std::string name, std::vector<PlainTensor> in_bufs, std::vector
     clReleaseKernel(kernel);
 }
 
-void cmp(const char* prefix, PlainTensor& cur_t, PlainTensor& ref_t) {
+void cmp(std::string prefix, PlainTensor& cur_t, PlainTensor& ref_t) {
     for (int i = 0; i < cur_t.size(0); ++i) {
         for (int j = 0; j < cur_t.size(1); ++j) {
             float cur = cur_t.ptr<float16_t>(i)[j];
             float ref = ref_t.ptr<float16_t>(i)[j];
             if (std::abs(cur - ref) > 0.01f) {
-                fprintf(stderr, "FAIL: comparison '%s' at index[%d, %d], cur: %f, ref: %f\n", prefix, i, j, cur, ref);
+                fprintf(stderr, "FAIL: comparison '%s' at index[%d, %d], cur: %f, ref: %f\n", prefix.c_str(), i, j, cur, ref);
                 exit(-1);
             }
         }
@@ -309,16 +309,46 @@ void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     size_t BLOCK_SG_M = v2::BLOCK_SG_M;
     size_t BLOCK_SG_N = v2::BLOCK_SG_N;
     size_t SG_M = v2::SG_M, SG_N = v2::SG_N;
-    std::vector<size_t> globalSize = { N / BLOCK_SG_N, M / BLOCK_SG_M};
+    size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
+    size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
+    std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
     std::vector<size_t> localSize = { SG_N, SG_M };
-    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N }, globalSize, localSize);
-    cmp("gemm_nocopy", c, c_ref);
+
+    int slice;
+    int slice_no;
+
+    // if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+    slice_no = 0;
+    for (slice = 0; slice < 2; slice++) {
+       exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
+       cmp("gemm_nocopy linear " + slice == 0 ? std::string("M first") : std::string("N first"), c, c_ref);
+    }
+    // if slice_no != 0, use wg blocking schema:
+    //    slice > 0 means the slice is in M dimension else is in N dimension
+    //    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+    slice = 2;
+    slice_no = -2;
+    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy block m:2x2+1*3", c, c_ref);
+    slice = 1;
+    slice_no = 3;
+    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy block m:1x3+2*2", c, c_ref);
+
+    slice = -2;
+    slice_no = -1;
+    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy block n:2x1+1*3", c, c_ref);
+    slice = -1;
+    slice_no = 3;
+    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy block n:1x3+2*1", c, c_ref);
 }
 
 int main( int argc, char* argv[])
 {
     PlainTensor a, b, c, b_repack_ref, b_repack;
-    uint32_t M = 128*2, N = 128*4, K = 64*2;
+    uint32_t M = 128*7, N = 256*5, K = 64*2;
     a.resize<float16_t>({ M, K });
     b.resize<float16_t>({ K, N });
 
