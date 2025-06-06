@@ -410,7 +410,7 @@ t_cminfo = cl.tensor([GWS[0]*GWS[1]*GWS[2]//WG_SIZE, 3], np.dtype(np.uint64))
 # f"-cmc -mdump_asm -g2 "
 cwd = os.path.dirname(os.path.realpath(__file__))
 print(f"compiling {cwd} ...")
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -I{cwd} -mdump_asm -g2")
+cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd} -mdump_asm -g2")
 print("first call ...")
 
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, 0, q_len, kv_len, t_q, t_k, t_v, t_out, t_cminfo)

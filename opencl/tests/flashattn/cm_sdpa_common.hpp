@@ -116,6 +116,14 @@ inline void Transpose2DMatrix(matrix_ref<T1, 8, 16> in, matrix_ref<T2, 16, 8> ou
     Transpose_8x8(in.select<8, 1, 8, 1>(0,8), out.select<8, 1, 8, 1>(8,0));
 }
 
+template <int n_stride, typename T, int M, int N>
+CM_INLINE void slm_read_2d(matrix_ref<T, M, N> out, uint slm, int offset) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        cm_slm_block_read(slm, GENX_DWALIGNED, offset + i*n_stride*sizeof(T), out.row(i));
+    }
+}
+
 template <typename T, int M, int N>
 CM_INLINE void svm_read_2d(matrix_ref<T, M, N> out, svmptr_t base, uint pitch) {
     #pragma unroll

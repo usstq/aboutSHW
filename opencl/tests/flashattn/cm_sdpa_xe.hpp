@@ -79,6 +79,29 @@ inline void ugemm_PV1(uint slm_V, matrix_ref<half, REG_N, REG_K> P, vector_ref<f
     }
 }
 
+template<typename T, int rows, int cols>
+vector<float, cols> online_softmax_update(matrix_ref<T, rows, cols> St, vector_ref<T, cols> cur_max, vector_ref<T, cols> cur_sum) {
+    vector<float, cols> new_max_t;
+    new_max_t = cm_max<float>(St[0], St[1]);
+    for(int r = 2; r < St.n_rows(); r++) new_max_t = cm_max<float>(new_max_t, St[r]);
+    new_max_t = cm_max<float>(new_max_t, cur_max);
+
+    // Pt = torch.exp(St - new_max)
+    constexpr float log2e = 1.4426950408889634f;
+    for(int r = 0; r < St.n_rows(); r++) St[r] = cm_exp((St[r] - new_max_t)*log2e);
+
+    vector<float, cols> row_sum_t;
+    row_sum_t = cm_add<float>(St[0], St[1]);
+    for(int r = 2; r < St.n_rows(); r++) row_sum_t = cm_add<float>(row_sum_t, St[r]);
+
+    vector<float, cols> max_comp;
+    max_comp = cm_exp((cur_max - new_max_t)*log2e);
+    cur_sum = cm_mul<float>(cur_sum, max_comp);
+    cur_sum = cm_add<float>(cur_sum, row_sum_t);
+    cur_max = new_max_t;
+    return max_comp;
+}
+
 template<bool use_causal_mask, int local_size>
 void sdpa_kernel(
     uint slm_K,
@@ -177,27 +200,29 @@ void sdpa_kernel(
 
     load_slm_KV(0);
     load_slm_KV(kv_step);
+
     cm_slm_fence(CM_LOCAL_BARRIER);
     cm_sbarrier(1);
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
             slm_buff_id_read ++) {
         //
-        //  load0, load1, signal1, 
-        //  [wait2, signal2, load2, read0]
-        //  [wait3, signal3, load3, read1]
-        //  [wait4, signal4, load4, read2]  
-        //  [wait5, signal5, load5, read3]  
+        //  load0->0, signal1, 
+        //  [load1->1, wait2, signal2, read0]
+        //  [load2->2, wait3, signal3, read1]
+        //  [load3->3, wait4, signal4, read2]  
+        //  [load4->0, wait5, signal5, read3]  
         //
         //  after wait4, all workers have reached signal3, so:
         //     - all workers have finished load2 & read0. 
         //     - we can start to load 4 into SLM slot 0 (i & 3) safely 
         //     - we can start to read 2 ((i-2) & 3) safely
         //
-        load_slm_KV(kv_pos + 2*kv_step);
-
         cm_fence(CM_LOCAL_BARRIER);
         cm_sbarrier(0);
+
+        load_slm_KV(kv_pos + 2*kv_step);
+
         if (kv_pos + kv_step < kv_stop)
             cm_sbarrier(1);
 
@@ -227,33 +252,12 @@ void sdpa_kernel(
             causal_left -= kv_step;
         }
 
+        // mask off k-tails
         int kv_tokens = kv_stop - kv_pos;
-        if (kv_tokens < kv_step) {
-            // mask off k-tails
-            for(int p = kv_tokens; p < kv_step; p++) {
-                St[p] = -3.4e38f;
-            }
-        }
+        for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
 
         //show(St);
-
-        vector<float, REG_N> new_max_t;
-        new_max_t = cm_max<float>(St[0], St[1]);
-        for(int r = 2; r < St.n_rows(); r++) new_max_t = cm_max<float>(new_max_t, St[r]);
-        new_max_t = cm_max<float>(new_max_t, cur_max);
-
-        // Pt = torch.exp(St - new_max)
-        constexpr float log2e = 1.4426950408889634f;
-        for(int r = 0; r < St.n_rows(); r++) St[r] = cm_exp((St[r] - new_max_t)*log2e);
-
-        vector<float, REG_N> row_sum_t;
-        row_sum_t = cm_add<float>(St[0], St[1]);
-        for(int r = 2; r < St.n_rows(); r++) row_sum_t = cm_add<float>(row_sum_t, St[r]);
-
-        vector<float, REG_N> max_comp;
-        max_comp = cm_exp((cur_max - new_max_t)*log2e);
-        cur_sum = cm_mul<float>(cur_sum, max_comp);
-        cur_sum = cm_add<float>(cur_sum, row_sum_t);
+        auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
         matrix<half, REG_N, REG_K> P;
         Transpose2DMatrix(St, P);
@@ -262,8 +266,6 @@ void sdpa_kernel(
             ugemm_PV0(slm_V, P, rO, slm_offset);
         else
             ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
-
-        cur_max = new_max_t;
     }
 
     //# save cur_O/cur_sum.transpose(0, 1)
@@ -284,7 +286,6 @@ void sdpa_kernel(
         cm_store_2d(cur_O_f16, output, qo_off + k*sizeof(half), qo_pitch);
     }
 }
-
 
 
 template<bool use_causal_mask, int local_size>
@@ -418,24 +419,7 @@ void sdpa_kernel_lsc(
             for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
 
             //show(St);
-
-            vector<float, REG_N> new_max_t;
-            new_max_t = cm_max<float>(St[0], St[1]);
-            for(int r = 2; r < St.n_rows(); r++) new_max_t = cm_max<float>(new_max_t, St[r]);
-            new_max_t = cm_max<float>(new_max_t, cur_max);
-
-            // Pt = torch.exp(St - new_max)
-            constexpr float log2e = 1.4426950408889634f;
-            for(int r = 0; r < St.n_rows(); r++) St[r] = cm_exp((St[r] - new_max_t)*log2e);
-
-            vector<float, REG_N> row_sum_t;
-            row_sum_t = cm_add<float>(St[0], St[1]);
-            for(int r = 2; r < St.n_rows(); r++) row_sum_t = cm_add<float>(row_sum_t, St[r]);
-
-            vector<float, REG_N> max_comp;
-            max_comp = cm_exp((cur_max - new_max_t)*log2e);
-            cur_sum = cm_mul<float>(cur_sum, max_comp);
-            cur_sum = cm_add<float>(cur_sum, row_sum_t);
+            auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
             matrix<half, REG_N, REG_K> P;
             Transpose2DMatrix(St, P);
@@ -444,7 +428,6 @@ void sdpa_kernel_lsc(
                 ugemm_PV0(slm_V, P, rO, slm_offset);
             else
                 ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
-            cur_max = new_max_t;
         }
     }
     // cm_sbarrier(0);
@@ -533,32 +516,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                                 v_base,
                                 o_base);
 
-
-#if 0
-    {
-        auto q_start = (q_len - q_group_id * local_size * q_step) - (local_size * q_step) + wg_local_id*q_step;
-        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
-        auto k_base = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
-        auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
-        auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
-        if constexpr (causal_mask) {
-            kv_stop = (q_len - q_group_id * local_size * q_step);
-            if (kv_stop > kv_len) kv_stop = kv_len;
-        }
-        SDPA_KERNEL<causal_mask, WG_SIZE_HINT>(   slm_K,
-                                    slm_V,
-                                    wg_local_id,
-                                    q_start,
-                                    kv_stop,
-                                    head_base_id,
-                                    q_len,
-                                    kv_len,
-                                    q_base,
-                                    k_base,
-                                    v_base,
-                                    o_base);
-    }
-#endif
     // if (i == args_verbose) return;
     CMTracer_end(&cminfo);
 }
@@ -623,32 +580,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                                 qo_off,
                                 kv_off);
 
-
-#if 0
-    {
-        auto q_start = (q_len - q_group_id * local_size * q_step) - (local_size * q_step) + wg_local_id*q_step;
-        auto q_base = reinterpret_cast<svmptr_t>(query + ((batch*q_len + q_start)*num_heads + h)*head_size);
-        auto k_base = reinterpret_cast<svmptr_t>(key + (batch*num_kv_heads*kv_len + hkv)*head_size);
-        auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
-        auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size);
-        if constexpr (causal_mask) {
-            kv_stop = (q_len - q_group_id * local_size * q_step);
-            if (kv_stop > kv_len) kv_stop = kv_len;
-        }
-        SDPA_KERNEL<causal_mask, WG_SIZE_HINT>(   slm_K,
-                                    slm_V,
-                                    wg_local_id,
-                                    q_start,
-                                    kv_stop,
-                                    head_base_id,
-                                    q_len,
-                                    kv_len,
-                                    q_base,
-                                    k_base,
-                                    v_base,
-                                    o_base);
-    }
-#endif
     // if (i == args_verbose) return;
     CMTracer_end(&cminfo);
 }
