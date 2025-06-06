@@ -381,12 +381,6 @@ attn-mask size    : 8192 * 8192  *2 ~ 128 MB
 src1 = cl.CMTracer.code + r'''
 //# CM kernel for flash attn, reference
 
-#pyeval f"#define num_heads {num_heads}"
-#pyeval f"#define num_kv_heads {num_kv_heads}"
-#pyeval f"#define head_size {head_size}"
-#pyeval f"#define q_step {q_step}"
-#pyeval f"#define kv_step {kv_step}"
-#pyeval f"#define scale_factor {scale_factor}"
 #pyeval f"#define args_verbose {args.verbose}"
 
 #pyeval f"#define dim_batch {dim_batch}"
@@ -412,10 +406,17 @@ t_cminfo = cl.tensor([GWS[0]*GWS[1]*GWS[2]//WG_SIZE, 3], np.dtype(np.uint64))
 # f"-cmc -mdump_asm -g2 "
 cwd = os.path.dirname(os.path.realpath(__file__))
 print(f"compiling {cwd} ...")
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd} -mdump_asm -g2")
+cm_kernels = cl.kernels(pyeval(src1),
+                        (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
+                         f" -DCMFLA_NUM_HEADS={num_heads}"
+                         f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
+                         f" -DCMFLA_HEAD_SIZE={head_size}"
+                         f" -DCMFLA_SCALE_FACTOR={scale_factor}"
+                         f" -mdump_asm -g2"
+                         ))
 print("first call ...")
 
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, 0, q_len, kv_len, t_q, t_k, t_v, t_out, t_cminfo)
+cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_cminfo)
 f1 = torch.from_numpy(t_out.numpy())
 
 if args.verbose >= 0:
@@ -441,7 +442,7 @@ while len(all_layers) < 100 and mem_size < 4e9:
 for i in range(100):
     j  = i % len(all_layers)
     cm_kernels.enqueue("cm_sdpa", GWS, LWS,
-                    0, q_len, kv_len,
+                    q_len, kv_len,
                     all_layers[j][0],
                     all_layers[j][1],
                     all_layers[j][2],

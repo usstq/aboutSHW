@@ -1,0 +1,165 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import functools
+
+from clops import cl
+import os
+
+import numpy as np
+
+def get_cm_grf_width():
+    cm_kernels = cl.kernels(r'''
+    extern "C" _GENX_MAIN_ void cm_get_grf_width(int * info [[type("svmptr_t")]]) {
+        info[0] = CM_GRF_WIDTH;
+    }''', f"-cmc")
+    t_info = cl.tensor([2], np.dtype(np.int32))
+    cm_kernels.enqueue("cm_get_grf_width", [1], [1], t_info)
+    return t_info.numpy()[0]
+
+CM_GRF_WIDTH = get_cm_grf_width()
+
+class flash_attn_cm:
+    def __init__(self, num_heads, head_size, max_seq_len):
+        self.num_heads = num_heads
+        self.head_size = head_size
+        src1 = r'''#include "cm_sdpa_vlen.hpp"'''
+        cwd = os.path.dirname(os.path.realpath(__file__))
+        print(f"compiling {cwd} {num_heads=} {head_size=} {max_seq_len=} ...")
+        self.q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
+        self.wg_size =  (max_seq_len + self.q_step - 1)//self.q_step
+        self.need_wg_mapping = 0
+        if self.wg_size > 16:
+            # seq_len is too big to fit into a single work-group
+            # will use fixed work-group size 16, process 16*16 (or 16*8 on xe1)
+            # part of sequence, in this case, kernel needs to figure-out which part
+            # it needs to handle
+            self.need_wg_mapping = 1
+            self.wg_size = 16
+
+        scale_factor = 1.0/(head_size**0.5)
+        self.kernels = cl.kernels(src1,
+                     (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
+                      f" -DCMFLA_NUM_HEADS={num_heads}"
+                      f" -DCMFLA_NUM_KV_HEADS={num_heads}"
+                      f" -DCMFLA_HEAD_SIZE={head_size}"
+                      f" -DCMFLA_SCALE_FACTOR={scale_factor}"
+                      f" -DCMFLA_WG_SIZE={self.wg_size}"
+                      f" -DCMFLA_WG_MAPPING={self.need_wg_mapping}"
+                      f" -mdump_asm -g2")
+                     )
+
+    def __call__(self, q, k, v, cu_seqlens, n_repeats = 1):
+        q_len = q.shape[0]
+        kv_len = k.shape[0]
+        old_dtype = q.dtype
+        assert q_len == kv_len
+        t_q = cl.tensor(q.to(torch.float16).detach().numpy())
+        t_k = cl.tensor(k.to(torch.float16).detach().numpy())
+        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
+        t_cu_seqlens = cl.tensor(np.array(cu_seqlens, dtype=np.int32))
+        t_out = cl.tensor([q.shape[0], self.num_heads, self.head_size], np.dtype(np.float16))
+        
+        if self.need_wg_mapping:
+            wg_count = 0
+            wg_seq_len = self.wg_size * self.q_step
+            for i in range(len(cu_seqlens) - 1):
+                wg_count += (cu_seqlens[i+1] - cu_seqlens[i] + wg_seq_len - 1) // wg_seq_len
+        else:
+            wg_count = (len(cu_seqlens) - 1)
+        GWS = [self.num_heads, wg_count * self.wg_size]
+        LWS = [1, self.wg_size]
+        print(f"{GWS=} {LWS=}")
+        for _ in range(n_repeats):
+            self.kernels.enqueue("cm_sdpa_vlen", GWS, LWS, t_cu_seqlens, t_q, t_k, t_v, t_out)
+        attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
+        return attn_output
+
+    @staticmethod
+    @functools.cache
+    def create_instance(num_heads, head_size, max_seq_len):
+        return flash_attn_cm(num_heads, head_size, max_seq_len)
+
+def flash_attn_vlen_ref(q, k, v, cu_seqlens):
+    seq_length, num_heads, head_size = q.shape
+    old_dtype = q.dtype        
+    attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
+    for i in range(1, len(cu_seqlens)):
+        attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+
+    q = q.transpose(0, 1)
+    k = k.transpose(0, 1)
+    v = v.transpose(0, 1)
+
+    # print(f"============2 {cu_seqlens=} {seq_length=} {num_heads=}")
+    # print(f"============2 {q.shape=} {q.is_contiguous()=} {k.shape=} {k.is_contiguous()=} {v.shape=} {v.is_contiguous()=}")
+    
+    attn_output = F.scaled_dot_product_attention(
+        q.unsqueeze(0).to(torch.float16), k.unsqueeze(0).to(torch.float16), v.unsqueeze(0).to(torch.float16), attention_mask, dropout_p=0.0
+    )
+    attn_output = attn_output.squeeze(0).transpose(0, 1)
+    # print(f"============2 {attn_output.shape=} ")    
+    print(".")
+    return attn_output.to(old_dtype)
+
+
+def flash_attn(q, k, v, cu_seqlens):
+    _, num_heads, head_size = q.shape
+    max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+    func = flash_attn_cm.create_instance(num_heads, head_size, max_seqlen)
+    # return flash_attn_vlen_ref(q, k, v, cu_seqlens)
+    return func(q, k, v, cu_seqlens)
+
+
+def check_close(input, other, atol=1e-3, rtol=1e-3):
+    print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
+    rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
+    atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
+    print(f"[check_close] rtol_max: {rtol_max}")
+    print(f"[check_close] atol_max: {atol_max}")
+    if not torch.allclose(input, other, atol=atol, rtol=rtol):
+        close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
+        not_close_indices = torch.where(~close_check) # Invert the close check to find failures
+        print(f"Not close indices: {not_close_indices}")
+        print(f"    input_tensor: {input[not_close_indices]}")
+        print(f"    other_tensor: {other[not_close_indices]}")
+        assert 0
+
+def test_flash_attn_cm(seq_len, sub_seq_len):
+    cl.profiling(True)
+    torch.manual_seed(0)
+    torch.set_printoptions(linewidth=1024)
+    
+    import numpy as np
+    q_len = kv_len = seq_len
+    num_heads = 16
+    num_kv_heads = 16
+    head_size = 80
+    cu_seqlens = torch.tensor([i for i in range(0, seq_len, sub_seq_len)] + [seq_len], dtype=torch.int32)
+    #print(cu_seqlens)
+
+    low = -1
+    high = 2
+    act_dtype = torch.float16
+    q = torch.randint(low, high, [q_len, num_heads, head_size]).to(dtype=act_dtype)
+    k = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)
+    v = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+
+    ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
+
+    max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+    func = flash_attn_cm.create_instance(num_heads, head_size, max_seqlen)
+    out = func(q, k, v, cu_seqlens)
+    check_close(ref, out)
+
+    out = func(q, k, v, cu_seqlens, 100)
+    latency = cl.finish()
+    # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
+    print(f" {seq_len=} {sub_seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
+
+
+if __name__ == "__main__":
+    test_flash_attn_cm(8192, 1024)
+    test_flash_attn_cm(8192, 64)
+    test_flash_attn_cm(8190, 64)
