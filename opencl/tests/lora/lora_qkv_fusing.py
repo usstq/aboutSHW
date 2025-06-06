@@ -293,9 +293,10 @@ def qkv_blocking_2nd(rank, input_state, kv_state):
     lora_cnt = 3
     fused_output = input_state+kv_state*2
     # The MAX_WG_SZ should be bigger than MAXRANK*3=768. Use 1024 for now.
-    MAX_WG_SZ = 1024
+    MAX_WG_SZ = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
     gemma_sg_BK = 32
     gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
+    assert  gemma_sgK !=0, f'MAX_WG_SZ:L{MAX_WG_SZ} is smaller than rank*lora_cnt:{rank*lora_cnt}'
     gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
@@ -579,7 +580,7 @@ class QKV_LORA_1ST:
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
             print(f'| BATCH = {batch} Q_STATE:{input_state}, KV_STATE:{kv_state}, RANK:{rank}:')
             print(f'[1ST_GEMMA] GWS:{self.gemma_GWS}, LWS:{self.gemma_LWS}, M:{batch}/{A_BM}, N:{rank}/{A_BN}, SGM:{A_sgM} SGN:{A_sgN} REGM:{A_regM} REGN:{A_regN}')
-            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_GWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}, SGM:{B_sgM} SGN:{B_sgN} REGM:{B_regM} REGN:{B_regN}')
+            print(f'[1st_GEMMB] GWS:{self.gemmb_GWS}, LWS:{self.gemmb_GWS}, M:{batch}/{B_BM}, N:{rank}/{B_BN}, SGM:{B_sgM} SGN:{B_sgN} REGM:{B_regM} REGN:{B_regN} N0:{self.q_state} N1_2={self.kv_state}')
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
 
@@ -692,8 +693,10 @@ def test_qkv_lora_1st(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def qkv_blocking_1st(batch, rank, input_state, kvstate):
+    max_wg_sz = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
+    # print(f'////////////////max wg size is {max_wg_sz}')
     sg_sz = 16
-    max_sg_num = 1024//sg_sz
+    max_sg_num = max_wg_sz//sg_sz
     lora_cnt = 3
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
 # GEMMA
@@ -713,13 +716,17 @@ def qkv_blocking_1st(batch, rank, input_state, kvstate):
     if kvstate % (2*sg_sz) == 0:
         if batch < 256:
             B_regM, B_regN = [8, 2]
-            B_sgM, B_sgN = [16, 4]
+            B_sgM = 16
+            B_sgN = max_sg_num // B_sgM
+
         else:
             B_regM, B_regN = [16, 2]
             B_sgM, B_sgN = [8, 4]
     else:
         B_regM, B_regN = [8, 1]
-        B_sgM, B_sgN = [8, 8]
+        B_sgM = 8
+        B_sgN = max_sg_num // B_sgM
+
     ##one SG calculation in N dimension can't cross Q,K,V should only one of Q,K,V . For both GEMMA and GEMMB.
     assert (rank%(sg_sz*A_regN)) == 0
     assert kvstate %(B_regN*sg_sz) == 0, f'kvstate:{kvstate}, B_regN:{B_regN}'
@@ -728,7 +735,7 @@ def qkv_blocking_1st(batch, rank, input_state, kvstate):
 
 if __name__ == '__main__':
     #2nd acc
-    if 0:
+    if 1:
         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
                 kv_state = input_state
@@ -740,7 +747,7 @@ if __name__ == '__main__':
                         gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
                         test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
     #1st acc test.,
-    if 0:
+    if 1:
         for batch in range(2054, 2069):
             for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
                 for rank in (16, 32, 64, 128, 256):
@@ -769,3 +776,4 @@ if __name__ == '__main__':
             A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = qkv_blocking_1st(batch, 64, 1536, 256)
             test_qkv_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,
                                 B_regM=B_regM, B_regN=B_regN, B_sgM=B_sgM, B_sgN=B_sgN)
+
