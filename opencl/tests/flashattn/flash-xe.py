@@ -25,6 +25,8 @@ parser.add_argument('-c', "--causal-mask", action="store_true")
 
 def get_xe_version():
     cm_kernels = cl.kernels(r'''
+    #include <cm/cm.h>
+    #include "cm/cmtl.h"
     extern "C" _GENX_MAIN_ void cm_check_platform(int * info [[type("svmptr_t")]]) {
         info[0] = CM_GRF_WIDTH;
     #ifdef CM_HAS_LSC_UNTYPED_2D

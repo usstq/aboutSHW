@@ -222,6 +222,8 @@ class SGTracer:
 
 class CMTracer:
     code = r'''
+        #include <cm/cm.h>
+        #include "cm/cmtl.h"
         CM_INLINE uint64_t _get_clock() {
             auto clk = cm_clock();
             return ((uint64_t)clk[1]) << 32 | clk[0];
