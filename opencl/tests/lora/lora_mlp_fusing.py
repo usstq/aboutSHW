@@ -271,9 +271,11 @@ def mlp_blocking_2nd(rank, input_state, output_state):
     fused_output = output_state*2
 
     # The MAX_WG_SZ should be bigger than MAXRANK*2=512. Use 1024 for now.
-    MAX_WG_SZ = 1024
+    MAX_WG_SZ = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
     gemma_sg_BK = 32
     gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
+    assert  gemma_sgK !=0, f'MAX_WG_SZ:L{MAX_WG_SZ} is smaller than rank*lora_cnt:{rank*lora_cnt}'
+
     gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
     return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
@@ -646,8 +648,9 @@ def test_mlp_lora_1st(batch, rank, input_state, output_state,  A_regM, A_regN, A
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def mlp_blocking_1st(batch, rank, input_state, outstate):
+    max_wg_sz = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
     sg_sz = 16
-    max_sg_num = 1024//sg_sz
+    max_sg_num = max_wg_sz//sg_sz
     lora_cnt = 2
     assert batch >= 8, f"batch:{batch} too small in 1st token, not support in opt kernel"
 # GEMMA:
@@ -665,13 +668,15 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
     if outstate % (2*sg_sz) == 0:
         if batch < 256:
             B_regM, B_regN = [8, 2]
-            B_sgM, B_sgN = [16, 4]
+            B_sgM = 16
+            B_sgN = max_sg_num // B_sgM
         else:
             B_regM, B_regN = [16, 2]
             B_sgM, B_sgN = [8, 4]
     else:
         B_regM, B_regN = [8, 1]
-        B_sgM, B_sgN = [8, 8]
+        B_sgM = 8
+        B_sgN = max_sg_num // B_sgM
     ##one SG calculation can't cross Gate projection and Up projecion. For both GEMMA and GEMMB.
     assert (rank%(sg_sz*A_regN)) == 0
     assert outstate %(B_regN*sg_sz) == 0, f'outstate:{outstate}, B_regN:{B_regN}'
@@ -680,14 +685,14 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
 
 if __name__ == '__main__':
     #2nd acc:
-    if 0:
+    if 1:
         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
                 for output_state in (1024, 1536, 3840, 8960, input_state*8,):
                     gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
                     test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
     #1st acc:
-    if 0:
+    if 1:
         for batch in range(2054, 2069):
             for input_state in (7*16, 11*16, 13*16, 15*16, 12*16,17*16, 1024, 1536, 2048, 2560, 3072, 3840, 4096,):
                 for rank in (16, 32, 64, 128, 256):
@@ -703,7 +708,7 @@ if __name__ == '__main__':
         gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
         test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
     #2nd perf based on qwen MLP
-    if 1:
+    if 0:
         for batch in(3192,):
             A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = mlp_blocking_1st(batch, 64, 1536, 8960)
             test_mlp_lora_1st(batch, 64, 1536, 8960, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,

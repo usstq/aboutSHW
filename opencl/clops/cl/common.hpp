@@ -53,7 +53,7 @@ struct ocl_queue {
     cl_command_queue queue;
 
     sycl::queue sycl_queue;
-    
+
     std::vector<std::variant<cl_event, sycl::event>> events;
     bool enable_profile;
 
@@ -85,7 +85,7 @@ struct ocl_queue {
             }
         }
         events.clear();
-        return ret;        
+        return ret;
     }
 
     void* malloc_host(size_t sz) {
@@ -118,6 +118,8 @@ struct ocl_queue {
         result["CL_DEVICE_MAX_COMPUTE_UNITS"] = device.get_info<sycl::info::device::max_compute_units>();
         result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = device.get_info<sycl::info::device::max_clock_frequency>();
         result["CL_DEVICE_LOCAL_MEM_SIZE"] = device.get_info<sycl::info::device::local_mem_size>();
+        result["CL_DEVICE_MAX_WORK_GROUP_SIZE"] = device.get_info<info::device::max_work_group_size>();
+
     }
 
     void update_queue(bool _enable_profile = false) {
@@ -241,6 +243,8 @@ struct ocl_queue {
         result["CL_DEVICE_MAX_COMPUTE_UNITS"] = getDeviceInfo<cl_uint>(device, CL_DEVICE_MAX_COMPUTE_UNITS);
         result["CL_DEVICE_MAX_CLOCK_FREQUENCY"] = getDeviceInfo<cl_uint>(device, CL_DEVICE_MAX_CLOCK_FREQUENCY);
         result["CL_DEVICE_LOCAL_MEM_SIZE"] = getDeviceInfo<cl_ulong>(device, CL_DEVICE_LOCAL_MEM_SIZE);
+        result["CL_DEVICE_MAX_WORK_GROUP_SIZE"] = getDeviceInfo<cl_ulong>(device, CL_DEVICE_MAX_WORK_GROUP_SIZE);
+
     }
 
     void select_device(std::vector<std::string> exts = {}) {
@@ -301,7 +305,7 @@ struct ocl_queue {
         ext_func_t ext_func = reinterpret_cast<ext_func_t>(clGetExtensionFunctionAddressForPlatform(platform, func_name));
         ASSERT(ext_func != nullptr, "clGetExtensionFunctionAddressForPlatform()", func_name, " returns nullptr");
         return (*ext_func)(std::forward<Args>(args)...);
-    }    
+    }
 };
 #endif
 
