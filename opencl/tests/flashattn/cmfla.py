@@ -21,8 +21,9 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 
 class flash_attn_cm:
-    def __init__(self, num_heads, head_size, max_seq_len):
+    def __init__(self, num_heads, num_kv_heads, head_size, max_seq_len):
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         src1 = r'''#include "cm_sdpa_vlen.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
@@ -42,7 +43,7 @@ class flash_attn_cm:
         self.kernels = cl.kernels(src1,
                      (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
                       f" -DCMFLA_NUM_HEADS={num_heads}"
-                      f" -DCMFLA_NUM_KV_HEADS={num_heads}"
+                      f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_SCALE_FACTOR={scale_factor}"
                       f" -DCMFLA_WG_SIZE={self.wg_size}"
@@ -78,11 +79,12 @@ class flash_attn_cm:
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, head_size, max_seq_len):
-        return flash_attn_cm(num_heads, head_size, max_seq_len)
+    def create_instance(num_heads, num_kv_heads, head_size, max_seq_len):
+        return flash_attn_cm(num_heads, num_kv_heads, head_size, max_seq_len)
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens):
     seq_length, num_heads, head_size = q.shape
+    kv_seq_length, num_kv_heads, head_size = k.shape
     old_dtype = q.dtype        
     attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
     for i in range(1, len(cu_seqlens)):
@@ -96,7 +98,10 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens):
     # print(f"============2 {q.shape=} {q.is_contiguous()=} {k.shape=} {k.is_contiguous()=} {v.shape=} {v.is_contiguous()=}")
     
     attn_output = F.scaled_dot_product_attention(
-        q.unsqueeze(0).to(torch.float16), k.unsqueeze(0).to(torch.float16), v.unsqueeze(0).to(torch.float16), attention_mask, dropout_p=0.0
+        q.unsqueeze(0).to(torch.float16), k.unsqueeze(0).to(torch.float16), v.unsqueeze(0).to(torch.float16),
+        attention_mask,
+        dropout_p=0.0,
+        enable_gqa = (num_kv_heads != num_heads)
     )
     attn_output = attn_output.squeeze(0).transpose(0, 1)
     # print(f"============2 {attn_output.shape=} ")    
@@ -126,16 +131,13 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_flash_attn_cm(seq_len, sub_seq_len):
+def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024)
     
     import numpy as np
     q_len = kv_len = seq_len
-    num_heads = 16
-    num_kv_heads = 16
-    head_size = 80
     cu_seqlens = torch.tensor([i for i in range(0, seq_len, sub_seq_len)] + [seq_len], dtype=torch.int32)
     #print(cu_seqlens)
 
@@ -149,7 +151,7 @@ def test_flash_attn_cm(seq_len, sub_seq_len):
     ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
 
     max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-    func = flash_attn_cm.create_instance(num_heads, head_size, max_seqlen)
+    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, max_seqlen)
     out = func(q, k, v, cu_seqlens)
     check_close(ref, out)
 
@@ -160,6 +162,8 @@ def test_flash_attn_cm(seq_len, sub_seq_len):
 
 
 if __name__ == "__main__":
+    test_flash_attn_cm(8192, 8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_cm(8192, 8192)
     test_flash_attn_cm(8192, 1024)
     test_flash_attn_cm(8192, 64)
     test_flash_attn_cm(8190, 64)
