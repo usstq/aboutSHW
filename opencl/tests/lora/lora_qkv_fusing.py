@@ -15,7 +15,10 @@ def ALIGN_UP(a, b):
     return ((a + (b -1)) // b *b)
 def DIV_UP(a, b):
     return ((a + (b -1)) // b)
-
+def get_max_wg_sz():
+    if os.environ.get('MAX_WG_SZ_512') != None:
+        return 512
+    return  cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
 """
 ------------------------------------------------------------------------------------------------------------------
 qkv lora reference kernel
@@ -94,11 +97,11 @@ qkv_lora_opt =  r'''
     __kernel void gemmA(__global half * A, __global half *B0, __global half *B1, __global half *B2,  __global half *C, int K) {
 
         int gid0 =  get_group_id(0);
+        int gid2 =  get_group_id(2);
+
         int sgid = get_sub_group_id();
-        // For 2nd token,  sg in one wg would be divided by 2 dimensions to increase threads number in wg.
-        int sgN = RANK*LORA_CNT / SG_SZ;
         int sgid_k = sgid / sgN;
-        int n_idx = sgid % sgN * SG_SZ;
+        int n_idx = (gid2 * sgN +  sgid % sgN) * SG_SZ;
         int n_off = n_idx % RANK;
         int B_idx = n_idx / RANK;
         __global half *B = B_idx == 0 ? B0 : ((B_idx == 1) ? B1: B2);
@@ -232,7 +235,7 @@ qkv_lora_opt =  r'''
 # gemma_sgK: the number of sg in K dimension for GEMMA.
 # gemmb_sgN: the number of sg in N dimension for GEMMB
 class QKV_LORA_2ND:
-    def __init__(self, rank, input_state, kv_state, gemma_sg_BK, gemma_sgK, gemmb_sgN, use_ref = False):
+    def __init__(self, rank, input_state, kv_state, gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN, use_ref = False):
         self.rank = rank
         self.input_state = input_state
         self.q_state = input_state
@@ -240,9 +243,9 @@ class QKV_LORA_2ND:
         self.sg_sz = 16
         self.gemmb_wg_sz = gemmb_sgN * self.sg_sz
         self.use_ref = use_ref
-        # WGs would divide K dimension. N would not divided by WGs
-        self.gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
+        mutlwgs_N = True if (get_max_wg_sz() <  rank*3) else False
         self.gemma_sgK = gemma_sgK
+        self.gemma_wgs_k = DIV_UP(input_state, gemma_sg_BK *self.gemma_sgK)
 
         assert gemmb_sgN <=1024//self.sg_sz, f'gemmb_sgN:{gemmb_sgN} bigger than {1024//self.sg_sz} limitation'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
@@ -251,21 +254,21 @@ class QKV_LORA_2ND:
         assert gemma_sg_BK % self.sg_sz == 0, f"'gemma_sg_BK' { gemma_sg_BK} is not multiple of SG_SZ {self.sg_sz}"
         assert self.gemmb_wg_sz % self.sg_sz == 0, f"'gemmb_wg_sz' {self.gemmb_wg_sz} is not multiple of SG_SZ {self.sg_sz}"
         # gemma_wg_BK only used for refrence kernel
-        self.gemma_wg_BK = gemma_sg_BK * gemma_sgK
-        options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs}\
-                        -DN1_2={self.kv_state} -DN0={self.q_state}'
+        self.gemma_wg_BK = gemma_sg_BK * self.gemma_sgK
+        options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={self.gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs_k}\
+                        -DN1_2={self.kv_state} -DN0={self.q_state} -DsgN={gemma_sgN}'
         if use_ref:
             self.cl_kernels_ref = kernel_cache(qkv_lora_ref_kernel, options=f"-DN_0={self.q_state} -DN_1_2={self.kv_state}")
         else:
             self.cl_kernels_opt = kernel_cache(qkv_lora_opt, options)
-        self.gemma_lws = [1 , gemma_sgK, self.rank*3]
-        self.gemma_gws = [self.gemma_wgs, gemma_sgK, self.rank*3]
+        self.gemma_lws = [1 , self.gemma_sgK, self.rank if mutlwgs_N  else self.rank*3 ]
+        self.gemma_gws = [self.gemma_wgs_k, self.gemma_sgK, self.rank*3]
         self.gemmb_lws = [self.gemmb_wg_sz]
         self.gemmb_gws = [ALIGN_UP(self.q_state + 2*self.kv_state, self.gemmb_wg_sz)]
         if use_ref == False:
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
             print(f'| BATCH = 1 INPUT_STATE:{input_state} Q_STATE:{input_state}, KV_STATE:{kv_state}, RANK:{rank}:')
-            print(f'| [2ND_GEMMA]: GWS:{self.gemma_gws}, LWS:{self.gemma_lws} SG_BK:{gemma_sg_BK} SGK:{gemma_sgK}')
+            print(f'| [2ND_GEMMA]: GWS:{self.gemma_gws}, LWS:{self.gemma_lws} SG_BK:{gemma_sg_BK} SGK:{self.gemma_sgK}')
             print(f'| [2ND_GEMMB]: GWS:{self.gemmb_gws}, LWS:{self.gemmb_lws} SGN:{gemmb_sgN}')
             print(f'----------------------------------------------------------------------------------------------------------------------------------')
 
@@ -293,14 +296,20 @@ def qkv_blocking_2nd(rank, input_state, kv_state):
     lora_cnt = 3
     fused_output = input_state+kv_state*2
     # The MAX_WG_SZ should be bigger than MAXRANK*3=768. Use 1024 for now.
-    MAX_WG_SZ = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
+    MAX_WG_SZ = get_max_wg_sz()
     gemma_sg_BK = 32
-    gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
-    assert  gemma_sgK !=0, f'MAX_WG_SZ:L{MAX_WG_SZ} is smaller than rank*lora_cnt:{rank*lora_cnt}'
-    gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
-    return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
+    if MAX_WG_SZ < rank*lora_cnt:
+        gemma_sgN = rank // SG_SZ
+        gemma_sgK = MAX_WG_SZ//(rank)
+    else:
+        gemma_sgN = (rank*lora_cnt) // SG_SZ
+        gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
 
-def test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
+    # assert  gemma_sgK !=0, f'MAX_WG_SZ:L{MAX_WG_SZ} is smaller than rank*lora_cnt:{rank*lora_cnt}'
+    gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
+    return [gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN]
+
+def test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgN, gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
     cl.profiling(True)
     SG_SZ = 16
     vRANGE = 1
@@ -311,7 +320,7 @@ def test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK = 8, gemma_sg_BK = 
     # np.random.seed(0)
 
     # for GEMMA, K decides how many WGs are needed.
-    gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
+    gemma_wgs_k = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*3]).astype(np.float16)
     alpha = np.random.rand(3, rank).astype(np.float16)
     qkv_state = input_state + kv_state*2
@@ -331,7 +340,7 @@ def test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK = 8, gemma_sg_BK = 
 
     loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)
     mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, qkv_state]).astype(np.float16)
-    Aoutput = np.zeros([gemma_wgs, rank*3]).astype(np.float16)
+    Aoutput = np.zeros([gemma_wgs_k, rank*3]).astype(np.float16)
 
     stateA0_list = [cl.tensor(stateA_0)for _ in range(REPEAT)]
     stateA1_list = [cl.tensor(stateA_1)for _ in range(REPEAT)]
@@ -352,8 +361,8 @@ def test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK = 8, gemma_sg_BK = 
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
     res_list = [cl.tensor([1, qkv_state], np.dtype(np.float16))for _ in range(REPEAT)]
     ref_list = [cl.tensor([1, qkv_state], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref = QKV_LORA_2ND(rank, input_state, kv_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
-    opt = QKV_LORA_2ND(rank, input_state, kv_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
+    ref = QKV_LORA_2ND(rank, input_state, kv_state, gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
+    opt = QKV_LORA_2ND(rank, input_state, kv_state, gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
 
     if check_acc:
         opt(mainInput_list[0], loraInput_list[0], stateA0_list[0], stateA1_list[0], stateA2_list[0], None, alpha0_list[0], alpha1_list[0], alpha2_list[0], None,
@@ -693,8 +702,7 @@ def test_qkv_lora_1st(batch, rank, input_state, kv_state,  A_regM, A_regN, A_sgM
                 print(f'[latency]: {ns_a*1e-3:.1f} + {ns_b*1e-3:.1f} = {(ns_a+ns_b)*1e-3:.1f}us')
 
 def qkv_blocking_1st(batch, rank, input_state, kvstate):
-    max_wg_sz = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
-    # print(f'////////////////max wg size is {max_wg_sz}')
+    max_wg_sz = get_max_wg_sz()
     sg_sz = 16
     max_sg_num = max_wg_sz//sg_sz
     lora_cnt = 3
@@ -708,6 +716,9 @@ def qkv_blocking_1st(batch, rank, input_state, kvstate):
             A_regM, A_regN = [16, 2]
     else:
         A_regM, A_regN = [8, 1]
+    if lora_cnt * rank >  max_wg_sz and A_regN == 1:
+        A_regN = 2
+
     A_sgN = rank*lora_cnt//(sg_sz*A_regN)
     A_sgM = max_sg_num // A_sgN
 
@@ -734,18 +745,19 @@ def qkv_blocking_1st(batch, rank, input_state, kvstate):
 
 
 if __name__ == '__main__':
-    #2nd acc
+
+#2nd acc
     if 1:
         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
                 kv_state = input_state
-                gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
-                test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+                gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
+                test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgN, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
                 for kv_groups in (3, 4, 5, 6, 7, 8, 9):
                     if input_state % kv_groups == 0 and input_state//kv_groups%16 == 0:
                         kv_state = input_state // kv_groups
-                        gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
-                        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+                        gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
+                        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgN, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
     #1st acc test.,
     if 1:
         for batch in range(2054, 2069):
@@ -767,11 +779,11 @@ if __name__ == '__main__':
         rank=64
         input_state=1536
         kv_state=256
-        gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
-        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+        gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN = qkv_blocking_2nd(rank, input_state, kv_state)
+        test_qkv_lora_2nd(input_state, rank, kv_state, gemma_sgN, gemma_sgK, gemma_sg_BK, gemmb_sgN)
 
     #1st perf based on qwen QKV,
-    if 1:
+    if 0:
         for batch in(1024, 3192):
             A_regM, A_regN, A_sgM, A_sgN, B_regM, B_regN, B_sgM, B_sgN = qkv_blocking_1st(batch, 64, 1536, 256)
             test_qkv_lora_1st(batch, 64, 1536, 256, A_regM = A_regM, A_regN = A_regN, A_sgM=A_sgM, A_sgN = A_sgN,

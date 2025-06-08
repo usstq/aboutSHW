@@ -15,6 +15,10 @@ def ALIGN_UP(a, b):
     return ((a + (b -1)) // b *b)
 def DIV_UP(a, b):
     return ((a + (b -1)) // b)
+def get_max_wg_sz():
+    if os.environ.get('MAX_WG_SZ_512') != None:
+        return 512
+    return  cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
 """
 ------------------------------------------------------------------------------------------------------------------
 qkv lora reference kernel
@@ -78,11 +82,10 @@ mlp_lora_opt =  r'''
     __kernel void gemmA(__global half * A, __global half *B0, __global half *B1,  __global half *C, int K) {
 
         int gid0 =  get_group_id(0);
+        int gid2 =  get_group_id(2);
         int sgid = get_sub_group_id();
-        // For 2nd token, rank is small. sg in one wg would be divided by 2 dimensions to increase threads number in wg.
-        int sgN = RANK*LORA_CNT / SG_SZ;
         int sgid_k = sgid / sgN;
-        int n_idx = sgid % sgN * SG_SZ;
+        int n_idx = (gid2 * sgN +  sgid % sgN) * SG_SZ;
         int n_off = n_idx % RANK;
         int B_idx = n_idx / RANK;
         __global half *B = B_idx == 0 ? B0 : B1;
@@ -210,7 +213,7 @@ mlp_lora_opt =  r'''
 # gemma_sgK: the number of sg in K dimension for GEMMA.
 # gemmb_sgN: the number of sg in N dimension for GEMMB
 class MLP_LORA_2ND:
-    def __init__(self, rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN, use_ref = False):
+    def __init__(self, rank, input_state, output_state, gemma_sgN,  gemma_sg_BK, gemma_sgK, gemmb_sgN, use_ref = False):
         self.rank = rank
         self.input_state = input_state
         self.output_state = output_state
@@ -219,9 +222,10 @@ class MLP_LORA_2ND:
         self.sg_sz = 16
         self.gemmb_wg_sz = gemmb_sgN * self.sg_sz
         self.use_ref = use_ref
-        # WGs would divide K dimension. N would not divided by WGs
-        self.gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
+        mutlwgs_N = True if (get_max_wg_sz() <  rank*2) else False
         self.gemma_sgK = gemma_sgK
+        self.gemma_wgs_k = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
+
         assert gemmb_sgN <=1024//self.sg_sz, f'gemmb_sgN:{gemmb_sgN} bigger than {1024//self.sg_sz} limitation'
         assert self.input_state % self.sg_sz == 0, f"'input state' {self.input_state} is not multiple of SG_SZ {self.sg_sz}"
         assert self.output_state % self.sg_sz == 0, f"'output_state' {self.output_state} is not multiple of SG_SZ {self.sg_sz}"
@@ -231,13 +235,14 @@ class MLP_LORA_2ND:
         # gemma_wg_BK only used for refrence kernel
         self.gemma_wg_BK = gemma_sg_BK * gemma_sgK
 
-        options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs} -DN0={self.output_state}'
+        options = f'-DSG_SZ={self.sg_sz}  -DGEMMA_SGK={gemma_sgK} -DRANK={rank} -DGEMMA_SG_BK={gemma_sg_BK} -DGEMMB_PART_NUM={self.gemma_wgs_k} -DN0={self.output_state}\
+                    -DsgN={gemma_sgN}'
         if use_ref:
             self.cl_kernels_ref = kernel_cache(mlp_lora_ref_kernel, options=f"-DN_0={self.output_state}")
         else:
             self.cl_kernels_opt = kernel_cache(mlp_lora_opt, options)
-        self.gemma_lws = [1 , gemma_sgK, self.rank*2]
-        self.gemma_gws = [self.gemma_wgs, gemma_sgK, self.rank*2]
+        self.gemma_lws = [1 , gemma_sgK, self.rank if mutlwgs_N  else self.rank*2 ]
+        self.gemma_gws = [self.gemma_wgs_k, gemma_sgK, self.rank*2]
         self.gemmb_lws = [self.gemmb_wg_sz]
         self.gemmb_gws = [ALIGN_UP(self.fused_out_state, self.gemmb_wg_sz)]
         if use_ref == False:
@@ -271,15 +276,18 @@ def mlp_blocking_2nd(rank, input_state, output_state):
     fused_output = output_state*2
 
     # The MAX_WG_SZ should be bigger than MAXRANK*2=512. Use 1024 for now.
-    MAX_WG_SZ = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
+    MAX_WG_SZ = get_max_wg_sz()
     gemma_sg_BK = 32
-    gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
-    assert  gemma_sgK !=0, f'MAX_WG_SZ:L{MAX_WG_SZ} is smaller than rank*lora_cnt:{rank*lora_cnt}'
-
+    if MAX_WG_SZ < rank*lora_cnt:
+        gemma_sgN = rank//SG_SZ
+        gemma_sgK = MAX_WG_SZ//(rank)
+    else:
+        gemma_sgN = rank*lora_cnt//SG_SZ
+        gemma_sgK = MAX_WG_SZ//(rank*lora_cnt)
     gemmb_sgN = min(fused_output, MAX_WG_SZ)//SG_SZ
-    return [gemma_sg_BK, gemma_sgK, gemmb_sgN]
+    return [gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN]
 
-def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
+def test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgN,  gemma_sgK = 8, gemma_sg_BK = 32, gemmb_sgN = 16, check_acc = False):
     cl.profiling(True)
     SG_SZ = 16
     vRANGE = 1
@@ -290,7 +298,7 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
     # np.random.seed(0)
 
     # for GEMMA, K decides how many WGs are needed.
-    gemma_wgs = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
+    gemma_wgs_k = DIV_UP(input_state, gemma_sg_BK *gemma_sgK)
     stateA = np.random.randint(-vRANGE, vRANGE+1, [input_state, rank*2]).astype(np.float16)
     alpha = np.random.rand(2, rank).astype(np.float16)
     stateA_list= [cl.tensor(stateA) for _ in range(REPEAT)]
@@ -306,7 +314,7 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
 
     loraInput = np.random.randint(-vRANGE, vRANGE+1, [1, input_state]).astype(np.float16)
     mainInput = np.random.randint(-vRANGE, vRANGE+1, [1, output_state*2]).astype(np.float16)
-    Aoutput = np.zeros([gemma_wgs, rank*2]).astype(np.float16)
+    Aoutput = np.zeros([gemma_wgs_k, rank*2]).astype(np.float16)
 
     stateA0_list = [cl.tensor(stateA_0)for _ in range(REPEAT)]
     stateA1_list = [cl.tensor(stateA_1)for _ in range(REPEAT)]
@@ -324,8 +332,8 @@ def test_mlp_lora_2nd(input_state, rank, output_state,  gemma_sgK = 8, gemma_sg_
     A_output_list = [cl.tensor(Aoutput)for _ in range(REPEAT)]
     res_list = [cl.tensor([1, output_state*2], np.dtype(np.float16))for _ in range(REPEAT)]
     ref_list = [cl.tensor([1, output_state*2], np.dtype(np.float16))for _ in range(REPEAT)]
-    ref = MLP_LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
-    opt = MLP_LORA_2ND(rank, input_state, output_state, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
+    ref = MLP_LORA_2ND(rank, input_state, output_state, gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN,True)
+    opt = MLP_LORA_2ND(rank, input_state, output_state, gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN,False)
 
     if check_acc:
         opt(mainInput_list[0], loraInput_list[0], stateA0_list[0], stateA1_list[0], None, alpha0_list[0], alpha1_list[0], None,
@@ -527,8 +535,7 @@ class MLP_LORA_1ST:
 
         if use_ref:
             self.cl_kernels_ref = kernel_cache(mlp_lora_ref_kernel,  options=f"-DN_0={self.output_state}")
-            self.tA_output_ref = cl.tensor([batch, self.rank*3], np.dtype(np.float16))
-
+            self.tA_output_ref = cl.tensor([batch, self.rank*2], np.dtype(np.float16))
         else:
             gemma_func, gemma_kernel_src = mlp_generate_gemm_src(A_regM, A_regN,  True, False)
             gemmb_func, gemmb_kernel_src = mlp_generate_gemm_src(B_regM, B_regN,  False, True)
@@ -554,14 +561,9 @@ class MLP_LORA_1ST:
             return self.tA_output_ref
 
         else:
-            # GEMMA: ONE WG would has {self.gemma_sgK*self.rank/SG_SZ}subgroups. self.rank/SG_SZ subgroups on N dimension, self.gemma_sgK on K dimension
-            # Total {self.gemma_wg} WGS
-            # self.kernel_opt_gemma.enqueue(self.gemma_func, self.gemma_GWS, self.gemma_LWS,
-            #                             loraInput, stateA0, stateA1, stateA2, Aoutput, stateAlpha, mainInput,self.batch, self.rank*3, self.input_state, self.rank)
+
             self.kernel_opt_gemma.enqueue(self.gemma_func, self.gemma_GWS, self.gemma_LWS,
                                          loraInput, stateA0, stateA1, Aoutput, stateAlpha0, stateAlpha1, mainInput,self.batch, self.rank*self.lora_cnt, self.input_state)
-            # GEMMB: ONE WG would has {gemmb_wg_sz/SG_SZ}subgroups.
-            # Total {(self.q_state+2*self.kv_state)/gemmb_wg_sz} WGS
             self.kernel_opt_gemmb.enqueue(self.gemmb_func, self.gemmb_GWS, self.gemmb_LWS,
                                           Aoutput, stateB0, stateB1, result, stateAlpha0, stateAlpha1, mainInput, self.batch, self.fused_output_state, self.rank)
             return Aoutput
@@ -661,6 +663,8 @@ def mlp_blocking_1st(batch, rank, input_state, outstate):
             A_regM, A_regN = [16, 2]
     else:
         A_regM, A_regN = [8, 1]
+    if lora_cnt * rank >  max_wg_sz and A_regN == 1:
+        A_regN = 2
     A_sgN = rank*lora_cnt//(sg_sz*A_regN)
     A_sgM = max_sg_num // A_sgN
 # GEMMB:
@@ -689,8 +693,8 @@ if __name__ == '__main__':
         for input_state in (1024, 1536, 2048, 2560, 3072, 3840, 4096, 7*16, 11*16, 13*16, 15*16, 12*16,17*16):
             for rank in (16, 32, 64, 128, 256):
                 for output_state in (1024, 1536, 3840, 8960, input_state*8,):
-                    gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
-                    test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
+                    gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state, output_state)
+                    test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgN, gemma_sgK, gemma_sg_BK, gemmb_sgN, check_acc = True)
     #1st acc:
     if 1:
         for batch in range(2054, 2069):
@@ -705,8 +709,8 @@ if __name__ == '__main__':
         rank=64
         input_state=1536
         output_state=8960
-        gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
-        test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgK, gemma_sg_BK, gemmb_sgN)
+        gemma_sgN, gemma_sg_BK, gemma_sgK, gemmb_sgN = mlp_blocking_2nd(rank, input_state,output_state)
+        test_mlp_lora_2nd(input_state, rank, output_state, gemma_sgN, gemma_sgK, gemma_sg_BK, gemmb_sgN)
     #2nd perf based on qwen MLP
     if 0:
         for batch in(3192,):
