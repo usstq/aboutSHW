@@ -161,17 +161,45 @@ def get_flash0(query, key, value, attention_mask):
                             sO = sP @ sV + sO*max_comp.transpose(0, 1)
                         lastMax = rowMax
                     else:
-                        sP = S_tr.transpose(0,1).to(dtype=torch.float16)
-                        print("------------------------------------------------------------------")
+                        S_tr *= scale_factor
+                        S_tr += sMask_tr
+                        rowMax = torch.max(S_tr, 0, keepdim=True).values
+                        if j == 0:
+                            lastMax = rowMax
+                        rowMax = torch.maximum(lastMax, rowMax)
+                        max_comp = torch.exp(lastMax - rowMax)
+                        P_tr = torch.exp(S_tr-rowMax)
+                        # [1, Br]
+                        tempSum = torch.sum(P_tr, 0, keepdim=True)
+                        # print("------------------------------------------------------------------")
+                        # print(P_tr)
+                        # print(rowMax)
+                        # print(tempSum)
+                        if j == 0:
+                            rowSum = tempSum
+                        else:
+                            rowSum = max_comp* rowSum + tempSum
+
+                        sP = P_tr.transpose(0,1).to(dtype=torch.float16)
+
                         # print(sP)
                         if j == 0:
                             sO = sP @ sV
                         else:
-                            sO = sP @ sV + sO
-                print(sO)
-                if 0:
+                            sO = sP @ sV + sO*max_comp.transpose(0, 1)
+                        lastMax = rowMax
+                        print("------------------------------------------------------------------")
+
+
+                if 1:
                     sO = sO / rowSum.transpose(0,1).to(dtype=torch.float16)
                     out[b, h, i:(i+br), :] = sO
+                    print(sO)
+
+                    # print(sO[0:8, 0:16])
+                    # print(sO[0:8, 16:32])
+                    # print(sO[8:16, 0:16])
+                    # print(sO[8:16, 16:32])
     return out
 
 if args.impl == 0:
@@ -349,6 +377,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto q_offset = (batch * q_len * num_heads + h) * head_size;
     auto kv_offset = (batch * kv_len * num_kv_heads + hkv) * head_size;
 
+
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
 
     auto q_pitch = num_heads * head_size * sizeof(half);
@@ -360,18 +389,25 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
     //# query [batch, q_len, num_heads, S], rect window [REG_N, REG_K/2]
     lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> q_desc(reinterpret_cast<uint*>(query + q_offset), q_len - 1, head_size*sizeof(half)-1,  q_pitch - 1, q_start, 0);
-    //lsc::block_2d_desc<half, 1, REG_M, REG_N> s_tr_desc;
     lsc::block_2d_desc<half, 1, REG_M, REG_K> k_desc((half*)(key + kv_offset), kv_len - 1, head_size*sizeof(half)-1, kv_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K, REG_N> v_desc((half*)(value + kv_offset), kv_len - 1, head_size*sizeof(half)-1, kv_pitch - 1, 0, 0);
+    // #attention_mask [batch, 1, q_len, kv_len]
+    lsc::block_2d_desc<half, 1, 2*REG_M, REG_N> atten_desc((half*)(mask + batch*q_len*kv_len),  q_len - 1, kv_len*sizeof(half)-1, kv_len*sizeof(half)-1, q_start, 0);
+
+
 
     matrix<half, head_size/REG_K, REG_K*REG_N> mat_Qtr;
-    matrix<float, head_size/REG_N*2, REG_M*REG_N> mat_O;
+    matrix<float, 2*head_size/REG_N, REG_M*REG_N> mat_O=0.f;
 
     #pragma unroll
     for (int i = 0,k = 0; i < head_size/REG_K; i++, k+=REG_K/2) {
         q_desc.set_block_x(k);
         cm_load<lsc::Transpose>(mat_Qtr[i].format<uint>(), q_desc);
     }
+
+    vector<float, REG_N> lastmax;
+    vector<float, 2*REG_M> rowsum;
+
 
     //show(mat_Qtr.format<half, REG_K, REG_N*2>());
     for (int kv_idx = 0; kv_idx < kv_len; kv_idx +=kv_step) {
@@ -408,13 +444,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             cm_barrier();
         }
 
-
-
-
         //#load K from SLM
         //#compute S_tr =K*Q_tr
         matrix<float, 2*REG_M, REG_N> St = 0;
         matrix<half, 2, REG_M * REG_K> Kmat;
+
         auto St2 = St.format<float, 2, REG_M*REG_N>();
         uint offset = 0;
         #pragma unroll
@@ -431,45 +465,126 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                         mat_Qtr[ri].format<int32_t>(),
                         Kmat[1].format<int32_t>());
         }
-        //#load V from SLM
-
-
         //#Transpose  S_tr
         //show(St);
+        St *= scale_factor;
+
+        matrix<half, 2*REG_M, REG_N> atten_mask;
+        matrix<float, 2*REG_M, REG_N> atten_mask_tr;
+        atten_desc.set_block_x(kv_idx);
+        cm_load<lsc::Normal>(atten_mask.format<half>(), atten_desc);
+        Transpose_16x16(atten_mask, atten_mask_tr.format<float, 2*REG_M, REG_N>());
+
+        St += atten_mask_tr;
+        vector<float, REG_N> rowmax;
+        vector<float, 2*REG_M> tempsum;
+        vector<float, 2*REG_M> max_comp=0.f;
+        for (int colidx = 0; colidx < REG_N; colidx++) {
+            rowmax[colidx] = cm_reduced_max<float>(St.column(colidx).format<float>());
+        }
+
+        if (kv_idx == 0)
+            lastmax = rowmax;
+        else
+            rowmax = cm_max<float>(rowmax.format<float>(), lastmax.format<float>());
+
+        constexpr float log2e = 1.4426950408889634f;
+        #pragma unroll
+        for (int rowidx = 0; rowidx < REG_M*2; rowidx++) {
+            St[rowidx].format<float>() = cm_exp((St[rowidx] - rowmax)*log2e);
+         }
+        #pragma unroll
+        //#seems removing progam unroll would caused accuracy error , here.
+        for (int idx = 0; idx < REG_N; idx++) {
+            tempsum[idx] = cm_sum<float>(St.format<float, 2*REG_M, REG_N>().column(idx));
+        }
+
+        if (kv_idx == 0) {
+            rowsum = tempsum;
+        } else {
+            max_comp = cm_exp((lastmax-rowmax)*log2e);
+            rowsum = tempsum + rowsum*max_comp;
+        }
+        //# show(lastmax.format<float, 1, 2*REG_M>());
+        //# show(rowmax.format<float, 1, 2*REG_M>());
+        //# show(max_comp.format<float, 1, 2*REG_M>());
+        //# show(tempsum.format<float, 1, 2*REG_M>());
+        //# show(rowsum.format<float, 1, 2*REG_M>());
+
         matrix<half, 2, REG_M*REG_K> matP;
         Transpose_16x16(St, matP.format<half, 2*REG_M, REG_K>());
-        //show(matP.format<half, 2*REG_M, REG_K>());
-        //#compute S*V
 
-        offset = 0;
+        //show(matP.format<half, 2*REG_M, REG_K>());
+
+        //#load V from SLM
+        //#compute S*V
+        //#matrix<float, head_size/REG_N*2, REG_M*REG_N> mat_O;
+
         for(int nn = 0, idx = 0; nn < head_size; nn += REG_N, idx++) {
             vector<half, REG_K*REG_N> tempV;
             cm_slm_block_read(slm_V, GENX_NONE,  REG_N * REG_K * sizeof(half) * idx, tempV);
             //show(tempV.format<half, REG_K/2, REG_N*2>());
-            offset += REG_N * REG_K * sizeof(half);
-            //matrix<float, head_size/REG_N*2, REG_M*REG_N> mat_O;
+            auto block0 =  mat_O[idx].format<float, REG_M, REG_N>();
+            for (int i = 0; i < REG_M; i++)
+                block0[i] = cm_mul<float>(block0[i], max_comp[i]);
 
             mat_O[idx] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                    mat_O[idx].format<float>(),
                     tempV.format<int32_t>(),
                    matP[0].format<int32_t>());
 
+            auto block1 =  mat_O[idx+(head_size/REG_N)].format<float, REG_M, REG_N>();
+            for (int i = 0; i < REG_M; i++)
+                block1[i] = cm_mul<float>(block1[i], max_comp[i+REG_M]);
+
             mat_O[idx+(head_size/REG_N)] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                         mat_O[idx+(head_size/REG_N)].format<float>(),
                         tempV.format<int32_t>(),
                         matP[1].format<int32_t>());
-            //show(mat_O[idx].format<float, REG_M, REG_N>());
-            //show(mat_O[idx+(head_size/REG_N)].format<float, REG_M, REG_N>());
         }
-
-
-         cm_barrier();
+        lastmax = rowmax;
+        cm_barrier();
     }
-    //matrix<float, head_size/REG_N*2, REG_M*REG_N> mat_O;
-    for (int row = 0; row < head_size/REG_N*2; row++)
-        show(mat_O[row].format<float, REG_M, REG_N>());
+
+#if 0
+    matrix<half, 2*REG_M, head_size> mat_O_dest = 0;
+    #pragma unroll
+    for (int row = 0; row < 2*REG_M; row++) {
+        matrix_ref<half, head_size/REG_N, REG_N> row_mat_dest = mat_O_dest[row].format<half, head_size/REG_N, REG_N>();
+        #pragma unroll
+        for (int col = 0; col < head_size/REG_N; col++) {
+            uint blk_idx = row / REG_M * (head_size/REG_N) + col;
+            auto src_blk = mat_O[blk_idx].format<float, REG_M, REG_N>();
+            row_mat_dest[col].format<half>() = src_blk[row%REG_M].format<float>()/rowsum[row];
+        }
+    }
+#endif
 
 
+    matrix<half, 2*head_size/REG_N, REG_M*REG_N> mat_O_dest = 0;
+    //# output [batch, q_len, num_heads, S], rect window [REG_M, REG_N]
+    lsc::block_2d_desc<half, 1, REG_M, REG_N> o_desc((half*)(output + q_offset), q_len - 1, head_size*sizeof(half)-1, q_pitch - 1, 0, 0);
+    int blks_per_row = head_size/REG_N;
+    #pragma unroll
+    for (int blk = 0; blk < 2*head_size/REG_N; blk++) {
+        auto src = mat_O[blk].format<float, REG_M, REG_N>();
+        auto dest = mat_O_dest[blk].format<half, REG_M, REG_N>();
+        auto rowoff = blk/blks_per_row == 0 ? 0 : REG_M;
+        #pragma unroll
+        for (int i = 0; i < REG_M; i++) {
+            dest[i] = src[i] / rowsum[i+rowoff];
+        }
+        o_desc.set_block_y(q_start + blk/blks_per_row * REG_M);
+        o_desc.set_block_x(blk%blks_per_row * REG_N);
+        cm_store(o_desc, dest.format<half>());
+    }
+
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < head_size / REG_N; j++) {
+            auto idx = i * head_size/REG_N + j;
+            show(mat_O_dest[idx].format<half, REG_M, REG_N>());
+        }
+    }
 }
 '''
 
@@ -484,9 +599,11 @@ t_mask = cl.tensor(attention_mask.detach().numpy())
 # f"-cmc -mdump_asm -g2 "
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
+torch.set_printoptions(precision=4, sci_mode=False)
+print(t_out.numpy())
 
-# f1 = torch.from_numpy(t_out.numpy())
-#check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
+f1 = torch.from_numpy(t_out.numpy())
+check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
 print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
 sys.exit(0)
 
