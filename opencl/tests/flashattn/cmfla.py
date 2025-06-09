@@ -21,23 +21,13 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 
 class flash_attn_cm:
-    def __init__(self, num_heads, num_kv_heads, head_size, max_seq_len):
+    def __init__(self, num_heads, num_kv_heads, head_size):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         src1 = r'''#include "cm_sdpa_vlen.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
-        print(f"compiling {cwd} {num_heads=} {head_size=} {max_seq_len=} ...")
-        self.q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
-        self.wg_size =  (max_seq_len + self.q_step - 1)//self.q_step
-        self.need_wg_mapping = 0
-        if self.wg_size > 16:
-            # seq_len is too big to fit into a single work-group
-            # will use fixed work-group size 16, process 16*16 (or 16*8 on xe1)
-            # part of sequence, in this case, kernel needs to figure-out which part
-            # it needs to handle
-            self.need_wg_mapping = 1
-            self.wg_size = 16
+        print(f"compiling {cwd} {num_heads=} {head_size=} ...")
 
         scale_factor = 1.0/(head_size**0.5)
         self.kernels = cl.kernels(src1,
@@ -46,8 +36,6 @@ class flash_attn_cm:
                       f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_SCALE_FACTOR={scale_factor}"
-                      f" -DCMFLA_WG_SIZE={self.wg_size}"
-                      f" -DCMFLA_WG_MAPPING={self.need_wg_mapping}"
                       f" -mdump_asm -g2")
                      )
 
@@ -62,25 +50,38 @@ class flash_attn_cm:
         t_cu_seqlens = cl.tensor(np.array(cu_seqlens, dtype=np.int32))
         t_out = cl.tensor([q.shape[0], self.num_heads, self.head_size], np.dtype(np.float16))
         
-        if self.need_wg_mapping:
+        max_seq_len = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
+        wg_size =  (max_seq_len + q_step - 1)//q_step
+        need_wg_mapping = 0
+        if wg_size > 16:
+            # seq_len is too big to fit into a single work-group
+            # will use fixed work-group size 16, process 16*16 (or 16*8 on xe1)
+            # part of sequence, in this case, kernel needs to figure-out which part
+            # it needs to handle
+            need_wg_mapping = 1
+            wg_size = 16
+
+        if need_wg_mapping:
             wg_count = 0
-            wg_seq_len = self.wg_size * self.q_step
+            wg_seq_len = wg_size * q_step
             for i in range(len(cu_seqlens) - 1):
                 wg_count += (cu_seqlens[i+1] - cu_seqlens[i] + wg_seq_len - 1) // wg_seq_len
         else:
             wg_count = (len(cu_seqlens) - 1)
-        GWS = [self.num_heads, wg_count * self.wg_size]
-        LWS = [1, self.wg_size]
+        GWS = [self.num_heads, wg_count * wg_size]
+        LWS = [1, wg_size]
+        print(f"calling {need_wg_mapping=} {q_step=} {max_seq_len=} {wg_count=} ...")
         print(f"{GWS=} {LWS=}")
         for _ in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_vlen", GWS, LWS, t_cu_seqlens, t_q, t_k, t_v, t_out)
+            self.kernels.enqueue("cm_sdpa_vlen", GWS, LWS, t_cu_seqlens, need_wg_mapping, t_q, t_k, t_v, t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, num_kv_heads, head_size, max_seq_len):
-        return flash_attn_cm(num_heads, num_kv_heads, head_size, max_seq_len)
+    def create_instance(num_heads, num_kv_heads, head_size):
+        return flash_attn_cm(num_heads, num_kv_heads, head_size)
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens):
     seq_length, num_heads, head_size = q.shape
@@ -111,8 +112,7 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens):
 
 def flash_attn(q, k, v, cu_seqlens):
     _, num_heads, head_size = q.shape
-    max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-    func = flash_attn_cm.create_instance(num_heads, head_size, max_seqlen)
+    func = flash_attn_cm.create_instance(num_heads, head_size)
     # return flash_attn_vlen_ref(q, k, v, cu_seqlens)
     return func(q, k, v, cu_seqlens)
 
@@ -150,8 +150,7 @@ def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, 
 
     ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
 
-    max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, max_seqlen)
+    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size)
     out = func(q, k, v, cu_seqlens)
     check_close(ref, out)
 

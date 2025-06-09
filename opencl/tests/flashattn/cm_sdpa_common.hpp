@@ -537,11 +537,12 @@ void sdpa_kernel_lsc(
 }
 
 
-template<bool use_causal_mask, int local_size, int num_heads, int num_kv_heads, int head_size>
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size>
 void sdpa_kernel(
     uint slm_K,
     uint slm_V,
     int wg_local_id,
+    int local_size,
     int q_start,
     int kv_stop,
     int q_len,
