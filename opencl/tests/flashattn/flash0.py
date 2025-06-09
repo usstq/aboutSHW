@@ -9,9 +9,9 @@ torch.set_printoptions(linewidth=1024)
 
 parser = argparse.ArgumentParser('')
 parser.add_argument('-i', "--impl", type=int, default=0)
-parser.add_argument('-b', "--batch", type=int, default=1)
-parser.add_argument('-nh', "--num-heads", type=int, default=1)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=1)
+parser.add_argument('-b', "--batch", type=int, default=2)
+parser.add_argument('-nh', "--num-heads", type=int, default=64)
+parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=16)
 parser.add_argument('-ql', "--q-len", type=int, default=16)
 parser.add_argument('-kvl', "--kv-len", type=int, default=32)
 parser.add_argument('-hs', "--head-size", type=int, default=32)
@@ -130,14 +130,7 @@ def get_flash0(query, key, value, attention_mask):
                     sMask_tr = mask[i:(i+br), j:(j+bc)].transpose(0,1)
                     # [Bc, Br]
                     S_tr = (sK @ sQ_tr).to(dtype=torch.float32)
-                    # print(sK[:,0:16])
-                    # print(sK[:,16:32])
-                    # print(sQ_tr[0:16, :])
-                    # print(sQ_tr[16:32, :])
-                    # print(sV[:,0:16])
-                    # print(sV[:,16:32])
-                    # print(S_tr)
-                    if 0:
+                    if 1:
                         S_tr *= scale_factor
                         S_tr += sMask_tr
                         # [1, Br]
@@ -194,12 +187,8 @@ def get_flash0(query, key, value, attention_mask):
                 if 1:
                     sO = sO / rowSum.transpose(0,1).to(dtype=torch.float16)
                     out[b, h, i:(i+br), :] = sO
-                    print(sO)
+                    #print(sO)
 
-                    # print(sO[0:8, 0:16])
-                    # print(sO[0:8, 16:32])
-                    # print(sO[8:16, 0:16])
-                    # print(sO[8:16, 16:32])
     return out
 
 if args.impl == 0:
@@ -582,7 +571,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < head_size / REG_N; j++) {
             auto idx = i * head_size/REG_N + j;
-            show(mat_O_dest[idx].format<half, REG_M, REG_N>());
+            //show(mat_O_dest[idx].format<half, REG_M, REG_N>());
         }
     }
 }
@@ -600,7 +589,6 @@ t_mask = cl.tensor(attention_mask.detach().numpy())
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
 torch.set_printoptions(precision=4, sci_mode=False)
-print(t_out.numpy())
 
 f1 = torch.from_numpy(t_out.numpy())
 check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
@@ -633,7 +621,5 @@ for i in range(1):
 latency = cl.finish()
 for ns in latency:
     print(f"  {ns*1e-6:.3f} ms")
-
-
 
 sys.exit(0)
