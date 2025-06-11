@@ -398,7 +398,11 @@ void cl_kernels::enqueue_py(std::string kernel_name, const std::vector<size_t>& 
             ::clSetKernelArg(kernel, arg_idx, sizeof(f), &f);
         } else if (py::isinstance<tensor>(arg)) {
             const auto& t = arg.cast<tensor>();
-            ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(t));
+            //::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(t));
+            using clSetKernelArgMemPointerINTEL_func_t = cl_int (*)(cl_kernel, cl_uint, const void *);
+            static ext_func_t<clSetKernelArgMemPointerINTEL_func_t> ext_func(
+                "clSetKernelArgMemPointerINTEL");
+            ext_func(g_queue.platform, kernel, arg_idx, static_cast<void*>(t));
         } else if (arg.is_none()) {
             ::clSetKernelArgSVMPointer(kernel, arg_idx, static_cast<void*>(nullptr));
         } else {

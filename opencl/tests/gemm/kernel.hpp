@@ -26,7 +26,7 @@
 #define ATTR
 #define ATTR_BUF
 #define CM_LOCAL_BARRIER 0x20
-
+#include "emu/block2d.h"
 #else
 #define ATTR [[type("svmptr_t")]]
 #define ATTR_BUF [[type("buffer_t")]]
@@ -367,7 +367,7 @@ template<
     int SG_N = 16,
     int BLOCK_WG_K = 64
 >
-CM_INLINE void gemm_xe1_f16_no_slmb(uint id_wg_m, uint id_wg_n, uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+CM_INLINE void gemm_xe1_f16(uint id_wg_m, uint id_wg_n, uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
     // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
     static constexpr int REPEAT = 8;
     static constexpr int DEPTH = 8;
@@ -611,16 +611,184 @@ CM_INLINE void gemm_xe1_f16_no_slmb(uint id_wg_m, uint id_wg_n, uint slm, Surfac
         (id_wg_m * BLOCK_WG_M +        // workgroup
             id_sg_m * BLOCK_SG_M) * ldc;  // subgroup
     offset_c *= sizeof(TYPE_DST);
+    matrix<TYPE_DST, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> tmp;
 #pragma unroll
     for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
-        matrix<TYPE_DST, BLOCK_REG_M, REG_N* BLOCK_REG_N> tmp;
         // TODO(TUNE): merge in N dimension
 #pragma unroll
         for (int reg_n = 0; reg_n < REG_N; reg_n++) {
-            tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(0, reg_n * BLOCK_REG_N) =
+            tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, reg_n * BLOCK_REG_N) =
                 acc.row(reg_m * REG_N + reg_n);
         }
-        write_2d(tmp.select_all(), dst, offset_c, ldc_bytes);
+    }
+#pragma unroll
+    for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+        write_2d(tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, 0), dst, offset_c, ldc_bytes);
         offset_c += BLOCK_REG_M * ldc_bytes;
     }
+}
+
+template<
+    typename TYPE_SRC = half,
+    typename TYPE_ACC = float,
+    typename TYPE_DST = half,
+    CmPrecisionType A_TYPE_PREC = CM_PRECISION_HF,
+    CmPrecisionType B_TYPE_PREC = CM_PRECISION_HF,
+    int SG_SIZE = 16,
+    // subgroup blocking
+    int BLOCK_SG_M = 64,
+    int BLOCK_SG_N = 16,
+    int SG_M = 2,
+    int SG_N = 16,
+    int BLOCK_WG_K = 64
+>
+CM_INLINE void gemm_xe2_f16(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+    // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
+    static constexpr int REPEAT = 8;
+    static constexpr int DEPTH = 8;
+    static constexpr int BLOCK_REG_M = REPEAT;
+    static constexpr int BLOCK_REG_N = SG_SIZE;
+    static constexpr int BLOCK_DPAS_C = BLOCK_REG_M * BLOCK_REG_N;
+    static constexpr int VNNI = sizeof(TYPE_SRC);
+    static constexpr int BLOCK_REG_K = DEPTH * sizeof(int) / VNNI;
+    static constexpr int BLOCK_REG_A = BLOCK_REG_M * BLOCK_REG_K;
+    static constexpr int BLOCK_REG_B = BLOCK_REG_N * BLOCK_REG_K;
+    static constexpr int BLOCK_WG_M = SG_M * BLOCK_SG_M;
+    static constexpr int BLOCK_WG_N = SG_N * BLOCK_SG_N;
+    // register blocking
+    static constexpr int REG_M = BLOCK_SG_M / BLOCK_REG_M;
+    static constexpr int REG_N = BLOCK_SG_N / BLOCK_REG_N;
+    static constexpr int REG_K = BLOCK_WG_K / BLOCK_REG_K;
+    static constexpr int REG_MN = REG_M * REG_N;
+    static constexpr uint size_slm_a = BLOCK_WG_M * BLOCK_WG_K * sizeof(TYPE_SRC);
+
+    matrix<TYPE_ACC, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;
+    uint id_sg_n = cm_local_id(0);
+    uint id_sg_m = cm_local_id(1);
+    uint id_sg_mn = id_sg_m * SG_N + id_sg_n;
+
+    static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
+    // N[0:32]xK[0:16]
+    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)(K * sizeof(TYPE_SRC) - 1), (uint)(K * sizeof(TYPE_SRC) - 1),
+        0, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
+    // prefetch B
+    static constexpr int SG_MN = SG_M * SG_N;
+    lsc::block_2d_desc<TYPE_SRC, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)(K * sizeof(TYPE_SRC) - 1), (uint)(K * sizeof(TYPE_SRC) - 1),
+        0, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
+    // N[0:32]xK[0:16]                                                                   --> 4 regs
+    matrix<TYPE_SRC, REG_N, BLOCK_REG_B> b0, b1;
+
+    // M[0:64]xK[0:32]
+    lsc::block_2d_desc<TYPE_SRC, 2, 32, BLOCK_REG_K> desc_a0{ src_a, M - 1, (uint)(K * sizeof(TYPE_SRC) - 1), (uint)(K * sizeof(TYPE_SRC) - 1),
+        0, (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
+    // M[32:64]xK[0:32]
+    // prefetch A
+    lsc::block_2d_desc<TYPE_SRC, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a, M - 1, (uint)(K * sizeof(TYPE_SRC) - 1), (uint)(K * sizeof(TYPE_SRC) - 1),
+        0, (int)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) };
+    // 0~3 is M[:]xK[0:16], 4~7 is M[:]xK[16:32]                                        --> 32+32=64 regs
+    matrix<TYPE_SRC, 8, BLOCK_REG_A> a0, a1;
+
+    // warmup
+    // prefetch
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached, 32, 0>(desc_prefetch_b);
+    desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 64);
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached, 32, 0>(desc_prefetch_a);
+    desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 64);
+
+    // load b: N[0:16]xK[0:16]
+    cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
+    cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
+    desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+    //cm_sbarrier(1);
+
+    auto dot = [&](matrix_ref<TYPE_SRC, 4, BLOCK_REG_A> A0, matrix_ref<TYPE_SRC, 4, BLOCK_REG_A> A1, matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> B) {
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+#pragma unroll
+            for (uint reg_m = 0; reg_m < 4; reg_m++) {
+                acc.row((ushort)(reg_m * REG_N + reg_n)) = cm_dpas<B_TYPE_PREC, A_TYPE_PREC, DEPTH, REPEAT>(acc.row((ushort)(reg_m * REG_N + reg_n)),
+                    B.row((ushort)reg_n).format<int>(), A0.row((ushort)reg_m).format<int>());
+            }
+#pragma unroll
+            for (uint reg_m = 0; reg_m < 4; reg_m++) {
+                acc.row((ushort)((reg_m + 4) * REG_N + reg_n)) = cm_dpas<B_TYPE_PREC, A_TYPE_PREC, DEPTH, REPEAT>(acc.row((ushort)((reg_m + 4) * REG_N + reg_n)),
+                    B.row((ushort)reg_n).format<int>(), A1.row((ushort)reg_m).format<int>());
+            }
+        }
+    };
+
+    for (uint k = 0; k < K / BLOCK_WG_K; k++) {
+        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+        cm_prefetch<CacheHint::Cached, CacheHint::Cached, 32, 0>(desc_prefetch_a);
+        desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 64);
+
+        // load b: N[0:16]xK[16:32]
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
+        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+
+        // load a: M[0:32]xK[0:32]
+        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<TYPE_SRC>(), desc_a0);
+        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<TYPE_SRC>(), desc_a0);
+        desc_a0.set_block_x(desc_a0.get_block_x() + 32);
+        // dot: (M[0:32]xK[0:16])*(N[0:16]xK[0:16])'
+        dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
+
+        // load b: N[0:16]xK[32:48]
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
+        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+        // dot: (M[0:32]xK[16:32])*(N[0:16]xK[16:32])'
+        dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
+    
+        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+        cm_prefetch<CacheHint::Cached, CacheHint::Cached, 32, 0>(desc_prefetch_a);
+        desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 64);
+    
+        // load b: N[0:16]xK[48:64]
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
+        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+        // load a: M[0:32]xK[32:64]
+        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<TYPE_SRC>(), desc_a0);
+        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<TYPE_SRC>(), desc_a0);
+        desc_a0.set_block_x(desc_a0.get_block_x() + 32);
+        // dot: (M[0:32]xK[32:48])*(N[0:16]xK[32:48])'
+        dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
+
+        // load b: N[0:16]xK[0:16]
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
+        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+        // dot: (M[0:32]xK[48:64])*(N[0:16]xK[48:64])'
+        dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
+        //cm_sbarrier(0);
+        //cm_sbarrier(1);
+    }
+    
+    //cm_sbarrier(0);
+
+    // store
+    lsc::block_2d_desc<int, 1, 8, BLOCK_SG_N / 2> desc_c{ dst, M - 1, (uint)(N * sizeof(TYPE_SRC) - 1), (uint)(N * sizeof(TYPE_SRC) - 1),
+        (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / 2, (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
+    matrix<TYPE_DST, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> tmp;
+#pragma unroll
+    for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+        // TODO(TUNE): merge in N dimension
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+            tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, reg_n * BLOCK_REG_N) =
+                acc.row(reg_m * REG_N + reg_n);
+        }
+    }
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(0 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(1 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(2 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(3 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 4>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(4 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(5 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(6 * BLOCK_REG_M, 0).format<int>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(7 * BLOCK_REG_M, 0).format<int>());
 }

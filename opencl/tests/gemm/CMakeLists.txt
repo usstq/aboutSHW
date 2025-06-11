@@ -55,7 +55,8 @@ set(INSTALL_DIR ${CMAKE_BINARY_DIR}/bin)
 # SHIM / OCL
 add_library(kernel.shim MODULE ${KERNEL})
 # 1276--> ARL
-set_target_properties(kernel.shim PROPERTIES COMPILE_FLAGS "-DCM_GENX=1276 -DCMRT_EMU -DSHIM")
+# 1290--> BMG 1295-->LNL
+set_target_properties(kernel.shim PROPERTIES COMPILE_FLAGS "-DCM_GENX=1295 -DCMRT_EMU -DSHIM")
 target_include_directories(kernel.shim PUBLIC ${CMEMU_PATH}/include/libcm ${CMEMU_PATH}/include/shim)
 target_link_libraries(kernel.shim ${LIB_CM_64})
 install(TARGETS kernel.shim DESTINATION ${INSTALL_DIR})

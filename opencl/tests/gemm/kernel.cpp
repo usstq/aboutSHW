@@ -29,47 +29,12 @@
 #endif
 extern "C" SHIM_API_EXPORT void gemm(svmptr_t, svmptr_t, svmptr_t, uint, uint, uint, uint, uint, uint);
 
-// shim layer (CM kernel, OpenCL runtime, GPU)
-#ifdef SHIM
-EXPORT_SIGNATURE(gemm);
-#endif
-
 #include "common.hpp"
 #include "kernel.hpp"
-
-_GENX_MAIN_ void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
-    const uint BLOCK_WG_M = x::BLOCK_SG_M * x::SG_M;
-    const uint BLOCK_WG_N = x::BLOCK_SG_N * x::SG_N;
-    const uint size_slm_a = BLOCK_WG_M * x::BLOCK_WG_K * sizeof(half);
-    const uint size_slm_b = x::BLOCK_WG_K * BLOCK_WG_N * sizeof(half);
-    cm_slm_init(size_slm_a + size_slm_b);
-    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
-
-    gemm_xmx<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
-        x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-}
-
-_GENX_MAIN_ void repack_f16(half* src ATTR, half* dst ATTR, int K, int N) {
-    repack_f16<x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N, x::BLOCK_WG_K>(src, dst, K, N);
-}
-
 #define ABS(x) (x) < 0 ? -(x) : (x)
 
-// if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
-// if slice_no != 0, use wg blocking schema:
-//    slice > 0 means the slice is in M dimension else is in N dimension
-//    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
-_GENX_MAIN_ void gemm_nocopy(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
-    int slice_no, int slice) {
-    const uint BLOCK_WG_M = v2::BLOCK_SG_M * v2::SG_M;
-    const uint BLOCK_WG_N = v2::BLOCK_SG_N * v2::SG_N;
-    const uint size_slm_a = BLOCK_WG_M * v2::BLOCK_WG_K * sizeof(half);
-    const uint size_slm_b = 0;
-    cm_slm_init(size_slm_a + size_slm_b);
-    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no, int slice, const int BLOCK_WG_M, const int BLOCK_WG_N) {
     uint id_wg_mn = cm_group_id(0);
-    uint id_wg_m;
-    uint id_wg_n;
     if (slice_no == 0) {
         if (slice == 0) {
             // loop M first, N is shared, total = N/256*M+N
@@ -106,7 +71,61 @@ _GENX_MAIN_ void gemm_nocopy(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATT
             id_wg_n = slice < 0 ? x + slice_idx * slice_rem + slice_no_abs * slice_abs : y;
         }
     }
+}
 
-    gemm_xe1_f16_no_slmb<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+#if (CM_GENX >= 1270 && CM_GENX < 1280)
+
+_GENX_MAIN_ void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+    const uint BLOCK_WG_M = x::BLOCK_SG_M * x::SG_M;
+    const uint BLOCK_WG_N = x::BLOCK_SG_N * x::SG_N;
+    const uint size_slm_a = BLOCK_WG_M * x::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = x::BLOCK_WG_K * BLOCK_WG_N * sizeof(half);
+    cm_slm_init(size_slm_a + size_slm_b);
+    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+
+    gemm_xmx<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+}
+
+_GENX_MAIN_ void repack_f16(half* src ATTR, half* dst ATTR, int K, int N) {
+    repack_f16<x::SG_SIZE, x::BLOCK_SG_M, x::BLOCK_SG_N, x::SG_M, x::SG_N, x::BLOCK_WG_K>(src, dst, K, N);
+}
+
+// if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+// if slice_no != 0, use wg blocking schema:
+//    slice > 0 means the slice is in M dimension else is in N dimension
+//    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+_GENX_MAIN_ void gemm_nocopy_xe1(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = v2::BLOCK_SG_M * v2::SG_M;
+    const uint BLOCK_WG_N = v2::BLOCK_SG_N * v2::SG_N;
+    const uint size_slm_a = BLOCK_WG_M * v2::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
+    cm_slm_init(size_slm_a + size_slm_b);
+    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_xe1_f16<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         v2::SG_SIZE, v2::BLOCK_SG_M, v2::BLOCK_SG_N, v2::SG_M, v2::SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }
+#endif
+
+#if CM_GENX >= 1280
+
+_GENX_MAIN_ void gemm_nocopy_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = v3::BLOCK_SG_M * v3::SG_M;
+    const uint BLOCK_WG_N = v3::BLOCK_SG_N * v3::SG_N;
+    const uint size_slm_a = BLOCK_WG_M * v3::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
+    auto slm = 0;
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_xe2_f16<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        v3::SG_SIZE, v3::BLOCK_SG_M, v3::BLOCK_SG_N, v3::SG_M, v3::SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+}
+#endif

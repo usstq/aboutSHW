@@ -182,6 +182,102 @@ inline std::string getDeviceInfo<std::string>(cl_device_id device, cl_device_inf
     return ret;
 }
 
+// copy from onednn
+template <typename F>
+struct ext_func_t {
+    // oneDNN relies on C++11 standard. However, for DPCPP runtime the standard we
+    // use to build oneDNN must be C++17 per requirements. Some C++11 features have
+    // been deprecated in C++17, which triggers deprecations warnings. This file
+    // contains a compatibility layer for such C++ features.
+
+    // Older than C++17.
+    #if defined(__cplusplus) && __cplusplus < 201703L
+    inline int uncaught_exceptions() {
+        return (int)std::uncaught_exception();
+    }
+
+    template <class F, class... ArgTypes>
+    using invoke_result = std::result_of<F(ArgTypes...)>;
+    #else
+
+    inline int uncaught_exceptions() {
+        return std::uncaught_exceptions();
+    }
+
+    template <class FUNC, class... ArgTypes>
+    using invoke_result = std::invoke_result<FUNC, ArgTypes...>;
+    #endif
+
+    ext_func_t(const char *ext_func_name, const char *vendor_name = "Intel")
+        : ext_func_ptrs_(vendor_platforms(vendor_name).size()) {
+        for (size_t i = 0; i < vendor_platforms(vendor_name).size(); ++i) {
+            auto p = vendor_platforms(vendor_name)[i];
+            auto it = ext_func_ptrs_.insert(
+                    {p, load_ext_func(p, ext_func_name)});
+            assert(it.second);
+        }
+    }
+
+    template <typename... Args>
+    typename invoke_result<F, Args...>::type operator()(
+            cl_platform_id platform, Args... args) const {
+        auto f = get_func(platform);
+        return f(args...);
+    }
+
+    // F get_func(engine_t *engine) const {
+    //     return get_func(get_platform(engine));
+    // }
+
+    F get_func(cl_platform_id platform) const {
+        return ext_func_ptrs_.at(platform);
+    }
+
+private:
+    std::unordered_map<cl_platform_id, F> ext_func_ptrs_;
+
+    static F load_ext_func(cl_platform_id platform, const char *ext_func_name) {
+        return reinterpret_cast<F>(clGetExtensionFunctionAddressForPlatform(
+                platform, ext_func_name));
+    }
+
+    static const std::vector<cl_platform_id> &vendor_platforms(
+            const char *vendor_name) {
+        static auto vendor_platforms = get_vendor_platforms(vendor_name);
+        return vendor_platforms;
+    }
+
+    static std::vector<cl_platform_id> get_vendor_platforms(
+            const char *vendor_name) {
+        cl_uint num_platforms = 0;
+        cl_int err = clGetPlatformIDs(0, nullptr, &num_platforms);
+        if (err != CL_SUCCESS) return {};
+
+        std::vector<cl_platform_id> platforms(num_platforms);
+        err = clGetPlatformIDs(num_platforms, platforms.data(), nullptr);
+        if (err != CL_SUCCESS) return {};
+
+        std::vector<cl_platform_id> vendor_platforms;
+        char platform_vendor_name[128] = {};
+        for (cl_platform_id p : platforms) {
+            err = clGetPlatformInfo(p, CL_PLATFORM_VENDOR,
+                    sizeof(platform_vendor_name), platform_vendor_name,
+                    nullptr);
+            if (err != CL_SUCCESS) continue;
+            if (std::string(platform_vendor_name).find(vendor_name)
+                    != std::string::npos)
+                vendor_platforms.push_back(p);
+        }
+
+        // OpenCL can return a list of platforms that contains duplicates.
+        std::sort(vendor_platforms.begin(), vendor_platforms.end());
+        vendor_platforms.erase(
+                std::unique(vendor_platforms.begin(), vendor_platforms.end()),
+                vendor_platforms.end());
+        return vendor_platforms;
+    }
+};
+
 struct ocl_queue {
     cl_platform_id platform;
     cl_device_id device;
@@ -215,25 +311,45 @@ struct ocl_queue {
     }
 
     void* malloc_host(size_t sz) {
-        return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
+        using clHostMemAllocINTEL_func_t = void *(*)(cl_context, const cl_ulong *,
+                size_t, cl_uint, cl_int *);
+        static ext_func_t<clHostMemAllocINTEL_func_t> ext_func(
+                "clHostMemAllocINTEL");
+        cl_int err;
+        return ext_func(platform, context, nullptr, sz, 0, &err);
+        //return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
     }
     void* malloc_device(size_t sz) {
-        return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
+        using clDeviceMemAllocINTEL_func_t = void *(*)(cl_context, cl_device_id,
+            cl_ulong *, size_t, cl_uint, cl_int *);
+        static ext_func_t<clDeviceMemAllocINTEL_func_t> ext_func(
+                "clDeviceMemAllocINTEL");
+        cl_int err;
+        return ext_func(platform, context, device, nullptr, sz, 0, &err);
+        //return clSVMAlloc(context, CL_MEM_READ_WRITE, sz, 64);
     }
     void memcpy_HtoD(void* pdst, void* psrc, size_t bytes) {
+        using clEnqueueMemcpyINTEL_func_t
+                = cl_int (*)(cl_command_queue, cl_bool, void *, const void *,
+                        size_t, cl_uint, const cl_event *, cl_event *);
+        static ext_func_t<clEnqueueMemcpyINTEL_func_t> ext_func(
+                "clEnqueueMemcpyINTEL");
+
         ASSERT(clFinish(queue) == CL_SUCCESS);
-        ASSERT(clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr) == CL_SUCCESS);
-        std::memcpy(pdst, psrc, bytes);
-        clEnqueueSVMUnmap(queue, pdst, 0, nullptr, nullptr);
+        ASSERT(ext_func(platform, queue, CL_TRUE, pdst, psrc, bytes, 0, nullptr, nullptr) == CL_SUCCESS);
+        // clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr);
+        // std::memcpy(pdst, psrc, bytes);
+        // clEnqueueSVMUnmap(queue, pdst, 0, nullptr, nullptr);
         ASSERT(clFinish(queue) == CL_SUCCESS);
     }
 
     void memcpy_DtoH(void* pdst, void* psrc, size_t bytes) {
-        ASSERT(clFinish(queue) == CL_SUCCESS);
-        ASSERT(clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_READ, psrc, bytes, 0, nullptr, nullptr) == CL_SUCCESS);
-        std::memcpy(pdst, psrc, bytes);
-        clEnqueueSVMUnmap(queue, psrc, 0, nullptr, nullptr);
-        ASSERT(clFinish(queue) == CL_SUCCESS);
+        memcpy_HtoD(pdst, psrc, bytes);
+        // ASSERT(clFinish(queue) == CL_SUCCESS);
+        // clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_READ, psrc, bytes, 0, nullptr, nullptr);
+        // std::memcpy(pdst, psrc, bytes);
+        // clEnqueueSVMUnmap(queue, psrc, 0, nullptr, nullptr);
+        // ASSERT(clFinish(queue) == CL_SUCCESS);
     }
 
     template<class MAP>

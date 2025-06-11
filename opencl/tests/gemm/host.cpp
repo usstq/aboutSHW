@@ -320,35 +320,85 @@ void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     // if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
     slice_no = 0;
     for (slice = 0; slice < 2; slice++) {
-       exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
-       cmp("gemm_nocopy linear " + slice == 0 ? std::string("M first") : std::string("N first"), c, c_ref);
+       exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
+       cmp("gemm_nocopy_xe1 linear " + (slice == 0 ? std::string("M first") : std::string("N first")), c, c_ref);
     }
     // if slice_no != 0, use wg blocking schema:
     //    slice > 0 means the slice is in M dimension else is in N dimension
     //    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
     slice = 2;
     slice_no = -2;
-    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
-    cmp("gemm_nocopy block m:2x2+1*3", c, c_ref);
+    exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe1 block m:2x2+1*3", c, c_ref);
     slice = 1;
     slice_no = 3;
-    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
-    cmp("gemm_nocopy block m:1x3+2*2", c, c_ref);
+    exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe1 block m:1x3+2*2", c, c_ref);
 
     slice = -2;
     slice_no = -1;
-    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
-    cmp("gemm_nocopy block n:2x1+1*3", c, c_ref);
+    exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe1 block n:2x1+1*3", c, c_ref);
     slice = -1;
     slice_no = 3;
-    exec_kernel("gemm_nocopy", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
-    cmp("gemm_nocopy block n:1x3+2*1", c, c_ref);
+    exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe1 block n:1x3+2*1", c, c_ref);
+}
+
+// a: [M, K], b: [N, K]
+void check_v3(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
+    PlainTensor c;
+    PlainTensor b_t;
+    uint32_t M = a.size(0);
+    uint32_t N = b.size(1);
+    uint32_t K = a.size(1);
+    b_t.resize<float16_t>({ K, N });
+    c.resize<float16_t>({ M, N });
+    transpose(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_t.m_ptr.get());
+    cl_int err;
+    size_t BLOCK_SG_M = v3::BLOCK_SG_M;
+    size_t BLOCK_SG_N = v3::BLOCK_SG_N;
+    size_t SG_M = v3::SG_M, SG_N = v3::SG_N;
+    size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
+    size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
+    std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
+    std::vector<size_t> localSize = { SG_N, SG_M };
+
+    int slice;
+    int slice_no;
+
+    // if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+    slice_no = 0;
+    for (slice = 0; slice < 2; slice++) {
+       exec_kernel("gemm_nocopy_xe2", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
+       cmp("gemm_nocopy_xe2 linear " + (slice == 0 ? std::string("M first") : std::string("N first")), c, c_ref);
+    }
+    // if slice_no != 0, use wg blocking schema:
+    //    slice > 0 means the slice is in M dimension else is in N dimension
+    //    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+    slice = 2;
+    slice_no = -2;
+    exec_kernel("gemm_nocopy_xe2", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe2 block m:2x2+1*3", c, c_ref);
+    slice = 1;
+    slice_no = 3;
+    exec_kernel("gemm_nocopy_xe2", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe2 block m:1x3+2*2", c, c_ref);
+
+    slice = -2;
+    slice_no = -1;
+    exec_kernel("gemm_nocopy_xe2", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe2 block n:2x1+1*3", c, c_ref);
+    slice = -1;
+    slice_no = 3;
+    exec_kernel("gemm_nocopy_xe2", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_nocopy_xe2 block n:1x3+2*1", c, c_ref);
 }
 
 int main( int argc, char* argv[])
 {
     PlainTensor a, b, c, b_repack_ref, b_repack;
-    uint32_t M = 128*7, N = 256*5, K = 64*2;
+    uint32_t M = 256*7, N = 256*5, K = 64*2;
     a.resize<float16_t>({ M, K });
     b.resize<float16_t>({ K, N });
 
@@ -361,7 +411,8 @@ int main( int argc, char* argv[])
     init_ocl();
 
     //check_v1(a, b, c_ref);
-    check_v2(a, b, c_ref);
+    //check_v2(a, b, c_ref);
+    check_v3(a, b, c_ref);
 
     uninit_ocl();
 

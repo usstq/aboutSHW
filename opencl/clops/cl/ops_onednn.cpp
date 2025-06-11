@@ -403,6 +403,14 @@ struct onednn_linear {
         g_queue.events.push_back(event);
         //m_prim.execute(m_stream, args);
     }
+
+    std::vector<uint64_t> finish() {
+        ASSERT(clFinish(g_queue.queue) == CL_SUCCESS);
+        std::vector<uint64_t> nsecs = dnnl::get_profiling_data(m_stream, profiling_data_kind::time);
+        // Reset profiler's state.
+        dnnl::reset_profiling(m_stream);
+        return nsecs;
+    }
 };
 
 #if 0
@@ -458,8 +466,8 @@ void init_ops_onednn(py::module_& m) {
     py::class_<onednn_linear>(m, "onednn_linear")
         .def(py::init())
         .def(py::init(&onednn_linear::create))
-        .def("forward", &onednn_linear::forward);
-
+        .def("forward", &onednn_linear::forward)
+        .def("finish", &onednn_linear::finish);
     //py::class_<memory>(m, "onednn_memory")
     //    .def(py::init())
     //    .def(py::init(&to_memory));
