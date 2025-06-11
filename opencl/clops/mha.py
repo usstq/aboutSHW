@@ -467,7 +467,7 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
             half q_val = as_half(intel_sub_group_block_read_us((const __local ushort*)query + j));
             //half q_val = query[j + id_sg_local];
             half k_val = as_half(intel_sub_group_block_read_us((const __global ushort*)pk + j));
-            sum = fma(q_val, k_val, sum);
+            sum = fma((float)q_val, (float)k_val, sum);
         }
         sum = sub_group_reduce_add(sum);
         if (id_sg_local == 0) {
@@ -688,12 +688,13 @@ class MHA:
 
         # sdpa kernel
         cwd = os.path.dirname(os.path.realpath(__file__))
-        print(f"compiling {cwd} {head_cnt_q=} {head_cnt_k=} ...")
+        # print(f"compiling {cwd} {head_cnt_q=} {head_cnt_k=} ...")
         self.cm_kernels = kernel_cache(r'''#include "cm_sdpa_vlen.hpp"''',
                      (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
                       f" -DCMFLA_NUM_HEADS={head_cnt_q}"
                       f" -DCMFLA_NUM_KV_HEADS={head_cnt_k}"
                       f" -DCMFLA_HEAD_SIZE={head_size}"
+                      f" -DCMFLA_IS_CAUSAL=1"
                       f" -DCMFLA_SCALE_FACTOR={self.head_size_scaler}"
                       f" -mdump_asm -g2")
                      )
@@ -781,16 +782,16 @@ class MHA:
                                        part_sum,
                                        part_num)
             else:
-                if 0:
+                if 1:
                     wg_size = 16
                     q_step = 8 # 16 for xe2
                     wg_seq_len = wg_size * q_step
                     wg_count = (L1 + wg_seq_len - 1) // wg_seq_len
-                    GWS = [self.num_heads, wg_count * wg_size]
-                    LWS = [1, wg_size]
-                    print(f"calling {q_step=} {wg_count=} ...")
-                    print(f"{GWS=} {LWS=}")
-                    self.cm_kernels.enqueue("cm_sdpa_single_causal", GWS, LWS, L1, qkv, output)
+                    GWS = [1, self.head_cnt_q, wg_count * wg_size]
+                    LWS = [1, 1, wg_size]
+                    #print(f"calling {q_step=} {wg_count=} ...")
+                    #print(f"{GWS=} {LWS=}")
+                    self.cm_kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, L1, qkv, output)
                 else:
                     mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
                     cl_kernels.enqueue("MHAFirst",

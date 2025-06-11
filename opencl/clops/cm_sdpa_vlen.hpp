@@ -22,6 +22,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     SurfaceIndex output [[type("buffer_t")]]    
 #endif
     ) {
+    constexpr int is_causal = CMFLA_IS_CAUSAL;
     constexpr int num_heads = CMFLA_NUM_HEADS;
     constexpr int head_size = CMFLA_HEAD_SIZE;
     constexpr int num_kv_heads = CMFLA_NUM_KV_HEADS;
@@ -109,7 +110,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
                                 reinterpret_cast<svmptr_t>(value + kv_offset),
                                 reinterpret_cast<svmptr_t>(output + qo_offset));
 #else
-    sdpa_kernel<false, num_heads, num_kv_heads, head_size>(
+    sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
@@ -123,14 +124,17 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
                                 value,
                                 output,
                                 qo_offset * sizeof(half),
-                                kv_offset * sizeof(half));
+                                kv_offset * sizeof(half),
+                                kv_offset * sizeof(half),
+                                qo_offset * sizeof(half)
+                                );
 #endif
 }
 
 
 
 
-extern "C" _GENX_MAIN_ void cm_sdpa_single_causal(
+extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
     half* query_key_value [[type("svmptr_t")]],
@@ -157,12 +161,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa_single_causal(
     auto slm_K = cm_slm_alloc(K_SLM_SIZE);
     auto slm_V = cm_slm_alloc(V_SLM_SIZE);
 
-    auto h = cm_group_id(0);
+    auto batch = cm_group_id(0);
+    auto h = cm_group_id(1);
     auto hkv = h / (num_heads/num_kv_heads);
-    auto wg_local_id = cm_local_id(1);
-    int local_size = cm_local_size(1);
-
-    auto wg_id = cm_group_id(1); // each work-group handles a sequence
+    auto wg_id = cm_group_id(2); // each work-group handles a sequence
+    auto wg_local_id = cm_local_id(2);
+    int local_size = cm_local_size(2);
 
     int q_start, kv_start, kv_seq_len, q_len;
 
@@ -171,7 +175,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_single_causal(
     int wg_seq_len = local_size * q_step;
     kv_start = 0;
     kv_seq_len = seqlen;
-    q_start = (wg_id) * wg_seq_len + wg_local_id * q_step;
+    q_start = (wg_id * local_size + wg_local_id) * q_step;
     q_len = q_step;
     if (q_start + q_len > seqlen) {
         q_len = seqlen - q_start;
@@ -182,15 +186,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa_single_causal(
     uint kv_offset = (kv_start*num_kv_heads + hkv)*head_size;
 
     // qkv is fused 
+    int kv_stop = kv_seq_len;
+    kv_stop = (wg_id + 1) * wg_seq_len;
+    if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
 
 #if USE_LSC == 1
-    sdpa_kernel_lsc<false, num_heads, num_kv_heads, head_size>(
+    sdpa_kernel_lsc<true, num_heads, num_kv_heads, head_size>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
                                 local_size,
                                 0, //q_start,
-                                kv_seq_len, //kv_stop,
+                                kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
                                 reinterpret_cast<svmptr_t>(query + qo_offset),
@@ -199,19 +206,19 @@ extern "C" _GENX_MAIN_ void cm_sdpa_single_causal(
                                 reinterpret_cast<svmptr_t>(output + qo_offset));
 #else
     // qkv fused
-    uint num_total_heads = num_heads + num_kv_heads * 2;
+    constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
     uint q_offset = (q_start*num_total_heads + h)*head_size;
     uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
     uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
     uint o_offset = (q_start*num_heads + h)*head_size;
 
-    sdpa_kernel<false, num_heads, num_kv_heads, head_size, 1>(
+    sdpa_kernel<true, num_heads, num_kv_heads, head_size, 1>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
                                 local_size,
-                                0, //q_start,
-                                kv_seq_len, //kv_stop,
+                                q_start,
+                                kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
                                 query_key_value,

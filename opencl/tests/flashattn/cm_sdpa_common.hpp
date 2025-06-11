@@ -538,7 +538,7 @@ void sdpa_kernel_lsc(
 }
 
 
-template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size>
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused = 0>
 void sdpa_kernel(
     uint slm_K,
     uint slm_V,
@@ -552,11 +552,15 @@ void sdpa_kernel(
     SurfaceIndex key [[type("buffer_t")]],
     SurfaceIndex value [[type("buffer_t")]],
     SurfaceIndex output [[type("buffer_t")]],
-    uint qo_off,
-    uint kv_off) {
+    uint q_off,
+    uint k_off,
+    uint v_off,
+    uint o_off) {
 
-    uint qo_pitch = num_heads * head_size * sizeof(half);
-    uint kv_pitch = num_kv_heads * head_size * sizeof(half);
+    constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
+    constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
+    constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
 
@@ -564,7 +568,7 @@ void sdpa_kernel(
     cur_sum = 0;
 
     matrix<half, head_size/REG_K, REG_K*REG_N> rQ;
-    auto q_tokens_left = q_len - q_start;
+    auto q_tokens_left = q_len;
     static_assert(q_step == REG_N);
     static_assert(kv_step == REG_K);
 
@@ -575,7 +579,7 @@ void sdpa_kernel(
         // load as many as possible given one address
         if constexpr (head_size == 128 || head_size == 64) {
             matrix<uint, q_step, head_size/2> QmatI32;
-            cm_load_2d(QmatI32, query, qo_off, qo_pitch);
+            cm_load_2d(QmatI32, query, q_off, q_pitch);
             #pragma unroll
             for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
                 Transpose2DMatrix(QmatI32.select<q_step, 1, REG_K/2, 1>(0, k), rQ[ri].format<uint, REG_K/2, q_step>());
@@ -585,7 +589,7 @@ void sdpa_kernel(
             #pragma unroll
             for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
                 matrix<uint, q_step, REG_K/2> QmatI32;
-                cm_load_2d(QmatI32, query, qo_off + k * sizeof(uint), qo_pitch);
+                cm_load_2d(QmatI32, query, q_off + k * sizeof(uint), q_pitch);
                 Transpose2DMatrix(QmatI32, rQ[ri].format<uint, REG_K/2, q_step>());
                 rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
             }
@@ -612,7 +616,7 @@ void sdpa_kernel(
             //if (kv_pos > 1024000) {
             matrix<half, 2*REG_M, REG_K> temp;
             for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                cm_load_2d(temp, key, kv_off + k*sizeof(half), kv_pitch);
+                cm_load_2d(temp, key, k_off + k*sizeof(half), kv_pitch);
                 cm_slm_block_write(slm_K, 
                                     slm_offset + k * 2 * REG_M * sizeof(half),
                                     temp.format<half>());
@@ -629,7 +633,7 @@ void sdpa_kernel(
             static_assert((head_size % VK_STEP) == 0);
             #pragma unroll
             for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
-                cm_load_2d(temp2, value, kv_off + k*sizeof(half), kv_pitch);
+                cm_load_2d(temp2, value, v_off + k*sizeof(half), kv_pitch);
 
                 #pragma unroll
                 for(int p = 0; p < VK_STEP/REG_N; p++) {
@@ -640,7 +644,8 @@ void sdpa_kernel(
                 }
             }
         }
-        kv_off += kv_step * kv_pitch;
+        k_off += kv_step * kv_pitch;
+        v_off += kv_step * kv_pitch;
         // printf(" diff= %lu\n", get_clock() - clk0);
     };
 
@@ -714,21 +719,23 @@ void sdpa_kernel(
             ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
     }
 
-    //# save cur_O/cur_sum.transpose(0, 1)
-    matrix<half, num_P_tiles*REG_M, REG_N> cur_O_f16;
-    cur_sum = cm_inv(cur_sum);
+    if (q_tokens_left > 0) {
+        //# save cur_O/cur_sum.transpose(0, 1)
+        matrix<half, num_P_tiles*REG_M, REG_N> cur_O_f16;
+        cur_sum = cm_inv(cur_sum);
 
-    #pragma unroll
-    for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
         #pragma unroll
-        for(int p = 0; p < num_P_tiles; p++) {
-            auto cO = rO[ri + p].format<float, REG_M, REG_N>();
+        for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
             #pragma unroll
-            for(int r = 0; r < cO.n_rows(); r++) {
-                cur_O_f16[r + p*REG_M] = cm_mul<float>(cO.row(r), cur_sum[r + p*REG_M]);
+            for(int p = 0; p < num_P_tiles; p++) {
+                auto cO = rO[ri + p].format<float, REG_M, REG_N>();
+                #pragma unroll
+                for(int r = 0; r < cO.n_rows(); r++) {
+                    cur_O_f16[r + p*REG_M] = cm_mul<float>(cO.row(r), cur_sum[r + p*REG_M]);
+                }
             }
+            // if (i == args_verbose) show(cur_O_f16);
+            cm_store_2d(cur_O_f16, output, o_off + k*sizeof(half), o_pitch);
         }
-        // if (i == args_verbose) show(cur_O_f16);
-        cm_store_2d(cur_O_f16, output, qo_off + k*sizeof(half), qo_pitch);
     }
 }
