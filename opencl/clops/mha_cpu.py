@@ -69,7 +69,9 @@ class MHA_cpu:
 
         key_states = self.repeat_kv(key_states, num_key_value_groups)
         value_states = self.repeat_kv(value_states, num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        #attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        attn_weights = torch.matmul(query_states.to(torch.float), key_states.transpose(2, 3).to(torch.float)) / math.sqrt(head_dim)
+        attn_weights = attn_weights.to(torch.float16)
 
         # [B, H, q_len, kv_len] [B, kv_len]
         attn_weights = attn_weights + attention_mask[:, None, None, :]

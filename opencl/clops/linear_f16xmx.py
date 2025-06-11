@@ -323,7 +323,7 @@ class Linear_f16xmx:
     # if weight_up is provided, gate/up combination & silu/mul is fused
     def __init__(self, weight, bias, weight_up = None):
         self.N, self.K = weight.shape # weight: [N, K]
-        self.bias = to_cl(bias)
+        self.bias = to_cl(bias.float())
         assert self.N % BN == 0, f"'N' dimension {self.N} is not multiple of BM {BN}"
         assert self.K % BK == 0, f"'K' dimension {self.K} is not multiple of BK {BK}"
 

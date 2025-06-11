@@ -1,6 +1,7 @@
 from . import cl
 import numpy as np
 from .utils import *
+import os
 
 cl_kernel_sources_ref = r'''
 // global_id [Hq, batch_size]
@@ -458,7 +459,7 @@ __kernel void MHASecond(__global half * param_qkv,         // [B, 1, (HQ + HK + 
     __local half qk_dot[KV_BLOCK];
     for (int i = id_sg; i < cur_kv_len; i += S / SGS) {
         __global half* pk = cache_k + i * S;
-        half sum = 0;
+        float sum = 0;
         __attribute__((opencl_unroll_hint))
         for (int j = 0; j < S; j += SGS) {
             // intel_sub_group_block_read_us cannot take __local pointer according to:
@@ -685,6 +686,18 @@ class MHA:
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
+        # sdpa kernel
+        cwd = os.path.dirname(os.path.realpath(__file__))
+        print(f"compiling {cwd} {head_cnt_q=} {head_cnt_k=} ...")
+        self.cm_kernels = kernel_cache(r'''#include "cm_sdpa_vlen.hpp"''',
+                     (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
+                      f" -DCMFLA_NUM_HEADS={head_cnt_q}"
+                      f" -DCMFLA_NUM_KV_HEADS={head_cnt_k}"
+                      f" -DCMFLA_HEAD_SIZE={head_size}"
+                      f" -DCMFLA_SCALE_FACTOR={self.head_size_scaler}"
+                      f" -mdump_asm -g2")
+                     )
+
     def __call__(self, qkv, attention_mask):
 
         '''
@@ -768,14 +781,25 @@ class MHA:
                                        part_sum,
                                        part_num)
             else:
-                mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
-                cl_kernels.enqueue("MHAFirst",
-                                   [B, self.head_cnt_q, self.S * mb_blocks_num],
-                                   [1, 1, self.S],
-                                   qkv,
-                                   output,
-                                   L1
-                                   )
+                if 0:
+                    wg_size = 16
+                    q_step = 8 # 16 for xe2
+                    wg_seq_len = wg_size * q_step
+                    wg_count = (L1 + wg_seq_len - 1) // wg_seq_len
+                    GWS = [self.num_heads, wg_count * wg_size]
+                    LWS = [1, wg_size]
+                    print(f"calling {q_step=} {wg_count=} ...")
+                    print(f"{GWS=} {LWS=}")
+                    self.cm_kernels.enqueue("cm_sdpa_single_causal", GWS, LWS, L1, qkv, output)
+                else:
+                    mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
+                    cl_kernels.enqueue("MHAFirst",
+                                    [B, self.head_cnt_q, self.S * mb_blocks_num],
+                                    [1, 1, self.S],
+                                    qkv,
+                                    output,
+                                    L1
+                                    )
         return output
 
 

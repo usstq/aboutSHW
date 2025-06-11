@@ -222,7 +222,7 @@ struct ocl_queue {
     }
     void memcpy_HtoD(void* pdst, void* psrc, size_t bytes) {
         ASSERT(clFinish(queue) == CL_SUCCESS);
-        clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr);
+        ASSERT(clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_WRITE, pdst, bytes, 0, nullptr, nullptr) == CL_SUCCESS);
         std::memcpy(pdst, psrc, bytes);
         clEnqueueSVMUnmap(queue, pdst, 0, nullptr, nullptr);
         ASSERT(clFinish(queue) == CL_SUCCESS);
@@ -230,7 +230,7 @@ struct ocl_queue {
 
     void memcpy_DtoH(void* pdst, void* psrc, size_t bytes) {
         ASSERT(clFinish(queue) == CL_SUCCESS);
-        clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_READ, psrc, bytes, 0, nullptr, nullptr);
+        ASSERT(clEnqueueSVMMap(queue, CL_TRUE, CL_MAP_READ, psrc, bytes, 0, nullptr, nullptr) == CL_SUCCESS);
         std::memcpy(pdst, psrc, bytes);
         clEnqueueSVMUnmap(queue, psrc, 0, nullptr, nullptr);
         ASSERT(clFinish(queue) == CL_SUCCESS);

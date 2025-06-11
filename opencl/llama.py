@@ -46,8 +46,8 @@ class LlamaLikeModel:
             raise Exception(f"Unknown model architectures {hf_model.config.architectures}")
 
         Linear = getattr(clops, f"Linear_{quant_type}")
-        MHA = clops.MHA
-        #MHA = clops.MHA_cpu
+        #MHA = clops.MHA
+        MHA = clops.MHA_cpu
         ROPE = clops.ROPE
         print(f"converting & loading model into GPGPU : {hf_model_id} ...")
         self.hf_config = hf_model.config
@@ -227,8 +227,12 @@ def simple_pipeline(hf_model_path,
                         break
                 #inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
                 #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
-                #inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
-                inputs = tokenizer(prompt, return_tensors="pt", padding=True, return_token_type_ids=False)
+                
+                #inputs = tokenizer("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n1+1=?<|im_end|>\n<|im_start|>assistant",return_tensors="pt")
+                inputs = tokenizer(f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant", return_tensors="pt", padding=True, return_token_type_ids=False)
+                #inputs = tokenizer(f'''<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat's Oxygen?<|im_end|>\n<|im_start|>assistant''',return_tensors="pt", padding=True, return_token_type_ids=False)
+                # inputs = tokenizer(f"[INST] {prompt} [/INST]", return_tensors="pt", padding=True, return_token_type_ids=False)
+                #inputs = tokenizer(prompt, return_tensors="pt", padding=True, return_token_type_ids=False)
 
                 input_ids = inputs["input_ids"]
                 _amask = (1 - inputs["attention_mask"]) * torch.finfo(torch.float32).min
@@ -272,15 +276,15 @@ def simple_pipeline(hf_model_path,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('')
-    parser.add_argument('-p', "--prompt0", type=str, default=None)
+    parser.add_argument('-p', "--prompt0", type=str, default="1+1=?")
     parser.add_argument('-x', "--prompt_tokens", type=str, default=None)
     parser.add_argument('-t', "--trace", action="store_true")
     parser.add_argument('-n', "--max_new_tokens", type=int, default=8)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
     parser.add_argument('-r', "--repeat", type=int, default=1)
-    parser.add_argument('-q', "--quant_type", type=str, default="w4a", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
+    parser.add_argument('-q', "--quant_type", type=str, default="f16", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
 
-    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/model_original/Qwen2-7B-Instruct/')
     parser.add_argument('--save', type=str, nargs='?', default=None)
     parser.add_argument('--load', type=str, nargs='?', default=None)
 

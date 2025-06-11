@@ -15,7 +15,7 @@ __kernel void Linear_f16(__global half * A, __global half * B, __global float * 
         for(int unroll = 0; unroll < 8; unroll++)
             sum += pA[k+unroll] * pB[k+unroll];
     }
-    if (bias != NULL) sum += bias[n];
+    if (bias) sum += bias[n];
     C[m*N + n] = sum;
 }
 '''
@@ -44,7 +44,7 @@ class Linear_f16:
     def __init__(self, weight, bias):
         self.N, self.K = weight.shape # weight: [N, K]
         self.weight = to_cl(weight.half())
-        self.bias = to_cl(bias)
+        self.bias = to_cl(bias.float()) if bias is not None else None
         self.cl_kernels = kernel_cache(cl_kernel_sources, options="")
 
     def __call__(self, input):
