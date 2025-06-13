@@ -282,9 +282,9 @@ if __name__ == "__main__":
     parser.add_argument('-n', "--max_new_tokens", type=int, default=32)
     parser.add_argument('-c', "--max_kv_len", type=int, default=256)
     parser.add_argument('-r', "--repeat", type=int, default=1)
-    parser.add_argument('-q', "--quant_type", type=str, default="w4x", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x'])
+    parser.add_argument('-q', "--quant_type", type=str, default="onednn", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x', 'onednn'])
 
-    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/tingqian/Qwen2-7B-Instruct/')
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/tingqian/Qwen2-0.5B-Instruct/')
     parser.add_argument('--save', type=str, nargs='?', default=None)
     parser.add_argument('--load', type=str, nargs='?', default=None)
 

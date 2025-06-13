@@ -39,6 +39,7 @@ struct onednn_matmul {
     matmul m_prim;
     memory::desc m_wei_md;
     memory::data_type m_w_type;
+    memory::data_type m_bias_type; // bias dtype
     memory::data_type m_a_type; // activation dtype
     memory::dim m_K;
     memory::dim m_N;
@@ -50,9 +51,10 @@ struct onednn_matmul {
     primitive_attr attr;
     post_ops postops;
 
-    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, int batch_size, int ic, int oc, int ic_group_size = -1) {
+    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch_size, int ic, int oc, int ic_group_size = -1) {
         m_a_type = act_dtype;
         m_w_type = weight_dtype;
+        m_bias_type = bias_dtype;
         m_K_groups = 0;
         m_K = ic;
         m_N = oc;
@@ -62,7 +64,13 @@ struct onednn_matmul {
             m_M = batch_size;
         }
         if (ic_group_size >= 0) {
-            w_scale(ic_group_size).w_zp(ic_group_size).fpmath_f16();
+            w_scale(ic_group_size);
+            if (m_w_type == memory::data_type::u4) {
+                // u4 requires u4 zero-points(asym) (which increases dynamic-range of u4 [0, 15] to [-15, 15])
+                // where s4 imply no-zero-points(sym)
+                w_zp(ic_group_size);
+            }
+            fpmath_f16();
         }
     }
 
@@ -131,8 +139,14 @@ struct onednn_matmul {
         m_engine = onednn_context::engine();
         m_stream = onednn_context::stream();
 
+        memory::desc bias_md;
+        if (m_bias_type != memory::data_type::undef) {
+            bias_md = memory::desc(memory::dims({1, m_N}), m_bias_type, memory::format_tag::ab);
+        }
         // Create primitive descriptor.
-        auto matmul_pd = matmul::primitive_desc(m_engine, src_md, wei_md, dst_md, attr);
+        auto matmul_pd = (m_bias_type == memory::data_type::undef) ? 
+                   matmul::primitive_desc(m_engine, src_md, wei_md, dst_md, attr)
+                 : matmul::primitive_desc(m_engine, src_md, wei_md, bias_md, dst_md, attr);;
 
         // Pre-packed weights stored as int8_t
         m_wei_md = matmul_pd.weights_desc();
@@ -152,7 +166,8 @@ struct onednn_matmul {
     };
     int bin_post_id = -1;
     bool bin_per_row = false;
-    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, int batch, int ic, int oc, int ic_group_size, type t) : onednn_matmul(act_dtype, weight_dtype, batch, ic, oc, ic_group_size) {
+    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch, int ic, int oc, int ic_group_size, type t)
+             : onednn_matmul(act_dtype, weight_dtype, bias_dtype, batch, ic, oc, ic_group_size) {
         if (t == type::with_bin_mul) {
             bin_post_id = 0;
             post_op_bin_mul(true);
@@ -185,6 +200,7 @@ struct onednn_linear {
     memory weight;
     memory scale;
     memory zp;
+    memory bias;
     matmul m_prim;
     memory::dim m_K;
     memory::dim m_N;
@@ -195,12 +211,13 @@ struct onednn_linear {
     dnnl::stream m_stream;
 
     static onednn_linear create(
-              memory::data_type act_dtype, memory::data_type weight_dtype, int batch, int ic, int oc, int ic_group_size, onednn_matmul::type t,
+              memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch, int ic, int oc, int ic_group_size, onednn_matmul::type t,
               memory::data_type dtype,
               tensor& data, // external weight
               tensor& scale,
-              tensor& zp) {
-        auto mm = make_cacheable<onednn_matmul>(act_dtype, weight_dtype, batch, ic, oc, ic_group_size, t);
+              tensor& zp,
+              tensor& bias) {
+        auto mm = make_cacheable<onednn_matmul>(act_dtype, weight_dtype, bias_dtype, batch, ic, oc, ic_group_size, t);
         onednn_linear linear;
         linear.mm = mm;
         linear.bin_post_id = mm->bin_post_id;
@@ -250,11 +267,18 @@ struct onednn_linear {
                 linear.zp = dnnl::ocl_interop::make_memory(wei_zp_md, linear.m_engine, ocl_interop::memory_kind::usm, zp);
             }
         }
+
+        if (bias) {
+            auto bias_md = memory::desc(memory::dims({1, mm->m_N}),
+                                                        mm->m_bias_type,
+                                                        memory::format_tag::ab);            
+            linear.bias = dnnl::ocl_interop::make_memory(bias_md, linear.m_engine, ocl_interop::memory_kind::usm, bias);
+        }
         return linear;
     }
 
     void forward(const tensor& a, tensor& c, tensor& bin_input) {
-        memory::dim M = a.get_shape()[0];
+        memory::dim M = a.get_numel()/m_K;
 
         ASSERT(m_batch == 0 || m_batch == M, "m_batch=", m_batch, " M=", M);
 
@@ -274,7 +298,9 @@ struct onednn_linear {
         std::unordered_map<int, memory> args;
         args.insert({DNNL_ARG_SRC, src_mem});
         args.insert({DNNL_ARG_WEIGHTS, weight});
-        //args.insert({DNNL_ARG_BIAS, bias_mem});
+        if (bias) {
+            args.insert({DNNL_ARG_BIAS, bias});
+        }
         args.insert({DNNL_ARG_DST, dst_mem});
 
         if (scale) {
@@ -367,7 +393,8 @@ void init_ops_onednn(py::module_& m) {
         .value("s8", memory::data_type::s8)
         .value("u8", memory::data_type::u8)
         .value("f16", memory::data_type::f16)
-        .value("f32", memory::data_type::f32);
+        .value("f32", memory::data_type::f32)
+        .value("undef", memory::data_type::undef);
 
     //py::class_<onednn_matmul>(m, "onednn_matmul")
     //    .def(py::init<>(&onednn_matmul::create))

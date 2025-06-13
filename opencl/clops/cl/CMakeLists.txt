@@ -47,7 +47,20 @@ else()
         target_link_libraries(csrc PRIVATE DNNL::dnnl)
         target_compile_definitions(csrc PRIVATE WITH_ONEDNN=1)
     else()
-        message(WARNING "onednn from OneAPI release not found, will skip onednn")
+        message(WARNING "onednn from OneAPI release not found, will build onednn as external project")
+        include(ExternalProject)
+        set(EXTERNAL_INSTALL_LOCATION ${CMAKE_BINARY_DIR}/external)
+        ExternalProject_Add(onednn
+            GIT_REPOSITORY https://github.com/uxlfoundation/oneDNN.git
+            GIT_TAG main
+            UPDATE_DISCONNECTED True
+            CMAKE_ARGS -DDNNL_GPU_RUNTIME=OCL -DCMAKE_INSTALL_PREFIX=${EXTERNAL_INSTALL_LOCATION}
+        )
+        target_include_directories(csrc PUBLIC ${EXTERNAL_INSTALL_LOCATION}/include)
+        target_link_directories(csrc PUBLIC ${EXTERNAL_INSTALL_LOCATION}/lib)
+        add_dependencies(csrc onednn)
+        target_link_libraries(csrc PUBLIC dnnl)
+        target_compile_definitions(csrc PRIVATE WITH_ONEDNN=1)
     endif()
 endif()
 
