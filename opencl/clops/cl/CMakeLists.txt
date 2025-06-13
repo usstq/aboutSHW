@@ -79,9 +79,7 @@ if(IntelSYCL_FOUND)
 else()
     if (WIN32)
         # install OpenCL SDK from https://github.com/KhronosGroup/OpenCL-SDK/releases
-        find_package(OpenCL REQUIRED
-        PATHS  "C:\\Users\\openvino-adlh\\Downloads\\OpenCL-SDK-v2024.10.24-Win-x64\\OpenCL-SDK-v2024.10.24-Win-x64\\share\\cmake"
-        )
+        find_package(OpenCL REQUIRED)
         target_include_directories(csrc PRIVATE ${OpenCL_INCLUDE_DIRS})
         target_link_libraries(csrc PRIVATE OpenCL::OpenCL)
     else()

@@ -10,6 +10,7 @@ some highlights in the design:
 
 ```bash
 
+
 # install cm-compiler
 sudo apt-get install -y gpg-agent wget
 wget -qO - https://repositories.intel.com/graphics/intel-graphics.key |  sudo apt-key add -
@@ -25,6 +26,10 @@ source /opt/intel/oneapi/setvars.sh
 
 # install clops
 pip install -e .
+
+# on Windows, download & extract OpenCL SDK from https://github.com/KhronosGroup/OpenCL-SDK/releases
+# then tell cmake where to find_package(OpenCL) by export(or set) following env
+export OpenCL_ROOT="C:\Users\openvino-adlh\Downloads\OpenCL-SDK-v2024.10.24-Win-x64"
 
 # run unit test (cmake will be automatically called to reflect the change in csrc)
 python -m clops.linear_f16xmx
