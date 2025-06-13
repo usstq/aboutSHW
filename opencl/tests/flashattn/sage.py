@@ -47,7 +47,12 @@ act_dtype = torch.float16
 q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
 k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-
+qmax = q.abs().amax(dim=3, keepdim=True)
+kmax = k.abs().amax(dim=3, keepdim=True)
+q_INT8 = (q/qmax*127.0).to(dtype=torch.int8)
+k_INT8 =  (k/kmax*127.0).to(dtype=torch.int8)
+dqscale_q = qmax.to(dtype=torch.float32) / 127.0
+dqscale_k = kmax.to(dtype=torch.float32) /127.0
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
 attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
@@ -57,6 +62,13 @@ attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
 q = q.transpose(1,2)
 k = k.transpose(1,2)
 v = v.transpose(1,2)
+q_INT8 = q_INT8.transpose(1,2)
+k_INT8 = k_INT8.transpose(1,2)
+dqscale_q=dqscale_q.transpose(1,2)
+dqscale_k=dqscale_k.transpose(1,2)
+
+
+print("==================================================")
 
 #q[:,:,:,:] = q[:,:,2,:]
 #attention_mask[:,:,:,:] = attention_mask[:,:,2,:]
@@ -105,7 +117,7 @@ check_close(ref, org, atol=1e-3, rtol=1e-2)
 print("ref:", ref.shape, ref.dtype)
 
 # blocking on kv-len dimension with online-softmax
-def get_flash0(query, key, value, attention_mask):
+def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
     global enable_vprint
     B,H,q_len,hs = query.shape
     _,Hkv,kv_len,_ = key.shape
@@ -117,6 +129,8 @@ def get_flash0(query, key, value, attention_mask):
             Q = query[b, h, :, :]
             K = key[b, hkv, :, :]
             V = value[b, hkv, :, :]
+            s_Q = dqscale_q[b, h, :, :]
+            s_K = dqscale_k[b, hkv, :, :]
             mask = attention_mask[b,0,:,:]
             for i in range(0, q_len, q_step):
                 i1 = min(i + q_step, q_len)
@@ -135,7 +149,7 @@ def get_flash0(query, key, value, attention_mask):
                 #      done only once at loop begin.
                 #   3.
                 rQt = Q[i:i1, :].transpose(0,1)  # sub Q block only transposed & VNNI packed once
-
+                rQt_scale = s_Q[i:i1, :].transpose(0,1)
                 for j in range(0, kv_len, kv_step):
                     j1 = min(j + kv_step, kv_len)
 
@@ -146,16 +160,12 @@ def get_flash0(query, key, value, attention_mask):
                     # compute in local SRAM
                     # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
                     rK = K[j:j1,:]
-
-                    #quantized rQt and rK
-                    rK_max = rK.abs().max()
-                    rQt_max = rQt.abs().max()
-                    dq_s = (rK_max/127.0 * rQt_max/127.0).to(dtype=torch.float32)
-
-                    q_rK = (rK *(127.0 / rK_max)).to(dtype=torch.int32)
-                    q_rQt = (rQt *(127.0 / rQt_max)).to(dtype=torch.int32)
-                    q_St = (q_rK @ q_rQt)
+                    rK_scale = s_K[j:j1,:]
+                    dq_s = rK_scale*rQt_scale
+                    q_St = (rK.to(dtype=torch.int32) @ rQt.to(dtype=torch.int32))
                     St = q_St.to(dtype=torch.float32)*dq_s
+                    # print(St)
+
                     MaskT = mask[i:i1, j:j1].transpose(0,1)
 
                     vprint("rK=", rK.shape, rK)
@@ -193,6 +203,7 @@ def get_flash0(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = St.to(dtype=torch.float16).transpose(0,1)
+                    # print(partial_attn_weight)
 
                     vprint("P=", partial_attn_weight.shape, partial_attn_weight)
 
@@ -207,6 +218,7 @@ def get_flash0(query, key, value, attention_mask):
                         cur_O = (cur_O * max_comp.transpose(0, 1))
                         vprint("cur_O1=", cur_O)
                         cur_O += partial_attn_weight @ rV
+                    print(cur_O)
                     vprint("cur_O2=", cur_O)
 
                     cur_max = rowmax
@@ -221,8 +233,9 @@ def get_flash0(query, key, value, attention_mask):
                 out[b, h, i:i1, :] = cur_O_f16
     return out
 
+
 if args.impl == 0:
-    f0 = get_flash0(q,k,v,attention_mask)
+    f0 = get_flash0(q_INT8,k_INT8,v,attention_mask, dqscale_q, dqscale_k)
     check_close(org, f0, atol=1e-1, rtol=5e-2)
     print("=========== PASS ===========")
     sys.exit(0)
@@ -238,10 +251,18 @@ import time
 q = q.transpose(1,2)
 k = k.transpose(1,2)
 v = v.transpose(1,2)
-print("q:", q.shape, q.dtype)
-print("k:", k.shape, k.dtype)
+q_INT8 = q_INT8.transpose(1,2)
+k_INT8 = k_INT8.transpose(1,2)
+dqscale_q=dqscale_q.transpose(1,2)
+dqscale_k=dqscale_k.transpose(1,2)
+
+print("q:", q_INT8.shape, q_INT8.dtype)
+print("k:", q_INT8.shape, q_INT8.dtype)
 print("v:", v.shape, v.dtype)
 print("attention_mask:", attention_mask.shape, attention_mask.dtype)
+print("dqscale_q:", dqscale_q.shape, dqscale_q.dtype)
+print("dqscale_k:", dqscale_k.shape, dqscale_k.dtype)
+
 
 def pyeval(src):
     result_src = ""
@@ -308,17 +329,28 @@ static_assert(q_step == 16);
 static_assert(kv_step == 16);
 
 template<typename T, int M, int N>
-void show(const matrix<T, M, N> mat) {
+void show_int(const matrix<T, M, N> mat) {
     for(int m = 0; m < M; m ++) {
         printf("\t[");
         for(int n = 0; n < N; n ++) {
-            printf("%8.4f,", mat[m][n]);
+            printf("%4d,", mat[m][n]);
         }
         printf("],\n");
     }
     printf("]\n");
 }
 
+template<typename T, int M, int N>
+void show(const matrix<T, M, N> mat) {
+    for(int m = 0; m < M; m ++) {
+        printf("\t[");
+        for(int n = 0; n < N; n ++) {
+            printf("%8.5f,", mat[m][n]);
+        }
+        printf("],\n");
+    }
+    printf("]\n");
+}
 template <typename T1, typename T2>
 CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,
                                matrix_ref<T2, 16, 16> out) {
@@ -381,20 +413,25 @@ CM_INLINE void Transpose_16x8(matrix_ref<T1, 16, 8> in,
 extern "C" _GENX_MAIN_ void cm_sdpa(
     int q_len,
     int kv_len,
-    half* query [[type("svmptr_t")]],
-    half* key [[type("svmptr_t")]],
+    int8_t* query [[type("svmptr_t")]],
+    int8_t* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]],
-    half* mask [[type("svmptr_t")]]
+    half* mask [[type("svmptr_t")]],
+    SurfaceIndex scale_q [[type("buffer_t")]],
+    SurfaceIndex scale_k [[type("buffer_t")]]
     ) {
     //# query [batch, q_len, num_heads, S]
     //#   key [batch, kv_len, num_heads, S]
     //# value [batch, kv_len, num_heads, S]
+    //# qscale [batch, q_len, num_heads, 1]
+    //# kscale [batch, q_len, num_heads, 1]
+
     //# to load Q
 
-    constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(half));
+    constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(int8_t));
     constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
-    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * WG_SIZE;
+    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(int8_t)) * WG_SIZE;
 
     cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
 
@@ -412,47 +449,46 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     auto hkv = h / (num_heads/num_kv_heads);
     auto wg_local_id = cm_local_id(2);
     auto q_start = (cm_group_id(2) * WG_SIZE + wg_local_id) * q_step;
-    auto q_offset = wg_local_id * q_step * head_size * sizeof(half);
     auto o_offset = wg_local_id * q_step * head_size * sizeof(float);
+    auto qs_offset = batch*num_heads*q_len + h;
+    auto ks_offset = batch*num_kv_heads*kv_len + hkv;
 
     //# debugging stage
     lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dMask(mask + batch * q_len * kv_len, q_len - 1, kv_len*sizeof(half) - 1, kv_len*sizeof(half) - 1, 0, 0);
 
-    uint qo_pitch = num_heads * head_size * sizeof(half);
-    uint kv_pitch = num_kv_heads * head_size * sizeof(half);
-    //#try using b2dQ to load [16,32] half type with VNNI width. equal with [16, 32/4] uint64_t transpose loading. Got error with invalid height when compiling.
-    lsc::block_2d_desc<half, 1, REG_N, REG_K_U8> b2dQ((query + (batch*num_heads*q_len + h)*head_size), q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
+    uint qo_pitch = num_heads * head_size * sizeof(int8_t);
+    uint k_pitch = num_kv_heads * head_size * sizeof(int8_t);
+    uint v_pitch = num_kv_heads * head_size * sizeof(half);
+
+    lsc::block_2d_desc<uint, 1, REG_N, REG_K_U8/4> b2dQ(reinterpret_cast<uint*>(query + qs_offset*head_size), q_len - 1, head_size*sizeof(int8_t) - 1, qo_pitch - 1, 0, 0);
     b2dQ.set_block_y(q_start);
-    lsc::block_2d_desc<half, 1, REG_M, REG_K_U8> b2dK(key + (batch*num_kv_heads*kv_len + hkv)*head_size,   kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, REG_M, REG_K_U8> b2dK(key + ks_offset*head_size,   kv_len - 1, head_size*sizeof(uint8_t) - 1, k_pitch - 1, 0, 0);
 
-    lsc::block_2d_desc<half, 1, REG_K_HALF, REG_N> b2dV(value + (batch*num_kv_heads*kv_len + hkv)*head_size, kv_len - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qo_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K_HALF, REG_N> b2dV(value + ks_offset*head_size, kv_len - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(output + (batch*num_heads*q_len + h)*head_size,   q_len - 1, head_size*sizeof(half) - 1, qo_pitch*2 - 1, 0, 0);
 
-    //# load Qt into register & pack as VNNI & store to SLM (as dpas-B tile)
-    vector <half, head_size/REG_K_U8> q_scales;
-    matrix<int8_t, head_size/REG_K_U8, REG_K_U8*REG_N> quan_rQ;
+    vector <float, q_step> q_scales;
+    vector <float, kv_step> k_scales;
 
+    matrix<int8_t, head_size/REG_K_U8, REG_K_U8*REG_N> rQ;
     {
-        matrix<half,REG_N,REG_K_U8> Qmat;
-        matrix<int8_t,REG_N,REG_K_U8> quan_Qmat;
-
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size; k += REG_K_U8, ri++) {
-            b2dQ.set_block_x(k);
-            cm_load<lsc::Normal>(Qmat.format<half>(), b2dQ);
-            q_scales[ri] = (half(127.0)/cm_reduced_max<half>(cm_abs<half>(Qmat).format<half>()));
-            quan_Qmat.format<int8_t>() = cm_mul<int8_t>(Qmat.format<half>(), q_scales[ri]);
-            Transpose_16x8(quan_Qmat.format<uint32_t, 16, 8>(), quan_rQ[ri].format<uint32_t, 8, 16>());
+            b2dQ.set_block_x(k/4);
+            cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ);
         }
+        q_scales = cm_load<float, q_step>(scale_q, (qs_offset+q_start*num_heads)*sizeof(float));
     }
 
     //int kv_stop = (cm_group_id(2) + 1) * WG_SIZE * q_step;
     int kv_stop = kv_len;
 
-    matrix <float, head_size/REG_K_HALF*2, REG_M*REG_N> rO;
-    auto clk0 = get_clock();
-
+    matrix <float, head_size/REG_N*2, REG_M*REG_N> rO;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
+        auto clk0 = get_clock();
+        k_scales = cm_load<float, kv_step>(scale_k, (ks_offset+kv_pos*num_kv_heads)*sizeof(float));
+
+#if 1
         // if (args_verbose >= 0) printf("======== %d =========\n", kv_pos);
         //===========================================================
         //# load K into SLM as dpas-A tile (shared by all hw within same WG)
@@ -461,21 +497,22 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             //# 1849 ~ 3259
             if (kv_pos > 0) cm_barrier();
             {
+#if 1
                 if (wg_local_id < WG_SIZE/2) {
-                    matrix<half, REG_M, REG_K_U8> temp0;
-                    matrix<half, REG_M, REG_K_U8> temp1;
+                    matrix<int8_t, REG_M, REG_K_U8> temp0;
+                    matrix<int8_t, REG_M, REG_K_U8> temp1;
                     for(int k = REG_K_U8*wg_local_id; k < head_size; k += REG_K_U8*(WG_SIZE/2)) {
                         b2dK.set_block_x(k);
-                        cm_load<lsc::Normal>(temp0.format<half>(), b2dK.set_block_y(kv_pos));
-                        cm_load<lsc::Normal>(temp1.format<half>(), b2dK.set_block_y(kv_pos + REG_M));
+                        cm_load<lsc::Normal>(temp0.format<int8_t>(), b2dK.set_block_y(kv_pos));
+                        cm_load<lsc::Normal>(temp1.format<int8_t>(), b2dK.set_block_y(kv_pos + REG_M));
 
                         //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
                         //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
 
-                        uint offset = k * 2 * REG_M * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp0.format<half>());
-                        offset += REG_M * REG_K_U8 * sizeof(half);
-                        cm_slm_block_write(slm_K, offset, temp1.format<half>());
+                        uint offset = k * 2 * REG_M * sizeof(int8_t);
+                        cm_slm_block_write(slm_K, offset, temp0.format<int8_t>());
+                        offset += REG_M * REG_K_U8 * sizeof(int8_t);
+                        cm_slm_block_write(slm_K, offset, temp1.format<int8_t>());
                     }
                 } else {
                     matrix<half, REG_K_HALF, REG_N> temp2;
@@ -487,59 +524,84 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                         cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
                     }
                 }
+#else
+                {
+                    matrix<int8_t, REG_M, REG_K_U8> temp0;
+                    matrix<int8_t, REG_M, REG_K_U8> temp1;
+                    for(int k = REG_K_U8*wg_local_id; k < head_size; k += REG_K_U8*(WG_SIZE)) {
+                        b2dK.set_block_x(k);
+                        cm_load<lsc::Normal>(temp0.format<int8_t>(), b2dK.set_block_y(kv_pos));
+                        cm_load<lsc::Normal>(temp1.format<int8_t>(), b2dK.set_block_y(kv_pos + REG_M));
+
+                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step));
+                        //cm_prefetch(b2dK.set_block_y(kv_pos + kv_step + REG_M));
+
+                        uint offset = k * 2 * REG_M * sizeof(int8_t);
+                        cm_slm_block_write(slm_K, offset, temp0.format<int8_t>());
+                        offset += REG_M * REG_K_U8 * sizeof(int8_t);
+                        cm_slm_block_write(slm_K, offset, temp1.format<int8_t>());
+                    }
+                }
+                {
+                    matrix<half, REG_K_HALF, REG_N> temp2;
+                    b2dV.set_block_y(kv_pos);
+                    for(int k = REG_K_HALF*(wg_local_id); k < head_size; k += REG_K_HALF*(WG_SIZE)) {
+                        cm_load<lsc::VNNI>(temp2.format<half>(), b2dV.set_block_x(k).set_block_y(kv_pos));
+                        //cm_prefetch(b2dV.set_block_y(kv_pos + kv_step));
+
+                        cm_slm_block_write(slm_V, k * REG_N * sizeof(half), temp2.format<half>());
+                    }
+                }
+#endif
+
             }
 
             cm_barrier();
         }
+#endif
         auto clk1 = get_clock();
         //printf(" diff0= %lu\n", clk1- clk0);
 
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
-        matrix<float, 2*REG_M, REG_N> St = 0;
-        matrix<half, 2, REG_M * REG_K_U8> Kmat;
+        matrix<int32_t, 2*REG_M, REG_N> Quan_St = 0;
 
-        //matrix<int8_t, 2, REG_M * REG_K_U8> Quan_Kmat;
-        //Quan_Kmat reuse the first half of Kmat registers. but seems no perf gain.
-        matrix_ref<int8_t, 2, REG_M * REG_K_U8> Quan_Kmat = Kmat[0].format<int8_t, 2, REG_M * REG_K_U8>();
-        matrix<int32_t, 2, REG_M*REG_N> Quan_St;
-        auto St2 = St.format<float, 2, REG_M*REG_N>();
+        matrix<int8_t, 2, REG_M * REG_K_U8> Kmat;
+        auto Quan_St2 = Quan_St.format<int32_t, 2, REG_M*REG_N>();
         uint offset = 0;
-        half scaleA[2];
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size; k += REG_K_U8, ri++) {
-            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[0]); offset += REG_M * REG_K_U8 * sizeof(half);
-            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[1]); offset += REG_M * REG_K_U8 * sizeof(half);
-            scaleA[0] = (half(127.0) / cm_reduced_max<half>(cm_abs<half>(Kmat[0]).format<half>()));
-            scaleA[1] = (half(127.0) / cm_reduced_max<half>(cm_abs<half>(Kmat[1]).format<half>()));
+            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[0]); offset += REG_M * REG_K_U8 * sizeof(int8_t);
+            cm_slm_block_read(slm_K, GENX_NONE, offset, Kmat[1]); offset += REG_M * REG_K_U8 * sizeof(int8_t);
 
-            Quan_Kmat[0] = cm_mul<int8_t>(Kmat[0], scaleA[0]);
-            Quan_Kmat[1] = cm_mul<int8_t>(Kmat[1], scaleA[1]);
-            //# matrix<int8_t, 2, REG_M * REG_K_U8> Quan_Kmat;
-            //# Quan_Kmat[0].select_all() = Kmat[0].select_all();
-            //# Quan_Kmat[1].select_all() = Kmat[1].select_all();
+            //show_int(Kmat.format<int8_t, 2*REG_M, REG_K_U8>());
+            //show_int( rQ[ri].format<int8_t, REG_N, REG_K_U8>());
 
-
-            //show(Kmat.format<half, 2*REG_M, REG_K_HALF>());
-            Quan_St = 0;
-            Quan_St[0].format<int32_t>() = cm_dpas<CM_PRECISION_S8, CM_PRECISION_S8, SystolicDepth, RepeatCount>(
-                        Quan_St[0].format<int32_t>(),
-                        quan_rQ[ri].format<int32_t>(),
-                        Quan_Kmat[0].format<int32_t>());
-            Quan_St[1].format<int32_t>() = cm_dpas<CM_PRECISION_S8, CM_PRECISION_S8, SystolicDepth, RepeatCount>(
-                        Quan_St[1].format<int32_t>(),
-                        quan_rQ[ri].format<int32_t>(),
-                        Quan_Kmat[1].format<int32_t>());
-            float dq_scale[2];
-            dq_scale[0] = (float)(1.0f/(scaleA[0]*q_scales[ri]));
-            dq_scale[1] = (float)(1.0f/(scaleA[1]*q_scales[ri]));
-
-            St2[0] += cm_mul<float>(Quan_St[0], dq_scale[0]);
-            St2[1] += cm_mul<float>(Quan_St[1], dq_scale[1]);
-            //# St2[0].select_all() += Quan_St[0].select_all();
-            //# St2[1].select_all() += Quan_St[1].select_all();
+            Quan_St2[0].format<int32_t>() = cm_dpas<CM_PRECISION_S8, CM_PRECISION_S8, SystolicDepth, RepeatCount>(
+                        Quan_St2[0].format<int32_t>(),
+                        rQ[ri].format<int32_t>(),
+                        Kmat[0].format<int32_t>());
+            Quan_St2[1].format<int32_t>() = cm_dpas<CM_PRECISION_S8, CM_PRECISION_S8, SystolicDepth, RepeatCount>(
+                        Quan_St2[1].format<int32_t>(),
+                        rQ[ri].format<int32_t>(),
+                        Kmat[1].format<int32_t>());
         }
-        printf(" diff1= %lu\n", get_clock()- clk1);
+
+        //matrix<float, 2*REG_M, REG_N> St = 0;
+        //Reuse the quantized output
+        auto St = Quan_St.format<float, 2*REG_M, REG_N>();
+        auto St2 = St.format<float, 2, REG_M*REG_N>();
+
+#if 1
+        //show_int(Quan_St.format<int32_t, 2*REG_M, REG_N>());
+        #pragma unroll
+        for(int r = 0; r < 2*REG_M; r++) St[r] = k_scales[r]*Quan_St[r];
+        #pragma unroll
+        for(int c = 0; c < REG_N; c++) St.column(c) = q_scales[c]*St.column(c);
+#endif
+        //show(St.format<float, 2*REG_M, REG_N>());
+
+        //printf(" diff1= %lu\n", get_clock()- clk1);
 
         //show(St);
         //=========================================================== 361
@@ -588,7 +650,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
 
         //============================================================== 666
-        //show(P);return;
+        //show(P);
         //auto clk0 = get_clock();
 
         auto P2 = P.format<half, 2, REG_M * REG_K_HALF>();
@@ -644,6 +706,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             }
             // if (kv_pos == args_verbose) return;
         }
+        //show(rO[0].format<float, REG_M, REG_N>());
+
         //============================================================== 1168
 
         cur_max = new_max_t;
@@ -674,16 +738,22 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 '''
 
 cl.profiling(True)
+REPEAT = 20
 
-t_q = cl.tensor(q.detach().numpy())
-t_k = cl.tensor(k.detach().numpy())
+t_q = cl.tensor(q_INT8.detach().numpy())
+t_k = cl.tensor(k_INT8.detach().numpy())
 t_v = cl.tensor(v.detach().numpy())
+
+
+t_scale_q = cl.tensor(dqscale_q.detach().numpy())
+t_scale_k  = cl.tensor(dqscale_k.detach().numpy())
+
 t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
 t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
-cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
+cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_scale_q, t_scale_k)
 
 f1 = torch.from_numpy(t_out.numpy())
 
@@ -691,30 +761,37 @@ all_layers = []
 mem_size = 0
 while len(all_layers) < 100 and mem_size < 8e9:
     all_layers.append([
-        cl.tensor(q.detach().numpy()),
-        cl.tensor(k.detach().numpy()),
+        cl.tensor(q_INT8.detach().numpy()),
+        cl.tensor(k_INT8.detach().numpy()),
         cl.tensor(v.detach().numpy()),
         cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
+        cl.tensor(dqscale_q.detach().numpy()),
+        cl.tensor(dqscale_k.detach().numpy()),
     ])
-    mem_size += q.numel() * q.element_size()
-    mem_size += k.numel() * k.element_size()
+    mem_size += q_INT8.numel() * q_INT8.element_size()
+    mem_size += k_INT8.numel() * k_INT8.element_size()
     mem_size += v.numel() * v.element_size()
+    mem_size += dqscale_q.numel() * dqscale_q.element_size()
+    mem_size += dqscale_k.numel() * dqscale_k.element_size()
+
     print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
 
-for i in range(10):
+for i in range(REPEAT):
     j  = i % len(all_layers)
     cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len,
                        all_layers[j][0],
                        all_layers[j][1],
                        all_layers[j][2],
                        all_layers[j][3],
-                       t_mask)
+                       t_mask,
+                       t_scale_q,
+                       t_scale_k,)
 
 latency = cl.finish()
 for ns in latency:
     print(f"  {ns*1e-6:.3f} ms")
 
-check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
+check_close(ref.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
 print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
 
 sys.exit(0)
