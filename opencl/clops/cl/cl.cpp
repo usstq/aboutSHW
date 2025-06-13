@@ -169,6 +169,8 @@ void tensor::resize(const py::array& b) {
 py::array tensor::to_numpy() {
     // this shouldn't be a very frequent operation which requires optimizations
     // so we just allocate
+    if (!p_buff) return {};
+
     py::array ret(dt, shape);
     py::buffer_info info = ret.request();
     auto* p_host = reinterpret_cast<uint8_t*>(info.ptr);
@@ -488,7 +490,10 @@ PYBIND11_MODULE(csrc, m) {
                 return py::make_tuple(p.to_numpy());
             },
             [](py::tuple t) {  // __setstate__
-                return tensor(t[0].cast<py::array>());
+                auto arr = t[0].cast<py::array>();
+                if (arr.size() == 0)
+                    return tensor();
+                return tensor(arr);
             }));
 
     py::class_<cl_kernels>(m, "kernels")
