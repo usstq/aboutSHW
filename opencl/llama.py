@@ -81,7 +81,11 @@ class LlamaLikeModel:
                 qkv_bias = torch.cat([l.self_attn.q_proj.bias, l.self_attn.k_proj.bias, l.self_attn.v_proj.bias], dim=0)
             d.qkv_proj = Linear(weight=qkv_weight, bias=qkv_bias)
 
-            d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
+            if Linear == clops.Linear_onednn:
+                d.o_proj_sum = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias, post_ops_name="sum")
+            else:
+                d.o_proj_sum = None
+                d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             
             if Linear == clops.Linear_f16xmx or Linear == clops.Linear_w4x:
@@ -96,7 +100,11 @@ class LlamaLikeModel:
                 d.gate_up_proj = None
                 d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, dq_per_token=False)
                 d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, dq_per_token=False)
-            d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
+            if Linear == clops.Linear_onednn:
+                d.down_proj_sum = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias, post_ops_name="sum")
+            else:
+                d.down_proj_sum = None
+                d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.is_last = False
             d.mha = MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
@@ -125,12 +133,15 @@ class LlamaLikeModel:
             attn_output = attn_output.slice(1, query_seq_len-1, query_seq_len)
             hidden_states = hidden_states.slice(1, query_seq_len-1, query_seq_len)
 
-        attn_output = layer.o_proj(attn_output)
+        if layer.o_proj_sum:
+            layer.o_proj_sum(attn_output, hidden_states)
+        else:
+            attn_output = layer.o_proj(attn_output)
+            hidden_states += attn_output
 
-        attn_output += hidden_states
-        post_attention_layernorm = layer.post_attention_layernorm(attn_output)
+        post_attention_layernorm = layer.post_attention_layernorm(hidden_states)
 
-        def mlp(states):
+        def mlp(states, sum_to):
             if layer.gate_up_proj:
                 gate_proj = layer.gate_up_proj(states)
             else:
@@ -138,12 +149,15 @@ class LlamaLikeModel:
                 up_proj = layer.up_proj(states)
                 gate_proj.iSilu()
                 gate_proj *= up_proj
-            down_proj = layer.down_proj(gate_proj)
-            return down_proj
+            if layer.down_proj_sum:
+                layer.down_proj_sum(gate_proj, sum_output=sum_to)
+            else:
+                down_proj = layer.down_proj(gate_proj)
+                sum_to += down_proj
 
-        mlp_output = mlp(post_attention_layernorm)
-        attn_output += mlp_output
-        return attn_output
+        mlp(post_attention_layernorm, hidden_states)
+        
+        return hidden_states
 
     def forward(self, input_ids, attn_mask):
         # embedding is done on CPU so far (to save GPU memory since embedding is memory-bounded)

@@ -490,6 +490,7 @@ void init_ops_onednn(py::module_& m) {
         .def("fpmath_f16", &onednn_matmul::fpmath_f16)
         .def("post_op_silu", &onednn_matmul::post_op_silu)
         .def("post_op_bin_mul", &onednn_matmul::post_op_bin_mul)
+        .def("post_op_sum", &onednn_matmul::post_op_sum)
         .def("create", &onednn_matmul::create)
         .def("forward", &onednn_matmul::forward);
 }

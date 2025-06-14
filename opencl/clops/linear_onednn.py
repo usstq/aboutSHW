@@ -184,6 +184,8 @@ def create_onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N,
     if pos_ops_name == "silu_binmul":
         mm.post_op_silu()
         mm.post_op_bin_mul(True)
+    elif pos_ops_name == "sum":
+        mm.post_op_sum(1.0, 0)
     elif pos_ops_name == "":
         pass
     else:
@@ -271,14 +273,14 @@ class GateUp_onednn:
         return output
 
 class Linear_onednn:
-    def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, dq_per_token = False):
+    def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, dq_per_token = False, post_ops_name = ""):
         self.linears = {}
 
         self.N, self.K = weight.shape # weight: [N, K]
         self.weight = to_cl(weight.half())
         self.bias_dtype = cl.onednn_dtype.f16 if bias is not None else cl.onednn_dtype.undef
         self.bias = to_cl(bias.half()) if bias is not None else cl.tensor()
-        self.post_ops_name = ""
+        self.post_ops_name = post_ops_name
         self.src_quant_group_size = 0
         self.wei_quant_group_size = 0
         self.with_zero_point = False
@@ -302,12 +304,12 @@ class Linear_onednn:
         if not self.with_zero_point:
             self.zps = cl.tensor()
 
-    def __call__(self, input):
+    def __call__(self, input, sum_output = None):
         # shape inference
         i_shape = input.shape
         o_shape = list(i_shape)
         o_shape[-1] = self.N
-        output = cl.tensor(o_shape, input.dtype)
+        output = cl.tensor(o_shape, input.dtype) if sum_output is None else sum_output
 
         M = input.numel // self.K
         if M not in self.linears:
