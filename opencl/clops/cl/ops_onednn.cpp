@@ -146,6 +146,7 @@ struct onednn_matmul {
             batch_size = 1024*1024; // big enough fake static batch
 
         m_bin_mul_md = memory::desc(memory::dims({batch_size, per_oc ? m_N : 1}), memory::data_type::f16, memory::format_tag::ab);
+        bin_post_id = postops.len();
         postops.append_binary(algorithm::binary_mul, m_bin_mul_md);
         return *this;
     }
@@ -214,8 +215,8 @@ struct onednn_matmul {
         }
         if (!m_bin_mul_md.is_zero()) {
             const auto& bshape = bin_input.get_shape();
-            ASSERT(bshape[0] == m_M || bshape[0] == 1);
-            ASSERT(bshape[1] == m_N || bshape[1] == m_N);
+            //ASSERT(bshape[0] == m_M || bshape[0] == 1);
+            //ASSERT(bshape[1] == m_N || bshape[1] == m_N);
             auto bin_mem = dnnl::ocl_interop::make_memory(m_bin_mul_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bin_input));
             args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
         }

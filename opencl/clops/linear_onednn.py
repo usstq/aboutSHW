@@ -183,7 +183,11 @@ def create_onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N,
         mm.a_scale(act_quant_k_group_size)
     if pos_ops_name == "silu_binmul":
         mm.post_op_silu()
-        mm.post_op_bin_mul(False)
+        mm.post_op_bin_mul(True)
+    elif pos_ops_name == "":
+        pass
+    else:
+        assert False, f"unsupported post-ops {pos_ops_name}"
     mm.fpmath_f16()
     mm.create()
     return mm
@@ -209,6 +213,63 @@ __kernel void quant_I8_per_row(__global half * _src,
 }
 '''
 
+class GateUp_onednn:
+    def __init__(self, weight_gate, weight_up, w_dtype = cl.onednn_dtype.s4, dq_per_token = True):
+        assert weight_gate.shape == weight_up.shape
+        self.N, self.K = weight_gate.shape # weight: [N, K]
+
+        self.kernels_gate = {}
+        self.kernels_up = {}
+        self.w_dtype = w_dtype
+        self.dq_per_token = dq_per_token
+        self.wei_quant_group_size = 0
+        self.src_quant_group_size = 0
+        self.t_empty = cl.tensor()
+        if w_dtype == cl.onednn_dtype.s4:
+            self.wei_quant_group_size = 128
+            self.weight_gate, self.scales_gate, _, _ = quantize_weight_to_i4(weight_gate, self.wei_quant_group_size, False)
+            self.weight_up, self.scales_up, _, _ = quantize_weight_to_i4(weight_up, self.wei_quant_group_size, False)
+        else:
+            assert False, f"not implemented {w_dtype}"
+
+        if dq_per_token:
+            self.src_quant_group_size = self.K
+        self.cl_kernels = kernel_cache(cl_dyn_quant_src, options=(f"-DK={self.K}"))
+
+        
+    def __call__(self, input):
+        # shape inference
+        i_shape = input.shape
+        o_shape = list(i_shape)
+        o_shape[-1] = self.N
+        output = cl.tensor(o_shape, input.dtype)
+
+        M = input.numel // self.K
+        if M not in self.kernels_up:
+            # there is a internal onednn kernel cache inside cl
+            self.kernels_up[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
+                                                   self.w_dtype, cl.onednn_dtype.undef, M, self.K, self.N,
+                                                   self.wei_quant_group_size,
+                                                   self.src_quant_group_size,
+                                                   "")
+            self.kernels_gate[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
+                                                   self.w_dtype, cl.onednn_dtype.undef, M, self.K, self.N,
+                                                   self.wei_quant_group_size,
+                                                   self.src_quant_group_size,
+                                                   "silu_binmul")
+        if self.dq_per_token:
+            input_i8 = cl.tensor(input.shape, np.dtype(np.int8))
+            input_sc = cl.tensor([M], np.dtype(np.float16))
+            self.cl_kernels.enqueue("quant_I8_per_row", [M], [1], input, input_i8, input_sc, M)
+            src = (input_i8, input_sc)
+        else:
+            src = (input,)
+
+        act_up = cl.tensor(o_shape, np.dtype(np.float16))
+        self.kernels_up[M].forward(act_up, src, [self.weight_up, self.scales_up, self.t_empty], self.t_empty, self.t_empty)
+        self.kernels_gate[M].forward(output, src, [self.weight_gate, self.scales_gate, self.t_empty], self.t_empty, act_up)
+        return output
+
 class Linear_onednn:
     def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, dq_per_token = False):
         self.linears = {}
@@ -229,7 +290,7 @@ class Linear_onednn:
         elif self.w_dtype == cl.onednn_dtype.s4:
             self.wei_quant_group_size = 128
             self.with_zero_point = False
-            self.weight, self.scales, self.zps, self.wei_deq = quantize_weight_to_i4(weight, self.wei_quant_group_size, self.with_zero_point)                
+            self.weight, self.scales, self.zps, _ = quantize_weight_to_i4(weight, self.wei_quant_group_size, self.with_zero_point)                
         else:
             assert 0, f"unsuuported weight-quantization dtype {self.w_dtype}" 
 

@@ -43,7 +43,8 @@ if cmake_need_config:
                     generator], shell=False, check=True)
 
 subprocess.run(["cmake", "--build", build_path, "--config", btype, "-j8"], shell=False, check=True)
-#subprocess.run(["cmake", "--install", build_path, "--config", btype, "--prefix", dir_path], shell=False, check=True)
+if os.name == 'nt':
+    subprocess.run(["cmake", "--install", build_path, "--config", btype, "--prefix", dir_path], shell=False, check=True)
 
 from .csrc import *
 

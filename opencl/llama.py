@@ -87,13 +87,15 @@ class LlamaLikeModel:
             if Linear == clops.Linear_f16xmx or Linear == clops.Linear_w4x:
                 assert l.mlp.gate_proj.bias is None
                 assert l.mlp.up_proj.bias is None
-                d.gate_up_proj = Linear(weight=l.mlp.gate_proj.weight, bias=None,
-                                        weight_up = l.mlp.up_proj.weight)
+                d.gate_up_proj = Linear(l.mlp.gate_proj.weight, l.mlp.up_proj.weight)
+            elif Linear == clops.Linear_onednn:
+                assert l.mlp.gate_proj.bias is None
+                assert l.mlp.up_proj.bias is None
+                d.gate_up_proj = clops.GateUp_onednn(l.mlp.gate_proj.weight, l.mlp.up_proj.weight)
             else:
                 d.gate_up_proj = None
-                dq_per_token = True
-                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, dq_per_token=dq_per_token)
-                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, dq_per_token=dq_per_token)
+                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, dq_per_token=False)
+                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, dq_per_token=False)
             d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
             d.is_last = False
             d.mha = MHA(self.hf_config.num_attention_heads,
@@ -244,9 +246,11 @@ def simple_pipeline(hf_model_path,
                 logits = model.forward(input_ids, attn_mask) # [batch, q_len, vocab_size]
                 next_token_logits = logits[:, -1, :]         # only the last token
                 next_tokens = torch.argmax(next_token_logits, dim=-1)
+
                 print("\033[0;33m")
                 t1 = time.time()
-                while tokenizer.eos_token_id not in next_tokens:
+                #while tokenizer.eos_token_id not in next_tokens:
+                while True:
                     next_tokens = next_tokens.reshape(batch_size, 1)
                     input_ids = next_tokens
                     if batch_size == 1:
@@ -260,9 +264,11 @@ def simple_pipeline(hf_model_path,
 
                     attn_mask = torch.cat([attn_mask, torch.zeros(batch_size, 1, dtype=torch.float32)], dim=-1)
                     logits = model.forward(input_ids, attn_mask)
+                    # print(input_ids.shape, logits.shape)
                     next_tokens = torch.argmax(logits, dim=-1)
                 t2 = time.time()
                 if batch_size == 1:
+                    # print(next_tokens.shape, next_tokens)
                     streamer.put(next_tokens[0,:])
                 streamer.end()
                 if prompt0:
@@ -285,7 +291,7 @@ if __name__ == "__main__":
     parser.add_argument('-r', "--repeat", type=int, default=1)
     parser.add_argument('-q', "--quant_type", type=str, default="onednn", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x', 'onednn'])
 
-    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-7B-Instruct/')
     parser.add_argument('--save', type=str, nargs='?', default=None)
     parser.add_argument('--load', type=str, nargs='?', default=None)
 
