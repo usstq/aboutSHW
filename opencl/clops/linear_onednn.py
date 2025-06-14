@@ -137,8 +137,7 @@ def quantize_weight_to_i4(weight, QUANT_GROUP_SIZE, with_zero_point):
     # scales/zp are stored so a cache-line can be shared by a quantization-group
     scales = cl.tensor([K//QUANT_GROUP_SIZE, N], np.dtype(np.float16))
     zps = cl.tensor([K//QUANT_GROUP_SIZE, N//2], np.dtype(np.int8))
-    cl_kernels = kernel_cache(cl_kernel_source,
-                              options=(f"-D{QUANT_GROUP_SIZE=}"))
+    cl_kernels = kernel_cache(cl_kernel_source, options=(f"-D{QUANT_GROUP_SIZE=}"))
     cl_kernels.enqueue("quant_I4", [K//QUANT_GROUP_SIZE, N//2], [1, 1],
                             weight_half,
                             weight_i4,
@@ -168,17 +167,77 @@ def quantize_weight_to_i4(weight, QUANT_GROUP_SIZE, with_zero_point):
         
     return weight_i4, scales, zps, weight_half.numpy()
 
+# creator function cache act as kernel factory cache
+from functools import cache, lru_cache
+@cache
+def create_onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N,
+                         wei_quant_k_group_size,
+                         act_quant_k_group_size,
+                         pos_ops_name):
+    mm = cl.onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N, -1)
+    if wei_quant_k_group_size:
+        mm.w_scale(wei_quant_k_group_size)
+        if w_dtype == cl.onednn_dtype.u4:
+            mm.w_zp(wei_quant_k_group_size)
+    if act_quant_k_group_size:
+        mm.a_scale(act_quant_k_group_size)
+    if pos_ops_name == "silu_binmul":
+        mm.post_op_silu()
+        mm.post_op_bin_mul(False)
+    mm.fpmath_f16()
+    mm.create()
+    return mm
+
+cl_dyn_quant_src = r'''
+__kernel void quant_I8_per_row(__global half * _src,
+                                __global char * _dst,
+                                __global half * scales,
+                                int N) {
+    int n = get_global_id(0);
+    __global half * src = _src + n * K;
+    __global char * dst = _dst + n * K;
+
+    half absmax = 0;
+    for(int k = 0; k < K; k++) {
+        absmax = fmax(absmax, fabs(src[k]));
+    }
+    half s = 127.0f/absmax;
+    for(int k = 0; k < K; k++) {
+        dst[k] = src[k] * s;
+    }
+    scales[n] = absmax/127.0f;
+}
+'''
 
 class Linear_onednn:
-    def __init__(self, weight, bias = None):
+    def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, dq_per_token = False):
+        self.linears = {}
+
         self.N, self.K = weight.shape # weight: [N, K]
         self.weight = to_cl(weight.half())
-        self.with_bias = bias is not None
+        self.bias_dtype = cl.onednn_dtype.f16 if bias is not None else cl.onednn_dtype.undef
         self.bias = to_cl(bias.half()) if bias is not None else cl.tensor()
-        self.linears = {}
-        self.ic_group_size = 128
+        self.post_ops_name = ""
+        self.src_quant_group_size = 0
+        self.wei_quant_group_size = 0
         self.with_zero_point = False
-        self.wi4, self.scales, self.zps, self.wei_deq = quantize_weight_to_i4(weight, self.ic_group_size, self.with_zero_point)
+        self.w_dtype = w_dtype
+        self.scales = cl.tensor()
+        self.zps = cl.tensor()
+        if self.w_dtype == cl.onednn_dtype.f16:
+            pass
+        elif self.w_dtype == cl.onednn_dtype.s4:
+            self.wei_quant_group_size = 128
+            self.with_zero_point = False
+            self.weight, self.scales, self.zps, self.wei_deq = quantize_weight_to_i4(weight, self.wei_quant_group_size, self.with_zero_point)                
+        else:
+            assert 0, f"unsuuported weight-quantization dtype {self.w_dtype}" 
+
+        self.dq_per_token = dq_per_token
+        if self.dq_per_token:
+            self.src_quant_group_size = self.K
+        self.cl_kernels = kernel_cache(cl_dyn_quant_src, options=(f"-DK={self.K}"))
+
         if not self.with_zero_point:
             self.zps = cl.tensor()
 
@@ -192,13 +251,20 @@ class Linear_onednn:
         M = input.numel // self.K
         if M not in self.linears:
             # there is a internal onednn kernel cache inside cl
-            self.linears[M] = cl.onednn_linear(cl.onednn_dtype.f16, cl.onednn_dtype.s4, cl.onednn_dtype.f16 if self.with_bias else cl.onednn_dtype.undef,
-                                               M, self.K, self.N, self.ic_group_size, cl.onednn_matmul_type.none,
-                                               cl.onednn_dtype.s4,
-                                               self.wi4, self.scales, self.zps, self.bias)
-        #print(M, self.K, self.N,  input.shape, self.weight.shape, output.shape)
-        #self.cl_kernels.enqueue("Linear_f16", [self.N, M], [128, 1], input, self.weight, self.bias, output, M, self.K, self.N)
-        self.linears[M].forward(input, output, cl.tensor())
+            self.linears[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
+                                                   self.w_dtype, self.bias_dtype, M, self.K, self.N,
+                                                   self.wei_quant_group_size,
+                                                   self.src_quant_group_size,
+                                                   self.post_ops_name)
+        if self.dq_per_token:
+            input_i8 = cl.tensor(input.shape, np.dtype(np.int8))
+            input_sc = cl.tensor([M], np.dtype(np.float16))
+            self.cl_kernels.enqueue("quant_I8_per_row", [M], [1], input, input_i8, input_sc, M)
+            src = (input_i8, input_sc)
+        else:
+            src = (input,)
+
+        self.linears[M].forward(output, src, [self.weight, self.scales, self.zps], self.bias, cl.tensor())
         return output
 
 if __name__ == "__main__":

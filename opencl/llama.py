@@ -67,6 +67,8 @@ class LlamaLikeModel:
         self.layers = []
         for l in tqdm(hf_model.model.layers):
             d = Layer()
+            d.id = len(self.layers)
+
             d.input_layernorm = clops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             # combine qkv : 
             qkv_weight = torch.cat([l.self_attn.q_proj.weight, l.self_attn.k_proj.weight, l.self_attn.v_proj.weight], dim=0)
@@ -89,11 +91,10 @@ class LlamaLikeModel:
                                         weight_up = l.mlp.up_proj.weight)
             else:
                 d.gate_up_proj = None
-                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
-                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
-            
+                dq_per_token = True
+                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, dq_per_token=dq_per_token)
+                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, dq_per_token=dq_per_token)
             d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
-            d.id = len(self.layers)
             d.is_last = False
             d.mha = MHA(self.hf_config.num_attention_heads,
                               self.hf_config.num_key_value_heads,
@@ -284,7 +285,7 @@ if __name__ == "__main__":
     parser.add_argument('-r', "--repeat", type=int, default=1)
     parser.add_argument('-q', "--quant_type", type=str, default="onednn", choices=['f16', 'f16b1', 'w4a', 'w4a_cpu', 'f16xmx', 'w4x', 'onednn'])
 
-    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/tingqian/Qwen2-0.5B-Instruct/')
+    parser.add_argument('-hf', '--hf_model_path', type=str, nargs='?', default='/mnt/llm_irs/models_original/Qwen2-0.5B-Instruct/')
     parser.add_argument('--save', type=str, nargs='?', default=None)
     parser.add_argument('--load', type=str, nargs='?', default=None)
 

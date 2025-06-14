@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -38,6 +39,14 @@ public:
 struct onednn_matmul {
     matmul m_prim;
     memory::desc m_wei_md;
+    memory::desc m_wei_scale_md;
+    memory::desc m_wei_zp_md;
+    memory::desc m_bias_md;
+    memory::desc m_src_md;
+    memory::desc m_src_scale_md;
+    memory::desc m_dst_md;
+    memory::desc m_bin_mul_md;
+    
     memory::data_type m_w_type;
     memory::data_type m_bias_type; // bias dtype
     memory::data_type m_a_type; // activation dtype
@@ -45,17 +54,22 @@ struct onednn_matmul {
     memory::dim m_N;
     memory::dim m_M;
     memory::dim m_K_groups;
+    memory::dim m_act_K_groups;
     dnnl::engine m_engine;
     dnnl::stream m_stream;
 
     primitive_attr attr;
     post_ops postops;
 
-    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch_size, int ic, int oc, int ic_group_size = -1) {
+    onednn_matmul(memory::data_type act_dtype,
+                  memory::data_type weight_dtype,
+                  memory::data_type bias_dtype,
+                  int batch_size, int ic, int oc, int ic_group_size = -1) {
         m_a_type = act_dtype;
         m_w_type = weight_dtype;
         m_bias_type = bias_dtype;
         m_K_groups = 0;
+        m_act_K_groups = 0;
         m_K = ic;
         m_N = oc;
         m_M = DNNL_RUNTIME_DIM_VAL;
@@ -63,6 +77,12 @@ struct onednn_matmul {
             // jit-gemm kernel only support static batch size
             m_M = batch_size;
         }
+        m_src_md = memory::desc(memory::dims({m_M, m_K}), m_a_type, memory::format_tag::ab);
+        m_dst_md = memory::desc(memory::dims({m_M, m_N}), memory::data_type::f16, memory::format_tag::ab);
+        if (m_bias_type != memory::data_type::undef) {
+            m_bias_md = memory::desc(memory::dims({1, m_N}), m_bias_type, memory::format_tag::ab);
+        }
+
         if (ic_group_size >= 0) {
             w_scale(ic_group_size);
             if (m_w_type == memory::data_type::u4) {
@@ -85,6 +105,7 @@ struct onednn_matmul {
             m_K_groups = m_K / k_group_size;
             attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), {k_group_size, 1}, memory::data_type::f16);
         }
+        m_wei_scale_md = memory::desc(memory::dims({m_K_groups, m_N}), memory::data_type::f16, memory::format_tag::ab);
         return *this;
     }
 
@@ -96,9 +117,19 @@ struct onednn_matmul {
             ASSERT(m_K_groups = (m_K / k_group_size));
             attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), {k_group_size, 1}, m_w_type);
         }
+        m_wei_zp_md = memory::desc(memory::dims({m_K_groups, m_N}), m_w_type, memory::format_tag::ab);
         return *this;
     }
-
+    // input activation is also quantized (per-row & k-grouped)
+    onednn_matmul& a_scale(int k_group_size) {
+        ASSERT((m_K % k_group_size) == 0);
+        m_act_K_groups = m_K / k_group_size;
+        attr.set_scales(DNNL_ARG_SRC, (1<<0) + (1<<1), 
+                dnnl::memory::dims{1, k_group_size},
+                memory::data_type::f16);
+        m_src_scale_md = memory::desc(memory::dims({m_M, m_act_K_groups}), memory::data_type::f16, memory::format_tag::ab);
+        return *this;
+    }
     onednn_matmul& fpmath_f16() {
         attr.set_fpmath_mode(fpmath_mode::f16, true);
         return *this;
@@ -114,8 +145,8 @@ struct onednn_matmul {
         if (batch_size == DNNL_RUNTIME_DIM_VAL)
             batch_size = 1024*1024; // big enough fake static batch
 
-        memory::desc bin_mul_md = memory::desc(memory::dims({batch_size, per_oc ? m_N : 1}), m_a_type, memory::format_tag::ab);
-        postops.append_binary(algorithm::binary_mul, bin_mul_md);
+        m_bin_mul_md = memory::desc(memory::dims({batch_size, per_oc ? m_N : 1}), memory::data_type::f16, memory::format_tag::ab);
+        postops.append_binary(algorithm::binary_mul, m_bin_mul_md);
         return *this;
     }
 
@@ -128,9 +159,6 @@ struct onednn_matmul {
         if (postops.len() > 0) {
             attr.set_post_ops(postops);
         }
-
-        memory::desc src_md = memory::desc(memory::dims({m_M, m_K}), m_a_type, memory::format_tag::ab);
-        memory::desc dst_md = memory::desc(memory::dims({m_M, m_N}), m_a_type, memory::format_tag::ab);
         //memory::desc wei_md = memory::desc(memory::dims({m_K, m_N}), m_w_type, memory::format_tag::any);
 
         // use fixed weight-layout to prevent shape-dependent weight-layout changes
@@ -139,20 +167,61 @@ struct onednn_matmul {
         m_engine = onednn_context::engine();
         m_stream = onednn_context::stream();
 
-        memory::desc bias_md;
-        if (m_bias_type != memory::data_type::undef) {
-            bias_md = memory::desc(memory::dims({1, m_N}), m_bias_type, memory::format_tag::ab);
-        }
         // Create primitive descriptor.
         auto matmul_pd = (m_bias_type == memory::data_type::undef) ? 
-                   matmul::primitive_desc(m_engine, src_md, wei_md, dst_md, attr)
-                 : matmul::primitive_desc(m_engine, src_md, wei_md, bias_md, dst_md, attr);;
+                   matmul::primitive_desc(m_engine, m_src_md, wei_md, m_dst_md, attr)
+                 : matmul::primitive_desc(m_engine, m_src_md, wei_md, m_bias_md, m_dst_md, attr);;
 
         // Pre-packed weights stored as int8_t
         m_wei_md = matmul_pd.weights_desc();
 
         // Create the primitive.
         m_prim = matmul(matmul_pd);
+    }
+
+    void forward(tensor& dst,
+                 const std::vector<tensor>& src,
+                 const std::vector<tensor>& weights,
+                 tensor& bias,
+                 tensor& bin_input) {
+        memory::dim M = src[0].get_numel()/m_K;
+
+        ASSERT(m_M == 0 || m_M == M, "m_M=", m_M, " M=", M);
+
+        auto src_mem = dnnl::ocl_interop::make_memory(m_src_md, m_engine, ocl_interop::memory_kind::usm, (void *)(src[0]));
+        auto dst_mem = dnnl::ocl_interop::make_memory(m_dst_md, m_engine, ocl_interop::memory_kind::usm, (void *)(dst));
+        auto weight_mem = dnnl::ocl_interop::make_memory(m_wei_md, m_engine, ocl_interop::memory_kind::usm, static_cast<void*>(weights[0]));
+
+        std::unordered_map<int, memory> args;
+        args.insert({DNNL_ARG_SRC, src_mem});
+        args.insert({DNNL_ARG_DST, dst_mem});
+        args.insert({DNNL_ARG_WEIGHTS, weight_mem});
+        if (!m_bias_md.is_zero()) {
+            auto mem = dnnl::ocl_interop::make_memory(m_dst_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bias));
+            args.insert({DNNL_ARG_BIAS, mem});
+        }
+        if (!m_wei_scale_md.is_zero()) {
+            auto scale_mem = dnnl::ocl_interop::make_memory(m_wei_scale_md, m_engine, ocl_interop::memory_kind::usm, static_cast<void*>(weights[1]));
+            args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, scale_mem});
+        }
+        if (!m_wei_zp_md.is_zero()) {
+            auto zp_mem = dnnl::ocl_interop::make_memory(m_wei_zp_md, m_engine, ocl_interop::memory_kind::usm, static_cast<void*>(weights[2]));
+            args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, zp_mem});
+        }
+        if (!m_src_scale_md.is_zero()) {
+            auto scale_mem = dnnl::ocl_interop::make_memory(m_src_scale_md, m_engine, ocl_interop::memory_kind::usm, static_cast<void*>(src[1]));
+            args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC_0, scale_mem});
+        }
+        if (!m_bin_mul_md.is_zero()) {
+            const auto& bshape = bin_input.get_shape();
+            ASSERT(bshape[0] == m_M || bshape[0] == 1);
+            ASSERT(bshape[1] == m_N || bshape[1] == m_N);
+            auto bin_mem = dnnl::ocl_interop::make_memory(m_bin_mul_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bin_input));
+            args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
+        }
+        auto event = dnnl::ocl_interop::execute(m_prim, m_stream, args);
+        g_queue.events.push_back(event);
+        //m_prim.execute(m_stream, args);
     }
 
     // this creator is for predefined matmul primitive types
@@ -166,7 +235,11 @@ struct onednn_matmul {
     };
     int bin_post_id = -1;
     bool bin_per_row = false;
-    onednn_matmul(memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch, int ic, int oc, int ic_group_size, type t)
+    onednn_matmul(memory::data_type act_dtype,
+                  memory::data_type weight_dtype,
+                  memory::data_type bias_dtype,
+                  int batch, int ic, int oc, int ic_group_size,
+                  type t)
              : onednn_matmul(act_dtype, weight_dtype, bias_dtype, batch, ic, oc, ic_group_size) {
         if (t == type::with_bin_mul) {
             bin_post_id = 0;
@@ -211,7 +284,11 @@ struct onednn_linear {
     dnnl::stream m_stream;
 
     static onednn_linear create(
-              memory::data_type act_dtype, memory::data_type weight_dtype, memory::data_type bias_dtype, int batch, int ic, int oc, int ic_group_size, onednn_matmul::type t,
+              memory::data_type act_dtype,
+              memory::data_type weight_dtype,
+              memory::data_type bias_dtype,
+              int batch, int ic, int oc, int ic_group_size,
+              onednn_matmul::type t,
               memory::data_type dtype,
               tensor& data, // external weight
               tensor& scale,
@@ -309,6 +386,14 @@ struct onednn_linear {
         if (zp) {
             args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, zp});
         }
+        /*
+        if (with_dyn_quant) {
+            const auto& bin_shape = bin_input.get_shape();
+            auto bin_md = memory::desc(memory::dims({bin_shape[0], bin_shape[1]}), memory::data_type::f16, memory::format_tag::ab);
+            auto bin_mem = dnnl::ocl_interop::make_memory(bin_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bin_input));
+            args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC_0, bin_mem});
+        } else 
+        */
         if (bin_input) {
             auto bin_mem = dnnl::ocl_interop::make_memory(rt_bin_md, m_engine, ocl_interop::memory_kind::usm, (void *)(bin_input));
             args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(bin_post_id) | DNNL_ARG_SRC_1, bin_mem});
@@ -396,9 +481,16 @@ void init_ops_onednn(py::module_& m) {
         .value("f32", memory::data_type::f32)
         .value("undef", memory::data_type::undef);
 
-    //py::class_<onednn_matmul>(m, "onednn_matmul")
-    //    .def(py::init<>(&onednn_matmul::create))
-    //    .def("get_linear", &onednn_matmul::get_linear);
+    py::class_<onednn_matmul>(m, "onednn_matmul")
+        .def(py::init<memory::data_type, memory::data_type, memory::data_type, int, int, int, int>())
+        .def("a_scale", &onednn_matmul::a_scale)
+        .def("w_scale", &onednn_matmul::w_scale)
+        .def("w_zp", &onednn_matmul::w_zp)
+        .def("fpmath_f16", &onednn_matmul::fpmath_f16)
+        .def("post_op_silu", &onednn_matmul::post_op_silu)
+        .def("post_op_bin_mul", &onednn_matmul::post_op_bin_mul)
+        .def("create", &onednn_matmul::create)
+        .def("forward", &onednn_matmul::forward);
 }
 
 #else
