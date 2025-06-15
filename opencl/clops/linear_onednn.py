@@ -104,7 +104,7 @@ __kernel void quant_I4(__global half * _src,
     _scales[kg*N + n + 0] = p0.scale;
     _scales[kg*N + n + 1] = p1.scale;
     if (with_zp) {
-        _zps[kg*N + ng] = (p1.zp << 4) | ( p0.zp & 0xF);
+        _zps[kg*N/2 + ng] = (p1.zp << 4) | ( p0.zp & 0xF);
     }
 }
 '''
@@ -171,13 +171,13 @@ def quantize_weight_to_i4(weight, QUANT_GROUP_SIZE, with_zero_point):
 from functools import cache, lru_cache
 @cache
 def create_onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N,
-                         wei_quant_k_group_size,
+                         wei_quant_k_group_size, with_zp,
                          act_quant_k_group_size,
                          pos_ops_name):
     mm = cl.onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N, -1)
     if wei_quant_k_group_size:
         mm.w_scale(wei_quant_k_group_size)
-        if w_dtype == cl.onednn_dtype.u4:
+        if with_zp:
             mm.w_zp(wei_quant_k_group_size)
     if act_quant_k_group_size:
         mm.a_scale(act_quant_k_group_size)
@@ -194,86 +194,48 @@ def create_onednn_matmul(a_dtype, w_dtype, bias_dtype, M, K, N,
     mm.create()
     return mm
 
-cl_dyn_quant_src = r'''
-__kernel void quant_I8_per_row(__global half * _src,
-                                __global char * _dst,
-                                __global half * scales,
-                                int N) {
+
+@cache
+def create_per_tok_quantizer(n_states, k_group_size):
+    cl_per_tok_quantizer = r'''
+    __kernel void quant_I8(__global half * _src,
+                            __global char * _dst,
+                            __global half * scales,
+                            int N) {
     int n = get_global_id(0);
-    __global half * src = _src + n * K;
-    __global char * dst = _dst + n * K;
+    int kg = get_global_id(1);
+    
+    __global half * src = _src + n * K + kg * k_group_size;
+    __global char * dst = _dst + n * K + kg * k_group_size;
 
     half absmax = 0;
-    for(int k = 0; k < K; k++) {
+    for(int k = 0; k < k_group_size; k++) {
         absmax = fmax(absmax, fabs(src[k]));
     }
     half s = 127.0f/absmax;
-    for(int k = 0; k < K; k++) {
+    for(int k = 0; k < k_group_size; k++) {
         dst[k] = src[k] * s;
     }
-    scales[n] = absmax/127.0f;
-}
-'''
+    scales[n*(K/k_group_size) + kg] = absmax/127.0f;
+    }
+    '''
+    return cl.kernels(cl_per_tok_quantizer, f"-DK={n_states} -D{k_group_size=}", "")
 
-class GateUp_onednn:
-    def __init__(self, weight_gate, weight_up, w_dtype = cl.onednn_dtype.s4, dq_per_token = True):
-        assert weight_gate.shape == weight_up.shape
-        self.N, self.K = weight_gate.shape # weight: [N, K]
-
-        self.kernels_gate = {}
-        self.kernels_up = {}
-        self.w_dtype = w_dtype
-        self.dq_per_token = dq_per_token
-        self.wei_quant_group_size = 0
-        self.src_quant_group_size = 0
-        self.t_empty = cl.tensor()
-        if w_dtype == cl.onednn_dtype.s4:
-            self.wei_quant_group_size = 128
-            self.weight_gate, self.scales_gate, _, _ = quantize_weight_to_i4(weight_gate, self.wei_quant_group_size, False)
-            self.weight_up, self.scales_up, _, _ = quantize_weight_to_i4(weight_up, self.wei_quant_group_size, False)
-        else:
-            assert False, f"not implemented {w_dtype}"
-
-        if dq_per_token:
-            self.src_quant_group_size = self.K
-        self.cl_kernels = kernel_cache(cl_dyn_quant_src, options=(f"-DK={self.K}"))
-
-        
-    def __call__(self, input):
-        # shape inference
-        i_shape = input.shape
-        o_shape = list(i_shape)
-        o_shape[-1] = self.N
-        output = cl.tensor(o_shape, input.dtype)
-
-        M = input.numel // self.K
-        if M not in self.kernels_up:
-            # there is a internal onednn kernel cache inside cl
-            self.kernels_up[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
-                                                   self.w_dtype, cl.onednn_dtype.undef, M, self.K, self.N,
-                                                   self.wei_quant_group_size,
-                                                   self.src_quant_group_size,
-                                                   "")
-            self.kernels_gate[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
-                                                   self.w_dtype, cl.onednn_dtype.undef, M, self.K, self.N,
-                                                   self.wei_quant_group_size,
-                                                   self.src_quant_group_size,
-                                                   "silu_binmul")
-        if self.dq_per_token:
-            input_i8 = cl.tensor(input.shape, np.dtype(np.int8))
-            input_sc = cl.tensor([M], np.dtype(np.float16))
-            self.cl_kernels.enqueue("quant_I8_per_row", [M], [1], input, input_i8, input_sc, M)
-            src = (input_i8, input_sc)
-        else:
-            src = (input,)
-
-        act_up = cl.tensor(o_shape, np.dtype(np.float16))
-        self.kernels_up[M].forward(act_up, src, [self.weight_up, self.scales_up, self.t_empty], self.t_empty, self.t_empty)
-        self.kernels_gate[M].forward(output, src, [self.weight_gate, self.scales_gate, self.t_empty], self.t_empty, act_up)
-        return output
+# functional style kernel-wrapper
+def per_tok_quantize(input, k_group_size):
+    n_states = input.shape[-1]
+    if k_group_size > n_states:
+        k_group_size = n_states
+    assert n_states % k_group_size == 0
+    k_groups = n_states // k_group_size
+    M = input.numel // n_states
+    input_i8 = cl.tensor(input.shape, np.dtype(np.int8))
+    input_sc = cl.tensor([M, k_groups], np.dtype(np.float16))
+    create_per_tok_quantizer(n_states, k_group_size).enqueue("quant_I8", [M, k_groups], [1, 1], input, input_i8, input_sc, M)
+    return input_i8, input_sc
 
 class Linear_onednn:
-    def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, dq_per_token = False, post_ops_name = ""):
+    def __init__(self, weight, bias = None, w_dtype = cl.onednn_dtype.s4, with_zp = False, post_ops_name = ""):
         self.linears = {}
 
         self.N, self.K = weight.shape # weight: [N, K]
@@ -281,9 +243,8 @@ class Linear_onednn:
         self.bias_dtype = cl.onednn_dtype.f16 if bias is not None else cl.onednn_dtype.undef
         self.bias = to_cl(bias.half()) if bias is not None else cl.tensor()
         self.post_ops_name = post_ops_name
-        self.src_quant_group_size = 0
         self.wei_quant_group_size = 0
-        self.with_zero_point = False
+        self.with_zp = with_zp
         self.w_dtype = w_dtype
         self.scales = cl.tensor()
         self.zps = cl.tensor()
@@ -291,43 +252,34 @@ class Linear_onednn:
             pass
         elif self.w_dtype == cl.onednn_dtype.s4:
             self.wei_quant_group_size = 128
-            self.with_zero_point = False
-            self.weight, self.scales, self.zps, _ = quantize_weight_to_i4(weight, self.wei_quant_group_size, self.with_zero_point)                
+            self.weight, self.scales, self.zps, _ = quantize_weight_to_i4(weight, self.wei_quant_group_size, self.with_zp)                
         else:
             assert 0, f"unsuuported weight-quantization dtype {self.w_dtype}" 
 
-        self.dq_per_token = dq_per_token
-        if self.dq_per_token:
-            self.src_quant_group_size = self.K
-        self.cl_kernels = kernel_cache(cl_dyn_quant_src, options=(f"-DK={self.K}"))
-
-        if not self.with_zero_point:
+        if not self.with_zp:
             self.zps = cl.tensor()
 
-    def __call__(self, input, sum_output = None):
+    def __call__(self, input, sum_output = None, src_scale = None, bin_rhs = None):
         # shape inference
         i_shape = input.shape
         o_shape = list(i_shape)
         o_shape[-1] = self.N
-        output = cl.tensor(o_shape, input.dtype) if sum_output is None else sum_output
+        output = cl.tensor(o_shape, np.dtype(np.float16)) if sum_output is None else sum_output
 
         M = input.numel // self.K
         if M not in self.linears:
             # there is a internal onednn kernel cache inside cl
-            self.linears[M] = create_onednn_matmul(cl.onednn_dtype.s8 if self.dq_per_token else cl.onednn_dtype.f16,
+            self.linears[M] = create_onednn_matmul(cl.onednn_dtype.s8 if src_scale is not None else cl.onednn_dtype.f16,
                                                    self.w_dtype, self.bias_dtype, M, self.K, self.N,
-                                                   self.wei_quant_group_size,
-                                                   self.src_quant_group_size,
+                                                   self.wei_quant_group_size, self.with_zp,
+                                                   self.K//src_scale.shape[-1] if src_scale is not None else 0,
                                                    self.post_ops_name)
-        if self.dq_per_token:
-            input_i8 = cl.tensor(input.shape, np.dtype(np.int8))
-            input_sc = cl.tensor([M], np.dtype(np.float16))
-            self.cl_kernels.enqueue("quant_I8_per_row", [M], [1], input, input_i8, input_sc, M)
-            src = (input_i8, input_sc)
+        if src_scale is not None:
+            src = (input, src_scale)
         else:
             src = (input,)
 
-        self.linears[M].forward(output, src, [self.weight, self.scales, self.zps], self.bias, cl.tensor())
+        self.linears[M].forward(output, src, [self.weight, self.scales, self.zps], self.bias, cl.tensor() if bin_rhs is None else bin_rhs)
         return output
 
 if __name__ == "__main__":

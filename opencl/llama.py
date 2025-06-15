@@ -65,6 +65,9 @@ class LlamaLikeModel:
                          hf_model.config.num_key_value_heads,
                          self.head_size)
         self.layers = []
+        self.onednn_with_zp = False
+        self.onednn_dynamic_quant_k_group_size = 128000
+
         for l in tqdm(hf_model.model.layers):
             d = Layer()
             d.id = len(self.layers)
@@ -79,29 +82,32 @@ class LlamaLikeModel:
                 qkv_bias = None
             else:
                 qkv_bias = torch.cat([l.self_attn.q_proj.bias, l.self_attn.k_proj.bias, l.self_attn.v_proj.bias], dim=0)
-            d.qkv_proj = Linear(weight=qkv_weight, bias=qkv_bias)
 
             if Linear == clops.Linear_onednn:
-                d.o_proj_sum = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias, post_ops_name="sum")
+                d.qkv_proj = Linear(weight=qkv_weight, bias=qkv_bias, with_zp = self.onednn_with_zp)
+                d.o_proj_sum = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias, with_zp = self.onednn_with_zp, post_ops_name="sum")
             else:
                 d.o_proj_sum = None
+                d.qkv_proj = Linear(weight=qkv_weight, bias=qkv_bias)
                 d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
             
+            d.gate_up_onednn = False
+            d.gate_up_proj = None
+
             if Linear == clops.Linear_f16xmx or Linear == clops.Linear_w4x:
                 assert l.mlp.gate_proj.bias is None
                 assert l.mlp.up_proj.bias is None
                 d.gate_up_proj = Linear(l.mlp.gate_proj.weight, l.mlp.up_proj.weight)
             elif Linear == clops.Linear_onednn:
-                assert l.mlp.gate_proj.bias is None
-                assert l.mlp.up_proj.bias is None
-                d.gate_up_proj = clops.GateUp_onednn(l.mlp.gate_proj.weight, l.mlp.up_proj.weight)
+                d.gate_up_onednn = True
+                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, with_zp = self.onednn_with_zp)
+                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, with_zp = self.onednn_with_zp, post_ops_name="silu_binmul")
             else:
-                d.gate_up_proj = None
-                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias, dq_per_token=False)
-                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias, dq_per_token=False)
+                d.gate_proj = Linear(weight=l.mlp.gate_proj.weight, bias=l.mlp.gate_proj.bias)
+                d.up_proj = Linear(weight=l.mlp.up_proj.weight, bias=l.mlp.up_proj.bias)
             if Linear == clops.Linear_onednn:
-                d.down_proj_sum = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias, post_ops_name="sum")
+                d.down_proj_sum = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias, with_zp = self.onednn_with_zp, post_ops_name="sum")
             else:
                 d.down_proj_sum = None
                 d.down_proj = Linear(weight=l.mlp.down_proj.weight, bias=l.mlp.down_proj.bias)
@@ -142,7 +148,15 @@ class LlamaLikeModel:
         post_attention_layernorm = layer.post_attention_layernorm(hidden_states)
 
         def mlp(states, sum_to):
-            if layer.gate_up_proj:
+            if layer.gate_up_onednn:
+                if self.onednn_dynamic_quant_k_group_size:
+                    states_i8, states_scales = clops.per_tok_quantize(states, self.onednn_dynamic_quant_k_group_size)
+                    up_proj = layer.up_proj(input=states_i8, src_scale=states_scales)
+                    gate_proj = layer.gate_proj(input=states_i8, src_scale=states_scales, bin_rhs=up_proj)
+                else:
+                    up_proj = layer.up_proj(input=states)
+                    gate_proj = layer.gate_proj(input=states, bin_rhs=up_proj)
+            elif layer.gate_up_proj:
                 gate_proj = layer.gate_up_proj(states)
             else:
                 gate_proj = layer.gate_proj(states)
