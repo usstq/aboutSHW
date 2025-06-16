@@ -55,10 +55,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         if (kv_stop > kv_len) kv_stop = kv_len;
     }
 
-    sdpa_kernel_lsc<causal_mask, WG_SIZE_HINT, num_heads, num_kv_heads, head_size>(
+    sdpa_kernel_lsc<causal_mask, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
+                                local_size,
                                 q_start,
                                 kv_stop,
                                 q_len,

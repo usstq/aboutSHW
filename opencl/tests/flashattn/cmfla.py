@@ -32,7 +32,7 @@ class flash_attn_cm:
 
         scale_factor = 1.0/(head_size**0.5)
         self.kernels = cl.kernels(src1,
-                     (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
+                     (f'-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}'
                       f" -DCMFLA_NUM_HEADS={num_heads}"
                       f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
                       f" -DCMFLA_HEAD_SIZE={head_size}"
@@ -41,7 +41,7 @@ class flash_attn_cm:
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused_causal(self, qkv, n_repeats = 1):
+    def qkv_fused(self, qkv, n_repeats = 1):
         seq_len, total_heads, head_size = qkv.shape
         old_dtype = qkv.dtype
         assert total_heads == (self.num_heads + self.num_kv_heads * 2)
@@ -101,8 +101,8 @@ class flash_attn_cm:
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, num_kv_heads, head_size):
-        return flash_attn_cm(num_heads, num_kv_heads, head_size)
+    def create_instance(num_heads, num_kv_heads, head_size, is_causal):
+        return flash_attn_cm(num_heads, num_kv_heads, head_size, is_causal)
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     seq_length, num_heads, head_size = q.shape
@@ -181,7 +181,7 @@ def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, 
 
     ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
 
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size)
+    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, False)
     out = func(q, k, v, cu_seqlens)
     check_close(ref, out)
 
@@ -205,19 +205,20 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
-    ref = flash_attn_vlen_ref(q, k, v, [], is_causal=True)
+    is_causal = True
+    ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
 
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size)
+    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, is_causal)
     
     qkv = torch.cat((q,k,v), 1)
     
-    out = func.qkv_fused_causal(qkv)
-    out = func.qkv_fused_causal(qkv, n_repeats=20)
+    out = func.qkv_fused(qkv)
+    out = func.qkv_fused(qkv, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
     check_close(ref, out)
-    assert 0
+    #assert 0
 
 if __name__ == "__main__":
     test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
