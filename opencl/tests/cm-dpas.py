@@ -201,6 +201,19 @@ CM_INLINE void VNNI_32x16(matrix_ref<T1, 32, 16> in,
     }
 }
 
+template <typename T1, typename T2>
+CM_INLINE void Transpose_16x8(matrix_ref<T1, 16, 8> in,
+                               matrix_ref<T2, 8, 16> out) {
+  out.row(0) =  in.column(0);
+  out.row(1) =  in.column(1);
+  out.row(2) =  in.column(2);
+  out.row(3) =  in.column(3);
+  out.row(4) =  in.column(4);
+  out.row(5) =  in.column(5);
+  out.row(6) =  in.column(6);
+  out.row(7) =  in.column(7);
+
+}
 
 
 #ifdef CM_HAS_LSC_UNTYPED_2D
@@ -219,27 +232,33 @@ CM_INLINE void VNNI_32x16(matrix_ref<T1, 32, 16> in,
         int m_idx = cm_global_id(0) * regM*2;
         int n_idx = cm_global_id(1) * regN;
         matrix<half, 2, regM*regK> matA;
-        matrix<half, regK, regN> matB;
+        matrix<uint64_t, regN, regK/4> tempB;
+
+        matrix<uint64_t, regK/4, regN> matB;
         matrix<float, 2, regM*regN> matC = 0;
         //#qA and qB reuse register with A, B
         matrix_ref<int8_t, regM, regK> qmatA0 = matA[0].format<int8_t, 2, regM * regK>().row(0).format<int8_t,regM,regK>();
         matrix_ref<int8_t, regM, regK> qmatA1 = matA[1].format<int8_t, 2, regM * regK>().row(0).format<int8_t,regM,regK>();
-        matrix_ref<int8_t, regK, regN> qmatB = matB.format<int8_t, 2, regK * regN>().row(0).format<int8_t,regK,regN>();
+        matrix_ref<half, regK/4, regN*4> matB_half = matB.format<half, regK/4, regN*4>().format<half, regK/4, regN*4>();
 
-        matrix<int8_t,regK, regN> qmatB_vnni;
+        //matrix<int8_t,regK, regN> qmatB_vnni;
+        matrix_ref<int8_t,regK, regN> qmatB_vnni = matB.format<int8_t, 2, regK*regN>().row(0).format<int8_t,regK, regN>();
+
         matrix<int32_t, 2, regM*regN> qmatC = 0;
 
         lsc::block_2d_desc<half, 1, regM, regK> descA{(half*)A, M-1, K*2-1, K*2-1, 0, m_idx};
-        lsc::block_2d_desc<half, 1, regK, regN> descB{(half*)B, K-1, 2*N-1, 2*N-1, n_idx, 0};
+        lsc::block_2d_desc<uint64_t, 1, regN, regK/4> descB{(uint64_t*)B, N-1, 2*K-1, 2*K-1, 0, n_idx};
         lsc::block_2d_desc<float, 1, regM, regN> descC{(float*)C, M-1, 4*N-1, 4*N-1, n_idx, m_idx};
 
         for (int kb = 0; kb < K; kb+= BK) {
             #pragma unroll
             for (int ki = 0; ki < BK ; ki+=regK) {
                 qmatC = 0;
-                //#load B, 16x32 float, each tile 8*32 float
-                descB.set_block_y(kb+ki);
-                cm_load<lsc::LoadOp::Normal>(matB.format<half>(), descB);
+                //#load B
+                descB.set_block_x((kb+ki)/4);
+                //cm_load<lsc::LoadOp::Transpose >(matB.format<uint64_t>(), matB);
+                cm_load<lsc::LoadOp::Normal>(tempB.format<uint64_t>(), descB);
+                Transpose_16x8(tempB, matB);
                 //#load A, 16x32 float, each tile 8*32 float
                 descA.set_block_x(kb+ki);
                 descA.set_block_y(m_idx);
@@ -251,15 +270,14 @@ CM_INLINE void VNNI_32x16(matrix_ref<T1, 32, 16> in,
                 scaleA[0] = half(127.0) / cm_reduced_max<half>(cm_abs<half>(matA[0]).format<half>());
                 scaleA[1] = half(127.0) / cm_reduced_max<half>(cm_abs<half>(matA[1]).format<half>());
                 //#quantize B per sybolic block, fp16 scale
-                half scaleB = half(127.0) / cm_reduced_max<half>(cm_abs<half>(matB).format<half>());
+                half scaleB = half(127.0) / cm_reduced_max<half>(cm_abs<half>(matB_half).format<half>());
 
                 qmatA0 = cm_mul<int8_t>(matA[0], scaleA[0]);
                 qmatA1 = cm_mul<int8_t>(matA[1], scaleA[1]);
 
-                qmatB = cm_mul<int8_t>(matB, scaleB);
+                qmatB_vnni.format<int8_t>() = cm_mul<int8_t>(matB_half.format<half>(), scaleB);
                 //show_int(qmatB[0].format<int8_t, 32, 16>());
                 //#make B to be format of VNNI
-                VNNI_32x16(qmatB.format<int8_t, 32, 16>(), qmatB_vnni.format<int8_t, 32, 16>());
                 //show_int(qmatB_vnni.format<int8_t, 8, 64>());
                 qmatC.row(0).format<int32_t>() = cm_dpas<CM_PRECISION_S8, CM_PRECISION_S8, SystolicDepth, regM>(
                         qmatC.row(0).format<int32_t>(),
@@ -295,14 +313,14 @@ CM_INLINE void VNNI_32x16(matrix_ref<T1, 32, 16> in,
     tileM = 2
     tileN = 1
 
-    nthrM = 2
-    nthrN = 2
+    nthrM = 1
+    nthrN = 1
 
     BM = nthrM* regM * tileM
     BN = nthrN* regN * tileN
 
-    WGS_M = 2
-    WGS_N = 2
+    WGS_M = 1
+    WGS_N = 1
     global_nthrM = nthrM*WGS_M
     global_nthrN = nthrN*WGS_N
 
@@ -312,8 +330,8 @@ CM_INLINE void VNNI_32x16(matrix_ref<T1, 32, 16> in,
     # np.random.seed(0)
     vRANGE = 2
     A = np.random.randint(-vRANGE, vRANGE+1, [M, K]).astype(np.float16)
-    B = np.random.randint(-vRANGE, vRANGE+1, [K, N]).astype(np.float16)
-    C_ref = np.matmul(A, B).astype(np.float32)
+    B = np.random.randint(-vRANGE, vRANGE+1, [N, K]).astype(np.float16)
+    C_ref = np.matmul(A, np.transpose(B, (1, 0))).astype(np.float32)
     tA_list = [cl.tensor(A) for _ in range(REPEAT)]
     tB_list = [cl.tensor(B) for _ in range(REPEAT)]
     tC_list = [cl.tensor([M, N], np.dtype(np.float32)) for _ in range(REPEAT)]
