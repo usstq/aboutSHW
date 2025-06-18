@@ -129,11 +129,11 @@ def get_flash0(query, key, value, attention_mask):
                 #cur_O = torch.full([i1-i, hs], 0, dtype=torch.float32)
 
                 # we prefer transposed S since:
-                #   1. per-column max/sum is easier than per-row in register, 
+                #   1. per-column max/sum is easier than per-row in register,
                 #   2. loop in K direction is inner-most, so load K in noraml
-                #      instead of VNNI is faster, load Q in transpose-VNNI is 
+                #      instead of VNNI is faster, load Q in transpose-VNNI is
                 #      done only once at loop begin.
-                #   3. 
+                #   3.
                 rQt = Q[i:i1, :].transpose(0,1)  # sub Q block only transposed & VNNI packed once
 
                 for j in range(0, kv_len, kv_step):
@@ -184,14 +184,14 @@ def get_flash0(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = St.to(dtype=torch.float16).transpose(0,1)
-                    
+
                     vprint("P=", partial_attn_weight.shape, partial_attn_weight)
 
                     rV = V[j:j1, :]
                     vprint("rV=",rV.shape, rV)
 
                     # correct last Output to current statistics
-                    
+
                     if j == 0:
                         cur_O = partial_attn_weight @ rV
                     else:
@@ -265,7 +265,7 @@ print("LWS=", LWS)
 r'''
 increase WG_SIZE to 16 (-70ms)
 use GRF to store temp Output(rO) instead of SLM, requires `-Qxcm_register_file_size=256` (-40ms)
-avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mul<float>(St, (float)scale_factor);   (-10ms) 
+avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mul<float>(St, (float)scale_factor);   (-10ms)
 change dtype of attention_mask from float to half (-14ms)
 avoid indirect register access: unroll for loop which access matrix rows using loop-index
 use GRF to store temp Input rQ instead of SLM, this allows more Work-Groups to be packed into same Xe-core!!!
@@ -419,6 +419,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
     matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
+        auto clk0 = get_clock();
+
         // if (args_verbose >= 0) printf("======== %d =========\n", kv_pos);
 
         //===========================================================
@@ -460,6 +462,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
             cm_barrier();
         }
+        auto clk1 = get_clock();
 
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
@@ -483,6 +486,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                         rQ[ri].format<int32_t>(),
                         Kmat[1].format<int32_t>());
         }
+        auto clk2 = get_clock();
+
         //show(St);
         //=========================================================== 361
 
@@ -531,7 +536,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
         //============================================================== 666
         //show(P);return;
-        //auto clk0 = get_clock();
+        auto clk3 = get_clock();
 
         auto P2 = P.format<half, 2, REG_M * REG_K>();
         matrix<float, 2, REG_M*REG_N> cur_O;
@@ -543,7 +548,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             for(int k = 0, ri = 0; k < head_size; k += REG_K, ri += 2) {
                 // V has been VNNI-prepacked
                 cm_slm_block_read(slm_V, GENX_NONE, REG_N*k*sizeof(half), Vmat.format<half>());
-                
+
                 rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 zero_O.format<float>(),
                                 Vmat.format<int32_t>(),
@@ -572,7 +577,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
                     cO2.row(r) = cm_mul<float>(cO2.row(r), max_comp[r + REG_M]);
 
                 //# show(cur_O.format<float, 2*REG_M, REG_N>()); return;
-                
+
                 rO[ri] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
                                 rO[ri].format<float>(),
                                 Vmat.format<int32_t>(),
@@ -586,11 +591,19 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             }
             // if (kv_pos == args_verbose) return;
         }
+        auto clk4 = get_clock();
+#if 0
+            printf("-------\n");
+            printf(" loading KV into SLM= %llu\n", clk1- clk0);
+            printf(" Q*K=%llu\n", clk2-clk1);
+            printf(" update attention weight = %llu\n", clk3- clk2);
+            printf(" P*V = %llu\n", clk4- clk3);
+#endif
         //============================================================== 1168
 
         cur_max = new_max_t;
     }//# for(int kv_pos = 0; kv_pos < kv_len; kv_pos += kv_step) {
-    
+
     //# save cur_O/cur_sum.transpose(0, 1)
     matrix<float, 2, REG_M*REG_N> cur_O;
     matrix<half, 2*REG_M, REG_N> cur_O_f16;
@@ -624,7 +637,7 @@ t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
 t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
+cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2 -mCM_printregusage")
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask)
 
 f1 = torch.from_numpy(t_out.numpy())

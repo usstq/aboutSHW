@@ -10,10 +10,10 @@ torch.set_printoptions(linewidth=1024)
 parser = argparse.ArgumentParser('')
 parser.add_argument('-i', "--impl", type=int, default=1)
 parser.add_argument('-b', "--batch", type=int, default=1)
-parser.add_argument('-nh', "--num-heads", type=int, default=32)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=32)
-parser.add_argument('-ql', "--q-len", type=int, default=32)
-parser.add_argument('-kvl', "--kv-len", type=int, default=256)
+parser.add_argument('-nh', "--num-heads", type=int, default=1)
+parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=1)
+parser.add_argument('-ql', "--q-len", type=int, default=16)
+parser.add_argument('-kvl', "--kv-len", type=int, default=512)
 parser.add_argument('-hs', "--head-size", type=int, default=64)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 
@@ -43,6 +43,7 @@ enable_gqa = num_heads > num_kv_heads
 #kv_len, kv_step = 800, 16
 low = -7
 high = 8
+scale_factor = 1.0/(float)(head_size**0.5)
 act_dtype = torch.float16
 q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
 k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
@@ -52,12 +53,11 @@ kmax = k.abs().amax(dim=3, keepdim=True)
 q_INT8 = (q/qmax*127.0).to(dtype=torch.int8)
 k_INT8 =  (k/kmax*127.0).to(dtype=torch.int8)
 dqscale_q = qmax.to(dtype=torch.float32) / 127.0
-dqscale_k = kmax.to(dtype=torch.float32) /127.0
+dqscale_k = scale_factor*kmax.to(dtype=torch.float32) /127.0
 # random attnmask
 attention_mask = torch.full([batch, 1, q_len, kv_len], torch.finfo(act_dtype).min).to(dtype=act_dtype)
 attention_mask[torch.rand(batch, 1, q_len, kv_len) > 0.5] = 0
 #attention_mask[...] = 0
-
 # BLHS=>BHLS
 q = q.transpose(1,2)
 k = k.transpose(1,2)
@@ -281,7 +281,6 @@ ugemm_kq: [kv_step, head_size] x [head_size, q_step]
 ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 '''
 
-scale_factor = 1.0/(head_size**0.5)
 
 GWS=[batch, num_heads, q_len//q_step]
 WG_SIZE = min(q_len//q_step, 8)
@@ -431,7 +430,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
     constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(int8_t));
     constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
-    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(int8_t)) * WG_SIZE;
 
     cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
 
@@ -485,7 +483,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 
     matrix <float, head_size/REG_N*2, REG_M*REG_N> rO;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
-        auto clk0 = get_clock();
+        //auto clk0 = get_clock();
         k_scales = cm_load<float, kv_step>(scale_k, (ks_offset+kv_pos*num_kv_heads)*sizeof(float));
 
 #if 1
@@ -559,10 +557,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             cm_barrier();
         }
 #endif
-        auto clk1 = get_clock();
-        //printf(" diff0= %lu\n", clk1- clk0);
+        //auto clk1 = get_clock();
+        //=========================================================== LOAD KV into SLM timing: 7788 ~ 8274
 
-        //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
         matrix<int32_t, 2*REG_M, REG_N> Quan_St = 0;
 
@@ -591,20 +588,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         //Reuse the quantized output
         auto St = Quan_St.format<float, 2*REG_M, REG_N>();
         auto St2 = St.format<float, 2, REG_M*REG_N>();
+        //auto clk20 = get_clock();
 
 #if 1
         //show_int(Quan_St.format<int32_t, 2*REG_M, REG_N>());
         #pragma unroll
-        for(int r = 0; r < 2*REG_M; r++) St[r] = k_scales[r]*Quan_St[r];
-        #pragma unroll
-        for(int c = 0; c < REG_N; c++) St.column(c) = q_scales[c]*St.column(c);
+        for(int r = 0; r < 2*REG_M; r++)  {
+            St[r] = cm_mul<float>(Quan_St[r], float(k_scales[r]));
+            St[r] = cm_mul<float>(St[r], q_scales);
+        }
 #endif
-        //show(St.format<float, 2*REG_M, REG_N>());
-
-        //printf(" diff1= %lu\n", get_clock()- clk1);
-
-        //show(St);
-        //=========================================================== 361
+        //auto clk2 = get_clock();
+        //=========================================================== Q*K timing: 1038
 
         matrix<half, 2, REG_M * REG_N> Maskmat;
         b2dMask.set_block_x(kv_pos);
@@ -615,7 +610,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         Transpose_16x16(Maskmat.format<half, 2*REG_M, REG_N>(), MaskT);
 
         //show(Maskmat);
-        St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
+        //scale_factor is fused into kscales
+        //St = cm_mul<float>(St, (float)scale_factor);  // convert scale_factor into (float), or it will be promoted to double
         St = cm_add<float>(St, MaskT);
 
         //show(St);
@@ -646,13 +642,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
         Transpose_16x16(St, P);
 
         //show(cur_sum.format<float, 1, REG_N>()); return;
-        //============================================================== 1074
 
 
-        //============================================================== 666
         //show(P);
-        //auto clk0 = get_clock();
-
+        //auto clk3 = get_clock();
+        //============================================================== update attention weight: 2500~2600
         auto P2 = P.format<half, 2, REG_M * REG_K_HALF>();
         matrix<float, 2, REG_M*REG_N> cur_O;
         if (kv_pos == 0) {
@@ -706,10 +700,17 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             }
             // if (kv_pos == args_verbose) return;
         }
+        //auto clk4 = get_clock();
+#if 0
+
+            printf("-------\n");
+            printf(" loading KV into SLM= %lu\n", clk1- clk0);
+            printf(" Q*K= %lu: dpas=%lu dequan = %lu\n", clk2- clk1, clk20-clk1, clk2-clk20);
+            printf(" update attention weight = %lu\n", clk3- clk2);
+            printf(" P*V = %lu\n", clk4- clk3);
+#endif
+        //============================================================== P*V timing : 178
         //show(rO[0].format<float, REG_M, REG_N>());
-
-        //============================================================== 1168
-
         cur_max = new_max_t;
     }//# for(int kv_pos = 0; kv_pos < kv_len; kv_pos += kv_step) {
 
@@ -728,6 +729,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             cur_O_f16[r + REG_M] = cm_div_ieee(cO2[r], cur_sum[r+REG_M]);
         }
 
+
         // if (i == args_verbose) show(cur_O_f16);
 
         cm_store(b2dO.set_block_x(k).set_block_y(q_start), cur_O_f16.format<half, 2, REG_M*REG_N>()[0]);
@@ -738,7 +740,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
 '''
 
 cl.profiling(True)
-REPEAT = 20
+REPEAT = 10
 
 t_q = cl.tensor(q_INT8.detach().numpy())
 t_k = cl.tensor(k_INT8.detach().numpy())
@@ -752,27 +754,23 @@ t_out = cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16))
 t_mask = cl.tensor(attention_mask.detach().numpy())
 
 # f"-cmc -mdump_asm -g2 "
-cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2")
+cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mdump_asm -g2 -mCM_printregusage")
 cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_scale_q, t_scale_k)
 
 f1 = torch.from_numpy(t_out.numpy())
 
 all_layers = []
 mem_size = 0
-while len(all_layers) < 100 and mem_size < 8e9:
+while len(all_layers) < 50 and mem_size < 8e9:
     all_layers.append([
         cl.tensor(q_INT8.detach().numpy()),
         cl.tensor(k_INT8.detach().numpy()),
         cl.tensor(v.detach().numpy()),
         cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
-        cl.tensor(dqscale_q.detach().numpy()),
-        cl.tensor(dqscale_k.detach().numpy()),
     ])
     mem_size += q_INT8.numel() * q_INT8.element_size()
     mem_size += k_INT8.numel() * k_INT8.element_size()
     mem_size += v.numel() * v.element_size()
-    mem_size += dqscale_q.numel() * dqscale_q.element_size()
-    mem_size += dqscale_k.numel() * dqscale_k.element_size()
 
     print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
 
