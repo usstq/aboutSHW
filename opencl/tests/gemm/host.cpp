@@ -136,17 +136,20 @@ void repack_f16(int K, int N, float16_t* src, float16_t* dst) {
     }
 }
 
-void fill(PlainTensor& t) {
+void fill(PlainTensor& t, float start = -2.0f, int num = 5) {
     uint32_t M = t.size(0), N = t.size(1);
     float16_t* p = (float16_t*)t.m_ptr.get();
-    for (uint32_t i = 0; i < M * N; i += 5) {
-#define SET(idx, val) if (i + idx < M * N) p[i + idx] = val;
-        SET(0, -2.0f);
-        SET(1, -1.0f);
-        SET(2, 0.0f);
-        SET(3, 1.0f);
-        SET(4, 2.0f);
-#undef SET
+    for (uint32_t i = 0; i < M * N; i += num) {
+        for (uint32_t j = 0; j < num; j++) {
+            if (i + j < M * N) p[i + j] = start + j;
+        }
+//#define SET(idx, val) if (i + idx < M * N) p[i + idx] = val;
+//        SET(0, -2.0f);
+//        SET(1, -1.0f);
+//        SET(2, 0.0f);
+//        SET(3, 1.0f);
+//        SET(4, 2.0f);
+//#undef SET
     }
 }
 
@@ -395,24 +398,133 @@ void check_v3(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     cmp("gemm_nocopy_xe2 block n:1x3+2*1", c, c_ref);
 }
 
-int main( int argc, char* argv[])
-{
-    PlainTensor a, b, c, b_repack_ref, b_repack;
-    uint32_t M = 256*7, N = 256*5, K = 64*2;
-    a.resize<float16_t>({ M, K });
-    b.resize<float16_t>({ K, N });
+template<typename T>
+void pack_u4(T* src, uint8_t* dst, size_t M, size_t K) {
+    for (size_t i = 0; i < M; i++) {
+        for (size_t j = 0; j < K; j += 2) {
+            uint8_t low = (uint8_t)(float(src[i * K + j + 0]));
+            uint8_t high = (uint8_t)(float(src[i * K + j + 1]));
+            dst[i * K / 2 + j / 2] = (uint8_t)(high << 4 | low);
+        }
+    }
+}
 
+void gen_weight_u4(size_t K, size_t N, PlainTensor& b_zp, PlainTensor& b_scale, PlainTensor& b, PlainTensor& b_ref) {
+    const size_t GROUP_SIZE = v4::GROUP_SIZE;
+    const size_t GROUP_NUM = K / GROUP_SIZE;
+    // zp f16
+    PlainTensor b_zp_init;
+    b_zp_init.resize<float16_t>({ GROUP_NUM, N });
+    fill(b_zp_init, 1.0f, 2);
+    //b_zp_init = float16_t{ 0.0f };
+    // zp f16->u4
+    b_zp.resize<uint8_t>({ GROUP_NUM, N / 2 });
+    pack_u4(b_zp_init.ptr<float16_t>(), b_zp.ptr<uint8_t>(), GROUP_NUM, N);
+    // scale f16
+    b_scale.resize<float16_t>({ GROUP_NUM, N });
+    fill(b_scale, -1.0f, 3);
+    //b_scale = float16_t{ 1.f };
+    // weight f16
+    PlainTensor b_init;
+    b_init.resize<float16_t>({ K, N });
+    fill(b_init, 0, 5);
+    //b_init = float16_t{ 1.f };
+    // weight f16->u4
+    {
+        PlainTensor b_t;
+        b_t.resize<float16_t>({ N, K });
+        // transpose
+        transpose(K, N, b_init.ptr<float16_t>(), b_t.ptr<float16_t>());
+        // pack f16->u4
+        b.resize<uint8_t>({ N, K / 2 });
+        pack_u4(b_t.ptr<float16_t>(), b.ptr<uint8_t>(), N, K);
+    }
+    // gen ref
+    b_ref.resize<float16_t>({ K, N });
+    {
+        for (size_t i = 0; i < K; i++) {
+            for (size_t j = 0; j < N; j++) {
+                b_ref.ptr<float16_t>(i)[j] = (b_init.ptr<float16_t>(i)[j] - b_zp_init.ptr<float16_t>(i / GROUP_SIZE)[j]) * 
+                    b_scale.ptr<float16_t>(i / GROUP_SIZE)[j];
+            }
+        }
+    }
+}
+
+// a: [M, K], b(u4): [N, K]
+void check_v4() {
+    PlainTensor a, b, c, b_zp, b_scale, b_ref;
+    uint32_t M = 256 * 7, N = 256 * 5, K = 128 * 2;
+    const size_t GOURP_SIZE = v4::GROUP_SIZE;
+    const size_t GROUP_NUM = K / GOURP_SIZE;
+    a.resize<float16_t>({ M, K });
     //a = float16_t{ 1.0f };
     fill(a);
-    //b = float16_t{ 1.0f };
-    fill(b);
-    auto c_ref = get_ref(a, b);
+    gen_weight_u4(K, N, b_zp, b_scale, b, b_ref);
+    auto c_ref = get_ref(a, b_ref);
 
+    c.resize<float16_t>({ M, N });
+    cl_int err;
+    size_t BLOCK_SG_M = v4::BLOCK_SG_M;
+    size_t BLOCK_SG_N = v4::BLOCK_SG_N;
+    size_t SG_M = v4::SG_M, SG_N = v4::SG_N;
+    size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
+    size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
+    std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
+    std::vector<size_t> localSize = { SG_N, SG_M };
+
+    int slice;
+    int slice_no;
+
+    // if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+    slice_no = 0;
+    for (slice = 0; slice < 2; slice++) {
+       exec_kernel("gemm_a16w4_xe2", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
+       cmp("gemm_a16w4_xe2 linear " + (slice == 0 ? std::string("M first") : std::string("N first")), c, c_ref);
+    }
+    // if slice_no != 0, use wg blocking schema:
+    //    slice > 0 means the slice is in M dimension else is in N dimension
+    //    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+    slice = 2;
+    slice_no = -2;
+    exec_kernel("gemm_a16w4_xe2", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe2 block m:2x2+1*3", c, c_ref);
+    slice = 1;
+    slice_no = 3;
+    exec_kernel("gemm_a16w4_xe2", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe2 block m:1x3+2*2", c, c_ref);
+
+    slice = -2;
+    slice_no = -1;
+    exec_kernel("gemm_a16w4_xe2", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe2 block n:2x1+1*3", c, c_ref);
+    slice = -1;
+    slice_no = 3;
+    exec_kernel("gemm_a16w4_xe2", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe2 block n:1x3+2*1", c, c_ref);
+}
+
+int main( int argc, char* argv[])
+{
     init_ocl();
+    if (0) {
+        PlainTensor a, b, c, b_repack_ref, b_repack;
+        uint32_t M = 256 * 7, N = 256 * 5, K = 64 * 2;
+        a.resize<float16_t>({ M, K });
+        b.resize<float16_t>({ K, N });
 
-    //check_v1(a, b, c_ref);
-    //check_v2(a, b, c_ref);
-    check_v3(a, b, c_ref);
+        //a = float16_t{ 1.0f };
+        fill(a);
+        //b = float16_t{ 1.0f };
+        fill(b);
+        auto c_ref = get_ref(a, b);
+
+        //check_v1(a, b, c_ref);
+        //check_v2(a, b, c_ref);
+        check_v3(a, b, c_ref);
+    } else {
+        check_v4();
+    }
 
     uninit_ocl();
 

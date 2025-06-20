@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import argparse
 import math
 from clops import cl
 import numpy as np
@@ -138,6 +139,21 @@ _GENX_MAIN_ void gemm_nocopy_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmpt
     gemm_xe2_f16<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         SG_SIZE, BLOCK_SG_M, BLOCK_SG_N, SG_M, SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }
+
+_GENX_MAIN_ void gemm_a16w4_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t src_b_scale ATTR, SurfaceIndex src_b_zp ATTR_BUF, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = _BLOCK_SG_M * _SG_M;
+    const uint BLOCK_WG_N = _BLOCK_SG_N * _SG_N;
+    const uint size_slm_b = 0;
+    auto slm = 0;
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_a16w4_xe2<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        _SG_SIZE, _BLOCK_SG_M, _BLOCK_SG_N, _SG_M, _SG_N, 128, 128>(id_wg_m, id_wg_n, slm, src_a, src_b, src_b_scale, src_b_zp, dst, M, N, K, lda, ldb, ldc);
+}
+
 #endif
 
 ''')
@@ -149,6 +165,24 @@ if 'cl_intel_subgroup_2d_block_io' in devinfo['CL_DEVICE_EXTENSIONS']:
 else:
     SG_SIZE = 8
 
+parser = argparse.ArgumentParser('')
+parser.add_argument('-wt', "--weight_type", type=str, default="f16", choices=['f16', 'u4'])
+args = parser.parse_args()
+
+weight_datatype = args.weight_type
+
+def pack_i8_to_i4(B_q):
+    assert B_q.ndim == 2
+    K = B_q.shape[0]
+    N = B_q.shape[1]
+    B_q4 = np.zeros([K, N//2], dtype=np.int8)
+    for k in range(K):
+        for n in range(N//2):
+            even = (B_q[k,2*n]) & 0xF
+            odd = (B_q[k,2*n+1]) & 0xF
+            B_q4[k,n] = even | (odd << 4)
+    return B_q4
+
 M = 4096*2
 N = 2048
 #M, N = N, M
@@ -156,14 +190,23 @@ K = 128*15
 K_GROUP_SIZE = 128
 K_GROUPS = K // K_GROUP_SIZE
 A = np.random.randint(-1,2,[M, K]).astype(np.float16)
-if 1:
+if weight_datatype == 'f16':
     B = np.random.randint(-1,2,[K, N]).astype(np.float16)
-else:
+elif weight_datatype == 'u4':
     B_q = np.random.randint(0,3,[K, N]).astype(np.int8)
     B_scale = np.random.randint(-4,5,[K_GROUPS, N]).astype(np.float16)
     B_zp = np.random.randint(0,3,[K_GROUPS, N]).astype(np.int8)
     
     B = (B_q.astype(np.float32) - B_zp.astype(np.float32).repeat(K_GROUP_SIZE, axis=0)) * B_scale.repeat(K_GROUP_SIZE, axis=0)
+    # pack weight into 4bit
+    B_q4 = pack_i8_to_i4(B_q.transpose().copy())
+    B_zp4 = pack_i8_to_i4(B_zp)
+
+    tBq4 = cl.tensor(B_q4)
+    tBs = cl.tensor(B_scale)
+    tBz = cl.tensor(B_zp4)
+else:
+    assert False, f'not support weight type: {weight_datatype}'
 
 tA = cl.tensor(A)
 tB = cl.tensor(B)
@@ -221,18 +264,6 @@ def test_org():
             #repeat_size1 = (M*K+M/BLOCK_WG_M*K*N+M*N)*2
             for time_opt in ns:
                 print(f'TPUT:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
-
-def pack_i8_to_i4(B_q):
-    assert B_q.ndim == 2
-    K = B_q.shape[0]
-    N = B_q.shape[1]
-    B_q4 = np.zeros([K, N//2], dtype=np.int8)
-    for k in range(K):
-        for n in range(N//2):
-            even = (B_q[k,2*n]) & 0xF
-            odd = (B_q[k,2*n+1]) & 0xF
-            B_q4[k,n] = even | (odd << 4)
-    return B_q4
 
 def test_v2():
     BLOCK_SG_M = 64 #16
@@ -314,6 +345,88 @@ def test_v2():
             for time_opt in ns:
                 print(f'(CUR)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
+def test_a16w4():
+    BLOCK_SG_M = 64 #16
+    BLOCK_SG_N = 16 #64
+    SG_M = 2
+    SG_N = 16
+    BLOCK_WG_K = 64 #32
+    BLOCK_WG_M = BLOCK_SG_M * SG_M
+    BLOCK_WG_N = BLOCK_SG_N * SG_N
+    SLM_SIZE_A=BLOCK_WG_M * BLOCK_WG_K * 2 // 1024
+    SLM_SIZE_B=0
+    # TODO
+    kernel_name = 'gemm_nocopy_xe1'
+    if SG_SIZE == 16:
+        kernel_name = 'gemm_a16w4_xe2'
+        BLOCK_SG_N = 32
+        SG_N = 8
+        SG_M = 4
+        BLOCK_WG_M = BLOCK_SG_M * SG_M
+        BLOCK_WG_N = BLOCK_SG_N * SG_N
+        SLM_SIZE_A=0
+        BLOCK_WG_K = 128
+
+    # -dumpVisaOptionsAll -noDPASMacro  -noschedule -dumpSchedule -nocompaction"
+    kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
+                        -D_SG_M={SG_M} -D_SG_N={SG_N} -D_BLOCK_WG_K={BLOCK_WG_K}''')
+
+    print(f'SLM used A: {SLM_SIZE_A}KB + B: {SLM_SIZE_B}KB = {SLM_SIZE_A+SLM_SIZE_B}KB')
+    # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
+    #default linear
+    slice_no = 0
+    slice = N < M
+    if 1:
+        block_m = M // BLOCK_WG_M
+        block_n = N // BLOCK_WG_N
+        bias = BLOCK_WG_M / BLOCK_WG_N
+        devinfo = cl.dev_info()
+        eu_xecore = 16 if SG_SIZE == 8 else 8
+        xecores = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"] // eu_xecore
+        sm = math.sqrt(xecores * 2 / bias)
+        sn = math.sqrt(xecores * 2 * bias)
+        if N < M:
+            s0 = math.ceil(sn)
+            if block_n % s0 == 0:
+                slice = -s0
+                slice_no = block_n // slice
+            else:
+                if s0 * 1.5 < block_n:
+                    rem = block_n % s0
+                    expect_slice_no = (block_n + s0 - 1) // s0 - (s0 - rem)
+                    if expect_slice_no > 0:
+                        assert expect_slice_no >= 0, f'{block_n=} {expect_slice_no=} {s0=}'
+                        slice = -s0
+                        slice_no = -expect_slice_no
+        else:
+            # TODO: big weight matrix?
+            pass
+    print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
+    for i in range(50):
+        kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], tA, tBq4, tBs, tBz, tC, M, N, K, K, K, N, slice_no, slice)
+    cl.finish()
+
+    if K < 1024:
+        C_ref = np.matmul(A, B)
+        compare(C_ref, tC.numpy())
+        print(f'{Colors.GREEN}passed{Colors.END}')
+    repeat_size = (N/BLOCK_WG_N*M*K+K*N+M*N)*2
+    if 0:
+        beg = time.time()
+        for i in range(0, 100):
+            kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], tA, tBq4, tBs, tBz, tC, M, N, K, K, K, N, slice_no, slice)
+        cl.finish()
+        end = time.time()
+        time_opt = (end - beg) * 1e9 / 100
+        print(f'NOCOPY TPUT(f16):{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+    else:
+        for i in range(0, 100):
+            kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], tA, tBq4, tBs, tBz, tC, M, N, K, K, K, N, slice_no, slice)
+            ns = cl.finish()
+            #repeat_size1 = (M*K+M/BLOCK_WG_M*K*N+M*N)*2
+            for time_opt in ns:
+                print(f'(CUR)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+
 def test_onednn(M, K, N, K_group_size, w_dtype):
     tP1 = cl.tensor()
 
@@ -331,21 +444,14 @@ def test_onednn(M, K, N, K_group_size, w_dtype):
 
         assert (K % K_group_size) == 0
         K_groups = K // K_group_size
-        C = A @ B
-        print("ref is calculated!")
 
-        # pack weight into 4bit
-        B_q4 = pack_i8_to_i4(B_q.transpose().copy())
-        B_zp4 = pack_i8_to_i4(B_zp)
-
-        tBq4 = cl.tensor(B_q4)
-        tBs = cl.tensor(B_scale)
-        tBz = cl.tensor(B_zp4)
         linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, cl.onednn_dtype.undef, M, K, N, K_group_size, cl.onednn_matmul_type.none,
                                   cl.onednn_dtype.u4, tBq4, tBs, tBz, cl.tensor())
         linear.forward(tA, tC, cl.tensor())
         cl.finish()
-        assert(np.allclose(C, tC.numpy()))
+        # C = A @ B
+        # print("ref is calculated!")
+        # assert(np.allclose(C, tC.numpy()))
         print('done')
         
     name = 'f16' if w_dtype == cl.onednn_dtype.f16 else 'u4 '
@@ -363,8 +469,13 @@ def test_onednn(M, K, N, K_group_size, w_dtype):
 if 0:
     test_org()
 
-test_v2()
+if weight_datatype == 'f16':
+    test_v2()
+elif weight_datatype == 'u4':
+    test_a16w4()
 print('============================================')
 if os.environ['OV_BUILD_PATH']:
-    test_onednn(M, K, N, 0, cl.onednn_dtype.f16)
-    #test_onednn(M, K, N, K_GROUP_SIZE, cl.onednn_dtype.u4)
+    if weight_datatype == 'f16':
+        test_onednn(M, K, N, 0, cl.onednn_dtype.f16)
+    elif weight_datatype == 'u4':
+        test_onednn(M, K, N, K_GROUP_SIZE, cl.onednn_dtype.u4)

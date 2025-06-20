@@ -405,12 +405,15 @@ struct onednn_linear {
     }
 
     std::vector<uint64_t> finish() {
-        return {};
+#ifdef DNNL_EXPERIMENTAL_PROFILING
         ASSERT(clFinish(g_queue.queue) == CL_SUCCESS);
-        //std::vector<uint64_t> nsecs = dnnl::get_profiling_data(m_stream, profiling_data_kind::time);
+        std::vector<uint64_t> nsecs = dnnl::get_profiling_data(m_stream, profiling_data_kind::time);
         // Reset profiler's state.
-        //dnnl::reset_profiling(m_stream);
-        //return nsecs;
+        dnnl::reset_profiling(m_stream);
+        return nsecs;
+#else
+        return {};
+#endif
     }
 };
 

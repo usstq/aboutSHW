@@ -128,4 +128,19 @@ _GENX_MAIN_ void gemm_nocopy_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmpt
     gemm_xe2_f16<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         v3::SG_SIZE, v3::BLOCK_SG_M, v3::BLOCK_SG_N, v3::SG_M, v3::SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }
+
+_GENX_MAIN_ void gemm_a16w4_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t src_b_scale ATTR, SurfaceIndex src_b_zp ATTR_BUF, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = v4::BLOCK_SG_M * v4::SG_M;
+    const uint BLOCK_WG_N = v4::BLOCK_SG_N * v4::SG_N;
+    const uint size_slm_a = BLOCK_WG_M * v4::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
+    auto slm = 0;
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_a16w4_xe2<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        v4::SG_SIZE, v4::BLOCK_SG_M, v4::BLOCK_SG_N, v4::SG_M, v4::SG_N, v4::GROUP_SIZE>(id_wg_m, id_wg_n, slm, src_a, src_b, src_b_scale, src_b_zp, dst, M, N, K, lda, ldb, ldc);
+}
 #endif
