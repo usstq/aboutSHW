@@ -45,8 +45,10 @@ low = -7
 high = 8
 scale_factor = 1.0/(float)(head_size**0.5)
 act_dtype = torch.float16
-q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
-k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+q_factor = torch.randint(high-3, high+1, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)
+q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/q_factor
+k_factor = torch.randint(high-3, high+1, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)
+k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/k_factor
 v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 qmax = q.abs().amax(dim=3, keepdim=True)
 kmax = k.abs().amax(dim=3, keepdim=True)
@@ -69,7 +71,6 @@ dqscale_k=dqscale_k.transpose(1,2)
 
 
 print("==================================================")
-
 #q[:,:,:,:] = q[:,:,2,:]
 #attention_mask[:,:,:,:] = attention_mask[:,:,2,:]
 
@@ -77,6 +78,9 @@ print("q:", q.shape, q.dtype)
 print("k:", k.shape, k.dtype)
 print("v:", v.shape, v.dtype)
 print("attention_mask:", attention_mask.shape, attention_mask.dtype)
+print("qscale:", dqscale_q.shape, dqscale_q.dtype)
+print("kscale:", dqscale_k.shape, dqscale_k.dtype)
+print("==================================================")
 
 def get_org(Q, K, V, attention_mask):
     B,H,L,S = Q.shape
@@ -116,7 +120,7 @@ check_close(ref, org, atol=1e-3, rtol=1e-2)
 # [batch, seq-len, heads, size] BLHS
 print("ref:", ref.shape, ref.dtype)
 
-# blocking on kv-len dimension with online-softmax
+
 def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
     global enable_vprint
     B,H,q_len,hs = query.shape
@@ -161,6 +165,8 @@ def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
                     # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
                     rK = K[j:j1,:]
                     rK_scale = s_K[j:j1,:]
+                    # print(f'===============Q: head:[{h}], seq:[{i}:{i1}]=======================')
+                    # print(rQt_scale)
                     dq_s = rK_scale*rQt_scale
                     q_St = (rK.to(dtype=torch.int32) @ rQt.to(dtype=torch.int32))
                     St = q_St.to(dtype=torch.float32)*dq_s
@@ -173,7 +179,7 @@ def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
                     vprint("St=",St.shape, St)
                     vprint("MaskT=",MaskT.shape, MaskT)
 
-                    St *= scale_factor
+                    # St *= scale_factor
                     St += mask[i:i1, j:j1].transpose(0,1)
                     vprint("St=",St.shape, St)
 
@@ -218,7 +224,7 @@ def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
                         cur_O = (cur_O * max_comp.transpose(0, 1))
                         vprint("cur_O1=", cur_O)
                         cur_O += partial_attn_weight @ rV
-                    print(cur_O)
+                    #print(cur_O)
                     vprint("cur_O2=", cur_O)
 
                     cur_max = rowmax
@@ -236,10 +242,9 @@ def get_flash0(query, key, value, attention_mask,dqscale_q, dqscale_k):
 
 if args.impl == 0:
     f0 = get_flash0(q_INT8,k_INT8,v,attention_mask, dqscale_q, dqscale_k)
-    check_close(org, f0, atol=1e-1, rtol=5e-2)
+    check_close(ref, f0, atol=1e-1, rtol=5e-2)
     print("=========== PASS ===========")
     sys.exit(0)
-
 #====================================================================================================
 # using the same parameter & inputs, develop cm kernels which produces the same output
 # prototyping CM kernels
@@ -253,9 +258,11 @@ k = k.transpose(1,2)
 v = v.transpose(1,2)
 q_INT8 = q_INT8.transpose(1,2)
 k_INT8 = k_INT8.transpose(1,2)
-dqscale_q=dqscale_q.transpose(1,2)
-dqscale_k=dqscale_k.transpose(1,2)
 
+
+
+dqscale_q=dqscale_q.flatten().reshape(batch, num_heads, q_len, 1)
+dqscale_k=dqscale_k.flatten().reshape(batch,num_kv_heads, kv_len, 1)
 print("q:", q_INT8.shape, q_INT8.dtype)
 print("k:", q_INT8.shape, q_INT8.dtype)
 print("v:", v.shape, v.dtype)
@@ -408,7 +415,6 @@ CM_INLINE void Transpose_16x8(matrix_ref<T1, 16, 8> in,
 
 }
 
-
 extern "C" _GENX_MAIN_ void cm_sdpa(
     int q_len,
     int kv_len,
@@ -417,21 +423,21 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]],
     half* mask [[type("svmptr_t")]],
-    SurfaceIndex scale_q [[type("buffer_t")]],
-    SurfaceIndex scale_k [[type("buffer_t")]]
+    float*  scale_q [[type("svmptr_t")]],
+    float*  scale_k [[type("svmptr_t")]]
     ) {
     //# query [batch, q_len, num_heads, S]
-    //#   key [batch, kv_len, num_heads, S]
+    //#  key [batch, kv_len, num_heads, S]
     //# value [batch, kv_len, num_heads, S]
-    //# qscale [batch, q_len, num_heads, 1]
-    //# kscale [batch, q_len, num_heads, 1]
+    //# qscale [batch, num_heads, q_len, 1]
+    //# kscale [batch, num_heads, k_len, 1]
 
     //# to load Q
 
     constexpr uint K_SLM_SIZE = (kv_step * head_size * sizeof(int8_t));
     constexpr uint V_SLM_SIZE = (kv_step * head_size * sizeof(half));
 
-    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE);
 
     auto slm_K = cm_slm_alloc(K_SLM_SIZE);
     auto slm_V = cm_slm_alloc(V_SLM_SIZE);
@@ -475,17 +481,21 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             b2dQ.set_block_x(k/4);
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ);
         }
-        q_scales = cm_load<float, q_step>(scale_q, (qs_offset+q_start*num_heads)*sizeof(float));
+
+        uint q_scale_offset = (batch*num_heads + h)*q_len+q_start;
+        lsc::block_2d_desc<float, 1, 1, q_step> b2dQ_scale((float*)(scale_q+q_scale_offset), 0, q_step*sizeof(float)-1, q_len*sizeof(float) - 1, 0, 0);
+        cm_load<lsc::Normal>(q_scales, b2dQ_scale);
     }
 
     //int kv_stop = (cm_group_id(2) + 1) * WG_SIZE * q_step;
     int kv_stop = kv_len;
 
+    lsc::block_2d_desc<float, 1, 1, kv_step> b2dK_scale((scale_k+(batch*num_kv_heads + hkv)*kv_len), 0, kv_len*sizeof(float)-1, kv_len*sizeof(float) - 1, 0, 0);
+
     matrix <float, head_size/REG_N*2, REG_M*REG_N> rO;
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         //auto clk0 = get_clock();
-        k_scales = cm_load<float, kv_step>(scale_k, (ks_offset+kv_pos*num_kv_heads)*sizeof(float));
-
+        cm_load<lsc::Normal>(k_scales, b2dK_scale.set_block_x(kv_pos));
 #if 1
         // if (args_verbose >= 0) printf("======== %d =========\n", kv_pos);
         //===========================================================
@@ -495,7 +505,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa(
             //# 1849 ~ 3259
             if (kv_pos > 0) cm_barrier();
             {
-#if 1
+#if 0
                 if (wg_local_id < WG_SIZE/2) {
                     matrix<int8_t, REG_M, REG_K_U8> temp0;
                     matrix<int8_t, REG_M, REG_K_U8> temp1;
@@ -759,35 +769,35 @@ cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_m
 
 f1 = torch.from_numpy(t_out.numpy())
 
-all_layers = []
-mem_size = 0
-while len(all_layers) < 50 and mem_size < 8e9:
-    all_layers.append([
-        cl.tensor(q_INT8.detach().numpy()),
-        cl.tensor(k_INT8.detach().numpy()),
-        cl.tensor(v.detach().numpy()),
-        cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
-    ])
-    mem_size += q_INT8.numel() * q_INT8.element_size()
-    mem_size += k_INT8.numel() * k_INT8.element_size()
-    mem_size += v.numel() * v.element_size()
+# all_layers = []
+# mem_size = 0
+# while len(all_layers) < 50 and mem_size < 8e9:
+#     all_layers.append([
+#         cl.tensor(q_INT8.detach().numpy()),
+#         cl.tensor(k_INT8.detach().numpy()),
+#         cl.tensor(v.detach().numpy()),
+#         cl.tensor([batch, q_len, num_heads, head_size], np.dtype(np.float16)),
+#     ])
+#     mem_size += q_INT8.numel() * q_INT8.element_size()
+#     mem_size += k_INT8.numel() * k_INT8.element_size()
+#     mem_size += v.numel() * v.element_size()
 
-    print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
+#     print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
 
-for i in range(REPEAT):
-    j  = i % len(all_layers)
-    cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len,
-                       all_layers[j][0],
-                       all_layers[j][1],
-                       all_layers[j][2],
-                       all_layers[j][3],
-                       t_mask,
-                       t_scale_q,
-                       t_scale_k,)
+# for i in range(REPEAT):
+#     j  = i % len(all_layers)
+#     cm_kernels.enqueue("cm_sdpa", GWS, LWS, q_len, kv_len,
+#                        all_layers[j][0],
+#                        all_layers[j][1],
+#                        all_layers[j][2],
+#                        all_layers[j][3],
+#                        t_mask,
+#                        t_scale_q,
+#                        t_scale_k,)
 
-latency = cl.finish()
-for ns in latency:
-    print(f"  {ns*1e-6:.3f} ms")
+# latency = cl.finish()
+# for ns in latency:
+#     print(f"  {ns*1e-6:.3f} ms")
 
 check_close(ref.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
 print(f"=========== cm_sdpa PASS GWS={GWS} LWS={LWS}  ===========")
