@@ -19,7 +19,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     SurfaceIndex query [[type("buffer_t")]],
     SurfaceIndex key [[type("buffer_t")]],
     SurfaceIndex value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -138,10 +138,14 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
     half* query_key_value [[type("svmptr_t")]],
+    float* dqscale_q [[type("svmptr_t")]],
+    float* dqscale_k [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]
 #else
     SurfaceIndex query_key_value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex dqscale_q [[type("buffer_t")]],
+    SurfaceIndex dqscale_k [[type("buffer_t")]],
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -184,7 +188,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     }
     //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start, q_len, kv_start, kv_seq_len);
 
-    // qkv is fused 
+    // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
         kv_stop = (wg_id + 1) * wg_seq_len;
@@ -197,6 +201,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
     uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
     uint o_offset = (q_start*num_heads + h)*head_size;
+    //# scale [head, sequence, 1]
+
+    uint qscale_offset =h*seqlen + q_start;
+    uint kscale_offset = hkv*seqlen;
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
@@ -208,6 +216,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(query_key_value + q_offset),
                                 reinterpret_cast<svmptr_t>(query_key_value + k_offset),
                                 reinterpret_cast<svmptr_t>(query_key_value + v_offset),
+                                reinterpret_cast<svmptr_t>(dqscale_q + qscale_offset),
+                                reinterpret_cast<svmptr_t>(dqscale_k + kscale_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
     sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(
