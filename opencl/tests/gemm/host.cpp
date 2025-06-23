@@ -299,7 +299,7 @@ void check_v1(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
 }
 
 // a: [M, K], b: [N, K]
-void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
+void check_f16_xe1(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     PlainTensor c;
     PlainTensor b_t;
     uint32_t M = a.size(0);
@@ -309,9 +309,9 @@ void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     c.resize<float16_t>({ M, N });
     transpose(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_t.m_ptr.get());
     cl_int err;
-    size_t BLOCK_SG_M = v2::BLOCK_SG_M;
-    size_t BLOCK_SG_N = v2::BLOCK_SG_N;
-    size_t SG_M = v2::SG_M, SG_N = v2::SG_N;
+    size_t BLOCK_SG_M = f16_xe1::BLOCK_SG_M;
+    size_t BLOCK_SG_N = f16_xe1::BLOCK_SG_N;
+    size_t SG_M = f16_xe1::SG_M, SG_N = f16_xe1::SG_N;
     size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
     size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
     std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
@@ -333,10 +333,10 @@ void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     slice_no = -2;
     exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
     cmp("gemm_nocopy_xe1 block m:2x2+1*3", c, c_ref);
-    slice = 1;
-    slice_no = 3;
+    slice = 3;
+    slice_no = 2;
     exec_kernel("gemm_nocopy_xe1", { a, b_t }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
-    cmp("gemm_nocopy_xe1 block m:1x3+2*2", c, c_ref);
+    cmp("gemm_nocopy_xe1 block m:3*2+4*2", c, c_ref);
 
     slice = -2;
     slice_no = -1;
@@ -349,7 +349,7 @@ void check_v2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
 }
 
 // a: [M, K], b: [N, K]
-void check_v3(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
+void check_f16_xe2(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     PlainTensor c;
     PlainTensor b_t;
     uint32_t M = a.size(0);
@@ -359,9 +359,9 @@ void check_v3(PlainTensor& a, PlainTensor& b, PlainTensor& c_ref) {
     c.resize<float16_t>({ M, N });
     transpose(K, N, (float16_t*)b.m_ptr.get(), (float16_t*)b_t.m_ptr.get());
     cl_int err;
-    size_t BLOCK_SG_M = v3::BLOCK_SG_M;
-    size_t BLOCK_SG_N = v3::BLOCK_SG_N;
-    size_t SG_M = v3::SG_M, SG_N = v3::SG_N;
+    size_t BLOCK_SG_M = f16_xe2::BLOCK_SG_M;
+    size_t BLOCK_SG_N = f16_xe2::BLOCK_SG_N;
+    size_t SG_M = f16_xe2::SG_M, SG_N = f16_xe2::SG_N;
     size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
     size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
     std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
@@ -409,8 +409,7 @@ void pack_u4(T* src, uint8_t* dst, size_t M, size_t K) {
     }
 }
 
-void gen_weight_u4(size_t K, size_t N, PlainTensor& b_zp, PlainTensor& b_scale, PlainTensor& b, PlainTensor& b_ref) {
-    const size_t GROUP_SIZE = v4::GROUP_SIZE;
+void gen_weight_u4(size_t K, size_t N, size_t GROUP_SIZE, PlainTensor& b_zp, PlainTensor& b_scale, PlainTensor& b, PlainTensor& b_ref) {
     const size_t GROUP_NUM = K / GROUP_SIZE;
     // zp f16
     PlainTensor b_zp_init;
@@ -452,22 +451,22 @@ void gen_weight_u4(size_t K, size_t N, PlainTensor& b_zp, PlainTensor& b_scale, 
 }
 
 // a: [M, K], b(u4): [N, K]
-void check_v4() {
+void check_a16w4_xe2() {
     PlainTensor a, b, c, b_zp, b_scale, b_ref;
     uint32_t M = 256 * 7, N = 256 * 5, K = 128 * 2;
-    const size_t GOURP_SIZE = v4::GROUP_SIZE;
-    const size_t GROUP_NUM = K / GOURP_SIZE;
+    const size_t GROUP_SIZE = a16u4_xe2::GROUP_SIZE;
+    const size_t GROUP_NUM = K / GROUP_SIZE;
     a.resize<float16_t>({ M, K });
     //a = float16_t{ 1.0f };
     fill(a);
-    gen_weight_u4(K, N, b_zp, b_scale, b, b_ref);
+    gen_weight_u4(K, N, GROUP_SIZE, b_zp, b_scale, b, b_ref);
     auto c_ref = get_ref(a, b_ref);
 
     c.resize<float16_t>({ M, N });
     cl_int err;
-    size_t BLOCK_SG_M = v4::BLOCK_SG_M;
-    size_t BLOCK_SG_N = v4::BLOCK_SG_N;
-    size_t SG_M = v4::SG_M, SG_N = v4::SG_N;
+    size_t BLOCK_SG_M = a16u4_xe2::BLOCK_SG_M;
+    size_t BLOCK_SG_N = a16u4_xe2::BLOCK_SG_N;
+    size_t SG_M = a16u4_xe2::SG_M, SG_N = a16u4_xe2::SG_N;
     size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
     size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
     std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
@@ -504,6 +503,59 @@ void check_v4() {
     cmp("gemm_a16w4_xe2 block n:1x3+2*1", c, c_ref);
 }
 
+// a: [M, K], b(u4): [N, K]
+void check_a16w4_xe1() {
+    PlainTensor a, b, c, b_zp, b_scale, b_ref;
+    uint32_t M = 128 * 7, N = 256 * 5, K = 128 * 2;
+    const size_t GROUP_SIZE = a16u4_xe1::GROUP_SIZE;
+    const size_t GROUP_NUM = K / GROUP_SIZE;
+    a.resize<float16_t>({ M, K });
+    //a = float16_t{ 1.0f };
+    fill(a);
+    gen_weight_u4(K, N, GROUP_SIZE, b_zp, b_scale, b, b_ref);
+    auto c_ref = get_ref(a, b_ref);
+
+    c.resize<float16_t>({ M, N });
+    cl_int err;
+    size_t BLOCK_SG_M = a16u4_xe1::BLOCK_SG_M;
+    size_t BLOCK_SG_N = a16u4_xe1::BLOCK_SG_N;
+    size_t SG_M = a16u4_xe1::SG_M, SG_N = a16u4_xe1::SG_N;
+    size_t BLOCK_WG_M = BLOCK_SG_M * SG_M;
+    size_t BLOCK_WG_N = BLOCK_SG_N * SG_N;
+    std::vector<size_t> globalSize = { M / BLOCK_WG_M * N / BLOCK_WG_N * SG_N, SG_M};
+    std::vector<size_t> localSize = { SG_N, SG_M };
+
+    int slice;
+    int slice_no;
+
+    // if slice_no == 0, slice is linear type, 0 for loop M first and 1 for loop N first
+    slice_no = 0;
+    for (slice = 0; slice < 2; slice++) {
+       exec_kernel("gemm_a16w4_xe1", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice}, globalSize, localSize);
+       cmp("gemm_a16w4_xe1 linear " + (slice == 0 ? std::string("M first") : std::string("N first")), c, c_ref);
+    }
+    // if slice_no != 0, use wg blocking schema:
+    //    slice > 0 means the slice is in M dimension else is in N dimension
+    //    slice_no > 0 means the slice size of reminder will be slice+1 else be slice-1
+    slice = 2;
+    slice_no = -2;
+    exec_kernel("gemm_a16w4_xe1", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe1 block m:2x2+1*3", c, c_ref);
+    slice = 1;
+    slice_no = 3;
+    exec_kernel("gemm_a16w4_xe1", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe1 block m:1x3+2*2", c, c_ref);
+
+    slice = -2;
+    slice_no = -1;
+    exec_kernel("gemm_a16w4_xe1", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe1 block n:2x1+1*3", c, c_ref);
+    slice = -1;
+    slice_no = 3;
+    exec_kernel("gemm_a16w4_xe1", { a, b, b_scale, b_zp }, { c }, { M, N, K, K, K, N, (uint32_t)slice_no, (uint32_t)slice }, globalSize, localSize);
+    cmp("gemm_a16w4_xe1 block n:1x3+2*1", c, c_ref);
+}
+
 int main( int argc, char* argv[])
 {
     init_ocl();
@@ -520,10 +572,11 @@ int main( int argc, char* argv[])
         auto c_ref = get_ref(a, b);
 
         //check_v1(a, b, c_ref);
-        //check_v2(a, b, c_ref);
-        check_v3(a, b, c_ref);
+        check_f16_xe1(a, b, c_ref);
+        //check_f16_xe2(a, b, c_ref);
     } else {
-        check_v4();
+        check_a16w4_xe1();
+        //check_a16w4_xe2();
     }
 
     uninit_ocl();

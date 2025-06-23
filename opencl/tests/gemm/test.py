@@ -67,7 +67,7 @@ CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no
 }
 
 #if (CM_GENX >= 1270 && CM_GENX < 1280)
-
+#if 0
 _GENX_MAIN_ void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
     const uint BLOCK_WG_M = _BLOCK_SG_M * _SG_M;
     const uint BLOCK_WG_N = _BLOCK_SG_N * _SG_N;
@@ -79,6 +79,7 @@ _GENX_MAIN_ void gemm(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATT
     gemm_xmx<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         _SG_SIZE, _BLOCK_SG_M, _BLOCK_SG_N, _SG_M, _SG_N, _BLOCK_WG_K>(slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 }
+#endif
 
 _GENX_MAIN_ void repack_f16(half* src ATTR, half* dst ATTR, int K, int N) {
     repack_f16<_SG_SIZE, _BLOCK_SG_M, _BLOCK_SG_N, _SG_M, _SG_N, _BLOCK_WG_K>(src, dst, K, N);
@@ -111,6 +112,22 @@ _GENX_MAIN_ void gemm_nocopy_xe1(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b
 
     gemm_xe1_f16<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         SG_SIZE, BLOCK_SG_M, BLOCK_SG_N, SG_M, SG_N>(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+}
+
+_GENX_MAIN_ void gemm_a16w4_xe1(SurfaceIndex src_a ATTR_BUF, SurfaceIndex src_b ATTR_BUF, SurfaceIndex src_b_scale ATTR_BUF, SurfaceIndex src_b_zp ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = _BLOCK_SG_M * _SG_M;
+    const uint BLOCK_WG_N = _BLOCK_SG_N * _SG_N;
+    const uint size_slm_a = BLOCK_WG_M * _BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
+    cm_slm_init(size_slm_a + size_slm_b);
+    auto slm = cm_slm_alloc(size_slm_a + size_slm_b);
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_a16w4_xe1<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
+        _SG_SIZE, _BLOCK_SG_M, _BLOCK_SG_N, _SG_M, _SG_N, 128, 128>(id_wg_m, id_wg_n, slm, src_a, src_b, src_b_scale, src_b_zp, dst, M, N, K, lda, ldb, ldc);
 }
 #endif
 
@@ -265,7 +282,7 @@ def test_org():
             for time_opt in ns:
                 print(f'TPUT:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
-def test_v2():
+def test_f16():
     BLOCK_SG_M = 64 #16
     BLOCK_SG_N = 16 #64
     SG_M = 2
@@ -350,13 +367,12 @@ def test_a16w4():
     BLOCK_SG_N = 16 #64
     SG_M = 2
     SG_N = 16
-    BLOCK_WG_K = 64 #32
+    BLOCK_WG_K = 128 #32
     BLOCK_WG_M = BLOCK_SG_M * SG_M
     BLOCK_WG_N = BLOCK_SG_N * SG_N
     SLM_SIZE_A=BLOCK_WG_M * BLOCK_WG_K * 2 // 1024
     SLM_SIZE_B=0
-    # TODO
-    kernel_name = 'gemm_nocopy_xe1'
+    kernel_name = 'gemm_a16w4_xe1'
     if SG_SIZE == 16:
         kernel_name = 'gemm_a16w4_xe2'
         BLOCK_SG_N = 32
@@ -368,7 +384,10 @@ def test_a16w4():
         BLOCK_WG_K = 128
 
     # -dumpVisaOptionsAll -noDPASMacro  -noschedule -dumpSchedule -nocompaction"
-    kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
+    jit_option = '-abortonspill'
+    if SG_SIZE == 8:
+        jit_option += ' -noschedule -nocompaction -DPASTokenReduction'
+    kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
                         -D_SG_M={SG_M} -D_SG_N={SG_N} -D_BLOCK_WG_K={BLOCK_WG_K}''')
 
     print(f'SLM used A: {SLM_SIZE_A}KB + B: {SLM_SIZE_B}KB = {SLM_SIZE_A+SLM_SIZE_B}KB')
@@ -470,7 +489,7 @@ if 0:
     test_org()
 
 if weight_datatype == 'f16':
-    test_v2()
+    test_f16()
 elif weight_datatype == 'u4':
     test_a16w4()
 print('============================================')

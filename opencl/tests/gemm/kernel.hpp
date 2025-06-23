@@ -634,6 +634,408 @@ template<
     typename TYPE_DST = half,
     CmPrecisionType A_TYPE_PREC = CM_PRECISION_HF,
     CmPrecisionType B_TYPE_PREC = CM_PRECISION_HF,
+    int SG_SIZE = 8,
+    // subgroup blocking
+    int BLOCK_SG_M = 64,
+    int BLOCK_SG_N = 16,
+    int SG_M = 2,
+    int SG_N = 16,
+    int BLOCK_WG_K = 128,
+    int GROUP_SIZE = 128
+>
+CM_INLINE void gemm_a16w4_xe1(uint id_wg_m, uint id_wg_n, uint slm, SurfaceIndex src_a, SurfaceIndex src_b, SurfaceIndex src_b_scale, SurfaceIndex src_b_zp, SurfaceIndex dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+    // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
+    static constexpr int REPEAT = 8;
+    static constexpr int DEPTH = 8;
+    static constexpr int BLOCK_REG_M = REPEAT;
+    static constexpr int BLOCK_REG_N = SG_SIZE;
+    static constexpr int BLOCK_DPAS_C = BLOCK_REG_M * BLOCK_REG_N;
+    static constexpr int VNNI = sizeof(TYPE_SRC);
+    static constexpr int BLOCK_REG_K = DEPTH * sizeof(int) / VNNI;
+    static constexpr int BLOCK_REG_A = BLOCK_REG_M * BLOCK_REG_K;
+    static constexpr int BLOCK_REG_B = BLOCK_REG_N * BLOCK_REG_K;
+    static constexpr int BLOCK_WG_M = SG_M * BLOCK_SG_M;
+    static constexpr int BLOCK_WG_N = SG_N * BLOCK_SG_N;
+    // register blocking
+    static constexpr int REG_M = BLOCK_SG_M / BLOCK_REG_M;
+    static constexpr int REG_N = BLOCK_SG_N / BLOCK_REG_N;
+    static constexpr int REG_K = BLOCK_WG_K / BLOCK_REG_K;
+    static constexpr int REG_MN = REG_M * REG_N;
+    static constexpr uint size_slm_a = BLOCK_WG_M * BLOCK_WG_K * sizeof(TYPE_SRC);
+
+    matrix<TYPE_ACC, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;
+    uint id_sg_n = cm_local_id(0);
+    uint id_sg_m = cm_local_id(1);
+    uint id_sg_mn = id_sg_m * SG_N + id_sg_n;
+
+    // A memory->reg
+    static constexpr int LINE_REG_M_LOAD_A = BLOCK_WG_M / (SG_M * SG_N);
+    // A memory address, step is 16*sizeof(half)*2, aka k step is 32(points)
+    matrix<uint32_t, LINE_REG_M_LOAD_A, SG_SIZE> mem_addr_a;                                    // ---> 4 regs (addr for A)
+    {
+        uint offset = (id_wg_m * BLOCK_WG_M + id_sg_mn * LINE_REG_M_LOAD_A) * lda * sizeof(TYPE_SRC);
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mem_addr_a[m][0] = offset;
+            offset += lda * sizeof(TYPE_SRC);
+        }
+    }
+    // A reg->slm: slm address for store, step is (64*2)*16*2=4096
+    vector<uint, 8> slm_addr_store_a0, slm_addr_store_a1;                                       // ----> 2 reg (addr for A)
+    slm_addr_store_a0[0] = id_sg_m * (BLOCK_SG_M * BLOCK_WG_K * sizeof(TYPE_SRC)) +
+        id_sg_n * (LINE_REG_M_LOAD_A * BLOCK_REG_K * sizeof(TYPE_SRC));
+    slm_addr_store_a1[0] = slm_addr_store_a0[0] + BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+    
+    // A slm->reg: slm address for load, step is 64*16*2=2048
+    matrix<uint, REG_M, SG_SIZE> slm_addr_load_a;                                               // ----> 8 regs (addr for A)
+    uint slm_addr_load_a_sg = id_sg_m * (BLOCK_SG_M * BLOCK_WG_K * sizeof(TYPE_SRC)) + (id_sg_n & 1) * (BLOCK_REG_A / 2 * sizeof(TYPE_SRC));
+    {
+        uint offset = 0;
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            slm_addr_load_a[m][0] = slm_addr_load_a_sg + offset;
+            offset += BLOCK_REG_A * sizeof(TYPE_SRC);
+        }
+    }
+    // B memory->reg: step is 16*sizeof(uchar)
+    matrix<uint, REG_N, BLOCK_REG_N> mem_addr_b;                                                // ---> 2 regs (addr for B)
+    {
+        uint offset = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * ldb / 2;
+#pragma unroll
+        for (uint reg_n = 0; reg_n < REG_N; reg_n++) {
+#pragma unroll
+            for (uint n = 0; n < BLOCK_REG_N; n++) {
+                mem_addr_b[reg_n][n] = offset;
+                offset += ldb / 2;
+            }
+        }
+    }
+
+    matrix<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K * 2> a_copy;                               // ---> 8 regs (load for A)
+    matrix<TYPE_SRC, 2, 4 * BLOCK_REG_K> a_cvt;                                                // ---> 8 regs (cvt for A) ??? reuse a_regs?
+    auto load_a_mem = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K * 2> mat_copy) {
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mat_copy.row(m).format<int>() = cm_load<int, BLOCK_REG_K * 2 / (sizeof(int) / sizeof(TYPE_SRC)), DataSize::Default, CacheHint::Cached, CacheHint::Cached>(src_a, mem_addr_a[m][0]);
+        }
+    };
+    auto inc_load_a_mem = [&]() {
+#pragma unroll
+        for (uint m = 0; m < LINE_REG_M_LOAD_A; m++) {
+            mem_addr_a[m][0] += BLOCK_REG_K * 2 * sizeof(TYPE_SRC);
+        }
+    };
+    auto store_a_slm = [&] (matrix<TYPE_SRC, 2, 4 * BLOCK_REG_K> mat_copy) {
+        cm_slm_block_write(slm, slm_addr_store_a0[0], mat_copy.row(0).format<int>());
+        cm_slm_block_write(slm, slm_addr_store_a1[0], mat_copy.row(1).format<int>());
+    };
+    auto inc_store_a_slm = [&](const int k_idx) {
+        if (k_idx == 3) {
+            slm_addr_store_a0[0] -= 3 * BLOCK_SG_M * BLOCK_REG_K * 2 * sizeof(TYPE_SRC);
+            slm_addr_store_a1[0] -= 3 * BLOCK_SG_M * BLOCK_REG_K * 2 * sizeof(TYPE_SRC);
+        } else {
+            slm_addr_store_a0[0] += BLOCK_SG_M * BLOCK_REG_K * 2 * sizeof(TYPE_SRC);
+            slm_addr_store_a1[0] += BLOCK_SG_M * BLOCK_REG_K * 2 * sizeof(TYPE_SRC);
+        }
+    };
+
+    matrix<TYPE_SRC, REG_M, BLOCK_REG_A / 2> a_regs;                                    // ---> 32 regs (dpasw for A)
+    auto load_a_slm = [&](matrix_ref<TYPE_SRC, REG_M, BLOCK_REG_A / 2> mat_copy) {
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            cm_slm_block_read(slm, slm_addr_load_a[m][0], mat_copy.row(m).format<int>());
+        }
+    };
+    auto inc_load_a_slm = [&](const int k_idx) {
+#pragma unroll
+        for (uint m = 0; m < REG_M; m++) {
+            if (k_idx == 7) {
+                slm_addr_load_a[m][0] -= 7 * BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            } else {
+                slm_addr_load_a[m][0] += BLOCK_SG_M * BLOCK_REG_K * sizeof(TYPE_SRC);
+            }
+        }
+    };
+    matrix<uint, REG_N, 8 * 4> b_copy0, b_copy1;                                         // ---> 16*2 regs (mem->reg for B)
+    matrix<TYPE_SRC, REG_N, BLOCK_REG_B> b_regs;                                         // ---> 16*1 regs (cvt, dpasw for B)
+    auto load_b_mem = [&] (matrix_ref<uint, REG_N, 8 * 4> mat_copy) {
+#pragma unroll
+        for (uint n = 0; n < REG_N; n++) {
+            mat_copy.row(n).format<int>() = cm_load<int, VectorSize::N4, DataSize::Default, CacheHint::Cached, CacheHint::Cached>(src_b, mem_addr_b.row(n));
+        }
+    };
+    auto inc_load_b_mem = [&]() {
+#pragma unroll
+        for (uint n = 0; n < REG_N; n++) {
+            mem_addr_b.row(n) += 4 * sizeof(int);
+        }
+    };
+
+    auto dot = [&](matrix_ref<TYPE_SRC, REG_M, BLOCK_REG_A / 2> A, matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> B) {
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+#pragma unroll
+            for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+                acc.row((ushort)(reg_m * REG_N + reg_n)) = cm_dpasw<B_TYPE_PREC, A_TYPE_PREC, DEPTH, REPEAT>(acc.row((ushort)(reg_m * REG_N + reg_n)),
+                    B.row((ushort)reg_n).format<int>(), A.row((ushort)reg_m).format<int>());
+            }
+        }
+    };
+
+    auto deinterleave = [&] (matrix_ref<TYPE_SRC, LINE_REG_M_LOAD_A, BLOCK_REG_K * 2> src, matrix_ref<TYPE_SRC, 2, 4 * BLOCK_REG_K> dst) {
+#pragma unroll
+        for (uint i = 0; i < 2; i++) {
+#pragma unroll
+            for (uint j = 0; j < 4; j++) {
+                dst.row(i).select<BLOCK_REG_K, 1>(j * BLOCK_REG_K).format<int>() = src.row(j).select<BLOCK_REG_K, 1>(i * BLOCK_REG_K).format<int>();
+            }
+        }
+    };
+
+    vector<uchar, 8> zp_copy;
+    vector<TYPE_SRC, 32> zp_f;
+    vector<TYPE_SRC, 16> scale_copy;
+    vector<TYPE_SRC, 32> scale;
+    uint zp_offset = (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / 2;
+    uint scale_offset = (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(TYPE_SRC);
+    auto load_zp_scale = [&] () {
+        zp_copy.format<int>() = cm_load<int, 2>(src_b_zp, zp_offset);
+        scale_copy.format<int>() = cm_load<int, 8>(src_b_scale, scale_offset);
+    };
+    auto inc_load_zp_scale = [&] () {
+        zp_offset += N / 2;
+        scale_offset += N * sizeof(TYPE_SRC);
+    };
+    auto dec_zp = [&] (vector_ref<uchar, 8> z_src, vector_ref<TYPE_SRC, 32> z_f) {
+        vector<ushort, 16> tmp;
+        tmp.select<8, 2>(0) = (z_src & (ushort)0xf);
+        tmp.select<8, 2>(1) = z_src >> (ushort)4;
+        tmp.format<TYPE_SRC>() *= half{4096 * (4096 / 512)};
+        z_f.select<16, 2>(0) = tmp.format<TYPE_SRC>();
+        z_f.select<16, 2>(1) = tmp.format<TYPE_SRC>();
+    };
+    auto dec_wei = [&](vector_ref<int, 16> b_src0, vector_ref<int, 16> b_src1, matrix_ref<TYPE_SRC, REG_N, BLOCK_REG_B> b_dst, vector_ref<TYPE_SRC, 32> s, vector_ref<TYPE_SRC, 32> z) {
+#pragma unroll
+        for (uint i = 0; i < REG_N; i++) {
+            auto b_reg = b_dst.row(i).format<TYPE_SRC, BLOCK_REG_K / 2, BLOCK_REG_N * 2>();
+#pragma unroll
+            for (uint k = 0; k < BLOCK_REG_K / 2; k++) {
+                auto tmp_f = b_reg.row(k);
+                if (i == 0) {
+                    auto tmp = b_src0.select<8, 1>(k / 4 * 8).format<uchar>().select<8, 4>(k % 4);
+                    tmp_f.select<8, 2>(0).format<ushort>() = tmp & (ushort)0xf;
+                    tmp_f.select<8, 2>(1).format<ushort>() = tmp >> 4;
+                    //tmp_f.select<8, 2>(1).format<ushort>() = tmp;
+                    //tmp_f.select<8, 2>(1).format<ushort>() /= 16;
+                } else {
+                    auto tmp = b_src1.select<8, 1>(k / 4 * 8).format<uchar>().select<8, 4>(k % 4);
+                    tmp_f.select<8, 2>(0).format<ushort>() = tmp & (ushort)0xf;
+                    tmp_f.select<8, 2>(1).format<ushort>() = tmp >> 4;
+                    //tmp_f.select<8, 2>(1).format<ushort>() = tmp;
+                    //tmp_f.select<8, 2>(1).format<ushort>() /= 16;
+                }
+            }
+        }
+#pragma unroll
+        for (uint i = 0; i < REG_N; i++) {
+            auto b_reg = b_dst.row(i).format<TYPE_SRC, BLOCK_REG_K / 2, BLOCK_REG_N * 2>();
+#pragma unroll
+            for (uint k = 0; k < BLOCK_REG_K / 2; k++) {
+                auto tmp_f = b_reg.row(k);
+                tmp_f = (tmp_f * half{32768.0} - z.select<16, 1>(i * 16));
+            }
+        }
+#pragma unroll
+        for (uint i = 0; i < REG_N; i++) {
+            auto b_reg = b_dst.row(i).format<TYPE_SRC, BLOCK_REG_K / 2, BLOCK_REG_N * 2>();
+#pragma unroll
+            for (uint k = 0; k < BLOCK_REG_K / 2; k++) {
+                auto tmp_f = b_reg.row(k);
+                tmp_f *= half{512.0};
+            }
+        }
+#pragma unroll
+        for (uint i = 0; i < REG_N; i++) {
+            auto b_reg = b_dst.row(i).format<TYPE_SRC, BLOCK_REG_K / 2, BLOCK_REG_N * 2>();
+#pragma unroll
+            for (uint k = 0; k < BLOCK_REG_K / 2; k++) {
+                auto tmp_f = b_reg.row(k);
+                tmp_f *= s.select<16, 1>(i * 16);
+            }
+        }
+    };
+
+    // warmup
+    load_a_mem(a_copy);            // k0 --> r
+    inc_load_a_mem();
+    deinterleave(a_copy, a_cvt);
+    store_a_slm(a_cvt);            // r  --> s0
+    load_a_mem(a_copy);            // k1 --> r
+    inc_store_a_slm(0);            // inc after s0
+    inc_load_a_mem();
+    deinterleave(a_copy, a_cvt);
+    cm_slm_fence(CM_LOCAL_BARRIER);
+    cm_sbarrier(1);
+    store_a_slm(a_cvt);            // r  --> s1
+    load_a_mem(a_copy);            // k2 --> r
+    load_b_mem(b_copy0);           // k0'--> r
+    inc_store_a_slm(1);
+    inc_load_a_mem();
+    inc_load_b_mem();
+    load_zp_scale();
+    deinterleave(a_copy, a_cvt);
+    cm_sbarrier(0);
+    cm_slm_fence(CM_LOCAL_BARRIER);
+    cm_sbarrier(1);
+    store_a_slm(a_cvt);            // r  --> s2
+
+    // main loop: K dimension inside one EU
+    for (uint k = 0; k < K / BLOCK_WG_K - 1; k++) {
+#pragma unroll
+        for (uint i = 0; i < 4; i++) {
+            load_a_mem(a_copy);            // k3 --> r
+            load_b_mem((i & 1) ? b_copy0 : b_copy1);
+                                           // k1'--> r
+            load_a_slm(a_regs);            // s0(first half) --> r
+            inc_store_a_slm((2 + i) % 4);
+            if (i == 0) {
+                inc_load_zp_scale();
+            }
+            inc_load_a_slm(2 * i + 0);
+            if (i == 0) {
+                dec_zp(zp_copy.select_all(), zp_f.select_all());
+                scale.select<16, 2>(0) = scale_copy;
+                scale.select<16, 2>(1) = scale_copy;
+            }
+            if (i & 1) {
+                dec_wei(b_copy1.row(0).format<int>().select<16, 1>(), b_copy1.row(1).format<int>().select<16, 1>(),
+                    b_regs, scale.select_all(), zp_f.select_all());
+            } else {
+                dec_wei(b_copy0.row(0).format<int>().select<16, 1>(), b_copy0.row(1).format<int>().select<16, 1>(),
+                    b_regs, scale.select_all(), zp_f.select_all());
+            }
+            dot(a_regs, b_regs);
+            load_a_slm(a_regs);            // s0(second half) --> r
+            inc_load_a_mem();
+            inc_load_b_mem();
+            inc_load_a_slm(2 * i + 1);
+            if (i & 1) {
+                dec_wei(b_copy1.row(0).format<int>().select<16, 1>(16), b_copy1.row(1).format<int>().select<16, 1>(16),
+                    b_regs, scale.select_all(), zp_f.select_all());
+            } else {
+                dec_wei(b_copy0.row(0).format<int>().select<16, 1>(16), b_copy0.row(1).format<int>().select<16, 1>(16),
+                    b_regs, scale.select_all(), zp_f.select_all());
+            }
+            if (i == 3) {
+                load_zp_scale();
+            }
+            dot(a_regs, b_regs);
+            deinterleave(a_copy, a_cvt);
+            cm_sbarrier(0);
+            cm_slm_fence(CM_LOCAL_BARRIER);
+            cm_sbarrier(1);
+            store_a_slm(a_cvt);            // r  --> s3
+        }
+    }
+    // tail
+    {
+        load_a_mem(a_copy);            // k3 --> r
+        load_b_mem(b_copy1);           // k1'--> r
+        load_a_slm(a_regs);            // s0(first half) --> r
+        inc_store_a_slm(2);
+
+        inc_load_a_slm(0);
+        dec_zp(zp_copy.select_all(), zp_f.select_all());
+        scale.select<16, 2>(0) = scale_copy;
+        scale.select<16, 2>(1) = scale_copy;
+        dec_wei(b_copy0.row(0).format<int>().select<16, 1>(), b_copy0.row(1).format<int>().select<16, 1>(),
+            b_regs, scale.select_all(), zp_f.select_all());
+
+        dot(a_regs, b_regs);
+        load_a_slm(a_regs);            // s0(second half) --> r
+        inc_load_b_mem();
+        inc_load_a_slm(1);
+        dec_wei(b_copy0.row(0).format<int>().select<16, 1>(16), b_copy0.row(1).format<int>().select<16, 1>(16),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        deinterleave(a_copy, a_cvt);
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+        store_a_slm(a_cvt);            // r  --> s3
+    }
+    {
+        load_b_mem(b_copy0);           // k2'--> r
+        load_a_slm(a_regs);            // s1(first half) --> r
+        inc_load_a_slm(2);
+        dec_wei(b_copy1.row(0).format<int>().select<16, 1>(), b_copy1.row(1).format<int>().select<16, 1>(),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        load_a_slm(a_regs);            // s1(second half) --> r
+        inc_load_b_mem();
+        inc_load_a_slm(3);
+        dec_wei(b_copy1.row(0).format<int>().select<16, 1>(16), b_copy1.row(1).format<int>().select<16, 1>(16),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        cm_sbarrier(0);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+    }
+    {
+        load_b_mem(b_copy1);            // k3' --> r
+        load_a_slm(a_regs);             // s2(first half) --> r
+        inc_load_a_slm(4);
+        dec_wei(b_copy0.row(0).format<int>().select<16, 1>(), b_copy0.row(1).format<int>().select<16, 1>(),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        load_a_slm(a_regs);            // s2(second half) --> r
+        inc_load_a_slm(5);
+        dec_wei(b_copy0.row(0).format<int>().select<16, 1>(16), b_copy0.row(1).format<int>().select<16, 1>(16),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        cm_sbarrier(0);
+    }
+    {
+        load_a_slm(a_regs);            // s3(first half) --> r
+        inc_load_a_slm(6);
+        dec_wei(b_copy1.row(0).format<int>().select<16, 1>(), b_copy1.row(1).format<int>().select<16, 1>(),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+        load_a_slm(a_regs);            // s3(second half) --> r
+        dec_wei(b_copy1.row(0).format<int>().select<16, 1>(16), b_copy1.row(1).format<int>().select<16, 1>(16),
+            b_regs, scale.select_all(), zp_f.select_all());
+        dot(a_regs, b_regs);
+    }
+
+    // store
+    uint ldc_bytes = ldc * sizeof(TYPE_DST);
+    uint offset_c = id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N +
+        (id_wg_m * BLOCK_WG_M +        // workgroup
+            id_sg_m * BLOCK_SG_M) * ldc;  // subgroup
+    offset_c *= sizeof(TYPE_DST);
+    matrix<TYPE_DST, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> tmp;
+#pragma unroll
+    for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+        // TODO(TUNE): merge in N dimension
+#pragma unroll
+        for (int reg_n = 0; reg_n < REG_N; reg_n++) {
+            tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, reg_n * BLOCK_REG_N) =
+                acc.row(reg_m * REG_N + reg_n);
+        }
+    }
+#pragma unroll
+    for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
+        write_2d(tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, 0), dst, offset_c, ldc_bytes);
+        offset_c += BLOCK_REG_M * ldc_bytes;
+    }
+}
+
+template<
+    typename TYPE_SRC = half,
+    typename TYPE_ACC = float,
+    typename TYPE_DST = half,
+    CmPrecisionType A_TYPE_PREC = CM_PRECISION_HF,
+    CmPrecisionType B_TYPE_PREC = CM_PRECISION_HF,
     int SG_SIZE = 16,
     // subgroup blocking
     int BLOCK_SG_M = 64,
@@ -857,6 +1259,10 @@ CM_INLINE void gemm_a16w4_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src
 
     // warmup
     // prefetch
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+    desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 16);
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
+    desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
     cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
     desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 16);
     cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
