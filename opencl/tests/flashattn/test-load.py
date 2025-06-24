@@ -10,7 +10,7 @@ import numpy as np
 import time
 
 
-A = np.random.randint(-7, 8,[128, 128]).astype(np.float16)
+A = np.random.randint(-7, 8,[128, 128]).astype(np.float32)
 
 print(A[:16, :16])
 
@@ -45,16 +45,24 @@ extern "C" _GENX_MAIN_ void cm_test(const half* A [[type("svmptr_t")]], int pitc
 
 extern "C" _GENX_MAIN_ void cm_test2(SurfaceIndex A [[type("buffer_t")]], int pitch) {
     matrix<half, 16, 16> in;
-    
+
     auto r = cm_load<uint, 8>(A, 0);
     show(r.format<half, 1, 16>());
 
-    
+
     vector<unsigned, 16> Offsets;
     for(int i = 0; i < 16; i++) Offsets[i] = i*pitch;
     in.format<uint>() = cm_load<uint, VectorSize::N8>(A, Offsets);
     show(in);
 }
+extern "C" _GENX_MAIN_ void cm_test2d(float* A [[type("svmptr_t")]], int pitch) {
+    lsc::block_2d_desc<float, 1, 16, 1> b2d((float*)A, 16-1, 1*sizeof(float)-1, (unsigned)(pitch-1), 0, 0);
+
+    matrix<float, 16, 1> in;
+    cm_load<lsc::Normal>(in.format<float>(), b2d);
+    show(in);
+}
+
 '''
 
 def pyeval(src):
@@ -72,11 +80,13 @@ t_A = cl.tensor(A)
 
 print(t_A.addr)
 
-t_A.offset = t_A.strides[0] * 2
-t_A.offset = 2*2
+# t_A.offset = t_A.strides[0] * 4
+# t_A.offset = 2*2
 
 print(t_A.addr)
 cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
-cm_kernels.enqueue("cm_test", [1], [1], t_A, t_A.strides[0] * 2)
-cm_kernels.enqueue("cm_test2", [1], [1], t_A, t_A.strides[0] * 2)
+# cm_kernels.enqueue("cm_test", [1], [1], t_A, t_A.strides[0] * 2)
+# cm_kernels.enqueue("cm_test2", [1], [1], t_A, t_A.strides[0] * 2)
+cm_kernels.enqueue("cm_test2d", [1], [1], t_A, t_A.strides[0] * 4)
+
 cl.finish()
