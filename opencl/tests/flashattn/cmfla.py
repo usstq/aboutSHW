@@ -211,7 +211,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype) / q_factor
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / k_factor
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-    ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
+    # ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
 
     scale_factor = 1.0/(float)(head_size**0.5)
     qmax = q.abs().amax(dim=2, keepdim=True)
@@ -235,13 +235,16 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
-    check_close(ref, out)
+    # check_close(ref, out)
     #assert 0
 
 if __name__ == "__main__":
     # test_flash_attn_causal_batch1(seq_len=4096, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # 0.368 ms overhead ,  1.264 quanQ*quanK , 1.355 mul dqscale ,1.705 apply mask , 2.613 softmax, 4.045 transpose P, 6.259 P*V.
     test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
+
     # test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
 

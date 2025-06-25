@@ -110,24 +110,23 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
                                 reinterpret_cast<svmptr_t>(value + kv_offset),
                                 reinterpret_cast<svmptr_t>(output + qo_offset));
 #else
-    sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
-                                slm_K,
-                                slm_V,
-                                wg_local_id,
-                                local_size,
-                                0, //q_start,
-                                kv_seq_len, //kv_stop,
-                                q_len, //q_len,
-                                kv_seq_len, //kv_len,
-                                query,
-                                key,
-                                value,
-                                output,
-                                qo_offset * sizeof(half),
-                                kv_offset * sizeof(half),
-                                kv_offset * sizeof(half),
-                                qo_offset * sizeof(half)
-                                );
+    // sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
+    //                             slm_K,
+    //                             slm_V,
+    //                             wg_local_id,
+    //                             local_size,
+    //                             0, //q_start,
+    //                             kv_seq_len, //kv_stop,
+    //                             q_len, //q_len,
+    //                             kv_seq_len, //kv_len,
+    //                             query,
+    //                             key,
+    //                             value,
+    //                             output,
+    //                             qo_offset * sizeof(half),
+    //                             kv_offset * sizeof(half),
+    //                             kv_offset * sizeof(half),
+    //                             qo_offset * sizeof(half));
 #endif
 }
 
@@ -157,7 +156,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
 #if USE_LSC != 1
-    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(int8_t));
     constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
     constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
 
@@ -232,10 +231,15 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 query_key_value,
                                 query_key_value,
                                 query_key_value,
+                                dqscale_q,
+                                dqscale_k,
                                 output,
                                 q_offset * sizeof(half),
                                 k_offset * sizeof(half),
                                 v_offset * sizeof(half),
-                                o_offset * sizeof(half));
+                                qscale_offset * sizeof(float),
+                                kscale_offset * sizeof(float),
+                                o_offset * sizeof(half),
+                                seqlen);
 #endif
 }
