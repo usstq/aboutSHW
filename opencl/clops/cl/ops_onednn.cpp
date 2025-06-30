@@ -267,6 +267,17 @@ struct onednn_matmul {
 
         create();
     }
+    std::vector<uint64_t> finish() {
+#ifdef DNNL_EXPERIMENTAL_PROFILING
+        ASSERT(clFinish(g_queue.queue) == CL_SUCCESS);
+        std::vector<uint64_t> nsecs = dnnl::get_profiling_data(m_stream, profiling_data_kind::time);
+        // Reset profiler's state.
+        dnnl::reset_profiling(m_stream);
+        return nsecs;
+#else
+        return {};
+#endif
+    }
 };
 
 struct onednn_linear {
@@ -504,7 +515,8 @@ void init_ops_onednn(py::module_& m) {
         .def("post_op_bin_mul", &onednn_matmul::post_op_bin_mul)
         .def("post_op_sum", &onednn_matmul::post_op_sum)
         .def("create", &onednn_matmul::create)
-        .def("forward", &onednn_matmul::forward);
+        .def("forward", &onednn_matmul::forward)
+        .def("finish", &onednn_matmul::finish);
 }
 
 #else

@@ -74,3 +74,19 @@ const int BLOCK_WG_K = 128;	// same in sg
 const int GROUP_SIZE = 128;
 
 };
+
+namespace a8s4_sym_xe2 {
+
+// shared between host/device
+// xe1 is 8, xe2 is 16
+const int SG_SIZE = 16;
+const int BLOCK_REG_N = SG_SIZE;
+// sg blocking
+const int BLOCK_SG_M = 16;
+const int BLOCK_SG_N = 64;
+const int SG_M = 8;
+const int SG_N = 2;
+const int BLOCK_WG_K = 128;	// same in sg
+const int GROUP_SIZE = 128;
+
+};

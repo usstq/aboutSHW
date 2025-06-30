@@ -159,4 +159,20 @@ _GENX_MAIN_ void gemm_a16w4_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr
     gemm_a16w4_xe2<half, float, half, CmPrecisionType::CM_Precision_FP16, CmPrecisionType::CM_Precision_FP16,
         a16u4_xe2::SG_SIZE, a16u4_xe2::BLOCK_SG_M, a16u4_xe2::BLOCK_SG_N, a16u4_xe2::SG_M, a16u4_xe2::SG_N, a16u4_xe2::GROUP_SIZE>(id_wg_m, id_wg_n, slm, src_a, src_b, src_b_scale, src_b_zp, dst, M, N, K, lda, ldb, ldc);
 }
+
+_GENX_MAIN_ void gemm_a8w4sym_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, SurfaceIndex src_a_scale ATTR_BUF, SurfaceIndex src_b_scale ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = a8s4_sym_xe2::BLOCK_SG_M * a8s4_sym_xe2::SG_M;
+    const uint BLOCK_WG_N = a8s4_sym_xe2::BLOCK_SG_N * a8s4_sym_xe2::SG_N;
+    const uint size_slm_a = BLOCK_WG_M * a8s4_sym_xe2::BLOCK_WG_K * sizeof(half);
+    const uint size_slm_b = 0;
+    auto slm = 0;
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_a8w4sym_xe2<half, int, half, CmPrecisionType::CM_Precision_S8, CmPrecisionType::CM_Precision_S4,
+        a8s4_sym_xe2::SG_SIZE, a8s4_sym_xe2::BLOCK_SG_M, a8s4_sym_xe2::BLOCK_SG_N, a8s4_sym_xe2::SG_M, a8s4_sym_xe2::SG_N, a8s4_sym_xe2::GROUP_SIZE>(
+            id_wg_m, id_wg_n, slm, src_a, src_b, src_a_scale, src_b_scale, dst, M, N, K, lda, ldb, ldc);
+}
 #endif

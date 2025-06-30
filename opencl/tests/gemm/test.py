@@ -2,6 +2,7 @@
 import argparse
 import math
 from clops import cl
+import clops
 import numpy as np
 import time
 from clops import compare
@@ -171,6 +172,20 @@ _GENX_MAIN_ void gemm_a16w4_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr
         _SG_SIZE, _BLOCK_SG_M, _BLOCK_SG_N, _SG_M, _SG_N, 128, 128>(id_wg_m, id_wg_n, slm, src_a, src_b, src_b_scale, src_b_zp, dst, M, N, K, lda, ldb, ldc);
 }
 
+_GENX_MAIN_ void gemm_a8w4sym_xe2(svmptr_t src_a ATTR, svmptr_t src_b ATTR, SurfaceIndex src_a_scale ATTR_BUF, SurfaceIndex src_b_scale ATTR_BUF, SurfaceIndex dst ATTR_BUF, uint M, uint N, uint K, uint lda, uint ldb, uint ldc,
+    int slice_no, int slice) {
+    const uint BLOCK_WG_M = 16 * 8;
+    const uint BLOCK_WG_N = 64 * 2;
+    const uint size_slm_b = 0;
+    auto slm = 0;
+
+    uint id_wg_m, id_wg_n;
+    get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+    gemm_a8w4sym_xe2<half, int, half, CmPrecisionType::CM_Precision_S8, CmPrecisionType::CM_Precision_S4,
+        16, 16, 64, 8, 2, 128, 128>(
+            id_wg_m, id_wg_n, slm, src_a, src_b, src_a_scale, src_b_scale, dst, M, N, K, lda, ldb, ldc);
+}
 #endif
 
 ''')
@@ -183,7 +198,7 @@ else:
     SG_SIZE = 8
 
 parser = argparse.ArgumentParser('')
-parser.add_argument('-wt', "--weight_type", type=str, default="f16", choices=['f16', 'u4'])
+parser.add_argument('-wt', "--weight_type", type=str, default="f16", choices=['f16', 'u4', 'a8w4sym'])
 args = parser.parse_args()
 
 weight_datatype = args.weight_type
@@ -213,6 +228,21 @@ elif weight_datatype == 'u4':
     B_q = np.random.randint(0,3,[K, N]).astype(np.int8)
     B_scale = np.random.randint(-4,5,[K_GROUPS, N]).astype(np.float16)
     B_zp = np.random.randint(0,3,[K_GROUPS, N]).astype(np.int8)
+    
+    B = (B_q.astype(np.float32) - B_zp.astype(np.float32).repeat(K_GROUP_SIZE, axis=0)) * B_scale.repeat(K_GROUP_SIZE, axis=0)
+    # pack weight into 4bit
+    B_q4 = pack_i8_to_i4(B_q.transpose().copy())
+    B_zp4 = pack_i8_to_i4(B_zp)
+
+    tBq4 = cl.tensor(B_q4)
+    tBs = cl.tensor(B_scale)
+    tBz = cl.tensor(B_zp4)
+elif weight_datatype == 'a8w4sym' or weight_datatype == 'a8w4asym':
+    B_q = np.random.randint(0,3,[K, N]).astype(np.int8)
+    B_scale = np.random.randint(-4,5,[K_GROUPS, N]).astype(np.float16)
+    B_zp = np.random.randint(0,3,[K_GROUPS, N]).astype(np.int8)
+    if weight_datatype == 'a8w4sym':
+        B_zp[:] = 0
     
     B = (B_q.astype(np.float32) - B_zp.astype(np.float32).repeat(K_GROUP_SIZE, axis=0)) * B_scale.repeat(K_GROUP_SIZE, axis=0)
     # pack weight into 4bit
@@ -446,6 +476,103 @@ def test_a16w4():
             for time_opt in ns:
                 print(f'(CUR)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
+def test_a8w4_sym():
+    BLOCK_SG_M = 64 #16
+    BLOCK_SG_N = 16 #64
+    SG_M = 2
+    SG_N = 16
+    BLOCK_WG_K = 128 #32
+    BLOCK_WG_M = BLOCK_SG_M * SG_M
+    BLOCK_WG_N = BLOCK_SG_N * SG_N
+    SLM_SIZE_A=BLOCK_WG_M * BLOCK_WG_K * 2 // 1024
+    SLM_SIZE_B=0
+    kernel_name = 'gemm_a8w4sym_xe1'
+    assert SG_SIZE == 16, "xe1 not support"
+    if SG_SIZE == 16:
+        kernel_name = 'gemm_a8w4sym_xe2'
+        BLOCK_SG_N = 32
+        SG_N = 8
+        SG_M = 4
+        BLOCK_WG_M = BLOCK_SG_M * SG_M
+        BLOCK_WG_N = BLOCK_SG_N * SG_N
+        SLM_SIZE_A=0
+        BLOCK_WG_K = 128
+
+    # -dumpVisaOptionsAll -noDPASMacro  -noschedule -dumpSchedule -nocompaction"
+    jit_option = '-abortonspill -noschedule '
+    if SG_SIZE == 8:
+        jit_option += ' -noschedule -nocompaction -DPASTokenReduction'
+    kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2 -D_SG_SIZE={SG_SIZE} -D_BLOCK_SG_M={BLOCK_SG_M} -D_BLOCK_SG_N={BLOCK_SG_N}
+                        -D_SG_M={SG_M} -D_SG_N={SG_N} -D_BLOCK_WG_K={BLOCK_WG_K}''')
+    
+    # TODO: refactor
+    if SG_SIZE == 16:
+        BLOCK_SG_M = 16 #16
+        BLOCK_SG_N = 64 #64
+        SG_M = 8
+        SG_N = 2
+        BLOCK_WG_K = 128 #32
+        BLOCK_WG_M = BLOCK_SG_M * SG_M
+        BLOCK_WG_N = BLOCK_SG_N * SG_N
+
+    print(f'SLM used A: {SLM_SIZE_A}KB + B: {SLM_SIZE_B}KB = {SLM_SIZE_A+SLM_SIZE_B}KB')
+    # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
+    #default linear
+    slice_no = 0
+    slice = N < M
+    if 1:
+        block_m = M // BLOCK_WG_M
+        block_n = N // BLOCK_WG_N
+        bias = BLOCK_WG_M / BLOCK_WG_N
+        devinfo = cl.dev_info()
+        eu_xecore = 16 if SG_SIZE == 8 else 8
+        xecores = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"] // eu_xecore
+        sm = math.sqrt(xecores * 2 / bias)
+        sn = math.sqrt(xecores * 2 * bias)
+        if N < M:
+            s0 = math.ceil(sn)
+            if block_n % s0 == 0:
+                slice = -s0
+                slice_no = block_n // slice
+            else:
+                if s0 * 1.5 < block_n:
+                    rem = block_n % s0
+                    expect_slice_no = (block_n + s0 - 1) // s0 - (s0 - rem)
+                    if expect_slice_no > 0:
+                        assert expect_slice_no >= 0, f'{block_n=} {expect_slice_no=} {s0=}'
+                        slice = -s0
+                        slice_no = -expect_slice_no
+        else:
+            # TODO: big weight matrix?
+            pass
+    print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
+    states_i8, states_scales = clops.per_tok_quantize(tA, 128000)
+    for i in range(50):
+        #id_wg_m, id_wg_n, slm, src_a, src_b, src_a_scale, src_b_scale, dst, M, N, K, lda, ldb, ldc
+        kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], states_i8, tBq4, states_scales, tBs, tC, M, N, K, K, K, N, slice_no, slice)
+    cl.finish()
+
+    if K < 1024:
+        C_ref = np.matmul(A, B)
+        compare(C_ref, tC.numpy())
+        print(f'{Colors.GREEN}passed{Colors.END}')
+    repeat_size = (N/BLOCK_WG_N*M*K+K*N+M*N)*2
+    if 0:
+        beg = time.time()
+        for i in range(0, 100):
+            kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], states_i8, tBq4, states_scales, tBs, tC, M, N, K, K, K, N, slice_no, slice)
+        cl.finish()
+        end = time.time()
+        time_opt = (end - beg) * 1e9 / 100
+        print(f'NOCOPY TPUT(f16):{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+    else:
+        for i in range(0, 100):
+            kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M], [SG_N, SG_M], states_i8, tBq4, states_scales, tBs, tC, M, N, K, K, K, N, slice_no, slice)
+            ns = cl.finish()
+            #repeat_size1 = (M*K+M/BLOCK_WG_M*K*N+M*N)*2
+            for time_opt in ns:
+                print(f'(CUR)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f}:{repeat_size/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+
 def test_onednn(M, K, N, K_group_size, w_dtype):
     tP1 = cl.tensor()
 
@@ -485,6 +612,81 @@ def test_onednn(M, K, N, K_group_size, w_dtype):
     # time_opt = (end - beg) * 1e9 / 100
     # print(f'ONEDNN TPUT({name}):{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
+def test_onednn_a8w4(M, K, N, K_group_size, w_dtype=cl.onednn_dtype.u4, is_sym=True):
+    tP1 = cl.tensor()
+    if w_dtype == cl.onednn_dtype.f16:
+        linear = cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, cl.onednn_dtype.undef, M, K, N, -1, cl.onednn_matmul_type.none,
+                                  cl.onednn_dtype.f16, tB_trans, cl.tensor(), cl.tensor(), cl.tensor())
+        linear.forward(tA, tC, cl.tensor())
+
+        cl.finish()
+        # C = A @ B
+        # assert(np.allclose(C, tC.numpy()))
+        # print('done')
+
+    if w_dtype == cl.onednn_dtype.u4:
+
+        assert (K % K_group_size) == 0
+        K_groups = K // K_group_size
+
+        test_type = 'w_s4'
+        #test_type = 'a_s8'
+        #test_type = 'a_f16'
+        with_zp = not is_sym
+        if test_type == 'a_f16':
+            mm = cl.onednn_matmul(cl.onednn_dtype.f16, w_dtype, cl.onednn_dtype.undef, M, K, N, -1)
+        elif test_type == 'a_s8':
+            mm = cl.onednn_matmul(cl.onednn_dtype.s8, w_dtype, cl.onednn_dtype.undef, M, K, N, -1)
+            mm.a_scale(K)
+        elif test_type == 'w_s4':
+            import torch
+            weight, scales, zps, _ = clops.linear_onednn.quantize_weight_to_i4(torch.from_numpy(B.transpose().copy()).to(dtype=torch.float16), K_group_size, with_zp)
+            mm = cl.onednn_matmul(cl.onednn_dtype.s8, cl.onednn_dtype.s4, cl.onednn_dtype.undef, M, K, N, -1)
+            mm.a_scale(K)
+        
+        mm.w_scale(K_group_size)
+        if with_zp:
+            mm.w_zp(K_group_size)
+        mm.fpmath_f16()
+        mm.create()
+        states_i8, states_scales = clops.per_tok_quantize(tA, 128000)
+        cl.finish()
+        if test_type == 'a_f16':
+            weights = [tBq4, tBs, tBz] if with_zp else [tBq4, tBs]
+            mm.forward(tC, (tA,), weights, cl.tensor(), cl.tensor())
+        elif test_type == 'a_s8':
+            weights = [tBq4, tBs, tBz] if with_zp else [tBq4, tBs]
+            mm.forward(tC, (states_i8, states_scales), weights, cl.tensor(), cl.tensor())
+        elif test_type == 'w_s4':
+            weights = [weight, scales, zps] if with_zp else [weight, scales]
+            mm.forward(tC, (states_i8, states_scales), weights, cl.tensor(), cl.tensor())
+
+        cl.finish()
+        # C = A @ B
+        # print("ref is calculated!")
+        # compare(C, tC.numpy())
+        print('done')
+        
+    name = 'f16' if w_dtype == cl.onednn_dtype.f16 else 'u4 '
+    beg = time.time()
+    for i in range(0, 100):
+        if test_type == 'a_f16':
+            weights = [tBq4, tBs, tBz] if with_zp else [tBq4, tBs]
+            mm.forward(tC, (tA,), weights, cl.tensor(), cl.tensor())
+        elif test_type == 'a_s8':
+            weights = [tBq4, tBs, tBz] if with_zp else [tBq4, tBs]
+            mm.forward(tC, (states_i8, states_scales), weights, cl.tensor(), cl.tensor())
+        elif test_type == 'w_s4':
+            weights = [weight, scales, zps] if with_zp else [weight, scales]
+            mm.forward(tC, (states_i8, states_scales), weights, cl.tensor(), cl.tensor())
+    ns = mm.finish()
+    end = time.time()
+    for i, time_opt in enumerate(ns):
+        print(f'(DNN)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+
+    # time_opt = (end - beg) * 1e9 / 100
+    # print(f'ONEDNN TPUT({name}):{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+
 if 0:
     test_org()
 
@@ -492,9 +694,13 @@ if weight_datatype == 'f16':
     test_f16()
 elif weight_datatype == 'u4':
     test_a16w4()
+elif weight_datatype == 'a8w4sym':
+    test_a8w4_sym()
 print('============================================')
 if os.environ['OV_BUILD_PATH']:
     if weight_datatype == 'f16':
         test_onednn(M, K, N, 0, cl.onednn_dtype.f16)
     elif weight_datatype == 'u4':
         test_onednn(M, K, N, K_GROUP_SIZE, cl.onednn_dtype.u4)
+    elif weight_datatype == 'a8w4sym':
+        test_onednn_a8w4(M, K, N, K_GROUP_SIZE, w_dtype=cl.onednn_dtype.u4, is_sym=True)
