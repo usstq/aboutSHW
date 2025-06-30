@@ -23,44 +23,42 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def get_cm_grf_width():
-    cm_kernels = cl.kernels(r'''
-    extern "C" _GENX_MAIN_ void cm_get_grf_width(int * info [[type("svmptr_t")]]) {
-        info[0] = CM_GRF_WIDTH;
-    }''', f"-cmc")
-    t_info = cl.tensor([2], np.dtype(np.int32))
-    cm_kernels.enqueue("cm_get_grf_width", [1], [1], t_info)
-    return t_info.numpy()[0]
-
-CM_GRF_WIDTH = get_cm_grf_width()
 
 seq_len = 8192
 head_num = 28
+kvhead_num = 4
 head_sz = 128
-MAX_GRF_NUM = 64
-assert head_sz%32 == 0
-#CM_GRF_WIDTH is 256 or 512, headsize%32 can ensure the (head_sz*16)%CM_GRF_WIDTH == 0
-GRFs_per_token=head_sz*16//CM_GRF_WIDTH
-#total
-token_blk = MAX_GRF_NUM//GRFs_per_token
+
+token_blk = 1
 local_sz=64
 token_per_wg=local_sz*token_blk
 low=-2
 high = 3
 
 q_factor = torch.randint(high, high+3, [seq_len, head_num, head_sz]).to(dtype=torch.float16)
+kv_factor = torch.randint(high, high+3, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16)
+
 q = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.float16) / q_factor
-qint8 = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.int8)
-out = torch.zeros(seq_len, head_num, head_sz*2).to(dtype=torch.int8)
+k = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
+v = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
+
+qint8_ref = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.int8)
+kint8_ref = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.int8)
+
+qscale_ref = torch.zeros(seq_len, head_num).to(dtype=torch.float32)
+kscale_ref = torch.zeros(seq_len, kvhead_num).to(dtype=torch.float32)
+
+scale_out = torch.zeros((seq_len*head_num + token_blk -1)//token_blk*token_blk).to(dtype=torch.float32)
+
 cl.profiling(True)
-
-
 
 src = r'''
 
 #pyeval f"#define TOKEN_NUM {token_blk}"
 #pyeval f"#define HEAD_SZ {head_sz}"
 #pyeval f"#define HEAD_NUM {head_num}"
+#pyeval f"#define KVHEAD_NUM {kvhead_num}"
+
 #pyeval f"#define SEQ_LEN {seq_len}"
 
 
@@ -90,39 +88,45 @@ void show_float(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex base [[type("buffer_t")]]) {
+extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex base [[type("buffer_t")]], SurfaceIndex scale [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
-    auto pitch = HEAD_SZ*sizeof(half);
-    auto offset = id*TOKEN_NUM*pitch;
     if (id*TOKEN_NUM >= HEAD_NUM*SEQ_LEN)
         return;
+    auto head = id % HEAD_NUM;
+    auto seq = id / HEAD_NUM;
+    auto pitch = HEAD_SZ*sizeof(half);
+    auto offset = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + head)*pitch;
+    auto scale_off = id*TOKEN_NUM*sizeof(float);
+
 
     auto remaining_tokens = (HEAD_NUM*SEQ_LEN-id*TOKEN_NUM) >= TOKEN_NUM ? TOKEN_NUM : (HEAD_NUM*SEQ_LEN-id*TOKEN_NUM);
 
-    matrix<half, TOKEN_NUM, HEAD_SZ> tokens;
-    auto quan_tokens = tokens.format<int8_t,TOKEN_NUM*2,  HEAD_SZ>();
+    vector<half, HEAD_SZ> token;
+    vector<float, TOKEN_NUM> scaleV;
 
+    auto quan_token = token.format<int8_t,2, HEAD_SZ>().row(0);
 
-#if 0
     if (remaining_tokens == TOKEN_NUM) {
         #pragma unroll
         for(int i= 0;i<TOKEN_NUM;i++,offset+=pitch) {
-            tokens.row(i).format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(base, offset);
-            //half max=cm_reduced_max<half>(cm_abs(tokens[i]));
-            //quan_tokens[i] =  cm_mul<int8_t>(tokens[i], float(127.0)/float(max));
-            //if (offset != 9999999999)
-                //continue;
-            cm_store<uint32_t, HEAD_SZ/4>(base, offset, quan_tokens[i].format<uint32_t>());
+            token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(base, offset);
+            half max=cm_reduced_max<half>(cm_abs(token));
+            quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
+            cm_store<uint32_t, HEAD_SZ/4>(base, offset, quan_token.format<uint32_t>());
+            scaleV[i] = (float)(max)/127.0;
         }
     } else {
         for(int i= 0;i<remaining_tokens;i++,offset+=pitch) {
-            tokens.row(i).format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(base, offset);
-            //half max=cm_reduced_max<half>(cm_abs(tokens[i]));
-            //quan_tokens[i] =  cm_mul<int8_t>(tokens[i], float(127.0)/float(max));
-            cm_store<uint32_t, HEAD_SZ/4>(base, offset, quan_tokens[i].format<uint32_t>());
+            token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(base, offset);
+            //half max=cm_reduced_max<half>(cm_abs(token));
+            //quan_token =  cm_mul<int8_t>(token, float(127.0)/float(max));
+            cm_store<uint32_t, HEAD_SZ/4>(base, offset, quan_token.format<uint32_t>());
+            //scaleV[i] = (float)(max)/127.0;
         }
+
     }
-#endif
+    cm_store<uint32_t, TOKEN_NUM>(scale, scale_off, scaleV.format<uint32_t>());
+
 }
 
 '''
@@ -141,10 +145,19 @@ def pyeval(src):
 
 for seq in range(seq_len):
     for h in range(head_num):
-        token=q[seq, h, :]
-        max=torch.amax(token.abs(), dim=0, keepdim=True)
-        qtoken=(token/max*127.0).to(dtype=torch.int8)
-        qint8[seq,h,:]=qtoken
+        hkv = h // (head_num//kvhead_num)
+        qtoken=q[seq, h, :]
+        qmax=torch.amax(qtoken.abs(), dim=0, keepdim=True)
+        qtoken_int8=(qtoken/qmax*127.0).to(dtype=torch.int8)
+        qint8_ref[seq,h,:]=qtoken_int8
+        qscale_ref[seq, h]=float(qmax)/127.0
+
+        ktoken=k[seq,hkv,:]
+        kmax=torch.amax(ktoken.abs(), dim=0, keepdim=True)
+        ktoken_int8=(ktoken/kmax*127.0).to(dtype=torch.int8)
+        kint8_ref[seq,hkv,:]=ktoken_int8
+        kscale_ref[seq, hkv]=float(kmax)/127.0
+
 
 all_layers=[]
 mem_size=0
@@ -153,9 +166,11 @@ while mem_size < 4e9:
         cl.tensor(q.detach().numpy())
     ])
     mem_size += q.numel() * q.element_size()
-t_Alist = [cl.tensor(q.to(torch.float16).detach().numpy()) for _ in range(50)]
+qkv =  torch.cat((q,k,v), 1)
+t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
+t_qscaleList = [cl.tensor(scale_out.detach().numpy()) for _ in range(50)]
 
-print(f'GRFs_per_token:{GRFs_per_token}, head_num:{head_num}, seq_len:{seq_len}, token_per_wg:{token_per_wg}, token_blk:{token_blk}')
+print(f'head_num:{head_num}, seq_len:{seq_len}, token_per_wg:{token_per_wg}, token_blk:{token_blk}')
 
 cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
 
@@ -164,18 +179,18 @@ tokens_align_up=(head_num*seq_len+token_per_wg-1)//token_per_wg*local_sz
 gws = [tokens_align_up]
 print(f'GWS:{gws}, LWS:{lws}')
 for i in range(50):
-    cm_kernels.enqueue("cm_test2d", gws, lws, t_Alist[i])
+    cm_kernels.enqueue("cm_test2d", gws, lws, t_qkvlist[i], t_qscaleList[i])
 lat=cl.finish()
 
 rdbytes=seq_len*head_num*head_sz*2
 ns=sum(lat[5:])/len(lat[5:])
-print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{rdbytes/2/ns:.2f} GB/S')
+print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{(rdbytes/2+head_num*seq_len*4)/ns:.2f} GB/S')
 
-out=t_Alist[0].numpy()[:,:,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
-# check_close(qint8,torch.from_numpy(out))
+qint8_out=t_qkvlist[0].numpy()[:,0:head_num,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
+qscale_out=t_qscaleList[0].numpy()[0:seq_len*head_num].view(np.float32).reshape((seq_len, head_num))
 
-
-
+check_close(qint8_ref,torch.from_numpy(qint8_out))
+# check_close(qscale_ref,torch.from_numpy(qscale_out))
 
 
 cl.finish()
