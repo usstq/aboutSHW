@@ -41,15 +41,27 @@ class flash_attn_cm:
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused(self, qkv, dqscale_q, dqscale_k, n_repeats = 1):
+    def qkv_fused(self, qkv, n_repeats = 1):
         seq_len, total_heads, head_size = qkv.shape
         old_dtype = qkv.dtype
         assert total_heads == (self.num_heads + self.num_kv_heads * 2)
         assert head_size == self.head_size
-        t_qkv = cl.tensor(qkv.to(torch.float16).detach().numpy())
+        t_qkv = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
         t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
-        t_dqscale_q = cl.tensor(dqscale_q.to(torch.float32).detach().numpy())
-        t_dqscale_k = cl.tensor(dqscale_k.to(torch.float32).detach().numpy())
+
+        t_dqscale_q = [cl.tensor(torch.zeros(self.num_heads, seq_len).to(torch.float32).detach().numpy()) for _ in range(n_repeats)]
+        t_dqscale_k = [cl.tensor(torch.zeros(self.num_kv_heads, seq_len).to(torch.float32).detach().numpy()) for _ in range(n_repeats)]
+        local_sz = 32
+        quan_lws = [local_sz]
+        quan_gws=[(self.num_kv_heads*seq_len+local_sz-1)//local_sz*local_sz]
+        print(f'GWS:{quan_gws}, LWS:{quan_lws}')
+        for i in range(n_repeats):
+            self.kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, seq_len, t_qkv[i], t_dqscale_q[i], t_dqscale_k[i])
+        lat=cl.finish()
+        rdbytes=(seq_len*self.num_heads*self.head_size+seq_len*self.num_kv_heads*self.head_size)*2
+        if n_repeats > 10:
+            ns=sum(lat[5:])/len(lat[5:])
+            print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{(rdbytes/2+(self.num_heads+self.num_kv_heads)*seq_len*4)/ns:.2f} GB/S')
 
         wg_size = 16
         q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
@@ -58,8 +70,8 @@ class flash_attn_cm:
         GWS = [1, self.num_heads, wg_count * wg_size]
         LWS = [1, 1, wg_size]
         print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
-        for _ in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_qkv, t_dqscale_q, t_dqscale_k, t_out)
+        for i in range(n_repeats):
+            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_qkv[i], t_dqscale_q[i], t_dqscale_k[i], t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
 
@@ -211,31 +223,32 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype) / q_factor
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / k_factor
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-    # ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
+    ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
 
-    scale_factor = 1.0/(float)(head_size**0.5)
-    qmax = q.abs().amax(dim=2, keepdim=True)
-    kmax = k.abs().amax(dim=2, keepdim=True)
-    q_INT8 = (q/qmax*127.0).to(dtype=torch.int8)
-    k_INT8 =  (k/kmax*127.0).to(dtype=torch.int8)
-    dqscale_q = qmax.to(dtype=torch.float32) / 127.0
-    dqscale_k = scale_factor*kmax.to(dtype=torch.float32) /127.0
-    # Tranpose from [B,S,H,1] to [B,H,S,1]. [B,S,H,1] scaling loading seems have bug in CM.
-    dqscale_q=dqscale_q.transpose(0,1).flatten().reshape(num_heads, seq_len, 1)
-    dqscale_k=dqscale_k.transpose(0,1).flatten().reshape(num_kv_heads, seq_len, 1)
+    # scale_factor = 1.0/(float)(head_size**0.5)
+    # qmax = q.abs().amax(dim=2, keepdim=True)
+    # kmax = k.abs().amax(dim=2, keepdim=True)
+    # q_INT8 = (q/qmax*127.0).to(dtype=torch.int8)
+    # k_INT8 =  (k/kmax*127.0).to(dtype=torch.int8)
+    # dqscale_q = qmax.to(dtype=torch.float32) / 127.0
+    # dqscale_k = scale_factor*kmax.to(dtype=torch.float32) /127.0
+    # # Tranpose from [B,S,H,1] to [B,H,S,1]. [B,S,H,1] scaling loading seems have bug in CM.
+    # dqscale_q=dqscale_q.transpose(0,1).flatten().reshape(num_heads, seq_len, 1)
+    # dqscale_k=dqscale_k.transpose(0,1).flatten().reshape(num_kv_heads, seq_len, 1)
 
     func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, is_causal)
-    dummy_q = torch.zeros(seq_len, num_heads, head_size).to(dtype=torch.int8)
-    dummy_k = torch.zeros(seq_len, num_kv_heads, head_size).to(dtype=torch.int8)
-    q_INT8 = torch.cat((q_INT8,dummy_q), 2).view(torch.float16).view(seq_len, num_heads, head_size)
-    k_INT8 = torch.cat((k_INT8,dummy_k), 2).view(torch.float16).view(seq_len, num_kv_heads, head_size)
-    qkv = torch.cat((q_INT8,k_INT8,v), 1)
-    out = func.qkv_fused(qkv, dqscale_q, dqscale_k)
-    out = func.qkv_fused(qkv, dqscale_q, dqscale_k, n_repeats=20)
+    # dummy_q = torch.zeros(seq_len, num_heads, head_size).to(dtype=torch.int8)
+    # dummy_k = torch.zeros(seq_len, num_kv_heads, head_size).to(dtype=torch.int8)
+    # q_INT8 = torch.cat((q_INT8,dummy_q), 2).view(torch.float16).view(seq_len, num_heads, head_size)
+    # k_INT8 = torch.cat((k_INT8,dummy_k), 2).view(torch.float16).view(seq_len, num_kv_heads, head_size)
+    qkv = torch.cat((q,k,v), 1)
+
+    out = func.qkv_fused(qkv)
+    out = func.qkv_fused(qkv, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
-    # check_close(ref, out)
+    check_close(ref, out)
     #assert 0
 
 if __name__ == "__main__":
@@ -243,7 +256,7 @@ if __name__ == "__main__":
     # 0.368 ms overhead ,  1.264 quanQ*quanK , 1.355 mul dqscale ,1.705 apply mask , 2.613 softmax, 4.045 transpose P, 6.259 P*V.
     test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
     test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    # test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
 
     # test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)

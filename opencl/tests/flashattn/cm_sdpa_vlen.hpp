@@ -96,6 +96,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     uint kv_offset = (kv_start*num_kv_heads + hkv)*head_size;
 
 #if USE_LSC == 1
+#if 0
     sdpa_kernel_lsc<false, num_heads, num_kv_heads, head_size>(
                                 slm_K,
                                 slm_V,
@@ -109,6 +110,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
                                 reinterpret_cast<svmptr_t>(key + kv_offset),
                                 reinterpret_cast<svmptr_t>(value + kv_offset),
                                 reinterpret_cast<svmptr_t>(output + qo_offset));
+#endif
 #else
     // sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
     //                             slm_K,
@@ -130,7 +132,43 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
 #endif
 }
 
+extern "C" _GENX_MAIN_ void cm_quantize_qk(int seqlen, SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]]) {
+    auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
+    if (id >= CMFLA_NUM_KV_HEADS*seqlen)
+        return;
+    constexpr int KVGRP_SZ =  CMFLA_NUM_HEADS / CMFLA_NUM_KV_HEADS;
+    auto headkv = id % CMFLA_NUM_KV_HEADS;
+    auto head = id * KVGRP_SZ % CMFLA_NUM_HEADS;
+    auto seq = id / CMFLA_NUM_KV_HEADS;
+    auto pitch = CMFLA_HEAD_SIZE*sizeof(half);
+    auto qoff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS+ CMFLA_NUM_KV_HEADS) + head)*pitch;
+    auto koff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS + CMFLA_NUM_KV_HEADS) + headkv + CMFLA_NUM_HEADS)*pitch;
 
+    auto kscale_off = (headkv*seqlen + seq)*sizeof(float);
+    auto qscale_off = (head*seqlen + seq)*sizeof(float);
+
+    vector<half, CMFLA_HEAD_SIZE> token;
+    vector<float, 1> scaleV;
+
+    auto quan_token= token.format<int8_t,2, CMFLA_HEAD_SIZE>().row(0);
+
+    #pragma unroll
+    for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*seqlen) {
+        token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, qoff);
+        half max=cm_reduced_max<half>(cm_abs(token));
+        quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
+        cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, qoff, quan_token.format<uint32_t>());
+        scaleV[0] = (float)(max)/127.0;
+        cm_store<uint32_t, 1>(qscale, qscale_off, scaleV.format<uint32_t>());
+    }
+
+    token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, koff);
+    half max=cm_reduced_max<half>(cm_abs(token));
+    quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
+    cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, koff, quan_token.format<uint32_t>());
+    scaleV[0] = (float)(max)/127.0*(float)(CMFLA_SCALE_FACTOR);
+    cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
+}
 
 
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(

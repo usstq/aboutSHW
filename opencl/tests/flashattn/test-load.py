@@ -47,8 +47,8 @@ kint8_ref = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=to
 qscale_ref = torch.zeros(seq_len, head_num).to(dtype=torch.float32)
 kscale_ref = torch.zeros(seq_len, kvhead_num).to(dtype=torch.float32)
 
-qscale_out = torch.zeros(seq_len, head_num).to(dtype=torch.float32)
-kscale_out = torch.zeros(seq_len, kvhead_num).to(dtype=torch.float32)
+qscale_out = torch.zeros(head_num, seq_len).to(dtype=torch.float32)
+kscale_out = torch.zeros(kvhead_num, seq_len).to(dtype=torch.float32)
 
 
 cl.profiling(True)
@@ -100,8 +100,8 @@ extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex qkv [[type("buffer_t")]], Sur
     auto qoff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + head)*pitch;
     auto koff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + headkv + HEAD_NUM)*pitch;
 
-    auto kscale_off = id*sizeof(float);
-    auto qscale_off = id*KVGRP_SZ*sizeof(float);
+    auto kscale_off = (headkv*SEQ_LEN + seq)*sizeof(float);
+    auto qscale_off = (head*SEQ_LEN + seq)*sizeof(float);
 
     vector<half, HEAD_SZ> token;
     vector<float, 1> scaleV;
@@ -109,7 +109,7 @@ extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex qkv [[type("buffer_t")]], Sur
     auto quan_token= token.format<int8_t,2, HEAD_SZ>().row(0);
 
     #pragma unroll
-    for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)) {
+    for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*SEQ_LEN) {
         token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, qoff);
         half max=cm_reduced_max<half>(cm_abs(token));
         quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
@@ -192,8 +192,8 @@ kint8_out=t_qkvlist[0].numpy()[:,head_num:(head_num+kvhead_num),0:head_sz//2].vi
 
 check_close(qint8_ref,torch.from_numpy(qint8_out))
 check_close(kint8_ref,torch.from_numpy(kint8_out))
-check_close(qscale_ref,torch.from_numpy(t_qscaleList[0].numpy()))
-check_close(kscale_ref,torch.from_numpy(t_kscaleList[0].numpy()))
+check_close(qscale_ref.transpose(0, 1),torch.from_numpy(t_qscaleList[0].numpy()))
+check_close(kscale_ref.transpose(0, 1),torch.from_numpy(t_kscaleList[0].numpy()))
 
 
 cl.finish()
