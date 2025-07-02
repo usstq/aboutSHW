@@ -99,12 +99,12 @@ __kernel void multi_scale_deformable_attn(
         const scalar_t w_im = loc_w * spatial_w - 0.5;
 
         if (h_im > -1 && w_im > -1 && h_im < spatial_h && w_im < spatial_w) {
-          scalar_t a = ms_deform_attn_im2col_bilinear(data_value_ptr, spatial_h,
+          col += ms_deform_attn_im2col_bilinear(data_value_ptr, spatial_h,
                                                 spatial_w, num_heads, channels,
                                                 h_im, w_im, m_col, c_col) *
                  weight;
           // printf("====== %f, %f\n", a, col);
-          col += a;
+          // col += a;
         }
 
         data_weight_ptr += 1;
