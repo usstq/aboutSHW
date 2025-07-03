@@ -166,7 +166,7 @@ extern "C" _GENX_MAIN_ void cm_quantize_qk(int seqlen, SurfaceIndex qkv [[type("
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
     cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, koff, quan_token.format<uint32_t>());
-    scaleV[0] = (float)(max)/127.0*(float)(CMFLA_SCALE_FACTOR);
+    scaleV[0] = (float)(max)*scale_factor/float(127.0);
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }
 

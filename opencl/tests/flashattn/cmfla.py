@@ -19,6 +19,7 @@ def get_cm_grf_width():
     return t_info.numpy()[0]
 
 CM_GRF_WIDTH = get_cm_grf_width()
+print(f'======================CM_GRF_WIDTH is {CM_GRF_WIDTH}')
 
 class flash_attn_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, is_causal = False):
@@ -256,7 +257,7 @@ if __name__ == "__main__":
     # 0.368 ms overhead ,  1.264 quanQ*quanK , 1.355 mul dqscale ,1.705 apply mask , 2.613 softmax, 4.045 transpose P, 6.259 P*V.
     test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
     test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    # test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
 
     # test_flash_attn_causal_batch1(seq_len=12288, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_causal_batch1(seq_len=16384, num_heads = 28, num_kv_heads = 4, head_size = 128)
