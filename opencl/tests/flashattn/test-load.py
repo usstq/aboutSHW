@@ -59,8 +59,11 @@ src = r'''
 #pyeval f"#define HEAD_SZ {head_sz}"
 #pyeval f"#define HEAD_NUM {head_num}"
 #pyeval f"#define KVHEAD_NUM {kvhead_num}"
-
+#pyeval f"#define SEQ_BLK {seq_blk}"
+#pyeval f"#define STATE_BLK {state_blk}"
 #pyeval f"#define SEQ_LEN {seq_len}"
+#pyeval f"#define SEQ_BLK_WG {seq_blk_wg}"
+#define MAX_LOCAL_SZ 32
 
 
 template<typename T, int M, int N>
@@ -89,7 +92,7 @@ void show_float(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]]) {
+extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
     if (id >= KVHEAD_NUM*SEQ_LEN)
         return;
@@ -125,6 +128,145 @@ extern "C" _GENX_MAIN_ void cm_test2d(SurfaceIndex qkv [[type("buffer_t")]], Sur
     scaleV[0] = (float)(max)/127.0;
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }
+
+
+extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
+#define SEQ_STEP 8
+#define NO_LSC 1
+    // q [B, L, H, S]
+    auto kvhead = cm_group_id(0);
+    auto sblk_idx = cm_group_id(1);
+    auto lid = cm_linear_local_id();
+    auto offset = ((lid * SEQ_BLK * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
+
+    auto remaing_seq = (lid+1)*SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-lid*SEQ_BLK): SEQ_BLK;
+    constexpr uint BUF_SIZE = MAX_LOCAL_SZ*STATE_BLK*sizeof(float);
+    cm_slm_init(BUF_SIZE);
+    auto scratch_buf = cm_slm_alloc(BUF_SIZE);
+
+#if NO_LSC
+    vector <half, STATE_BLK> seq;
+    vector <float, STATE_BLK> seq_f32;
+
+#else
+    matrix <half, 8, STATE_BLK> seq;
+    matrix <float, 8, STATE_BLK> seq_f32;
+    lsc::block_2d_desc<half, 1, SEQ_STEP, STATE_BLK> b2dq((k_ptr + offset), remaing_seq - 1,STATE_BLK*sizeof(half) - 1, KVHEAD_NUM*HEAD_SZ*sizeof(half) - 1, 0, 0);
+#endif
+    vector<float, STATE_BLK> seq_blk_sum = 0;
+    auto pitch = KVHEAD_NUM*HEAD_SZ;
+
+#if NO_LSC
+    #pragma unroll
+    for (int i = 0; i < SEQ_BLK; i++) {
+        cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr + offset + i* pitch), seq);
+        seq_f32 = seq;
+        seq_blk_sum += seq_f32;
+        //# cm_load<lsc::Normal>(seq_blk.format<half>(), b2dq.set_block_y(i));
+        //# seq_blk_f32 = seq_blk;
+        //# #pragma unroll
+        //# for (int r = 0; r<SEQ_STEP; r++) {
+        //#     seq_blk_sum += seq_blk_f32[r];
+        //# }
+    }
+#else
+    #pragma unroll
+    for (int i = 0; i < SEQ_BLK; i+=SEQ_STEP) {
+        cm_load<lsc::Normal>(seq.format<half>(), b2dq.set_block_y(i));
+        seq_f32 = seq;
+        #pragma unroll
+        for (int r = 0; r<SEQ_STEP; r++) {
+             seq_blk_sum += seq_f32[r];
+        }
+    }
+#endif
+    cm_slm_block_write(scratch_buf, lid*STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
+    cm_barrier();
+    if (lid == 0) {
+        seq_blk_sum = 0;
+        vector<float, STATE_BLK> tmpsum = 0;
+        int off = 0;
+        #pragma unroll
+        for (int r = 0; r<MAX_LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
+            cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
+            seq_blk_sum += tmpsum;
+        }
+
+        vector<half, STATE_BLK> kmean;
+        kmean = seq_blk_sum / (float)(SEQ_LEN);
+        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*HEAD_SZ+sblk_idx*STATE_BLK), kmean);
+    }
+}
+
+
+extern "C" _GENX_MAIN_ void Kmean_1st(half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
+#define SEQ_STEP 8
+#define NO_LSC 1
+    // q [B, L, H, S]
+    auto kvhead = cm_group_id(0);
+    auto sblk_idx = cm_group_id(1);
+    auto lid = cm_linear_local_id();
+    auto offset = ((lid * SEQ_BLK * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
+
+    auto remaing_seq = (lid+1)*SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-lid*SEQ_BLK): SEQ_BLK;
+    constexpr uint BUF_SIZE = MAX_LOCAL_SZ*STATE_BLK*sizeof(float);
+    cm_slm_init(BUF_SIZE);
+    auto scratch_buf = cm_slm_alloc(BUF_SIZE);
+
+#if NO_LSC
+    vector <half, STATE_BLK> seq;
+    vector <float, STATE_BLK> seq_f32;
+
+#else
+    matrix <half, 8, STATE_BLK> seq;
+    matrix <float, 8, STATE_BLK> seq_f32;
+    lsc::block_2d_desc<half, 1, SEQ_STEP, STATE_BLK> b2dq((k_ptr + offset), remaing_seq - 1,STATE_BLK*sizeof(half) - 1, KVHEAD_NUM*HEAD_SZ*sizeof(half) - 1, 0, 0);
+#endif
+    vector<float, STATE_BLK> seq_blk_sum = 0;
+    auto pitch = KVHEAD_NUM*HEAD_SZ;
+
+#if NO_LSC
+    #pragma unroll
+    for (int i = 0; i < SEQ_BLK; i++) {
+        cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr + offset + i* pitch), seq);
+        seq_f32 = seq;
+        seq_blk_sum += seq_f32;
+        //# cm_load<lsc::Normal>(seq_blk.format<half>(), b2dq.set_block_y(i));
+        //# seq_blk_f32 = seq_blk;
+        //# #pragma unroll
+        //# for (int r = 0; r<SEQ_STEP; r++) {
+        //#     seq_blk_sum += seq_blk_f32[r];
+        //# }
+    }
+#else
+    #pragma unroll
+    for (int i = 0; i < SEQ_BLK; i+=SEQ_STEP) {
+        cm_load<lsc::Normal>(seq.format<half>(), b2dq.set_block_y(i));
+        seq_f32 = seq;
+        #pragma unroll
+        for (int r = 0; r<SEQ_STEP; r++) {
+             seq_blk_sum += seq_f32[r];
+        }
+    }
+#endif
+    cm_slm_block_write(scratch_buf, lid*STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
+    cm_barrier();
+    if (lid == 0) {
+        seq_blk_sum = 0;
+        vector<float, STATE_BLK> tmpsum = 0;
+        int off = 0;
+        #pragma unroll
+        for (int r = 0; r<MAX_LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
+            cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
+            seq_blk_sum += tmpsum;
+        }
+
+        vector<half, STATE_BLK> kmean;
+        kmean = seq_blk_sum / (float)(SEQ_LEN);
+        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*HEAD_SZ+sblk_idx*STATE_BLK), kmean);
+    }
+}
+
 
 '''
 
@@ -163,37 +305,33 @@ while mem_size < 4e9:
         cl.tensor(q.detach().numpy())
     ])
     mem_size += q.numel() * q.element_size()
+t_klist = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(50)]
+t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(50)]
+smmothk_local_sz = 32
+
 qkv =  torch.cat((q,k,v), 1)
+kmean = k.mean(dim=0, keepdim=True)
+
 t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
 t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(50)]
 t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(50)]
 
 
 print(f'head_num:{head_num}, seq_len:{seq_len}')
+seq_blk = (seq_len + smmothk_local_sz - 1) // smmothk_local_sz
+seq_blk_wg=seq_blk
+state_blk=32
 
 cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
 
-lws = [local_sz]
-tokens_align_up=(kvhead_num*seq_len+local_sz-1)//local_sz*local_sz
-gws = [tokens_align_up]
+assert head_sz % state_blk == 0, f'headsz is multiple of 32'
+lws = [1, 1, smmothk_local_sz]
+gws = [kvhead_num, head_sz//state_blk, smmothk_local_sz]
 print(f'GWS:{gws}, LWS:{lws}')
 for i in range(50):
-    cm_kernels.enqueue("cm_test2d", gws, lws, t_qkvlist[i], t_qscaleList[i], t_kscaleList[i])
+    cm_kernels.enqueue("Kmean", gws, lws, t_klist[i], t_kmeanlist[i])
 lat=cl.finish()
-
-rdbytes=(seq_len*head_num*head_sz+seq_len*kvhead_num*head_sz)*2
 ns=sum(lat[5:])/len(lat[5:])
-print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{(rdbytes/2+(head_num+kvhead_num)*seq_len*4)/ns:.2f} GB/S')
-
-qint8_out=t_qkvlist[0].numpy()[:,0:head_num,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
-kint8_out=t_qkvlist[0].numpy()[:,head_num:(head_num+kvhead_num),0:head_sz//2].view(np.int8).reshape((seq_len, kvhead_num, head_sz))
-
-# qscale_out=t_qscaleList[0].numpy()[0:seq_len*head_num].view(np.float32).reshape((seq_len, head_num))
-
-check_close(qint8_ref,torch.from_numpy(qint8_out))
-check_close(kint8_ref,torch.from_numpy(kint8_out))
-check_close(qscale_ref.transpose(0, 1),torch.from_numpy(t_qscaleList[0].numpy()))
-check_close(kscale_ref.transpose(0, 1),torch.from_numpy(t_kscaleList[0].numpy()))
-
-
-cl.finish()
+print(ns)
+check_close(kmean,torch.from_numpy(t_kmeanlist[0].numpy()))
+print(f'-----------------------------------------------------------------------------------------------\n')
