@@ -63,7 +63,7 @@ src = r'''
 #pyeval f"#define STATE_BLK {state_blk}"
 #pyeval f"#define SEQ_LEN {seq_len}"
 #pyeval f"#define SEQ_BLK_WG {seq_blk_wg}"
-#define MAX_LOCAL_SZ 32
+#pyeval f"#define LOCAL_SZ {smmothk_local_sz}"
 
 
 template<typename T, int M, int N>
@@ -140,7 +140,7 @@ extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_
     auto offset = ((lid * SEQ_BLK * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
 
     auto remaing_seq = (lid+1)*SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-lid*SEQ_BLK): SEQ_BLK;
-    constexpr uint BUF_SIZE = MAX_LOCAL_SZ*STATE_BLK*sizeof(float);
+    constexpr uint BUF_SIZE = LOCAL_SZ*STATE_BLK*sizeof(float);
     cm_slm_init(BUF_SIZE);
     auto scratch_buf = cm_slm_alloc(BUF_SIZE);
 
@@ -187,7 +187,7 @@ extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_
         vector<float, STATE_BLK> tmpsum = 0;
         int off = 0;
         #pragma unroll
-        for (int r = 0; r<MAX_LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
+        for (int r = 0; r<LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
             cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
             seq_blk_sum += tmpsum;
         }
@@ -199,71 +199,57 @@ extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_
 }
 
 
-extern "C" _GENX_MAIN_ void Kmean_1st(half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
-#define SEQ_STEP 8
-#define NO_LSC 1
-    // q [B, L, H, S]
+extern "C" _GENX_MAIN_ void Kmean_1st(half* k_ptr [[type("svmptr_t")]], float* kmean_ptr [[type("svmptr_t")]]) {
+    //lws = [1, 1, smmothk_local_sz]
+    //gws = [kvhead_num, part_num, smmothk_local_sz]
+    // k [B, L, H, S]
     auto kvhead = cm_group_id(0);
-    auto sblk_idx = cm_group_id(1);
+    auto part_idx = cm_group_id(1);
     auto lid = cm_linear_local_id();
-    auto offset = ((lid * SEQ_BLK * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
+    auto seq_idx = part_idx * SEQ_BLK_WG + lid * SEQ_BLK;
+    auto local_sz = cm_linear_local_size();
+    auto partnum = cm_group_count(1);
+    if (seq_idx > SEQ_LEN)
+        return;
+    auto remaing_seq = seq_idx + SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-seq_idx): SEQ_BLK;
 
-    auto remaing_seq = (lid+1)*SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-lid*SEQ_BLK): SEQ_BLK;
-    constexpr uint BUF_SIZE = MAX_LOCAL_SZ*STATE_BLK*sizeof(float);
+    auto offset = ((seq_idx * KVHEAD_NUM + kvhead)*HEAD_SZ);
+
+    constexpr uint BUF_SIZE = LOCAL_SZ*HEAD_SZ*sizeof(float);
     cm_slm_init(BUF_SIZE);
     auto scratch_buf = cm_slm_alloc(BUF_SIZE);
 
-#if NO_LSC
-    vector <half, STATE_BLK> seq;
-    vector <float, STATE_BLK> seq_f32;
+    vector <half, HEAD_SZ> seq;
+    vector <float, HEAD_SZ> seq_f32;
 
-#else
-    matrix <half, 8, STATE_BLK> seq;
-    matrix <float, 8, STATE_BLK> seq_f32;
-    lsc::block_2d_desc<half, 1, SEQ_STEP, STATE_BLK> b2dq((k_ptr + offset), remaing_seq - 1,STATE_BLK*sizeof(half) - 1, KVHEAD_NUM*HEAD_SZ*sizeof(half) - 1, 0, 0);
-#endif
-    vector<float, STATE_BLK> seq_blk_sum = 0;
+
+    vector<float, HEAD_SZ> seq_blk_sum = 0;
     auto pitch = KVHEAD_NUM*HEAD_SZ;
 
-#if NO_LSC
     #pragma unroll
     for (int i = 0; i < SEQ_BLK; i++) {
         cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr + offset + i* pitch), seq);
         seq_f32 = seq;
+
         seq_blk_sum += seq_f32;
-        //# cm_load<lsc::Normal>(seq_blk.format<half>(), b2dq.set_block_y(i));
-        //# seq_blk_f32 = seq_blk;
-        //# #pragma unroll
-        //# for (int r = 0; r<SEQ_STEP; r++) {
-        //#     seq_blk_sum += seq_blk_f32[r];
-        //# }
     }
-#else
-    #pragma unroll
-    for (int i = 0; i < SEQ_BLK; i+=SEQ_STEP) {
-        cm_load<lsc::Normal>(seq.format<half>(), b2dq.set_block_y(i));
-        seq_f32 = seq;
-        #pragma unroll
-        for (int r = 0; r<SEQ_STEP; r++) {
-             seq_blk_sum += seq_f32[r];
-        }
-    }
-#endif
-    cm_slm_block_write(scratch_buf, lid*STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
+    cm_slm_block_write(scratch_buf, lid*HEAD_SZ*sizeof(float), seq_blk_sum.format<float>());
     cm_barrier();
     if (lid == 0) {
         seq_blk_sum = 0;
-        vector<float, STATE_BLK> tmpsum = 0;
+        vector<float, HEAD_SZ> tmpsum = 0;
         int off = 0;
         #pragma unroll
-        for (int r = 0; r<MAX_LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
+        for (int r = 0; r<LOCAL_SZ; r++, off +=HEAD_SZ*sizeof(float)) {
             cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
             seq_blk_sum += tmpsum;
         }
 
-        vector<half, STATE_BLK> kmean;
-        kmean = seq_blk_sum / (float)(SEQ_LEN);
-        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*HEAD_SZ+sblk_idx*STATE_BLK), kmean);
+        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + (part_idx*KVHEAD_NUM +kvhead) * HEAD_SZ), seq_blk_sum);
+        if (part_idx == 0) {
+                //printf("********************************************************\n");
+                //show_float(seq_blk_sum.format<float, 1, HEAD_SZ>());
+        }
     }
 }
 
@@ -308,10 +294,8 @@ while mem_size < 4e9:
 t_klist = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(50)]
 t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(50)]
 smmothk_local_sz = 32
-
 qkv =  torch.cat((q,k,v), 1)
-kmean = k.mean(dim=0, keepdim=True)
-
+kmean_ref = k.mean(dim=0, keepdim=True)
 t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
 t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(50)]
 t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(50)]
@@ -333,5 +317,43 @@ for i in range(50):
 lat=cl.finish()
 ns=sum(lat[5:])/len(lat[5:])
 print(ns)
-check_close(kmean,torch.from_numpy(t_kmeanlist[0].numpy()))
+rdbytes=seq_len*kvhead_num*head_sz*2
+print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S')
+
+check_close(kmean_ref,torch.from_numpy(t_kmeanlist[0].numpy()))
 print(f'-----------------------------------------------------------------------------------------------\n')
+
+
+
+kmean_ref = k.mean(dim=0, keepdim=True)
+
+seq_blk=8
+smmothk_local_sz = 32
+seq_blk_wg = smmothk_local_sz * seq_blk
+part_num=(seq_len+ seq_blk_wg - 1) // seq_blk_wg
+
+t_kmeanlist_part = [cl.tensor(torch.zeros(part_num, kvhead_num, head_sz).to(dtype=torch.float32).detach().numpy()) for _ in range(50)]
+
+
+lws = [1, 1, smmothk_local_sz]
+gws = [kvhead_num, part_num, smmothk_local_sz]
+
+print(f'GWS:{gws}, LWS:{lws}')
+cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
+for i in range(20):
+    cm_kernels.enqueue("Kmean_1st", gws, lws, t_klist[i], t_kmeanlist_part[i])
+lat=cl.finish()
+rdbytes=seq_len*kvhead_num*head_sz*2
+wrbytes=kvhead_num*head_sz*4
+ns=sum(lat[5:])/len(lat[5:])
+print(f'average latency is {ns} ns')
+print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{wrbytes/ns:.2f} GB/S')
+
+
+kmean_parts=torch.from_numpy(t_kmeanlist_part[0].numpy())
+
+kmean=(kmean_parts.sum(dim=0, keepdim=True) / float(seq_len)).to(dtype=torch.float16)
+
+print(f'ref shape:{kmean_ref.shape}, keman shape:{kmean.shape}')
+check_close(kmean_ref, kmean)
+
