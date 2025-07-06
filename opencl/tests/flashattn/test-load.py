@@ -24,34 +24,6 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         assert 0
 
 
-seq_len = 8192
-head_num = 28
-kvhead_num = 4
-head_sz = 128
-
-grp_sz = head_num//kvhead_num
-local_sz=64
-low=-2
-high = 3
-
-q_factor = torch.randint(high, high+3, [seq_len, head_num, head_sz]).to(dtype=torch.float16)
-kv_factor = torch.randint(high, high+3, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16)
-
-q = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.float16) / q_factor
-k = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
-v = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
-
-qint8_ref = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.int8)
-kint8_ref = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.int8)
-
-qscale_ref = torch.zeros(seq_len, head_num).to(dtype=torch.float32)
-kscale_ref = torch.zeros(seq_len, kvhead_num).to(dtype=torch.float32)
-
-qscale_out = torch.zeros(head_num, seq_len).to(dtype=torch.float32)
-kscale_out = torch.zeros(kvhead_num, seq_len).to(dtype=torch.float32)
-
-
-cl.profiling(True)
 
 src = r'''
 
@@ -62,8 +34,8 @@ src = r'''
 #pyeval f"#define SEQ_BLK {seq_blk}"
 #pyeval f"#define STATE_BLK {state_blk}"
 #pyeval f"#define SEQ_LEN {seq_len}"
-#pyeval f"#define SEQ_BLK_WG {seq_blk_wg}"
 #pyeval f"#define LOCAL_SZ {smmothk_local_sz}"
+#pyeval f"#define UNROLL_NUM {unroll_num}"
 
 
 template<typename T, int M, int N>
@@ -92,7 +64,7 @@ void show_float(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]]) {
+extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
     if (id >= KVHEAD_NUM*SEQ_LEN)
         return;
@@ -120,8 +92,10 @@ extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], Surfac
         scaleV[0] = (float)(max)/127.0;
         cm_store<uint32_t, 1>(qscale, qscale_off, scaleV.format<uint32_t>());
     }
-
+    vector<half, HEAD_SZ> kmean;
     token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, koff);
+    kmean.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(kmean_ptr, headkv*pitch);
+    token = token - kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
     cm_store<uint32_t, HEAD_SZ/4>(qkv, koff, quan_token.format<uint32_t>());
@@ -131,128 +105,64 @@ extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], Surfac
 
 
 extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
-#define SEQ_STEP 8
-#define NO_LSC 1
+
     // q [B, L, H, S]
     auto kvhead = cm_group_id(0);
     auto sblk_idx = cm_group_id(1);
     auto lid = cm_linear_local_id();
-    auto offset = ((lid * SEQ_BLK * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
+    auto seq_start = lid * SEQ_BLK;
+    uint constexpr TOTAL_HEADS = (KVHEAD_NUM+KVHEAD_NUM+HEAD_NUM);
 
-    auto remaing_seq = (lid+1)*SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-lid*SEQ_BLK): SEQ_BLK;
+    auto sum_threads = (SEQ_LEN + SEQ_BLK - 1) / SEQ_BLK;
+    //auto offset = ((seq_start * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
+    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + HEAD_NUM)*HEAD_SZ + sblk_idx*STATE_BLK);
+    k_ptr += offset;
+
     constexpr uint BUF_SIZE = LOCAL_SZ*STATE_BLK*sizeof(float);
     cm_slm_init(BUF_SIZE);
     auto scratch_buf = cm_slm_alloc(BUF_SIZE);
 
-#if NO_LSC
     vector <half, STATE_BLK> seq;
     vector <float, STATE_BLK> seq_f32;
-
-#else
-    matrix <half, 8, STATE_BLK> seq;
-    matrix <float, 8, STATE_BLK> seq_f32;
-    lsc::block_2d_desc<half, 1, SEQ_STEP, STATE_BLK> b2dq((k_ptr + offset), remaing_seq - 1,STATE_BLK*sizeof(half) - 1, KVHEAD_NUM*HEAD_SZ*sizeof(half) - 1, 0, 0);
-#endif
     vector<float, STATE_BLK> seq_blk_sum = 0;
-    auto pitch = KVHEAD_NUM*HEAD_SZ;
+    //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
+    auto pitch = TOTAL_HEADS*HEAD_SZ;
 
-#if NO_LSC
-    #pragma unroll
-    for (int i = 0; i < SEQ_BLK; i++) {
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr + offset + i* pitch), seq);
-        seq_f32 = seq;
-        seq_blk_sum += seq_f32;
-        //# cm_load<lsc::Normal>(seq_blk.format<half>(), b2dq.set_block_y(i));
-        //# seq_blk_f32 = seq_blk;
-        //# #pragma unroll
-        //# for (int r = 0; r<SEQ_STEP; r++) {
-        //#     seq_blk_sum += seq_blk_f32[r];
-        //# }
-    }
-#else
-    #pragma unroll
-    for (int i = 0; i < SEQ_BLK; i+=SEQ_STEP) {
-        cm_load<lsc::Normal>(seq.format<half>(), b2dq.set_block_y(i));
-        seq_f32 = seq;
-        #pragma unroll
-        for (int r = 0; r<SEQ_STEP; r++) {
-             seq_blk_sum += seq_f32[r];
+    if (seq_start < SEQ_LEN) {
+        auto remaing_seq = (seq_start + SEQ_BLK ) > SEQ_LEN ?  (SEQ_LEN-seq_start): SEQ_BLK;
+
+        if (SEQ_BLK == remaing_seq) {
+            #pragma unroll(UNROLL_NUM)
+            for (int i = 0; i < SEQ_BLK; i++) {
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr), seq);
+                seq_f32 = seq;
+                seq_blk_sum += seq_f32;
+                k_ptr += pitch;
+            }
+        } else {
+            for (int i = 0; i < remaing_seq; i++) {
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr), seq);
+                seq_f32 = seq;
+                seq_blk_sum += seq_f32;
+                k_ptr += pitch;
+            }
         }
+        cm_slm_block_write(scratch_buf, lid*STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
     }
-#endif
-    cm_slm_block_write(scratch_buf, lid*STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
     cm_barrier();
     if (lid == 0) {
         seq_blk_sum = 0;
         vector<float, STATE_BLK> tmpsum = 0;
         int off = 0;
-        #pragma unroll
-        for (int r = 0; r<LOCAL_SZ; r++, off +=STATE_BLK*sizeof(float)) {
+        for (int r = 0; r<sum_threads; r++, off +=STATE_BLK*sizeof(float)) {
             cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
             seq_blk_sum += tmpsum;
         }
-
         vector<half, STATE_BLK> kmean;
         kmean = seq_blk_sum / (float)(SEQ_LEN);
         cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*HEAD_SZ+sblk_idx*STATE_BLK), kmean);
     }
 }
-
-
-extern "C" _GENX_MAIN_ void Kmean_1st(half* k_ptr [[type("svmptr_t")]], float* kmean_ptr [[type("svmptr_t")]]) {
-    //lws = [1, 1, smmothk_local_sz]
-    //gws = [kvhead_num, part_num, smmothk_local_sz]
-    // k [B, L, H, S]
-    auto kvhead = cm_group_id(0);
-    auto part_idx = cm_group_id(1);
-    auto lid = cm_linear_local_id();
-    auto seq_idx = part_idx * SEQ_BLK_WG + lid * SEQ_BLK;
-    auto local_sz = cm_linear_local_size();
-    auto partnum = cm_group_count(1);
-    if (seq_idx > SEQ_LEN)
-        return;
-    auto remaing_seq = seq_idx + SEQ_BLK > SEQ_LEN ?  (SEQ_LEN-seq_idx): SEQ_BLK;
-
-    auto offset = ((seq_idx * KVHEAD_NUM + kvhead)*HEAD_SZ);
-
-    constexpr uint BUF_SIZE = LOCAL_SZ*HEAD_SZ*sizeof(float);
-    cm_slm_init(BUF_SIZE);
-    auto scratch_buf = cm_slm_alloc(BUF_SIZE);
-
-    vector <half, HEAD_SZ> seq;
-    vector <float, HEAD_SZ> seq_f32;
-
-
-    vector<float, HEAD_SZ> seq_blk_sum = 0;
-    auto pitch = KVHEAD_NUM*HEAD_SZ;
-
-    #pragma unroll
-    for (int i = 0; i < SEQ_BLK; i++) {
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr + offset + i* pitch), seq);
-        seq_f32 = seq;
-
-        seq_blk_sum += seq_f32;
-    }
-    cm_slm_block_write(scratch_buf, lid*HEAD_SZ*sizeof(float), seq_blk_sum.format<float>());
-    cm_barrier();
-    if (lid == 0) {
-        seq_blk_sum = 0;
-        vector<float, HEAD_SZ> tmpsum = 0;
-        int off = 0;
-        #pragma unroll
-        for (int r = 0; r<LOCAL_SZ; r++, off +=HEAD_SZ*sizeof(float)) {
-            cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
-            seq_blk_sum += tmpsum;
-        }
-
-        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + (part_idx*KVHEAD_NUM +kvhead) * HEAD_SZ), seq_blk_sum);
-        if (part_idx == 0) {
-                //printf("********************************************************\n");
-                //show_float(seq_blk_sum.format<float, 1, HEAD_SZ>());
-        }
-    }
-}
-
 
 '''
 
@@ -267,93 +177,114 @@ def pyeval(src):
             result_src += line + "\n"
     return result_src
 
+seq_len = 2
+head_num = 28
+kvhead_num = 1
+head_sz = 32
+unroll_num = 32
+smmothk_local_sz = 32
+local_sz=64
+state_blk=32
+seq_blk = (seq_len + smmothk_local_sz - 1) // smmothk_local_sz
+seq_blk = (seq_blk + unroll_num - 1) // unroll_num * unroll_num
 
+
+grp_sz = head_num//kvhead_num
+low=-2
+high = 3
+
+q_factor = torch.randint(high, high+3, [seq_len, head_num, head_sz]).to(dtype=torch.float16)
+kv_factor = torch.randint(high, high+3, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16)
+
+q = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.float16) / q_factor
+k = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
+k[:,:,2:32] += 100
+v = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
+qkv =  torch.cat((q,k,v), 1)
+
+qint8_ref = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.int8)
+kint8_ref = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.int8)
+
+qscale_ref = torch.zeros(seq_len, head_num).to(dtype=torch.float32)
+kscale_ref = torch.zeros(seq_len, kvhead_num).to(dtype=torch.float32)
+
+qscale_out = torch.zeros(head_num, seq_len).to(dtype=torch.float32)
+kscale_out = torch.zeros(kvhead_num, seq_len).to(dtype=torch.float32)
+
+
+cl.profiling(True)
+
+
+kmean_ref = k.mean(dim=0, keepdim=True)
+smoothk = k - kmean_ref
 for seq in range(seq_len):
     for h in range(head_num):
         hkv = h // (head_num//kvhead_num)
         qtoken=q[seq, h, :]
         qmax=torch.amax(qtoken.abs(), dim=0, keepdim=True)
-        qtoken_int8=(qtoken/qmax*127.0).to(dtype=torch.int8)
+        qtoken = qtoken.to(dtype=torch.float32)
+        qtoken_int8=(qtoken/float(qmax)*float(127.0)).to(dtype=torch.int8)
         qint8_ref[seq,h,:]=qtoken_int8
         qscale_ref[seq, h]=float(qmax)/127.0
 
-        ktoken=k[seq,hkv,:]
+        ktoken=smoothk[seq,hkv,:]
         kmax=torch.amax(ktoken.abs(), dim=0, keepdim=True)
         ktoken_int8=(ktoken/kmax*127.0).to(dtype=torch.int8)
         kint8_ref[seq,hkv,:]=ktoken_int8
         kscale_ref[seq, hkv]=float(kmax)/127.0
 
 
-all_layers=[]
-mem_size=0
-while mem_size < 4e9:
-    all_layers.append([
-        cl.tensor(q.detach().numpy())
-    ])
-    mem_size += q.numel() * q.element_size()
-t_klist = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(50)]
+# all_layers=[]
+# mem_size=0
+# while mem_size < 4e9:
+#     all_layers.append([
+#         cl.tensor(q.detach().numpy())
+#     ])
+#     mem_size += q.numel() * q.element_size()
+
+
+assert smoothk.shape == k.shape
+
+
+
 t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(50)]
-smmothk_local_sz = 32
-qkv =  torch.cat((q,k,v), 1)
-kmean_ref = k.mean(dim=0, keepdim=True)
 t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
 t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(50)]
 t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(50)]
 
-
 print(f'head_num:{head_num}, seq_len:{seq_len}')
-seq_blk = (seq_len + smmothk_local_sz - 1) // smmothk_local_sz
-seq_blk_wg=seq_blk
-state_blk=32
+
 
 cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
 
 assert head_sz % state_blk == 0, f'headsz is multiple of 32'
-lws = [1, 1, smmothk_local_sz]
-gws = [kvhead_num, head_sz//state_blk, smmothk_local_sz]
-print(f'GWS:{gws}, LWS:{lws}')
+
+quan_lws = [local_sz]
+tokens_align_up=(kvhead_num*seq_len+local_sz-1)//local_sz*local_sz
+quan_gws = [tokens_align_up]
+
+mean_lws = [1, 1, smmothk_local_sz]
+mean_gws = [kvhead_num, head_sz//state_blk, smmothk_local_sz]
+
+print(f'MEAN_GWS:{mean_gws}, MEAN_LWS:{mean_lws} seq_blk:{seq_blk}')
+print(f'QUAN_GWS:{quan_gws}, QUAN_LWS:{quan_lws}')
+
 for i in range(50):
-    cm_kernels.enqueue("Kmean", gws, lws, t_klist[i], t_kmeanlist[i])
+    cm_kernels.enqueue("Kmean", mean_gws, mean_lws, t_qkvlist[i], t_kmeanlist[i])
+    cm_kernels.enqueue("quanQK", quan_gws, quan_lws, t_qkvlist[i], t_qscaleList[i], t_kscaleList[i], t_kmeanlist[i])
+
 lat=cl.finish()
 ns=sum(lat[5:])/len(lat[5:])
 print(ns)
 rdbytes=seq_len*kvhead_num*head_sz*2
 print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S')
 
-check_close(kmean_ref,torch.from_numpy(t_kmeanlist[0].numpy()))
+
+qint8_out=t_qkvlist[0].numpy()[:,0:head_num,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
+kint8_out=t_qkvlist[0].numpy()[:,head_num:(head_num+kvhead_num),0:head_sz//2].view(np.int8).reshape((seq_len, kvhead_num, head_sz))
+# check_close(qint8_ref,torch.from_numpy(qint8_out))
+check_close(kint8_ref,torch.from_numpy(kint8_out))
+# check_close(kmean_ref,torch.from_numpy(t_kmeanlist[0].numpy()))
+# check_close(kscale_ref.transpose(0, 1),torch.from_numpy(t_kscaleList[0].numpy()))
+
 print(f'-----------------------------------------------------------------------------------------------\n')
-
-
-
-kmean_ref = k.mean(dim=0, keepdim=True)
-
-seq_blk=8
-smmothk_local_sz = 32
-seq_blk_wg = smmothk_local_sz * seq_blk
-part_num=(seq_len+ seq_blk_wg - 1) // seq_blk_wg
-
-t_kmeanlist_part = [cl.tensor(torch.zeros(part_num, kvhead_num, head_sz).to(dtype=torch.float32).detach().numpy()) for _ in range(50)]
-
-
-lws = [1, 1, smmothk_local_sz]
-gws = [kvhead_num, part_num, smmothk_local_sz]
-
-print(f'GWS:{gws}, LWS:{lws}')
-cm_kernels = cl.kernels(pyeval(src), f"-cmc -mdump_asm -g2 ")
-for i in range(20):
-    cm_kernels.enqueue("Kmean_1st", gws, lws, t_klist[i], t_kmeanlist_part[i])
-lat=cl.finish()
-rdbytes=seq_len*kvhead_num*head_sz*2
-wrbytes=kvhead_num*head_sz*4
-ns=sum(lat[5:])/len(lat[5:])
-print(f'average latency is {ns} ns')
-print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S, write:{wrbytes/ns:.2f} GB/S')
-
-
-kmean_parts=torch.from_numpy(t_kmeanlist_part[0].numpy())
-
-kmean=(kmean_parts.sum(dim=0, keepdim=True) / float(seq_len)).to(dtype=torch.float16)
-
-print(f'ref shape:{kmean_ref.shape}, keman shape:{kmean.shape}')
-check_close(kmean_ref, kmean)
-
