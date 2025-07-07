@@ -64,7 +64,20 @@ void show_float(const matrix<T, M, N> mat) {
     printf("]\n");
 }
 
-extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
+
+extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void test_rnd(SurfaceIndex ptr [[type("buffer_t")]])
+{
+        vector<half, 8> test;
+        vector<float, 8> test_f32;
+
+        vector<int8_t, 8> test_u8;
+        test.format<uint32_t>() = cm_load<uint, 4>(ptr, 0);
+        test_f32 = test;
+        test_u8 = cm_rnde<int8_t>(test_f32);
+        show<int8_t, 1, 8>(test_u8);
+}
+
+extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
     if (id >= KVHEAD_NUM*SEQ_LEN)
         return;
@@ -74,7 +87,6 @@ extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], Surfac
     auto pitch = HEAD_SZ*sizeof(half);
     auto qoff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + head)*pitch;
     auto koff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + headkv + HEAD_NUM)*pitch;
-
     auto kscale_off = (headkv*SEQ_LEN + seq)*sizeof(float);
     auto qscale_off = (head*SEQ_LEN + seq)*sizeof(float);
 
@@ -97,7 +109,8 @@ extern "C" _GENX_MAIN_ void quanQK(SurfaceIndex qkv [[type("buffer_t")]], Surfac
     kmean.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(kmean_ptr, headkv*pitch);
     token = token - kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
-    quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
+    quan_token =  cm_rnde<int8_t>(cm_mul<float>(token, (float)(127.0)/(float)(max)));
+
     cm_store<uint32_t, HEAD_SZ/4>(qkv, koff, quan_token.format<uint32_t>());
     scaleV[0] = (float)(max)/127.0;
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
@@ -125,6 +138,8 @@ extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_
     vector <half, STATE_BLK> seq;
     vector <float, STATE_BLK> seq_f32;
     vector<float, STATE_BLK> seq_blk_sum = 0;
+    //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
+    //TLB issue?
     //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
     auto pitch = TOTAL_HEADS*HEAD_SZ;
 
@@ -177,12 +192,12 @@ def pyeval(src):
             result_src += line + "\n"
     return result_src
 
-seq_len = 2
+seq_len = 12800
 head_num = 28
-kvhead_num = 1
-head_sz = 32
+kvhead_num = 4
+head_sz = 128
 unroll_num = 32
-smmothk_local_sz = 32
+smmothk_local_sz = 64
 local_sz=64
 state_blk=32
 seq_blk = (seq_len + smmothk_local_sz - 1) // smmothk_local_sz
@@ -193,8 +208,8 @@ grp_sz = head_num//kvhead_num
 low=-2
 high = 3
 
-q_factor = torch.randint(high, high+3, [seq_len, head_num, head_sz]).to(dtype=torch.float16)
-kv_factor = torch.randint(high, high+3, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16)
+q_factor = torch.randint(high+3, high+9, [seq_len, head_num, head_sz]).to(dtype=torch.float16)
+kv_factor = torch.randint(high+3, high+9, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16)
 
 q = torch.randint(low, high, [seq_len, head_num, head_sz]).to(dtype=torch.float16) / q_factor
 k = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float16) / kv_factor
@@ -212,6 +227,9 @@ qscale_out = torch.zeros(head_num, seq_len).to(dtype=torch.float32)
 kscale_out = torch.zeros(kvhead_num, seq_len).to(dtype=torch.float32)
 
 
+k_tmp_ref = torch.randint(low, high, [seq_len, kvhead_num, head_sz]).to(dtype=torch.float32)
+
+
 cl.profiling(True)
 
 
@@ -227,20 +245,15 @@ for seq in range(seq_len):
         qint8_ref[seq,h,:]=qtoken_int8
         qscale_ref[seq, h]=float(qmax)/127.0
 
-        ktoken=smoothk[seq,hkv,:]
+        ktoken=smoothk[seq,hkv,:].to(dtype=torch.float32)
         kmax=torch.amax(ktoken.abs(), dim=0, keepdim=True)
-        ktoken_int8=(ktoken/kmax*127.0).to(dtype=torch.int8)
+        ktoken_f32 = (ktoken/float(kmax)*float(127.0)).to(dtype=torch.float32)
+        ktoken_int8=(torch.round(ktoken/float(kmax)*float(127.0))).to(dtype=torch.int8)
         kint8_ref[seq,hkv,:]=ktoken_int8
         kscale_ref[seq, hkv]=float(kmax)/127.0
+        k_tmp_ref[seq,hkv,:] = ktoken_f32
 
 
-# all_layers=[]
-# mem_size=0
-# while mem_size < 4e9:
-#     all_layers.append([
-#         cl.tensor(q.detach().numpy())
-#     ])
-#     mem_size += q.numel() * q.element_size()
 
 
 assert smoothk.shape == k.shape
@@ -251,6 +264,17 @@ t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.floa
 t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
 t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(50)]
 t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(50)]
+
+t_kf32_tmp = cl.tensor(torch.zeros(seq_len, kvhead_num, head_sz).to(dtype=torch.float32).detach().numpy())
+
+all_layers=[]
+mem_size=0
+while mem_size < 4e9:
+    all_layers.append([
+        cl.tensor(q.detach().numpy())
+    ])
+    mem_size += q.numel() * q.element_size()
+
 
 print(f'head_num:{head_num}, seq_len:{seq_len}')
 
@@ -269,22 +293,34 @@ mean_gws = [kvhead_num, head_sz//state_blk, smmothk_local_sz]
 print(f'MEAN_GWS:{mean_gws}, MEAN_LWS:{mean_lws} seq_blk:{seq_blk}')
 print(f'QUAN_GWS:{quan_gws}, QUAN_LWS:{quan_lws}')
 
-for i in range(50):
+rep = 50
+for i in range(rep):
     cm_kernels.enqueue("Kmean", mean_gws, mean_lws, t_qkvlist[i], t_kmeanlist[i])
+for i in range(rep):
     cm_kernels.enqueue("quanQK", quan_gws, quan_lws, t_qkvlist[i], t_qscaleList[i], t_kscaleList[i], t_kmeanlist[i])
 
 lat=cl.finish()
-ns=sum(lat[5:])/len(lat[5:])
-print(ns)
-rdbytes=seq_len*kvhead_num*head_sz*2
-print(f'avg latency:{ns*1e-3:.2f} us, read:{rdbytes/ns:.2f} GB/S')
+lat_mean= lat[0:rep]
+lat_quantize= lat[rep:2*rep]
+
+ns_mean=sum(lat_mean[5:])/len(lat_mean[5:])
+ns_quan=sum(lat_quantize[5:])/len(lat_quantize[5:])
+
+rdbytes_K=seq_len*kvhead_num*head_sz*2
+rdbytes_V=seq_len*head_num*head_sz*2
+print(f'-----------------------------------------------------------------------------------------------\n')
+print(f'[Kmean]avg latency:{ns_mean*1e-3:.2f} us, read:{rdbytes_K/ns_mean:.2f} GB/S')
+print(f'[Quantize]avg latency:{ns_quan*1e-3:.2f} us, read:{(rdbytes_K+rdbytes_V)/ns_quan:.2f} GB/S write: {((rdbytes_K+rdbytes_V))/2/ns_quan:.2f} GB/S')
 
 
 qint8_out=t_qkvlist[0].numpy()[:,0:head_num,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
 kint8_out=t_qkvlist[0].numpy()[:,head_num:(head_num+kvhead_num),0:head_sz//2].view(np.int8).reshape((seq_len, kvhead_num, head_sz))
-# check_close(qint8_ref,torch.from_numpy(qint8_out))
-check_close(kint8_ref,torch.from_numpy(kint8_out))
-# check_close(kmean_ref,torch.from_numpy(t_kmeanlist[0].numpy()))
-# check_close(kscale_ref.transpose(0, 1),torch.from_numpy(t_kscaleList[0].numpy()))
 
-print(f'-----------------------------------------------------------------------------------------------\n')
+if 1:
+    check_close(qint8_ref,torch.from_numpy(qint8_out))
+    check_close(kmean_ref,torch.from_numpy(t_kmeanlist[0].numpy()))
+    check_close(kscale_ref.transpose(0, 1),torch.from_numpy(t_kscaleList[0].numpy()))
+    check_close(qscale_ref.transpose(0, 1),torch.from_numpy(t_qscaleList[0].numpy()))
+    # rounding to even and calculation error in float could introduce error of 1
+    check_close(kint8_ref,torch.from_numpy(kint8_out), atol=1)
+
