@@ -269,7 +269,10 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=1023, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    for seqlen in range(1025, 1055, 1):
+        test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(113, num_heads = 28, num_kv_heads = 4, head_size = 128)
+
 
     # test_flash_attn_causal_batch1(seq_len=4096, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # 0.368 ms overhead ,  1.264 quanQ*quanK , 1.355 mul dqscale ,1.705 apply mask , 2.613 softmax, 4.045 transpose P, 6.259 P*V.

@@ -624,7 +624,7 @@ void sdpa_kernel_lsc_prefetch(
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k/4));
         }
 
-        lsc::block_2d_desc<float, 1, 1, q_step> b2dQscale(reinterpret_cast<float*>(q_scale_base), 0, q_step*sizeof(float)-1, q_step*sizeof(float)-1, 0, 0);
+        lsc::block_2d_desc<float, 1, 1, q_step> b2dQscale(reinterpret_cast<float*>(q_scale_base), 0, q_tokens_left*sizeof(float)-1, q_step*sizeof(float)-1, 0, 0);
         cm_load<lsc::Normal>(q_scales, b2dQscale);
     }
 
@@ -632,8 +632,8 @@ void sdpa_kernel_lsc_prefetch(
     lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
 
     static_assert(wg_local_size == 16);
-    lsc::block_2d_desc<int8_t, 1, kv_step/wg_local_size, REG_K_U8> prefetch_K(k_base + kv_pitch*wg_local_id, kv_stop - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base + kv_pitch*wg_local_id, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step/wg_local_size, REG_K_U8> prefetch_K(k_base, kv_stop - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
 
     int causal_left = q_start;
 
@@ -653,7 +653,7 @@ void sdpa_kernel_lsc_prefetch(
 
             matrix<int8_t, num_K, REG_M * REG_K_U8> Kmat;
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
-            prefetch_K.set_block_y(kv_pos + kv_step);
+            prefetch_K.set_block_y(wg_local_id + kv_pos + kv_step);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
             b2dK.set_block_y(kv_pos);
@@ -709,7 +709,7 @@ void sdpa_kernel_lsc_prefetch(
         Transpose2DMatrix(St, P);
 
         b2dV.set_block_y(kv_pos);
-        prefetch_V.set_block_y(kv_pos + kv_step);
+        prefetch_V.set_block_y(wg_local_id +kv_pos + kv_step);
         if (kv_pos == 0) {
             // ugemm_PV0(slm_V, P, rO, slm_offset);
             auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
@@ -733,7 +733,6 @@ void sdpa_kernel_lsc_prefetch(
             #pragma unroll
             for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
                 matrix<half, REG_K/2, REG_N*2> Vmat;
-
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
                 cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
 
