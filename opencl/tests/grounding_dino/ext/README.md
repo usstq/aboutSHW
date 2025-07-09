@@ -19,7 +19,7 @@ mkdir build && cd build
 cmake .. && make
 
 ### make test unit
-refer to `onnx_swin.py/torch_swin.py`
+refer to `onnx_swin*.py/torch_swin.py`
 
 ### gpu kernel
 ov branch: https://github.com/luo-cheng2021/openvino/tree/luocheng/dino_gpu
