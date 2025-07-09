@@ -243,16 +243,21 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     high = 3
     act_dtype = torch.float16
     is_causal = True
-
+    #manually produce different scales for different token.
     q_factor = torch.randint(high, high+3, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
     k_factor = torch.randint(high, high+3, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)
+    q_factor[:,:,0:head_size:3] = torch.randint(high+3,high+6,[1]).to(dtype=act_dtype)
+    k_factor[:,:,0:head_size:3] = torch.randint(high+3,high+6,[1]).to(dtype=act_dtype)
+
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype) / q_factor
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / k_factor
     # add bias to k to simulate outlier
-    bias_low=1
-    bias_high=5
+    bias_low=3
+    bias_high=7
     step=3
     k[:,:,0:head_size:step] += torch.randint(bias_low,bias_high,[1]).to(dtype=act_dtype)/bias_high
+
+
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
 
@@ -266,12 +271,12 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
     check_close(ref, out)
-    #assert 0
 
 if __name__ == "__main__":
-    for seqlen in range(1025, 1055, 1):
-        test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    # for seqlen in range(1025, 1055, 1):
+    #     test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
     test_flash_attn_causal_batch1(113, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 128)
 
 
     # test_flash_attn_causal_batch1(seq_len=4096, num_heads = 28, num_kv_heads = 4, head_size = 128)
