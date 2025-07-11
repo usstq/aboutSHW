@@ -22,16 +22,16 @@ class Layer:
 
 class LlamaLikeModel:
     def __init__(self) -> None:
-        super(LlamaLikeModel, self).__init__()    
+        super(LlamaLikeModel, self).__init__()
 
     def load_from_hf(self, hf_model_id, max_kv_len, quant_type, rope_base = 1000000):
         print(f"loading {hf_model_id}...")
         hf_model = AutoModelForCausalLM.from_pretrained(hf_model_id, trust_remote_code=True).to('cpu', dtype=torch.float16).eval()
         print(hf_model.config)
-        
+
         is_qwen2 = "Qwen2ForCausalLM" in hf_model.config.architectures
         is_llama = "LlamaForCausalLM" in hf_model.config.architectures
-        
+
         if is_qwen2:
             assert(hf_model.config.hidden_act in ['silu'])
             #assert(hf_model.config.rope_scaling is None)
@@ -73,9 +73,9 @@ class LlamaLikeModel:
             d.id = len(self.layers)
 
             d.input_layernorm = clops.RMSNorm(weight=l.input_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            # combine qkv : 
+            # combine qkv :
             qkv_weight = torch.cat([l.self_attn.q_proj.weight, l.self_attn.k_proj.weight, l.self_attn.v_proj.weight], dim=0)
-            
+
             if l.self_attn.q_proj.bias is None:
                 assert(l.self_attn.k_proj.bias is None)
                 assert(l.self_attn.v_proj.bias is None)
@@ -91,7 +91,7 @@ class LlamaLikeModel:
                 d.qkv_proj = Linear(weight=qkv_weight, bias=qkv_bias)
                 d.o_proj = Linear(weight=l.self_attn.o_proj.weight, bias=l.self_attn.o_proj.bias)
             d.post_attention_layernorm = clops.RMSNorm(weight=l.post_attention_layernorm.weight, epsilon = hf_model.config.rms_norm_eps)
-            
+
             d.gate_up_onednn = False
             d.gate_up_proj = None
 
@@ -170,7 +170,7 @@ class LlamaLikeModel:
                 sum_to += down_proj
 
         mlp(post_attention_layernorm, hidden_states)
-        
+
         return hidden_states
 
     def forward(self, input_ids, attn_mask):
@@ -222,7 +222,7 @@ def simple_pipeline(hf_model_path,
     if prompt0:
         inputs = tokenizer(prompt0, return_tensors="pt", padding=True, return_token_type_ids=False)
         input_ids = inputs["input_ids"]
-        max_kv_len = (input_ids.shape[-1] + max_new_tokens + 63 )//64 * 64
+        max_kv_len = (input_ids.shape[-1] + max_new_tokens + 63 )//64 * 64 * 2
 
     model = LlamaLikeModel()
     if load_path is None:
@@ -258,7 +258,7 @@ def simple_pipeline(hf_model_path,
                         break
                 #inputs = tokenizer(f"<|user|>{prompt}</s><|assistant|>", return_tensors="pt", padding=True, return_token_type_ids=False)
                 #inputs = tokenizer(f"Hi", return_tensors="pt", padding=True, return_token_type_ids=False)
-                
+
                 #inputs = tokenizer("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n1+1=?<|im_end|>\n<|im_start|>assistant",return_tensors="pt")
                 inputs = tokenizer(f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant", return_tensors="pt", padding=True, return_token_type_ids=False)
                 #inputs = tokenizer(f'''<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat's Oxygen?<|im_end|>\n<|im_start|>assistant''',return_tensors="pt", padding=True, return_token_type_ids=False)

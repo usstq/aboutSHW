@@ -20,7 +20,7 @@ __kernel void MHA(__global half * param_qkv,         // [batch_size, L, (Hq + Hk
                     int head_group_size,
                     float head_size_scaler
                     ) {
-    
+
     int h = get_global_id(0);
     int b = get_global_id(1);
 
@@ -112,7 +112,7 @@ __kernel void concat(__global half * param_qkv,         // [B, L1, (Hq + Hk + Hv
     int HQKV = HQ + HK + HK;
 
     // concat k & v into cache
-    __global half * dst_k = param_cache_k + 
+    __global half * dst_k = param_cache_k +
         ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
     __global half * dst_v = param_cache_v +
         ((b * HK + hkv) * MAX_KV_LEN + L0 + l) * S;
@@ -268,7 +268,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 // assume A([M=3, S]) * B([N=3, S]), the result(dot_prod[0-15]):
                 //     M0 M1 M2 M3 M4...M14 M15   apply causal->      M0   M1  M2  M3 M4...M14 M15
                 //  N0 v  v  v  0  0     0  0                     N0  v    v   v   0  0     0  0
-                //  N1 v  v  v  0  0     0  0                     N1 -inf  v   v   0  0     0  0 
+                //  N1 v  v  v  0  0     0  0                     N1 -inf  v   v   0  0     0  0
                 //  N2 v  v  v  0  0     0  0                     N2 -inf -inf v   0  0     0  0
                 //  N3 ?  ?  ?  ?  ?     ?  ?                     N3  ?    ?   ?   ?  ?     ?  ?
                 //  ...                                           ...
@@ -291,7 +291,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 // qk_dot_share[M][kv_len](before softmax:):
                 //     N0   N1  N2  N3 N4...N14 N15
                 // M0  v  -inf -inf ?  ?     ?  ?
-                // M1  v    v  -inf ?  ?     ?  ? 
+                // M1  v    v  -inf ?  ?     ?  ?
                 // M2  v    v   v   ?  ?     ?  ?
                 // M3  0    0   0   ?  ?     ?  ?
                 // ...
@@ -301,7 +301,7 @@ __kernel void MHAFirst(__global half * param_qkv,         // [B, L1, (HQ + HK + 
                 // qk_dot_share[M][kv_len](after softmax+scale):
                 //     N0   N1  N2  N3 N4...N14 N15
                 // M0  v'   0   0   ?  ?     ?  ?
-                // M1  v'   v'  0   ?  ?     ?  ? 
+                // M1  v'   v'  0   ?  ?     ?  ?
                 // M2  v'   v'  v'  ?  ?     ?  ?
                 // M3  0    0   0   ?  ?     ?  ?
                 // ...
@@ -686,16 +686,23 @@ class MHA:
         self.cl_kernels = kernel_cache(cl_kernel_sources, options)
         self.cl_kernels_ref = kernel_cache(cl_kernel_sources_ref)
 
+
         # sdpa kernel
         cwd = os.path.dirname(os.path.realpath(__file__))
+        self.local_sz = 32
+        self.unroll_cnt = 32
+        self.state_blk_sz = 32
         # print(f"compiling {cwd} {head_cnt_q=} {head_cnt_k=} ...")
-        self.cm_kernels = kernel_cache(r'''#include "cm_sdpa_vlen.hpp"''',
-                     (f"-cmc -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}"
+        self.cm_kernels = kernel_cache(r'''#include "sage_sdpa.hpp"''',
+                     (f'-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}'
                       f" -DCMFLA_NUM_HEADS={head_cnt_q}"
                       f" -DCMFLA_NUM_KV_HEADS={head_cnt_k}"
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_IS_CAUSAL=1"
                       f" -DCMFLA_SCALE_FACTOR={self.head_size_scaler}"
+                      f" -DUNROLL_NUM={int(self.unroll_cnt)}"
+                      f" -DCMFLA_STATE_BLK={int(self.state_blk_sz)}"
+                      f" -DLOCAL_SZ={int(self.local_sz)}"
                       f" -mdump_asm -g2")
                      )
 
@@ -782,9 +789,9 @@ class MHA:
                                        part_sum,
                                        part_num)
             else:
-                if 1:
+                if 0:
                     wg_size = 16
-                    q_step = 8 # 16 for xe2
+                    q_step = 16 # 16 for xe2
                     wg_seq_len = wg_size * q_step
                     wg_count = (L1 + wg_seq_len - 1) // wg_seq_len
                     GWS = [1, self.head_cnt_q, wg_count * wg_size]
@@ -793,14 +800,38 @@ class MHA:
                     #print(f"{GWS=} {LWS=}")
                     self.cm_kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, L1, qkv, output)
                 else:
-                    mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
-                    cl_kernels.enqueue("MHAFirst",
-                                    [B, self.head_cnt_q, self.S * mb_blocks_num],
-                                    [1, 1, self.S],
-                                    qkv,
-                                    output,
-                                    L1
-                                    )
+                    t_dqscale_q = cl.tensor([1, self.head_cnt_q, L1], np.dtype(np.float32))
+                    t_dqscale_k = cl.tensor([1, self.head_cnt_k, L1], np.dtype(np.float32))
+                    t_mean_k = cl.tensor([1, self.head_cnt_k, self.S], np.dtype(np.float16))
+                    local_sz = self.local_sz
+                    kmean_seq_blk = (L1 + local_sz - 1) // local_sz
+                    kmean_seq_blk = (kmean_seq_blk + self.unroll_cnt - 1) // self.unroll_cnt * self.unroll_cnt
+                    kmean_lws = [1, 1, local_sz]
+                    kmean_gws = [self.head_cnt_k, self.S//self.state_blk_sz, local_sz]
+                    quan_lws = [local_sz]
+                    quan_gws=[(self.head_cnt_k*L1+local_sz-1)//local_sz*local_sz]
+
+                    self.cm_kernels.enqueue("Kmean", kmean_gws, kmean_lws, L1, kmean_seq_blk, qkv, t_mean_k)
+                    self.cm_kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, L1, qkv, t_dqscale_q, t_dqscale_k, t_mean_k)
+
+                    wg_size = 16
+                    q_step = 16
+                    wg_seq_len = wg_size * q_step
+                    wg_count = (L1 + wg_seq_len - 1) // wg_seq_len
+                    GWS = [1, self.head_cnt_q, wg_count * wg_size]
+                    LWS = [1, 1, wg_size]
+                    self.cm_kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, L1, qkv, t_dqscale_q, t_dqscale_k, output)
+                    # self.cm_kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, L1, qkv, output)
+
+                # else:
+                #     mb_blocks_num = (L1 + self.sub_group_size - 1) // self.sub_group_size
+                #     cl_kernels.enqueue("MHAFirst",
+                #                     [B, self.head_cnt_q, self.S * mb_blocks_num],
+                #                     [1, 1, self.S],
+                #                     qkv,
+                #                     output,
+                #                     L1
+                #                     )
         return output
 
 
