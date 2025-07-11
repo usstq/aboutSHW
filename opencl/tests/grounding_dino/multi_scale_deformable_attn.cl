@@ -1,7 +1,7 @@
 
 scalar_t ms_deform_attn_im2col_bilinear(
     __global const scalar_t *bottom_data, const int height, const int width,
-    const int nheads, const int channels, const scalar_t h,
+    const int nheads, const int embed_dims, const scalar_t h,
     const scalar_t w, const int m, const int c) {
   const int h_low = floor(h);
   const int w_low = floor(w);
@@ -12,13 +12,13 @@ scalar_t ms_deform_attn_im2col_bilinear(
   const scalar_t lw = w - w_low;
   const scalar_t hh = 1 - lh, hw = 1 - lw;
 
-  const int w_stride = nheads * channels;
+  const int w_stride = nheads * embed_dims;
   const int h_stride = width * w_stride;
   const int h_low_ptr_offset = h_low * h_stride;
   const int h_high_ptr_offset = h_low_ptr_offset + h_stride;
   const int w_low_ptr_offset = w_low * w_stride;
   const int w_high_ptr_offset = w_low_ptr_offset + w_stride;
-  const int base_ptr = m * channels + c;
+  const int base_ptr = m * embed_dims + c;
 
   scalar_t v1 = 0;
   if (h_low >= 0 && w_low >= 0) {
@@ -49,15 +49,15 @@ scalar_t ms_deform_attn_im2col_bilinear(
 
 __kernel void multi_scale_deformable_attn(
     const int n,
-    __global const scalar_t *data_value,            //# (bs, num_keys, num_heads, channels)
+    __global const scalar_t *data_value,            //# (bs, num_keys, num_heads, embed_dims)
     __global const int *data_spatial_shapes,        //# (num_levels, 2) Spatial shape of each feature map, last dimension 2 represent (h, w)
     __global const int *data_level_start_index,     //# (num_levels, ) start index of each level and can be represented as [0, h_0*w_0, h_0*w_0+h_1*w_1, ...].
     __global const scalar_t *data_sampling_loc,     //# (bs ,num_queries, num_heads, num_levels, num_points, 2), the last dimension 2 represent (x, y).
     __global const scalar_t *data_attn_weight,      //# (bs ,num_queries, num_heads, num_levels, num_points), weight of sampling points
     const int batch_size,
-    const int spatial_size, const int num_heads, const int channels,
+    const int spatial_size, const int num_heads, const int embed_dims,
     const int num_levels, const int num_query, const int num_point,
-    __global scalar_t *data_col) {                  //# (bs, num_keys, num_heads, channels), output
+    __global scalar_t *data_col) {                  //# (bs, num_queries, num_heads * embed_dims), output
 #define sglid          (uint) get_sub_group_local_id()
 #define sgid           (uint) get_sub_group_id()
   // CUDA_1D_KERNEL_LOOP(index, n) {
@@ -67,8 +67,8 @@ __kernel void multi_scale_deformable_attn(
     // printf("[%ld]][%ld][%d][%d] indx = %d/%d\n", get_group_id(2), get_local_id(2), sgid, sglid, index, n);
 
     int _temp = index;
-    const int c_col = _temp % channels;
-    _temp /= channels;
+    const int c_col = _temp % embed_dims;
+    _temp /= embed_dims;
     const int sampling_index = _temp;
     const int m_col = _temp % num_heads;
     _temp /= num_heads;
@@ -77,8 +77,8 @@ __kernel void multi_scale_deformable_attn(
 
     __global scalar_t *data_col_ptr = data_col + index;
     int data_weight_ptr = sampling_index * num_levels * num_point;
-    int data_loc_w_ptr = data_weight_ptr << 1;
-    const int qid_stride = num_heads * channels;
+    int data_loc_w_ptr = dsata_weight_ptr << 1;
+    const int qid_stride = num_heads * embed_dims;
     const int data_value_ptr_init_offset = b_col * spatial_size * qid_stride;
     scalar_t col = 0;
 
@@ -100,7 +100,7 @@ __kernel void multi_scale_deformable_attn(
 
         if (h_im > -1 && w_im > -1 && h_im < spatial_h && w_im < spatial_w) {
           col += ms_deform_attn_im2col_bilinear(data_value_ptr, spatial_h,
-                                                spatial_w, num_heads, channels,
+                                                spatial_w, num_heads, embed_dims,
                                                 h_im, w_im, m_col, c_col) *
                  weight;
           // printf("====== %f, %f\n", a, col);

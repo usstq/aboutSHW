@@ -44,7 +44,7 @@ class multi_scale_deformable_attn_pytorch(nn.Module):
                 (bs ,num_queries, num_heads, num_levels, num_points),
 
         Returns:
-            torch.Tensor: has shape (bs, num_queries, embed_dims)
+            torch.Tensor: has shape (bs, num_queries, num_heads*embed_dims)
         """
 
         bs, _, num_heads, embed_dims = value.shape
@@ -109,7 +109,7 @@ class MultiScaleDeformableAttnFunction_CL:
         num_kernels = batch_size * num_queries * num_heads * embed_dims
         
         datatype = np.float16 if self.dtype == 'half' else np.float32
-        t_data_col = cl.tensor([batch_size, num_queries, num_heads, embed_dims], np.dtype(datatype))
+        t_data_col = cl.tensor([batch_size, num_queries, num_heads*embed_dims], np.dtype(datatype))
 
         assert type(data_value) is torch.Tensor
 
@@ -150,7 +150,7 @@ class MultiScaleDeformableAttnFunction_CL:
                     A tensor has shape ``(num_levels, )`` and can be represented
                     as [0, h_0*w_0, h_0*w_0+h_1*w_1, ...].
 
-                ==> output (bs, num_queries, num_heads, embed_dims)
+                ==> output (bs, num_queries, num_heads*embed_dims)
         '''
         assert value.is_contiguous()
         assert spatial_shapes.is_contiguous()
@@ -206,7 +206,7 @@ class MultiScaleDeformableAttnFunction_CL:
 
         return output
 
-def generate_inputs(value_shape, offsets_shape, spatial_shapes, VERBOSE=False):
+def generate_inputs(value_shape, offsets_shape, spatial_shapes, VERBOSE=True):
     N, H, S = value_shape
     Lq, L, P = offsets_shape
 
@@ -220,11 +220,11 @@ def generate_inputs(value_shape, offsets_shape, spatial_shapes, VERBOSE=False):
         spatial_shapes = generate_pairs(L)
 
     value_spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.int32)
-    # print(f'{value_spatial_shapes=}')
-
     level_start_index = torch.cat((value_spatial_shapes.new_zeros(
         (1, )), value_spatial_shapes.prod(1).cumsum(0)[:-1])).to(torch.int32)
     Lv = sum((H * W).item() for H, W in value_spatial_shapes)
+    
+    print(f'{value_spatial_shapes=} {level_start_index=} {Lv=}')
 
     value = torch.rand(N, Lv, H, S)
     sampling_locations = torch.rand(N, Lq, H, L, P, 2)
@@ -332,7 +332,7 @@ def main():
     
     bs, num_heads, embed_dims = 1, 8, 32
     num_queries, num_levels, num_points = 22223, 4, 4
-    spatial_shapes = [(13, 21), (25, 42), (50, 84), (100, 167)]
+    spatial_shapes = [(100, 167), (50, 84), (25, 42), (13, 21)]
     # test_forward_equal_with_pytorch([bs, num_heads, embed_dims], [num_queries, num_levels, num_points], spatial_shapes, datatype = 'float')
     test_forward_equal_with_pytorch([bs, num_heads, embed_dims], [num_queries, num_levels, num_points], spatial_shapes, datatype = 'half')
 
