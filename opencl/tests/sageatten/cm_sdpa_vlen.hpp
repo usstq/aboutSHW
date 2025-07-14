@@ -7,6 +7,29 @@
 #define USE_LSC 0
 #endif
 
+
+
+template <int NElts, int step=NElts>
+CM_INLINE void cm_load_1d(vector_ref<uint32_t, NElts> out, SurfaceIndex base, uint offset) {
+    auto mat = out.format<uint32_t, NElts/step, step>();
+    #pragma unroll
+    for (int r = 0; r < NElts/step; r++, offset += step*sizeof(int32_t)) {
+        mat.row(r).format<uint32_t>() = cm_load<uint32_t, step>(base, offset);
+    }
+}
+
+template <int NElts, int step=NElts>
+CM_INLINE void cm_store_1d(vector_ref<uint32_t, NElts> in, SurfaceIndex base, uint offset) {
+    auto mat = in.format<uint32_t, NElts/step, step>();
+
+    #pragma unroll
+    for (int r = 0; r < NElts/step; r++, offset += step*sizeof(int32_t)) {
+        cm_store<uint32_t, step>(base, offset,  mat.row(r).format<uint32_t>());
+    }
+}
+
+
+
 extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seqlen, SurfaceIndex qkv [[type("buffer_t")]],
                                             SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
@@ -25,26 +48,33 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
 
     vector<half, CMFLA_HEAD_SIZE> token;
     vector<float, 1> scaleV;
+    constexpr int step = (CMFLA_HEAD_SIZE==64 ||  CMFLA_HEAD_SIZE ==128) ? CMFLA_HEAD_SIZE : REG_K_U8;
 
     auto quan_token= token.format<int8_t,2, CMFLA_HEAD_SIZE>().row(0);
 
     #pragma unroll
     for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*seqlen) {
-        token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, qoff);
+        // token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, qoff);
+        cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), qkv, qoff);
         half max=cm_reduced_max<half>(cm_abs(token));
         quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
-        cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, qoff, quan_token.format<uint32_t>());
+        cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), qkv, qoff);
+
+        // cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, qoff, quan_token.format<uint32_t>());
         scaleV[0] = (float)(max)/127.0;
         cm_store<uint32_t, 1>(qscale, qscale_off, scaleV.format<uint32_t>());
     }
 
     vector<half, CMFLA_HEAD_SIZE> kmean;
-    token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, koff);
-    kmean.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(kmean_ptr, headkv*pitch);
+    // token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, koff);
+    cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), qkv, koff);
+    // kmean.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(kmean_ptr, headkv*pitch);
+    cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(kmean.format<uint32_t>(), kmean_ptr, headkv*pitch);
     token -= kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token = cm_rnde<int8_t>(cm_mul<float>(token, (float)(127.0)/(float)(max)));
-    cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, koff, quan_token.format<uint32_t>());
+    // cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, koff, quan_token.format<uint32_t>());
+    cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), qkv, koff);
     scaleV[0] = (float)(max)*scale_factor/float(127.0);
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }

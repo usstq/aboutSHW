@@ -53,6 +53,27 @@ void show_float(const matrix<T, M, N> mat) {
 }
 
 
+
+template <int NElts, int step=NElts>
+CM_INLINE void cm_load_1d(vector_ref<uint32_t, NElts> out, SurfaceIndex base, uint offset) {
+    auto mat = out.format<uint32_t, NElts/step, step>();
+    #pragma unroll
+    for (int r = 0; r < NElts/step; r++, offset += step*sizeof(int32_t)) {
+        mat.row(r).format<uint32_t>() = cm_load<uint32_t, step>(base, offset);
+    }
+}
+
+template <int NElts, int step=NElts>
+CM_INLINE void cm_store_1d(vector_ref<uint32_t, NElts> in, SurfaceIndex base, uint offset) {
+    auto mat = in.format<uint32_t, NElts/step, step>();
+
+    #pragma unroll
+    for (int r = 0; r < NElts/step; r++, offset += step*sizeof(int32_t)) {
+        cm_store<uint32_t, step>(base, offset,  mat.row(r).format<uint32_t>());
+    }
+}
+
+
 extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void test_rnd(SurfaceIndex ptr [[type("buffer_t")]])
 {
         vector<half, 8> test;
@@ -80,26 +101,32 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv
 
     vector<half, HEAD_SZ> token;
     vector<float, 1> scaleV;
-
+    constexpr int step = (HEAD_SZ==64 ||  HEAD_SZ ==128) ? HEAD_SZ : 32;
     auto quan_token= token.format<int8_t,2, HEAD_SZ>().row(0);
 
     #pragma unroll
     for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*SEQ_LEN) {
-        token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, qoff);
+        //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, qoff);
+        cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), qkv, qoff);
+
         half max=cm_reduced_max<half>(cm_abs(token));
         quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
-        cm_store<uint32_t, HEAD_SZ/4>(qkv, qoff, quan_token.format<uint32_t>());
+        cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), qkv, qoff);
+        //cm_store<uint32_t, HEAD_SZ/4>(qkv, qoff, quan_token.format<uint32_t>());
         scaleV[0] = (float)(max)/127.0;
         cm_store<uint32_t, 1>(qscale, qscale_off, scaleV.format<uint32_t>());
     }
     vector<half, HEAD_SZ> kmean;
-    token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, koff);
-    kmean.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(kmean_ptr, headkv*pitch);
+    //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, koff);
+    cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), qkv, koff);
+    //kmean.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(kmean_ptr, headkv*pitch);
+    cm_load_1d<HEAD_SZ/2, step/2>(kmean.format<uint32_t>(), kmean_ptr, headkv*pitch);
     token = token - kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token =  cm_rnde<int8_t>(cm_mul<float>(token, (float)(127.0)/(float)(max)));
 
-    cm_store<uint32_t, HEAD_SZ/4>(qkv, koff, quan_token.format<uint32_t>());
+    //cm_store<uint32_t, HEAD_SZ/4>(qkv, koff, quan_token.format<uint32_t>());
+    cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), qkv, koff);
     scaleV[0] = (float)(max)/127.0;
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }
@@ -179,7 +206,7 @@ def pyeval(src):
             result_src += line + "\n"
     return result_src
 
-def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=20, checkacc=True):
+def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True):
     seq_len = 12800
     head_num = 28
     kvhead_num = 4
@@ -244,19 +271,19 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=20, checkacc=True
 
 
 
-    t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(50)]
-    t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(50)]
-    t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(50)]
-    t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(50)]
+    t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(rep)]
+    t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(rep)]
+    t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(rep)]
+    t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(rep)]
     t_kf32_tmp = cl.tensor(torch.zeros(seq_len, kvhead_num, head_sz).to(dtype=torch.float32).detach().numpy())
 
-    all_layers=[]
-    mem_size=0
-    while mem_size < 4e9:
-        all_layers.append([
-            cl.tensor(q.detach().numpy())
-        ])
-        mem_size += q.numel() * q.element_size()
+    # all_layers=[]
+    # mem_size=0
+    # while mem_size < 4e9:
+    #     all_layers.append([
+    #         cl.tensor(q.detach().numpy())
+    #     ])
+    #     mem_size += q.numel() * q.element_size()
 
 
     print(f'head_num:{head_num}, seq_len:{seq_len}')
@@ -313,4 +340,6 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=20, checkacc=True
         # rounding to even and calculation error in float could introduce error of 1
         check_close(kint8_ref,torch.from_numpy(kint8_out), atol=1)
 
-test_sage_quan(1024, 28, 28, 128)
+test_sage_quan(128, 28, 28, 96)
+test_sage_quan(113, 28, 28, 128)
+

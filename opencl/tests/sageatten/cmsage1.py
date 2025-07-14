@@ -236,5 +236,12 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 if __name__ == "__main__":
     # for seqlen in range(1025, 1055, 1):
     #     test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    test_flash_attn_causal_batch1(113, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    test_flash_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 128)
+
+    for seqlen in range(1024, 1026, 1):
+        # todo: add other head_size support,cmload limitation.
+        for head_size in range(64, 256, 32):
+            print(f'-----------------------------------------------')
+            print(f'seq={seqlen}, head_size={head_size}')
+            print(f'-----------------------------------------------')
+            test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size)
+    # test_flash_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 96)
