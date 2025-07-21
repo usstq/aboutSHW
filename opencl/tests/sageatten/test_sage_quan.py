@@ -207,10 +207,6 @@ def pyeval(src):
     return result_src
 
 def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True):
-    seq_len = 12800
-    head_num = 28
-    kvhead_num = 4
-    head_sz = 128
     unroll_num = 32
     smmothk_local_sz = 64
     local_sz=64
