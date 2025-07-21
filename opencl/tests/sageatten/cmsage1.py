@@ -239,7 +239,7 @@ if __name__ == "__main__":
 
     for seqlen in range(1024, 1026, 1):
         # todo: add other head_size support,cmload limitation.
-        for head_size in range(64, 256, 32):
+        for head_size in range(64, 160, 32):
             print(f'-----------------------------------------------')
             print(f'seq={seqlen}, head_size={head_size}')
             print(f'-----------------------------------------------')

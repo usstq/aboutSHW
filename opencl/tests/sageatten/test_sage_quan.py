@@ -86,7 +86,7 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void test_rnd(SurfaceIndex p
         show<int8_t, 1, 8>(test_u8);
 }
 
-extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
+extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex q [[type("buffer_t")]], SurfaceIndex k [[type("buffer_t")]], SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
     if (id >= KVHEAD_NUM*SEQ_LEN)
         return;
@@ -94,8 +94,8 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv
     auto head = id*KVGRP_SZ % HEAD_NUM;
     auto seq = id / KVHEAD_NUM;
     auto pitch = HEAD_SZ*sizeof(half);
-    auto qoff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + head)*pitch;
-    auto koff = (seq * (HEAD_NUM + KVHEAD_NUM + KVHEAD_NUM) + headkv + HEAD_NUM)*pitch;
+    auto qoff = (seq * HEAD_NUM + head)*pitch;
+    auto koff = (seq * KVHEAD_NUM + headkv)*pitch;
     auto kscale_off = (headkv*SEQ_LEN + seq)*sizeof(float);
     auto qscale_off = (head*SEQ_LEN + seq)*sizeof(float);
 
@@ -106,27 +106,27 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv
 
     #pragma unroll
     for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*SEQ_LEN) {
-        //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, qoff);
-        cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), qkv, qoff);
+        //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(q, qoff);
+        cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), q, qoff);
 
         half max=cm_reduced_max<half>(cm_abs(token));
         quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
-        cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), qkv, qoff);
+        cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), q, qoff);
         //cm_store<uint32_t, HEAD_SZ/4>(qkv, qoff, quan_token.format<uint32_t>());
         scaleV[0] = (float)(max)/127.0;
         cm_store<uint32_t, 1>(qscale, qscale_off, scaleV.format<uint32_t>());
     }
     vector<half, HEAD_SZ> kmean;
-    //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(qkv, koff);
-    cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), qkv, koff);
+    //token.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(k, koff);
+    cm_load_1d<HEAD_SZ/2, step/2>(token.format<uint32_t>(), k, koff);
     //kmean.format<uint32_t>() = cm_load<uint, HEAD_SZ/2>(kmean_ptr, headkv*pitch);
     cm_load_1d<HEAD_SZ/2, step/2>(kmean.format<uint32_t>(), kmean_ptr, headkv*pitch);
     token = token - kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token =  cm_rnde<int8_t>(cm_mul<float>(token, (float)(127.0)/(float)(max)));
 
-    //cm_store<uint32_t, HEAD_SZ/4>(qkv, koff, quan_token.format<uint32_t>());
-    cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), qkv, koff);
+    //cm_store<uint32_t, HEAD_SZ/4>(k, koff, quan_token.format<uint32_t>());
+    cm_store_1d<HEAD_SZ/4, step/4>(quan_token.format<uint32_t>(), k, koff);
     scaleV[0] = (float)(max)/127.0;
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }
@@ -134,16 +134,15 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void quanQK(SurfaceIndex qkv
 
 extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
 
-    // q [B, L, H, S]
+    // k [B, L, H, S]
     auto kvhead = cm_group_id(0);
     auto sblk_idx = cm_group_id(1);
     auto lid = cm_linear_local_id();
     auto seq_start = lid * SEQ_BLK;
-    uint constexpr TOTAL_HEADS = (KVHEAD_NUM+KVHEAD_NUM+HEAD_NUM);
 
     auto sum_threads = (SEQ_LEN + SEQ_BLK - 1) / SEQ_BLK;
-    //auto offset = ((seq_start * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*STATE_BLK);
-    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + HEAD_NUM)*HEAD_SZ + sblk_idx*STATE_BLK);
+    auto offset = ((seq_start *KVHEAD_NUM  + kvhead )*HEAD_SZ + sblk_idx*STATE_BLK);
+
     k_ptr += offset;
 
     constexpr uint BUF_SIZE = LOCAL_SZ*STATE_BLK*sizeof(float);
@@ -155,8 +154,7 @@ extern "C" _GENX_MAIN_ void Kmean(half* k_ptr [[type("svmptr_t")]], half* kmean_
     vector<float, STATE_BLK> seq_blk_sum = 0;
     //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
     //TLB issue?
-    //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
-    auto pitch = TOTAL_HEADS*HEAD_SZ;
+    auto pitch = KVHEAD_NUM*HEAD_SZ;
 
     if (seq_start < SEQ_LEN) {
         auto remaing_seq = (seq_start + SEQ_BLK ) > SEQ_LEN ?  (SEQ_LEN-seq_start): SEQ_BLK;
@@ -269,6 +267,10 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True
 
     t_kmeanlist = [cl.tensor(torch.zeros(1, kvhead_num, head_sz).to(dtype=torch.float16).detach().numpy()) for _ in range(rep)]
     t_qkvlist = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(rep)]
+    t_qlist = [cl.tensor(q.to(torch.float16).detach().numpy()) for _ in range(rep)]
+    t_klist = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(rep)]
+
+
     t_qscaleList = [cl.tensor(qscale_out.detach().numpy()) for _ in range(rep)]
     t_kscaleList = [cl.tensor(kscale_out.detach().numpy()) for _ in range(rep)]
     t_kf32_tmp = cl.tensor(torch.zeros(seq_len, kvhead_num, head_sz).to(dtype=torch.float32).detach().numpy())
@@ -306,9 +308,9 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True
     print(f'QUAN_GWS:{quan_gws}, QUAN_LWS:{quan_lws}')
 
     for i in range(rep):
-        cm_kernels.enqueue("Kmean", mean_gws, mean_lws, t_qkvlist[i], t_kmeanlist[i])
+        cm_kernels.enqueue("Kmean", mean_gws, mean_lws, t_klist[i], t_kmeanlist[i])
     for i in range(rep):
-        cm_kernels.enqueue("quanQK", quan_gws, quan_lws, t_qkvlist[i], t_qscaleList[i], t_kscaleList[i], t_kmeanlist[i])
+        cm_kernels.enqueue("quanQK", quan_gws, quan_lws, t_qlist[i], t_klist[i], t_qscaleList[i], t_kscaleList[i], t_kmeanlist[i])
 
     lat=cl.finish()
     lat_mean= lat[0:rep]
@@ -325,8 +327,8 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True
     print(f'-----------------------------------------------------------------------------------------------')
 
 
-    qint8_out=t_qkvlist[0].numpy()[:,0:head_num,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
-    kint8_out=t_qkvlist[0].numpy()[:,head_num:(head_num+kvhead_num),0:head_sz//2].view(np.int8).reshape((seq_len, kvhead_num, head_sz))
+    qint8_out=t_qlist[0].numpy()[:,:,0:head_sz//2].view(np.int8).reshape((seq_len, head_num, head_sz))
+    kint8_out=t_klist[0].numpy()[:,:,0:head_sz//2].view(np.int8).reshape((seq_len, kvhead_num, head_sz))
 
     if checkacc:
         check_close(qint8_ref,torch.from_numpy(qint8_out))
@@ -338,4 +340,6 @@ def test_sage_quan(seq_len, head_num, kvhead_num, head_sz, rep=10, checkacc=True
 
 test_sage_quan(128, 28, 28, 96)
 test_sage_quan(113, 28, 28, 128)
+test_sage_quan(8192, 28, 4, 128, 8)
+
 
