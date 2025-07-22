@@ -21,17 +21,19 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 print(f'======================CM_GRF_WIDTH is {CM_GRF_WIDTH}')
 
-class flash_attn_cm:
-    def __init__(self, num_heads, num_kv_heads, head_size, is_causal = False, unroll_cnt=32):
+class sage_attn_cm:
+    def __init__(self, num_heads, num_kv_heads, head_size, qkfused = False, vfused = False, is_causal = False, unroll_cnt=32):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
+        self.qkfused = qkfused
+        self.vfused = vfused
         self.is_causal = is_causal
 
         self.unroll_cnt = unroll_cnt
         self.state_blk_sz = 32
         self.local_sz = 32 if CM_GRF_WIDTH == 512 else 64
-        src1 = r'''#include "cm_sdpa_vlen.hpp"'''
+        src1 = r'''#include "sage_sdpa_vlen.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
         print(f"compiling {cwd} {num_heads=} {head_size=} ...")
 
@@ -43,24 +45,30 @@ class flash_attn_cm:
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_SCALE_FACTOR={scale_factor}"
                       f" -DCMFLA_IS_CAUSAL={int(is_causal)}"
-                      f" -DUNROLL_NUM={int( self.unroll_cnt)}"
+                      f" -DUNROLL_NUM={int(self.unroll_cnt)}"
                       f" -DCMFLA_STATE_BLK={int(self.state_blk_sz)}"
                       f" -DLOCAL_SZ={int(self.local_sz)}"
+                      f" -DQK_FUSED={int(self.qkfused)}"
+                      f" -DV_FUSED={int(self.vfused)}"
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused(self, q, k, v, qkv, n_repeats = 1):
-        seq_len, total_heads, head_size = qkv.shape
+    def __call__(self, q, k, v, n_repeats = 1):
+        seq_len, _, head_size = q.shape
         old_dtype = q.dtype
-        assert total_heads == (self.num_heads + self.num_kv_heads * 2)
+        total_heads = (self.num_heads + self.num_kv_heads * 2)
         assert head_size == self.head_size
-        t_qkv = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
-        t_q = [cl.tensor(q.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
-        t_k = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
-        t_v = [cl.tensor(v.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_Q = [cl.tensor(q.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_K = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_V = [cl.tensor(v.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        qkv = None
+        t_QKV = []
+        if self.qkfused or self.vfused:
+            qkv = torch.cat((q,k,v), 1)
+            t_QKV = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+
 
         t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
-
         t_dqscale_q = [cl.tensor(torch.zeros(self.num_heads, seq_len).to(torch.float32).detach().numpy()) for _ in range(n_repeats)]
         t_dqscale_k = [cl.tensor(torch.zeros(self.num_kv_heads, seq_len).to(torch.float32).detach().numpy()) for _ in range(n_repeats)]
         t_mean_k = [cl.tensor(torch.zeros(1, self.num_kv_heads, self.head_size).to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
@@ -79,8 +87,10 @@ class flash_attn_cm:
 
         cl.finish()
         for i in range(n_repeats):
-            self.kernels.enqueue("Kmean", kmean_gws, kmean_lws, seq_len, kmean_seq_blk, t_k[i], t_mean_k[i])
-            self.kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, seq_len, t_q[i], t_k[i], t_dqscale_q[i], t_dqscale_k[i], t_mean_k[i])
+            t_q= t_QKV[i] if self.qkfused else t_Q[i]
+            t_k= t_QKV[i] if self.qkfused else t_K[i]
+            self.kernels.enqueue("cm_kmean", kmean_gws, kmean_lws, seq_len, kmean_seq_blk, t_k, t_mean_k[i])
+            self.kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, seq_len, t_q, t_k, t_dqscale_q[i], t_dqscale_k[i], t_mean_k[i])
         lat=cl.finish()
         assert len(lat) == n_repeats * 2
         lat_kmean=lat[0:n_repeats*2:2]
@@ -101,16 +111,19 @@ class flash_attn_cm:
         LWS = [1, 1, wg_size]
         print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
         for i in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_q[i], t_k[i], t_v[i], t_dqscale_q[i], t_dqscale_k[i], t_out)
+            t_q= t_QKV[i] if self.qkfused else t_Q[i]
+            t_k= t_QKV[i] if self.qkfused else t_K[i]
+            t_v= t_QKV[i] if self.vfused else t_V[i]
+            self.kernels.enqueue("cm_sage_sdpa", GWS, LWS, seq_len, t_q, t_k, t_v, t_dqscale_q[i], t_dqscale_k[i], t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, num_kv_heads, head_size, is_causal):
-        return flash_attn_cm(num_heads, num_kv_heads, head_size, is_causal)
+    def create_instance(num_heads, num_kv_heads, head_size, qkfused, vfused, is_causal):
+        return sage_attn_cm(num_heads, num_kv_heads, head_size, qkfused, vfused,is_causal)
 
-def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
+def sage_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     seq_length, num_heads, head_size = q.shape
     kv_seq_length, num_kv_heads, head_size = k.shape
     old_dtype = q.dtype
@@ -147,10 +160,10 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     return attn_output.to(old_dtype)
 
 
-def flash_attn(q, k, v, cu_seqlens):
+def sage_attn(q, k, v, cu_seqlens):
     _, num_heads, head_size = q.shape
-    func = flash_attn_cm.create_instance(num_heads, head_size)
-    # return flash_attn_vlen_ref(q, k, v, cu_seqlens)
+    func = sage_attn_cm.create_instance(num_heads, head_size)
+    # return sage_attn_vlen_ref(q, k, v, cu_seqlens)
     return func(q, k, v, cu_seqlens)
 
 
@@ -168,7 +181,7 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
+def test_sage_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, qkfused = False, vfused = False):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024)
@@ -195,14 +208,12 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
 
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-    ref = flash_attn_vlen_ref(q, k, v, [], is_causal)
+    ref = sage_attn_vlen_ref(q, k, v, [], is_causal)
 
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, is_causal)
+    func = sage_attn_cm.create_instance(num_heads, num_kv_heads, head_size, qkfused, vfused, is_causal)
 
-    qkv = torch.cat((q,k,v), 1)
-
-    out = func.qkv_fused(q, k, v, qkv)
-    out = func.qkv_fused(q, k, v, qkv, n_repeats=11)
+    out = func(q, k, v)
+    out = func(q, k, v, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
@@ -210,13 +221,17 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
 if __name__ == "__main__":
     # for seqlen in range(1025, 1055, 1):
-    #     test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    #     test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
 
-    for seqlen in range(1024, 1026, 1):
+    for seqlen in range(9216, 9217, 1024):
         # todo: add other head_size support,cmload limitation.
-        for head_size in range(64, 160, 32):
+        for head_size in range(160, 192, 32):
             print(f'-----------------------------------------------')
             print(f'seq={seqlen}, head_size={head_size}')
             print(f'-----------------------------------------------')
-            test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size)
-    # test_flash_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 96)
+            # test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=False, vfused=False)
+            # test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=True, vfused=True)
+            test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=False, vfused=True)
+
+    # test_sage_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 96)
+

@@ -1,5 +1,5 @@
 
-#include "cm_sdpa_common.hpp"
+#include "sage_sdpa_common.hpp"
 
 #ifdef CM_HAS_LSC_UNTYPED_2D
 #define USE_LSC 1
@@ -40,9 +40,13 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
     auto head = id * KVGRP_SZ % CMFLA_NUM_HEADS;
     auto seq = id / CMFLA_NUM_KV_HEADS;
     auto pitch = CMFLA_HEAD_SIZE*sizeof(half);
+#if QK_FUSED
+    auto qoff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS+ CMFLA_NUM_KV_HEADS) + head)*pitch;
+    auto koff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS + CMFLA_NUM_KV_HEADS) + headkv + CMFLA_NUM_HEADS)*pitch;
+#else
     auto qoff = (seq * CMFLA_NUM_HEADS  + head)*pitch;
     auto koff = (seq * CMFLA_NUM_KV_HEADS + headkv)*pitch;
-
+#endif
     auto kscale_off = (headkv*seqlen + seq)*sizeof(float);
     auto qscale_off = (head*seqlen + seq)*sizeof(float);
 
@@ -76,7 +80,7 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
 }
 
 
-extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
+extern "C" _GENX_MAIN_ void cm_kmean(int seqlen, int seq_blk, half* k_ptr [[type("svmptr_t")]], half* kmean_ptr [[type("svmptr_t")]]) {
 
     // q [B, L, H, S]
     auto kvhead = cm_group_id(0);
@@ -85,9 +89,18 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
     auto seq_start = lid * seq_blk;
 
     auto threads_cnt = (seqlen + seq_blk - 1) / seq_blk;
+#if QK_FUSED
+    uint constexpr TOTAL_HEADS = (CMFLA_NUM_KV_HEADS+CMFLA_NUM_KV_HEADS+CMFLA_NUM_HEADS);
+    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + CMFLA_NUM_HEADS)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
+    //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
+    //TLB issue?
+    //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
+    auto pitch = TOTAL_HEADS*CMFLA_HEAD_SIZE;
+#else
     auto offset = ((seq_start *CMFLA_NUM_KV_HEADS  + kvhead)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
     k_ptr += offset;
-
+    auto pitch = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE;
+#endif
     constexpr uint BUF_SIZE = LOCAL_SZ*CMFLA_STATE_BLK*sizeof(float);
     cm_slm_init(BUF_SIZE);
     auto scratch_buf = cm_slm_alloc(BUF_SIZE);
@@ -95,10 +108,7 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
     vector <half, CMFLA_STATE_BLK> seq;
     vector <float, CMFLA_STATE_BLK> seq_f32;
     vector<float, CMFLA_STATE_BLK> seq_blk_sum = 0;
-    //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
-    //TLB issue?
-    //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
-    auto pitch = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE;
+
 
     if (seq_start < seqlen) {
         auto remaing_seq = (seq_start + seq_blk ) > seqlen ?  (seqlen-seq_start): seq_blk;
@@ -136,7 +146,7 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
     }
 }
 
-extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
+extern "C" _GENX_MAIN_ void cm_sage_sdpa(
     int seqlen,
 #if USE_LSC == 1
     half* query [[type("svmptr_t")]],
@@ -204,13 +214,19 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
 
     // qkv fused
     constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    // uint q_offset = (q_start*num_total_heads + h)*head_size;
-    // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
-
+#if QK_FUSED
+    uint q_offset = (q_start*num_total_heads + h)*head_size;
+    uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
+#else
     uint q_offset = (q_start*num_heads + h)*head_size;
     uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
-    uint v_offset = k_offset;
+#endif
+
+#if V_FUSED
+    uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+#else
+    uint v_offset = (kv_start*num_kv_heads + hkv)*head_size;
+#endif
     uint o_offset = (q_start*num_heads + h)*head_size;
     //# scale [head, sequence, 1]
 
@@ -218,7 +234,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     uint kscale_offset = hkv*seqlen;
 
 #if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
+    sage_sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 16>(
                                 wg_local_id,
                                 q_start, //q_start,
                                 kv_stop,
@@ -231,7 +247,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(dqscale_k + kscale_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
+    sage_sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
