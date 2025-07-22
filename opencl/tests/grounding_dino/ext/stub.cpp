@@ -115,62 +115,75 @@ public:
         // expected:
         //  'out_dt:f32 out_shape:[-1,1,1]'
         //  'out_dt:0 out_shape:0' data type from input 0, shape from input 0
-        auto shape_info = extract_from_node(attr_node, "The last input for attributes must be constant");
-        OPENVINO_ASSERT(shape_info.count("out_dt"), "output info must have 'out_dt' key, example: 'out_dt:f32'/'out_dt:0'");
-        OPENVINO_ASSERT(shape_info.count("out_shape"), "output info must have 'out_shape' key, example: 'out_shape:[-1,1,1]'/'out_shape:0'");
-        OPENVINO_ASSERT(shape_info.count("type"), "attribute must have 'type' key for real algorithm");
-        auto dt_str = shape_info["out_dt"];
-        auto shape_str = shape_info["out_shape"];
-
-        ov::element::Type dt;
-        if (std::isdigit(dt_str[0])) {
-            auto dt_from_input = std::stoi(dt_str);
-            OPENVINO_ASSERT(dt_from_input < input_num - 1 && dt_from_input >= 0, "dt is set from input ", dt_from_input, " but max input is ", input_num - 1);
-            dt = get_input_element_type(dt_from_input);
-        } else {
-            if (dt_str == "f32") {
-                dt = ov::element::f32;
-            } else if (dt_str == "f16") {
-                dt = ov::element::f16;
-            } else if (dt_str == "bf16") {
-                dt = ov::element::bf16;
-            } else if (dt_str == "u8") {
-                dt = ov::element::u8;
-            } else if (dt_str == "i8") {
-                dt = ov::element::i8;
-            } else if (dt_str == "u4") {
-                dt = ov::element::u4;
-            } else if (dt_str == "i4") {
-                dt = ov::element::i4;
-            } else if (dt_str == "u32") {
-                dt = ov::element::u32;
-            } else if (dt_str == "i32") {
-                dt = ov::element::i32;
-            } else {
-                OPENVINO_ASSERT(false, "unsupport dt type, current ", dt_str);
-            }
-        }
-        ov::PartialShape ps;
-        if (std::isdigit(shape_str[0])) {
-            auto shape_from_input = std::stoi(shape_str);
-            OPENVINO_ASSERT(shape_from_input < input_num - 1 && shape_from_input >= 0, "shape is set from input ", shape_from_input, " but max input is ", input_num - 1);
-            ps = get_input_partial_shape(shape_from_input);
-        } else {
-            auto len = shape_str.size();
-            OPENVINO_ASSERT(len > 2 && shape_str[0] == '[' && shape_str[len - 1] == ']', "shape length format should be '[1]', current: ", shape_str);
-            shape_str = shape_str.substr(1, len - 2);
-            auto dim_str = split_string_single_delimiter(shape_str, ",");
-            std::vector<ov::Dimension> dims;
-            std::transform(dim_str.begin(), dim_str.end(), std::back_inserter(dims), [&] (const std::string& s) {
-                return std::stoi(s);
-            });
-            ps = dims;
-        }
-        for (auto&& kv : shape_info) {
+        auto attr_info = extract_from_node(attr_node, "The last input for attributes must be constant");
+        size_t idx = 0;
+        OPENVINO_ASSERT(attr_info.count("type"), "attribute must have 'type' key for real algorithm");
+        for (auto&& kv : attr_info) {
             m_attributes[kv.first] = kv.second;
         }
+        do {
+            std::string key_out_dt = "out_dt";
+            std::string key_out_shape = "out_shape";
+            if (idx == 0) {
+                OPENVINO_ASSERT(attr_info.count(key_out_dt), "output info must have 'out_dt' key, example: 'out_dt:f32'/'out_dt:0'");
+                OPENVINO_ASSERT(attr_info.count(key_out_shape), "output info must have 'out_shape' key, example: 'out_shape:[-1,1,1]'/'out_shape:0'");
+            } else {
+                key_out_dt = key_out_dt + std::to_string(idx);
+                key_out_shape = key_out_shape + std::to_string(idx);
+                if (!attr_info.count(key_out_dt) || !attr_info.count(key_out_shape))
+                    break;
+            }
+            auto dt_str = attr_info[key_out_dt];
+            auto shape_str = attr_info[key_out_shape];
 
-        set_output_type(0, dt, ps);
+            ov::element::Type dt;
+            if (std::isdigit(dt_str[0])) {
+                auto dt_from_input = std::stoi(dt_str);
+                OPENVINO_ASSERT(dt_from_input < input_num - 1 && dt_from_input >= 0, "dt is set from input ", dt_from_input, " but max input is ", input_num - 1);
+                dt = get_input_element_type(dt_from_input);
+            } else {
+                if (dt_str == "f32") {
+                    dt = ov::element::f32;
+                } else if (dt_str == "f16") {
+                    dt = ov::element::f16;
+                } else if (dt_str == "bf16") {
+                    dt = ov::element::bf16;
+                } else if (dt_str == "u8") {
+                    dt = ov::element::u8;
+                } else if (dt_str == "i8") {
+                    dt = ov::element::i8;
+                } else if (dt_str == "u4") {
+                    dt = ov::element::u4;
+                } else if (dt_str == "i4") {
+                    dt = ov::element::i4;
+                } else if (dt_str == "u32") {
+                    dt = ov::element::u32;
+                } else if (dt_str == "i32") {
+                    dt = ov::element::i32;
+                } else {
+                    OPENVINO_ASSERT(false, "unsupport dt type, current ", dt_str);
+                }
+            }
+            ov::PartialShape ps;
+            if (std::isdigit(shape_str[0])) {
+                auto shape_from_input = std::stoi(shape_str);
+                OPENVINO_ASSERT(shape_from_input < input_num - 1 && shape_from_input >= 0, "shape is set from input ", shape_from_input, " but max input is ", input_num - 1);
+                ps = get_input_partial_shape(shape_from_input);
+            } else {
+                auto len = shape_str.size();
+                OPENVINO_ASSERT(len > 2 && shape_str[0] == '[' && shape_str[len - 1] == ']', "shape length format should be '[1]', current: ", shape_str);
+                shape_str = shape_str.substr(1, len - 2);
+                auto dim_str = split_string_single_delimiter(shape_str, ",");
+                std::vector<ov::Dimension> dims;
+                std::transform(dim_str.begin(), dim_str.end(), std::back_inserter(dims), [&] (const std::string& s) {
+                    return std::stoi(s);
+                });
+                ps = dims;
+            }
+
+            // std::cout << "extract port " << idx << " dt: " << dt << " ps: " << ps << "\n";
+            set_output_type(idx++, dt, ps);
+        } while (1);
     }
     
     std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override {
