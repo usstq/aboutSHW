@@ -30,7 +30,7 @@ CM_INLINE void cm_store_1d(vector_ref<uint32_t, NElts> in, SurfaceIndex base, ui
 
 
 
-extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seqlen, SurfaceIndex qkv [[type("buffer_t")]],
+extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seqlen, SurfaceIndex q [[type("buffer_t")]], SurfaceIndex k [[type("buffer_t")]],
                                             SurfaceIndex qscale [[type("buffer_t")]], SurfaceIndex kscale [[type("buffer_t")]], SurfaceIndex kmean_ptr [[type("buffer_t")]]) {
     auto id = cm_group_id(0)*cm_local_size(0) + cm_linear_local_id();
     if (id >= CMFLA_NUM_KV_HEADS*seqlen)
@@ -40,8 +40,8 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
     auto head = id * KVGRP_SZ % CMFLA_NUM_HEADS;
     auto seq = id / CMFLA_NUM_KV_HEADS;
     auto pitch = CMFLA_HEAD_SIZE*sizeof(half);
-    auto qoff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS+ CMFLA_NUM_KV_HEADS) + head)*pitch;
-    auto koff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS + CMFLA_NUM_KV_HEADS) + headkv + CMFLA_NUM_HEADS)*pitch;
+    auto qoff = (seq * CMFLA_NUM_HEADS  + head)*pitch;
+    auto koff = (seq * CMFLA_NUM_KV_HEADS + headkv)*pitch;
 
     auto kscale_off = (headkv*seqlen + seq)*sizeof(float);
     auto qscale_off = (head*seqlen + seq)*sizeof(float);
@@ -54,11 +54,10 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
 
     #pragma unroll
     for(int i= 0;i<KVGRP_SZ;i++,qoff+=pitch, qscale_off += sizeof(float)*seqlen) {
-        // token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, qoff);
-        cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), qkv, qoff);
+        cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), q, qoff);
         half max=cm_reduced_max<half>(cm_abs(token));
         quan_token =  cm_mul<int8_t>(token, (float)(127.0)/(float)(max));
-        cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), qkv, qoff);
+        cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), q, qoff);
 
         // cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, qoff, quan_token.format<uint32_t>());
         scaleV[0] = (float)(max)/127.0;
@@ -66,15 +65,12 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
     }
 
     vector<half, CMFLA_HEAD_SIZE> kmean;
-    // token.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(qkv, koff);
-    cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), qkv, koff);
-    // kmean.format<uint32_t>() = cm_load<uint, CMFLA_HEAD_SIZE/2>(kmean_ptr, headkv*pitch);
+    cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(token.format<uint32_t>(), k, koff);
     cm_load_1d<CMFLA_HEAD_SIZE/2, step/2>(kmean.format<uint32_t>(), kmean_ptr, headkv*pitch);
     token -= kmean;
     half max=cm_reduced_max<half>(cm_abs(token));
     quan_token = cm_rnde<int8_t>(cm_mul<float>(token, (float)(127.0)/(float)(max)));
-    // cm_store<uint32_t, CMFLA_HEAD_SIZE/4>(qkv, koff, quan_token.format<uint32_t>());
-    cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), qkv, koff);
+    cm_store_1d<CMFLA_HEAD_SIZE/4, step/4>(quan_token.format<uint32_t>(), k, koff);
     scaleV[0] = (float)(max)*scale_factor/float(127.0);
     cm_store<uint32_t, 1>(kscale, kscale_off, scaleV.format<uint32_t>());
 }
@@ -87,11 +83,9 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
     auto sblk_idx = cm_group_id(1);
     auto lid = cm_linear_local_id();
     auto seq_start = lid * seq_blk;
-    uint constexpr TOTAL_HEADS = (CMFLA_NUM_KV_HEADS+CMFLA_NUM_KV_HEADS+CMFLA_NUM_HEADS);
 
     auto threads_cnt = (seqlen + seq_blk - 1) / seq_blk;
-    //auto offset = ((seq_start * KVHEAD_NUM + kvhead)*HEAD_SZ + sblk_idx*CMFLA_STATE_BLK);
-    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + CMFLA_NUM_HEADS)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
+    auto offset = ((seq_start *CMFLA_NUM_KV_HEADS  + kvhead)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
     k_ptr += offset;
 
     constexpr uint BUF_SIZE = LOCAL_SZ*CMFLA_STATE_BLK*sizeof(float);
@@ -104,7 +98,7 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
     //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
     //TLB issue?
     //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
-    auto pitch = TOTAL_HEADS*CMFLA_HEAD_SIZE;
+    auto pitch = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE;
 
     if (seq_start < seqlen) {
         auto remaing_seq = (seq_start + seq_blk ) > seqlen ?  (seqlen-seq_start): seq_blk;
@@ -145,12 +139,17 @@ extern "C" _GENX_MAIN_ void Kmean(int seqlen, int seq_blk, half* k_ptr [[type("s
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
-    half* query_key_value [[type("svmptr_t")]],
+    half* query [[type("svmptr_t")]],
+    half* key [[type("svmptr_t")]],
+    half* value [[type("svmptr_t")]],
     float* dqscale_q [[type("svmptr_t")]],
     float* dqscale_k [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]
 #else
-    SurfaceIndex query_key_value [[type("buffer_t")]],
+    SurfaceIndex query [[type("buffer_t")]],
+    SurfaceIndex key [[type("buffer_t")]],
+    SurfaceIndex value [[type("buffer_t")]],
+
     SurfaceIndex dqscale_q [[type("buffer_t")]],
     SurfaceIndex dqscale_k [[type("buffer_t")]],
     SurfaceIndex output [[type("buffer_t")]]
@@ -205,9 +204,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
 
     // qkv fused
     constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    uint q_offset = (q_start*num_total_heads + h)*head_size;
-    uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // uint q_offset = (q_start*num_total_heads + h)*head_size;
+    // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
+    // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+
+    uint q_offset = (q_start*num_heads + h)*head_size;
+    uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
+    uint v_offset = k_offset;
     uint o_offset = (q_start*num_heads + h)*head_size;
     //# scale [head, sequence, 1]
 
@@ -215,20 +218,20 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     uint kscale_offset = hkv*seqlen;
 
 #if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
+    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
                                 wg_local_id,
                                 q_start, //q_start,
                                 kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query_key_value + q_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + k_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + v_offset),
+                                reinterpret_cast<svmptr_t>(query + q_offset),
+                                reinterpret_cast<svmptr_t>(key + k_offset),
+                                reinterpret_cast<svmptr_t>(value + v_offset),
                                 reinterpret_cast<svmptr_t>(dqscale_q + qscale_offset),
                                 reinterpret_cast<svmptr_t>(dqscale_k + kscale_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(
+    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
@@ -237,9 +240,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
-                                query_key_value,
-                                query_key_value,
-                                query_key_value,
+                                query,
+                                key,
+                                value,
                                 dqscale_q,
                                 dqscale_k,
                                 output,

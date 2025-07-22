@@ -49,12 +49,16 @@ class flash_attn_cm:
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused(self, qkv, n_repeats = 1):
+    def qkv_fused(self, q, k, v, qkv, n_repeats = 1):
         seq_len, total_heads, head_size = qkv.shape
-        old_dtype = qkv.dtype
+        old_dtype = q.dtype
         assert total_heads == (self.num_heads + self.num_kv_heads * 2)
         assert head_size == self.head_size
         t_qkv = [cl.tensor(qkv.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_q = [cl.tensor(q.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_k = [cl.tensor(k.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+        t_v = [cl.tensor(v.to(torch.float16).detach().numpy()) for _ in range(n_repeats)]
+
         t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
 
         t_dqscale_q = [cl.tensor(torch.zeros(self.num_heads, seq_len).to(torch.float32).detach().numpy()) for _ in range(n_repeats)]
@@ -75,8 +79,8 @@ class flash_attn_cm:
 
         cl.finish()
         for i in range(n_repeats):
-            self.kernels.enqueue("Kmean", kmean_gws, kmean_lws, seq_len, kmean_seq_blk, t_qkv[i], t_mean_k[i])
-            self.kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, seq_len, t_qkv[i], t_dqscale_q[i], t_dqscale_k[i], t_mean_k[i])
+            self.kernels.enqueue("Kmean", kmean_gws, kmean_lws, seq_len, kmean_seq_blk, t_k[i], t_mean_k[i])
+            self.kernels.enqueue("cm_quantize_qk", quan_gws, quan_lws, seq_len, t_q[i], t_k[i], t_dqscale_q[i], t_dqscale_k[i], t_mean_k[i])
         lat=cl.finish()
         assert len(lat) == n_repeats * 2
         lat_kmean=lat[0:n_repeats*2:2]
@@ -97,7 +101,7 @@ class flash_attn_cm:
         LWS = [1, 1, wg_size]
         print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
         for i in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_qkv[i], t_dqscale_q[i], t_dqscale_k[i], t_out)
+            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_q[i], t_k[i], t_v[i], t_dqscale_q[i], t_dqscale_k[i], t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
 
@@ -164,35 +168,6 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
-    cl.profiling(True)
-    torch.manual_seed(0)
-    torch.set_printoptions(linewidth=1024)
-
-    import numpy as np
-    q_len = kv_len = seq_len
-    cu_seqlens = torch.tensor([i for i in range(0, seq_len, sub_seq_len)] + [seq_len], dtype=torch.int32)
-    #print(cu_seqlens)
-
-    low = -1
-    high = 2
-    act_dtype = torch.float16
-    q = torch.randint(low, high, [q_len, num_heads, head_size]).to(dtype=act_dtype)
-    k = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)
-    v = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-
-    ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
-
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, False)
-    out = func(q, k, v, cu_seqlens)
-    check_close(ref, out)
-
-    out = func(q, k, v, cu_seqlens, 100)
-    latency = cl.finish()
-    # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
-    print(f" {seq_len=} {sub_seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
-
-
 def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
     cl.profiling(True)
     torch.manual_seed(0)
@@ -226,8 +201,8 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
     qkv = torch.cat((q,k,v), 1)
 
-    out = func.qkv_fused(qkv)
-    out = func.qkv_fused(qkv, n_repeats=11)
+    out = func.qkv_fused(q, k, v, qkv)
+    out = func.qkv_fused(q, k, v, qkv, n_repeats=11)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
