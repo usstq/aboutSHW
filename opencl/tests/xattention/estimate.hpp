@@ -82,13 +82,14 @@ CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, SurfaceIndex base, uint offs
     }
 }
 
-CM_INLINE void gemm_qk_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+// register tile: [8, 2] aka[(8*8,16), (16, 16*2)]
+CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t dst, uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
     constexpr int SG_SIZE = 16;
     // sg blocking
     constexpr int BLOCK_SG_M = 64;
     constexpr int BLOCK_SG_N = 32;
-    constexpr int SG_M = 4;
-    constexpr int SG_N = 8;
+    //constexpr int SG_M = 4;
+    //constexpr int SG_N = 8;
     constexpr int BLOCK_WG_K = 64;	// same in sg
 
     // xehpg DPAS spec: dst: [8, 8], repeat: 1~8, depth: 8
@@ -116,21 +117,21 @@ CM_INLINE void gemm_qk_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a,
 
     static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
     // N[0:32]xK[0:16]
-    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
         0, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
     // prefetch B
     static constexpr int SG_MN = SG_M * SG_N;
-    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
         0, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
     // N[0:32]xK[0:16]                                                                   --> 4 regs
     matrix<half, REG_N, BLOCK_REG_B> b0, b1;
 
     // M[0:64]xK[0:32]
-    lsc::block_2d_desc<half, 2, 32, BLOCK_REG_K> desc_a0{ src_a, M - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 2, 32, BLOCK_REG_K> desc_a0{ src_a, M - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
         0, (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
     // M[32:64]xK[0:32]
     // prefetch A
-    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a, M - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a, M - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
         0, (int)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) };
     // 0~3 is M[:]xK[0:16], 4~7 is M[:]xK[16:32]                                        --> 32+32=64 regs
     matrix<half, 8, BLOCK_REG_A> a0, a1;
@@ -218,7 +219,7 @@ CM_INLINE void gemm_qk_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a,
     //cm_sbarrier(0);
 
     // store
-    lsc::block_2d_desc<int, 1, 8, BLOCK_SG_N / 2> desc_c{ dst, M - 1, (uint)(N * sizeof(half) - 1), (uint)(N * sizeof(half) - 1),
+    lsc::block_2d_desc<int, 1, 8, BLOCK_SG_N / 2> desc_c{ dst, M - 1, (uint)(N * sizeof(half) - 1), (uint)(ldc * sizeof(half) - 1),
         (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / 2, (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
     matrix<half, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> tmp;
 #pragma unroll

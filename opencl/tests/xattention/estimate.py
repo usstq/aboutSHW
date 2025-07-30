@@ -101,8 +101,8 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     }
 
     _GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc, int slice_no, int slice) {
-        const uint BLOCK_WG_M = 256;
-        const uint BLOCK_WG_N = 256;
+        const uint BLOCK_WG_M = 64 * SG_M;
+        const uint BLOCK_WG_N = 32 * SG_N;
         const uint size_slm_b = 0;
         auto slm = 0;
         uint b_hq = cm_group_id(2);
@@ -118,7 +118,30 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
         src_a += (b * HQ + hq) * M * lda * (uint)sizeof(half);
         src_b += (b * HK + hk) * N * ldb * (uint)sizeof(half);
         dst += (b * HQ + hq) * M * ldc * (uint)sizeof(half);
-        gemm_qk_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+        gemm_qk_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+    }
+
+    _GENX_MAIN_ void gemm_qk_gqa(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc, int slice_no, int slice) {
+        const uint BLOCK_WG_M = 64 * SG_M;
+        const uint BLOCK_WG_N = 32 * SG_N;
+        const uint size_slm_b = 0;
+        auto slm = 0;
+        uint b_hk = cm_group_id(2);
+        uint b = b_hk / HK;
+        uint hk = b_hk % HK;
+        uint hq = hk * (HQ / HK);
+
+        static_assert(HQ % HK == 0, "HQ must be multiple of HK");
+
+        uint id_wg_m, id_wg_n;
+        get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
+
+        src_b += (b * HK + hk) * N * ldb * (uint)sizeof(half);
+        for (uint i = 0; i < HQ / HK; i++) {
+            svmptr_t cur_a = src_a + (b * HQ + hq + i) * M * lda * (uint)sizeof(half);
+            svmptr_t cur_dst = dst + (b * HQ + hq + i) * M * ldc * (uint)sizeof(half);
+            gemm_qk_8x2_xe2(id_wg_m, id_wg_n, slm, cur_a, src_b, cur_dst, M, N, K, lda, ldb, ldc);
+        }
     }
     ''')
     src = '\n'.join(src)
@@ -126,14 +149,14 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     kernel_name = 'gemm_qk'
     BLOCK_SG_M = 64
     BLOCK_SG_N = 32
-    SG_M = 4
+    SG_M = 2
     SG_N = 8
     BLOCK_WG_M = BLOCK_SG_M * SG_M
     BLOCK_WG_N = BLOCK_SG_N * SG_N
 
-    jit_option = '-abortonspill -noschedule '
+    jit_option = '-abortonspill ' #-noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
-                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S}''')
+                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N}''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
