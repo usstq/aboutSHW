@@ -26,9 +26,7 @@ def get_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, caus
     K_block = (k_len + block_size -1) // block_size
 
     # Antidiagonal Reshaping (Stride-S)
-    # TODO
-    #Q_resh = torch.cat([Q[:, :, S-1-i::S, :] for i in range(S)], dim=-1)
-    Q_resh = torch.cat([Q[:, :, i::S, :] for i in range(S)], dim=-1)
+    Q_resh = torch.cat([Q[:, :, S-1-i::S, :] for i in range(S)], dim=-1)
     K_resh = torch.cat([K[:, :, i::S, :] for i in range(S)], dim=-1)
 
     # Attention Estimation
@@ -154,7 +152,7 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     BLOCK_WG_M = BLOCK_SG_M * SG_M
     BLOCK_WG_N = BLOCK_SG_N * SG_N
 
-    jit_option = '-abortonspill ' #-noschedule '
+    jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                        -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N}''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]

@@ -110,12 +110,13 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
     static constexpr int REG_K = BLOCK_WG_K / BLOCK_REG_K;
     static constexpr int REG_MN = REG_M * REG_N;
 
-    matrix<float, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;
+    matrix<float, REG_M * REG_N, BLOCK_DPAS_C> acc = 0;                               // --> 64*2 regs
     uint id_sg_n = cm_local_id(0);
     uint id_sg_m = cm_local_id(1);
     uint id_sg_mn = id_sg_m * SG_N + id_sg_n;
 
     static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
+    static_assert(HEAD_SIZE % BLOCK_WG_K == 0, "K dimension must be multiple of BLOCK_WG_K");
     // N[0:32]xK[0:16]
     lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
         0, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
@@ -123,7 +124,7 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
     static constexpr int SG_MN = SG_M * SG_N;
     lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
         0, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
-    // N[0:32]xK[0:16]                                                                   --> 4 regs
+    // N[0:32]xK[0:16]                                                                   --> 8+8 regs
     matrix<half, REG_N, BLOCK_REG_B> b0, b1;
 
     // M[0:64]xK[0:32]
@@ -132,7 +133,7 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
     // M[32:64]xK[0:32]
     // prefetch A
     lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a, M - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
-        0, (int)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) };
+        (STRIDE - 1) * HEAD_SIZE, (int)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) };
     // 0~3 is M[:]xK[0:16], 4~7 is M[:]xK[16:32]                                        --> 32+32=64 regs
     matrix<half, 8, BLOCK_REG_A> a0, a1;
 
@@ -147,7 +148,7 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
     desc_b0.set_block_x(desc_b0.get_block_x() + 8);
-    //cm_sbarrier(1);
+    cm_sbarrier(1);
 
     auto dot = [&](matrix_ref<half, 4, BLOCK_REG_A> A0, matrix_ref<half, 4, BLOCK_REG_A> A1, matrix_ref<half, REG_N, BLOCK_REG_B> B) {
 #pragma unroll
@@ -165,58 +166,65 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
         }
     };
 
-    for (uint k = 0; k < K / BLOCK_WG_K; k++) {
-        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
-        desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
-        desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
+    for (uint s = 0; s < STRIDE; s++) {
+        desc_a0.set_block_x((STRIDE - 1 - s) * HEAD_SIZE);
+        #pragma unroll
+        for (uint hs = 0; hs < HEAD_SIZE / BLOCK_WG_K; hs++) {
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
+            desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
+            if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
+                desc_prefetch_a.set_block_x((s > 0 ? STRIDE - 1 - s - 1 : 0) * HEAD_SIZE);
+            else
+                desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
 
-        // load b: N[0:16]xK[16:32]
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
-        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+            // load b: N[0:16]xK[16:32]
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
+            desc_b0.set_block_x(desc_b0.get_block_x() + 8);
 
-        // load a: M[0:32]xK[0:32]
-        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<half>(), desc_a0);
-        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<half>(), desc_a0);
-        desc_a0.set_block_x(desc_a0.get_block_x() + 32);
-        // dot: (M[0:32]xK[0:16])*(N[0:16]xK[0:16])'
-        dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
+            // load a: M[0:32]xK[0:32]
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<half>(), desc_a0);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<half>(), desc_a0);
+            desc_a0.set_block_x(desc_a0.get_block_x() + 32);
+            // dot: (M[0:32]xK[0:16])*(N[0:16]xK[0:16])'
+            dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
 
-        // load b: N[0:16]xK[32:48]
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
-        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
-        // dot: (M[0:32]xK[16:32])*(N[0:16]xK[16:32])'
-        dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
-    
-        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
-        desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
-        desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
-    
-        // load b: N[0:16]xK[48:64]
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
-        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
-        // load a: M[0:32]xK[32:64]
-        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<half>(), desc_a0);
-        cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<half>(), desc_a0);
-        desc_a0.set_block_x(desc_a0.get_block_x() + 32);
-        // dot: (M[0:32]xK[32:48])*(N[0:16]xK[32:48])'
-        dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
+            // load b: N[0:16]xK[32:48]
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
+            desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+            // dot: (M[0:32]xK[16:32])*(N[0:16]xK[16:32])'
+            dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
+        
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
+            desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
+            desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
+        
+            // load b: N[0:16]xK[48:64]
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.row(0).format<int>(), desc_b0);
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
+            desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+            // load a: M[0:32]xK[32:64]
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0.format<half>(), desc_a0);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a1.format<half>(), desc_a0);
+            desc_a0.set_block_x(desc_a0.get_block_x() + 32);
+            // dot: (M[0:32]xK[32:48])*(N[0:16]xK[32:48])'
+            dot(a0.select<4, 1, BLOCK_REG_A, 1>(), a1.select<4, 1, BLOCK_REG_A, 1>(), b0.select_all());
 
-        // load b: N[0:16]xK[0:16]
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
-        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
-        desc_b0.set_block_x(desc_b0.get_block_x() + 8);
-        // dot: (M[0:32]xK[48:64])*(N[0:16]xK[48:64])'
-        dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
-        //cm_sbarrier(0);
-        //cm_sbarrier(1);
+            // load b: N[0:16]xK[0:16]
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.row(0).format<int>(), desc_b0);
+            cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b0.row(1).format<int>(), desc_b0);
+            desc_b0.set_block_x(desc_b0.get_block_x() + 8);
+            // dot: (M[0:32]xK[48:64])*(N[0:16]xK[48:64])'
+            dot(a0.select<4, 1, BLOCK_REG_A, 1>(4, 0), a1.select<4, 1, BLOCK_REG_A, 1>(4, 0), b1.select_all());
+            cm_sbarrier(0);
+            cm_sbarrier(1);
+        }
     }
-    
-    //cm_sbarrier(0);
+
+    cm_sbarrier(0);
 
     // store
     lsc::block_2d_desc<int, 1, 8, BLOCK_SG_N / 2> desc_c{ dst, M - 1, (uint)(N * sizeof(half) - 1), (uint)(ldc * sizeof(half) - 1),
