@@ -236,7 +236,7 @@ CM_INLINE void gemm_qk_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
 #pragma unroll
         for (int reg_n = 0; reg_n < REG_N; reg_n++) {
             tmp.select<BLOCK_REG_M, 1, BLOCK_REG_N, 1>(reg_m * BLOCK_REG_M, reg_n * BLOCK_REG_N) =
-                acc.row(reg_m * REG_N + reg_n);
+                acc.row(reg_m * REG_N + reg_n) * float{INV_S};
         }
     }
     cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, tmp.select<BLOCK_REG_M, 1, REG_N * BLOCK_REG_N, 1>(0 * BLOCK_REG_M, 0).format<int>());

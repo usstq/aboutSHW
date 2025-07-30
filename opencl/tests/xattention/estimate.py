@@ -32,8 +32,9 @@ def get_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, caus
     # Attention Estimation
     A = Q_resh @ K_resh.transpose(-1, -2)
     #print(f'{A.shape=} {Q_resh.shape=} {K_resh.shape=}')
+    A = A / math.sqrt(d) / S
 
-    #A = F.softmax(A / math.sqrt(d) / S, dim=-1, dtype=torch.float32).to(Q.dtype)
+    #A = F.softmax(A, dim=-1, dtype=torch.float32).to(Q.dtype)
     return A
 
 
@@ -154,7 +155,7 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
 
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
-                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N}''')
+                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N} -DINV_S={1 / math.sqrt(S) / stride}''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
