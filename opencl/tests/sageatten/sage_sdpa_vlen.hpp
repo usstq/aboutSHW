@@ -40,7 +40,7 @@ extern "C" _GENX_MAIN_ _GENX_FLOAT_CONTROL_(CM_RTE) void cm_quantize_qk(int seql
     auto head = id * KVGRP_SZ % CMFLA_NUM_HEADS;
     auto seq = id / CMFLA_NUM_KV_HEADS;
     auto pitch = CMFLA_HEAD_SIZE*sizeof(half);
-#if QK_FUSED
+#if CMFLA_QK_FUSED
     auto qoff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS+ CMFLA_NUM_KV_HEADS) + head)*pitch;
     auto koff = (seq * (CMFLA_NUM_HEADS + CMFLA_NUM_KV_HEADS + CMFLA_NUM_KV_HEADS) + headkv + CMFLA_NUM_HEADS)*pitch;
 #else
@@ -89,32 +89,32 @@ extern "C" _GENX_MAIN_ void cm_kmean(int seqlen, int seq_blk, half* k_ptr [[type
     auto seq_start = lid * seq_blk;
 
     auto threads_cnt = (seqlen + seq_blk - 1) / seq_blk;
-#if QK_FUSED
+#if CMFLA_QK_FUSED
     uint constexpr TOTAL_HEADS = (CMFLA_NUM_KV_HEADS+CMFLA_NUM_KV_HEADS+CMFLA_NUM_HEADS);
-    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + CMFLA_NUM_HEADS)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
+    auto offset = ((seq_start *TOTAL_HEADS  + kvhead + CMFLA_NUM_HEADS)*CMFLA_HEAD_SIZE + sblk_idx*CMKMEAN_STATE_BLK);
     //don't know why, when lowering down pitch can achive 385.64 GB/S, just a test.
     //TLB issue?
     //auto pitch = (TOTAL_HEADS-1)*HEAD_SZ;
     auto pitch = TOTAL_HEADS*CMFLA_HEAD_SIZE;
 #else
-    auto offset = ((seq_start *CMFLA_NUM_KV_HEADS  + kvhead)*CMFLA_HEAD_SIZE + sblk_idx*CMFLA_STATE_BLK);
+    auto offset = ((seq_start *CMFLA_NUM_KV_HEADS  + kvhead)*CMFLA_HEAD_SIZE + sblk_idx*CMKMEAN_STATE_BLK);
     k_ptr += offset;
     auto pitch = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE;
 #endif
-    constexpr uint BUF_SIZE = LOCAL_SZ*CMFLA_STATE_BLK*sizeof(float);
+    constexpr uint BUF_SIZE = CMKMEAN_LOCAL_SZ*CMKMEAN_STATE_BLK*sizeof(float);
     cm_slm_init(BUF_SIZE);
     auto scratch_buf = cm_slm_alloc(BUF_SIZE);
 
-    vector <half, CMFLA_STATE_BLK> seq;
-    vector <float, CMFLA_STATE_BLK> seq_f32;
-    vector<float, CMFLA_STATE_BLK> seq_blk_sum = 0;
+    vector <half, CMKMEAN_STATE_BLK> seq;
+    vector <float, CMKMEAN_STATE_BLK> seq_f32;
+    vector<float, CMKMEAN_STATE_BLK> seq_blk_sum = 0;
 
 
     if (seq_start < seqlen) {
         auto remaing_seq = (seq_start + seq_blk ) > seqlen ?  (seqlen-seq_start): seq_blk;
 
         if (seq_blk == remaing_seq) {
-            #pragma unroll(UNROLL_NUM)
+            #pragma unroll(CMKMEAN_UNROLL_NUM)
             for (int i = 0; i < seq_blk; i++) {
                 cm_svm_block_read(reinterpret_cast<svmptr_t>(k_ptr), seq);
                 seq_f32 = seq;
@@ -129,20 +129,20 @@ extern "C" _GENX_MAIN_ void cm_kmean(int seqlen, int seq_blk, half* k_ptr [[type
                 k_ptr += pitch;
             }
         }
-        cm_slm_block_write(scratch_buf, lid*CMFLA_STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
+        cm_slm_block_write(scratch_buf, lid*CMKMEAN_STATE_BLK*sizeof(float), seq_blk_sum.format<float>());
     }
     cm_barrier();
     if (lid == 0) {
         seq_blk_sum = 0;
-        vector<float, CMFLA_STATE_BLK> tmpsum = 0;
+        vector<float, CMKMEAN_STATE_BLK> tmpsum = 0;
         int off = 0;
-        for (int r = 0; r<threads_cnt; r++, off +=CMFLA_STATE_BLK*sizeof(float)) {
+        for (int r = 0; r<threads_cnt; r++, off +=CMKMEAN_STATE_BLK*sizeof(float)) {
             cm_slm_block_read(scratch_buf, GENX_NONE, off, tmpsum.format<float>());
             seq_blk_sum += tmpsum;
         }
-        vector<half, CMFLA_STATE_BLK> kmean;
+        vector<half, CMKMEAN_STATE_BLK> kmean;
         kmean = seq_blk_sum / (float)(seqlen);
-        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*CMFLA_HEAD_SIZE+sblk_idx*CMFLA_STATE_BLK), kmean);
+        cm_svm_block_write(reinterpret_cast<svmptr_t>(kmean_ptr + kvhead*CMFLA_HEAD_SIZE+sblk_idx*CMKMEAN_STATE_BLK), kmean);
     }
 }
 
@@ -214,7 +214,7 @@ extern "C" _GENX_MAIN_ void cm_sage_sdpa(
 
     // qkv fused
     constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-#if QK_FUSED
+#if CMFLA_QK_FUSED
     uint q_offset = (q_start*num_total_heads + h)*head_size;
     uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
 #else
@@ -222,7 +222,7 @@ extern "C" _GENX_MAIN_ void cm_sage_sdpa(
     uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
 #endif
 
-#if V_FUSED
+#if CMFLA_V_FUSED
     uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
 #else
     uint v_offset = (kv_start*num_kv_heads + hkv)*head_size;

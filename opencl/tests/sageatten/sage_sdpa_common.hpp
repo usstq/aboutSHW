@@ -417,7 +417,7 @@ void sage_sdpa_kernel_lsc_prefetch(
 
     constexpr uint fused_pitch = ((num_heads + num_kv_heads*2) * head_size * sizeof(half));
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-#if QK_FUSED
+#if CMFLA_QK_FUSED
     constexpr uint q_pitch = fused_pitch;
     constexpr uint k_pitch = fused_pitch;
 #else
@@ -427,7 +427,7 @@ void sage_sdpa_kernel_lsc_prefetch(
 
 
 
-#if V_FUSED
+#if CMFLA_V_FUSED
     constexpr uint v_pitch = fused_pitch;
 #else
     constexpr uint v_pitch = (num_kv_heads * head_size * sizeof(half));
@@ -642,7 +642,7 @@ void sage_sdpa_kernel(
 
     constexpr uint fused_pitch = ((num_heads + num_kv_heads*2) * head_size * sizeof(half));
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-#if QK_FUSED
+#if CMFLA_QK_FUSED
     constexpr uint q_pitch = fused_pitch;
     constexpr uint k_pitch = fused_pitch;
 #else
@@ -650,7 +650,7 @@ void sage_sdpa_kernel(
     constexpr uint k_pitch =  num_kv_heads * head_size * sizeof(half);
 #endif
 
-#if V_FUSED
+#if CMFLA_V_FUSED
     constexpr uint v_pitch = fused_pitch;
 #else
     constexpr uint v_pitch = (num_kv_heads * head_size * sizeof(half));

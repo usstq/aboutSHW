@@ -45,11 +45,11 @@ class sage_attn_cm:
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_SCALE_FACTOR={scale_factor}"
                       f" -DCMFLA_IS_CAUSAL={int(is_causal)}"
-                      f" -DUNROLL_NUM={int(self.unroll_cnt)}"
-                      f" -DCMFLA_STATE_BLK={int(self.state_blk_sz)}"
-                      f" -DLOCAL_SZ={int(self.local_sz)}"
-                      f" -DQK_FUSED={int(self.qkfused)}"
-                      f" -DV_FUSED={int(self.vfused)}"
+                      f" -DCMKMEAN_UNROLL_NUM={int(self.unroll_cnt)}"
+                      f" -DCMKMEAN_STATE_BLK={int(self.state_blk_sz)}"
+                      f" -DCMKMEAN_LOCAL_SZ={int(self.local_sz)}"
+                      f" -DCMFLA_QK_FUSED={int(self.qkfused)}"
+                      f" -DCMFLA_V_FUSED={int(self.vfused)}"
                       f" -mdump_asm -g2")
                      )
 
@@ -229,8 +229,8 @@ if __name__ == "__main__":
             print(f'-----------------------------------------------')
             print(f'seq={seqlen}, head_size={head_size}')
             print(f'-----------------------------------------------')
-            # test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=False, vfused=False)
-            # test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=True, vfused=True)
+            test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=False, vfused=False)
+            test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=True, vfused=True)
             test_sage_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = head_size, qkfused=False, vfused=True)
 
     # test_sage_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 96)
