@@ -14,7 +14,7 @@ from clops.utils import Colors
 
 cl.profiling(True)
 
-def get_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_n=256):
+def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_n=256):
     # Q, K, V shape = (B, H, L, d)
     B, num_kv_head, k_len, d = K.shape
     B, num_q_head, q_len, d = Q.shape
@@ -68,6 +68,12 @@ def get_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, caus
     #A = F.softmax(A, dim=-1, dtype=torch.float32).to(Q.dtype)
     return A
 
+def get_softmax_ref(A: torch.Tensor, block_size, S, causal=True):
+    # [1, 32, 256, 8192]
+    B, num_q_head, q_len_strided, k_len_strided = A.shape
+    A_sum = F.softmax(A, dim=-1).reshape(B, num_q_head, q_len_strided // (block_size // S), (block_size // S), k_len_strided // (block_size // S), (block_size // S))
+    A_sum = A_sum.sum(dim=-1).sum(dim=-2)
+    return A_sum
 
 # q: [B, Hq, L_q, S]
 # k: [B, Hk, L_k, S]
@@ -77,10 +83,12 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     M = Lq // stride
     N = Lk // stride
     K = stride * S
+    M_kq = N
+    N_kq = M
 
     tQ = cl.tensor(q.detach().numpy())
     tK = cl.tensor(k.detach().numpy())
-    tC = cl.tensor(np.zeros([B, Hq, M, N], np.float16))
+    tC = cl.tensor(np.zeros([B, Hq, M_kq, N_kq], np.float16))
 
     # kernel
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -144,14 +152,20 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
 
         uint id_wg_m, id_wg_n;
         get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
-
+#if (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
+        src_a += (b * HK + hk) * M * lda * (uint)sizeof(half);
+        src_b += (b * HQ + hq) * N * ldb * (uint)sizeof(half);
+#else
         src_a += (b * HQ + hq) * M * lda * (uint)sizeof(half);
         src_b += (b * HK + hk) * N * ldb * (uint)sizeof(half);
+#endif
         dst += (b * HQ + hq) * M * ldc * (uint)sizeof(half);
 #if (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
             gemm_qk_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 #elif (BLOCK_SG_M == 32 && BLOCK_SG_N == 32)
             gemm_qk_4x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+#elif (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
+            gemm_kq_4x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 #else
             static_assert(false, "BLOCK_SG_M and BLOCK_SG_N not support");
 #endif
@@ -185,19 +199,21 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     src = '\n'.join(src)
 
     kernel_name = 'gemm_qk'
-    BLOCK_SG_M = 64 #32
-    BLOCK_SG_N = 32
-    SG_M = 2
-    SG_N = 4
+    BLOCK_SG_M = 32 #32
+    BLOCK_SG_N = 64
+    SG_M = 4
+    SG_N = 2
     BLOCK_WG_M = BLOCK_SG_M * SG_M
     BLOCK_WG_N = BLOCK_SG_N * SG_N
+    KV_BLOCK_SIZE = 256
 
     ################# TODO: fuse gemm+softmax begin
     #assert BLOCK_WG_N % block_size == 0, "a block must be in a workgroup"
 
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
-                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M} -DINV_S={1 / math.sqrt(S) / stride}''')
+                       -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
+                       -DINV_S={1 / math.sqrt(S) / stride} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE}''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
@@ -228,22 +244,45 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
             # TODO: big weight matrix?
             pass
     slice_no = 0
-    slice = 0
+    slice = 1
     print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
 
+    # gemm
     for i in range(10):
-        kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
+        # kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
+        kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
     cl.finish()
 
-    C_ref = get_ref(q, k, block_size=block_size, S=stride, threshold=threshold, causal=causal, wg_n=BLOCK_WG_N)
-    compare(C_ref.detach().numpy(), tC.numpy())
-    print(f'{Colors.GREEN}passed{Colors.END}')
-    flops = B * Hq * M * N * K * 2
-    for i in range(0, 100):
-        kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
-    ns = cl.finish()
-    for i, time_opt in enumerate(ns):
-        print(f'(CUR)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+    C_ref = get_gemm_ref(q, k, block_size=block_size, S=stride, threshold=threshold, causal=causal, wg_n=BLOCK_WG_N)
+    compare(C_ref.transpose(-1, -2).detach().numpy(), tC.numpy())
+    print(f'{Colors.GREEN}gemm passed{Colors.END}')
+    if 1:
+        flops = B * Hq * M * N * K * 2
+        for i in range(0, 100):
+            # kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
+            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+        ns = cl.finish()
+        for i, time_opt in enumerate(ns):
+            print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+
+    # softmax_sum
+    if 0:
+        block_stride = block_size // stride
+        q_len_strided = C_ref.shape[2]
+        tSoftmax = cl.tensor(np.zeros([B, Hq, q_len_strided // block_stride, C_ref.shape[3] // block_stride], np.float16))
+        for i in range(10):
+            kernels.enqueue("softmax_sum", [(q_len_strided + block_stride - 1) // block_stride * block_stride, Hq, B], [block_stride, 1, 1], tC, tSoftmax, q_len_strided, tSoftmax.shape[3])
+        cl.finish()
+        if 1:
+            for i in range(0, 100):
+                kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
+            ns = cl.finish()
+            for i, time_opt in enumerate(ns):
+                print(f'(Softmax)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, {time_opt*1e-3:,.0f} us')
+
+        softmax_ref = get_softmax_ref(tC.numpy(), block_size=block_size, S=stride, causal=causal)
+        compare(softmax_ref.detach().numpy(), tSoftmax.numpy())
+        print(f'{Colors.GREEN}softmax passed{Colors.END}')
 
     #mask = torch.zeros([1, 1], dtype=torch.bool)
     #return mask
@@ -269,7 +308,7 @@ def main():
     block_size = 128
     stride = 16
 
-    assert (q_len // stride) >= 256 and (k_len // stride) >= 256, "minimum block size should be 256*256"
+    assert (q_len // stride) >= 128 and (k_len // stride) >= 128, "minimum block size should be 128*128"
 
     if True:
         q = torch.randn((bsz,q_head,q_len,dim),dtype=torch.float32)
