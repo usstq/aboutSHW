@@ -10,17 +10,20 @@
 
 
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
-    int seqlen,
+    int q_seqlen,
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
-    half* output [[type("svmptr_t")]]
-    ) {
+    int32_t* past_lens [[type("svmptr_t")]],
+    int32_t* block_indices [[type("svmptr_t")]],
+    int32_t* block_indices_begins [[type("svmptr_t")]],
+    int32_t* subsequence_begins [[type("svmptr_t")]],
+    half* output [[type("svmptr_t")]]) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
     constexpr int num_heads = CMFLA_NUM_HEADS;
     constexpr int head_size = CMFLA_HEAD_SIZE;
     constexpr int num_kv_heads = CMFLA_NUM_KV_HEADS;
-
+    constexpr int pa_block_sz = CMPA_BLOCK_SZ;
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
@@ -37,44 +40,51 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     // multiple work-groups are required to split a sequence,
     // need to figure out which part of query-tokens to process
     int wg_seq_len = local_size * q_step;
+    int past_q_lens = past_lens[0];
     kv_start = 0;
-    kv_seq_len = seqlen;
+    kv_seq_len = q_seqlen + past_q_lens;
     q_start = (wg_id * local_size + wg_local_id) * q_step;
     q_len = q_step;
-    if (q_start + q_len > seqlen) {
-        q_len = seqlen - q_start;
+    if (q_start + q_len > q_seqlen) {
+        q_len = q_seqlen - q_start;
     }
     //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start, q_len, kv_start, kv_seq_len);
 
     // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
-        kv_stop = (wg_id + 1) * wg_seq_len;
+        //todo:kv_stop is wg level, should we change to sg level?
+        kv_stop = (wg_id + 1) * wg_seq_len + past_q_lens;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
 
     // qkv fused
-    constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
+    //constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
     // uint q_offset = (q_start*num_total_heads + h)*head_size;
     // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
     // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
 
+    //Q/O[B, L, H, S]
     uint q_offset = (q_start*num_heads + h)*head_size;
-    uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
-    uint v_offset = (kv_start*num_kv_heads + hkv)*head_size;
     uint o_offset = (q_start*num_heads + h)*head_size;
+
+    //K/V[block_num, kv_heads, block_sz, head_sz]
+    uint k_offset = hkv*head_size*pa_block_sz;
+    uint v_offset = hkv*head_size*pa_block_sz;
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
                                 wg_local_id,
                                 q_start, //q_start,
                                 kv_stop,
-                                q_len, //q_len,
+                                q_len, //q_step,
                                 kv_seq_len, //kv_len,
                                 reinterpret_cast<svmptr_t>(query + q_offset),
                                 reinterpret_cast<svmptr_t>(key + k_offset),
                                 reinterpret_cast<svmptr_t>(value + v_offset),
-                                reinterpret_cast<svmptr_t>(output + o_offset));
+                                reinterpret_cast<svmptr_t>(output + o_offset),
+                                past_q_lens,
+                                block_indices);
 #else
     static_assert(0);
 

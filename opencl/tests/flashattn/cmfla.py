@@ -26,6 +26,7 @@ class flash_attn_cm:
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         self.is_causal = is_causal
+        self.block_sz = 32
         src1 = r'''#include "cm_sdpa_vlen.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
         print(f"compiling {cwd} {num_heads=} {head_size=} ...")
@@ -38,29 +39,71 @@ class flash_attn_cm:
                       f" -DCMFLA_HEAD_SIZE={head_size}"
                       f" -DCMFLA_SCALE_FACTOR={scale_factor}"
                       f" -DCMFLA_IS_CAUSAL={int(is_causal)}"
+                      f" -DCMPA_BLOCK_SZ={self.block_sz}"
                       f" -mdump_asm -g2")
                      )
 
     def qkv_fused(self, q, k, v, n_repeats = 1):
+
         seq_len, _, head_size = q.shape
+        trunk_sz = seq_len
+        trunk_num = seq_len // trunk_sz
+        assert trunk_sz%self.block_sz == 0 and  seq_len%trunk_sz==0, f'Error: trunk_sz must be multiple of trunk_sz/block_sz'
+
         old_dtype = q.dtype
         total_heads = (self.num_heads + self.num_kv_heads * 2)
         assert head_size == self.head_size
-        t_q = cl.tensor(q.to(torch.float16).detach().numpy())
-        t_k= cl.tensor(k.to(torch.float16).detach().numpy())
-        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
 
-        t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
-        wg_size = 16
-        q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
-        wg_seq_len = wg_size * q_step
-        wg_count = (seq_len + wg_seq_len - 1) // wg_seq_len
-        GWS = [1, self.num_heads, wg_count * wg_size]
-        LWS = [1, 1, wg_size]
-        print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
-        for _ in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_q, t_k, t_v, t_out)
-        attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
+        k = k.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        v = v.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+
+
+        blks_per_trunk = trunk_sz // self.block_sz
+
+        # Q[L, H, S]
+        # K/V: [blk_num, H, blk_sz, S]
+        for trunk_idx in range(seq_len //trunk_sz):
+            blk_num = blks_per_trunk * (trunk_idx + 1)
+            block_indices =  torch.randperm(blk_num)
+             # print(block_indices)
+            sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
+            sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
+            for i in  range(len(block_indices)):
+                sub_k[block_indices[i],:] = k[i,:]
+                sub_v[block_indices[i],:] = v[i,:]
+
+            q_start = trunk_idx*trunk_sz
+            q_end =  q_start + trunk_sz
+            blk_start = trunk_idx * blks_per_trunk
+            blk_end = blk_start + blks_per_trunk
+            sub_q = q[q_start:q_end, :]
+
+            t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
+            t_k= cl.tensor(sub_k.to(torch.float16).detach().numpy())
+            t_v = cl.tensor(sub_v.to(torch.float16).detach().numpy())
+
+            t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
+            wg_size = 16
+            q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
+            wg_seq_len = wg_size * q_step
+            wg_count = (trunk_sz + wg_seq_len - 1) // wg_seq_len
+
+            GWS = [1, self.num_heads, wg_count * wg_size]
+            LWS = [1, 1, wg_size]
+            # block_indices = int[blk_num], past_lens = 0, block_indices_begins = 0,
+            past_lens=torch.tensor([0]).to(torch.int32)
+            block_indices_begins=torch.tensor([0, blk_num]).to(torch.int32)
+            subsequence_begins=torch.tensor([0,seq_len]).to(torch.int32)
+
+            t_block_indices=cl.tensor(block_indices.to(torch.int32).detach().numpy())
+            t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
+            t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
+            t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
+            q_len = trunk_sz
+            print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
+            for _ in range(n_repeats):
+                self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
+            attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
 
     @staticmethod
