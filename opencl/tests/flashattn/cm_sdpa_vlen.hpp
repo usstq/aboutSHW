@@ -11,17 +11,10 @@
 
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
-#if USE_LSC == 1
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]
-#else
-    SurfaceIndex query [[type("buffer_t")]],
-    SurfaceIndex key [[type("buffer_t")]],
-    SurfaceIndex value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]
-#endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
     constexpr int num_heads = CMFLA_NUM_HEADS;
@@ -31,16 +24,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
-#if USE_LSC != 1
-    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
-    constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
-    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
-
-    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
-
-    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
-    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
-#endif
 
     auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
@@ -74,10 +57,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
     // uint q_offset = (q_start*num_total_heads + h)*head_size;
     // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
 
     uint q_offset = (q_start*num_heads + h)*head_size;
     uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
+    uint v_offset = (kv_start*num_kv_heads + hkv)*head_size;
     uint o_offset = (q_start*num_heads + h)*head_size;
 
 #if USE_LSC == 1
@@ -92,22 +76,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(value + v_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
-                                slm_K,
-                                slm_V,
-                                wg_local_id,
-                                local_size,
-                                q_start,
-                                kv_stop,
-                                q_len, //q_len,
-                                kv_seq_len, //kv_len,
-                                query,
-                                key,
-                                value,
-                                output,
-                                q_offset * sizeof(half),
-                                k_offset * sizeof(half),
-                                v_offset * sizeof(half),
-                                o_offset * sizeof(half));
+    static_assert(0);
+
 #endif
 }

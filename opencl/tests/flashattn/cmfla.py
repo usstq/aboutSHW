@@ -42,14 +42,13 @@ class flash_attn_cm:
                      )
 
     def qkv_fused(self, q, k, v, n_repeats = 1):
-        qkv = torch.cat((q,k,v), 1)
         seq_len, _, head_size = q.shape
         old_dtype = q.dtype
         total_heads = (self.num_heads + self.num_kv_heads * 2)
         assert head_size == self.head_size
         t_q = cl.tensor(q.to(torch.float16).detach().numpy())
         t_k= cl.tensor(k.to(torch.float16).detach().numpy())
-        t_v = cl.tensor(qkv.to(torch.float16).detach().numpy())
+        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
 
         t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
         wg_size = 16
@@ -146,7 +145,6 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
     func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, is_causal)
 
-    qkv = torch.cat((q,k,v), 1)
 
     out = func.qkv_fused(q, k, v)
     out = func.qkv_fused(q, k, v, n_repeats=20)
