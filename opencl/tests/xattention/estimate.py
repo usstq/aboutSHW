@@ -152,7 +152,7 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
 
         uint id_wg_m, id_wg_n;
         get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
-#if (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
+#if USE_KQ == 1
         src_a += (b * HK + hk) * M * lda * (uint)sizeof(half);
         src_b += (b * HQ + hq) * N * ldb * (uint)sizeof(half);
 #else
@@ -160,14 +160,24 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
         src_b += (b * HK + hk) * N * ldb * (uint)sizeof(half);
 #endif
         dst += (b * HQ + hq) * M * ldc * (uint)sizeof(half);
+#if USE_KQ == 0
 #if (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
             gemm_qk_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 #elif (BLOCK_SG_M == 32 && BLOCK_SG_N == 32)
             gemm_qk_4x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#elif (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
-            gemm_kq_4x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
 #else
             static_assert(false, "BLOCK_SG_M and BLOCK_SG_N not support");
+#endif
+#else
+#if (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
+            gemm_kq_4x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+#elif (BLOCK_SG_M == 16 && BLOCK_SG_N == 64)
+            gemm_kq_2x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+#elif (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
+            gemm_kq_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
+#else
+            static_assert(false, "BLOCK_SG_M and BLOCK_SG_N not support");
+#endif
 #endif
     }
 
@@ -199,10 +209,10 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     src = '\n'.join(src)
 
     kernel_name = 'gemm_qk'
-    BLOCK_SG_M = 32 #32
-    BLOCK_SG_N = 64
-    SG_M = 4
-    SG_N = 2
+    BLOCK_SG_M = 64 #32
+    BLOCK_SG_N = 32
+    SG_M = 2
+    SG_N = 4
     BLOCK_WG_M = BLOCK_SG_M * SG_M
     BLOCK_WG_N = BLOCK_SG_N * SG_N
     KV_BLOCK_SIZE = 256
@@ -213,14 +223,14 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                        -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                       -DINV_S={1 / math.sqrt(S) / stride} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE}''')
+                       -DINV_S={1 / math.sqrt(S) / stride} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DUSE_KQ=1''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
-    slice = N < M
+    slice = N_kq < M_kq
     if 1:
-        block_m = M // BLOCK_WG_M
-        block_n = N // BLOCK_WG_N
+        block_m = M_kq // BLOCK_WG_M
+        block_n = N_kq // BLOCK_WG_N
         bias = BLOCK_WG_M / BLOCK_WG_N
         devinfo = cl.dev_info()
         eu_xecore = 8
@@ -261,9 +271,9 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
         for i in range(0, 100):
             # kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
             kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
-        ns = cl.finish()
-        for i, time_opt in enumerate(ns):
-            print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
+            ns = cl.finish()
+            for i, time_opt in enumerate(ns):
+                print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
     # softmax_sum
     if 0:
