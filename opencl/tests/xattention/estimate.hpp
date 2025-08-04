@@ -54,6 +54,15 @@ CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) 
     out.row(5) = temp.template select<4, 1, 2, 4>(4, 2);
     out.row(7) = temp.template select<4, 1, 2, 4>(4, 3);
 }
+
+template <typename T1, typename T2>
+CM_INLINE void Transpose_8x32(matrix_ref<T1, 8, 32> in, matrix_ref<T2, 32, 8> out) {
+    Transpose_8x8(in.template select<8, 1, 8, 1>(0,  0), out.template select<8, 1, 8, 1>( 0, 0));
+    Transpose_8x8(in.template select<8, 1, 8, 1>(0,  8), out.template select<8, 1, 8, 1>( 8, 0));
+    Transpose_8x8(in.template select<8, 1, 8, 1>(0, 16), out.template select<8, 1, 8, 1>(16, 0));
+    Transpose_8x8(in.template select<8, 1, 8, 1>(0, 24), out.template select<8, 1, 8, 1>(24, 0));
+}
+
 template <typename T, int N>
 CM_INLINE void read_1d(vector_ref<T, N> out, svmptr_t base) {
     cm_ptr_block_read((T*)base, out);
@@ -688,21 +697,32 @@ uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
         cm_ptr_store<int>((int*)c_max_wg, offset, max_n.format<int>());
     }
     {
-        // c_exp_partial_sum: [b, hq, M/(BLOCK_SIZE/STRIDE), N_aligned]
+        // c_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
         const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
         uint offset = ((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
         constexpr half log2e = 1.4426950408889634f;
+        matrix<half, 8, 32> sum;
+        static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
+        static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
 #pragma unroll
         for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
-            auto sum = cm_exp((acc_half.row(m * block_size_div_stride) - max_n) * log2e);
+            sum.row(m) = cm_exp((acc_half.row(m * block_size_div_stride) - max_n) * log2e);
 #pragma unroll
             for (uint sub_m = 1; sub_m < block_size_div_stride; sub_m++) {
                 uint real_m = m * block_size_div_stride + sub_m;
-                sum += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+                sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
             }
-            cm_ptr_store<int>((int*)c_exp_partial_sum, offset, sum.format<int>());
-            offset += N_aligned * (uint)sizeof(half);
         }
+        matrix<half, 32, 8> sum_t;
+
+        Transpose_8x32(sum, sum_t);
+        // store
+        lsc::block_2d_desc<half, 1, 8, 8> desc_c{ c_exp_partial_sum, N_aligned - 1, (uint)(M_block_aligned * sizeof(half) - 1), (uint)(M_block_aligned * sizeof(half) - 1),
+            (int)((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride), (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
+        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 8, 1>( 0).format<half>());
+        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.select<8, 1, 8, 1>( 8).format<half>());
+        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.select<8, 1, 8, 1>(16).format<half>());
+        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.select<8, 1, 8, 1>(24).format<half>());
     }
 }
 #endif

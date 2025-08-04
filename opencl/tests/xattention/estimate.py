@@ -51,8 +51,8 @@ def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9,
     A_exp_partial = A_exp_partial.reshape(B, num_q_head, q_len_strided, k_len_strided // wg_x, wg_x // (block_size // S), block_size // S)
     # [1, 32, 256, 64, 16]
     A_exp_partial_sum = A_exp_partial.sum(dim=-1)                               # local wg sum
-    # [1, 32, 64 * 16, 256]
-    A_exp_partial_sum_ret = torch.permute(A_exp_partial_sum, (0, 1, 3, 4, 2)).reshape(B, num_q_head, -1, q_len_strided)
+    # [1, 32, 256, 64 * 16]
+    A_exp_partial_sum_ret = torch.reshape(A_exp_partial_sum, (B, num_q_head, q_len_strided, -1))
 
     # stage 2:
     # [1, 32, 256, 64, 16] * [1, 32, 256, 64, 1]
@@ -165,7 +165,7 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
 
         // c_max: [b, hq, N_aligned]
         // c_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
-        // c_exp_partial_sum: [b, hq, M/(BLOCK_SIZE/STRIDE), N_aligned]
+        // c_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
         uint N_aligned = (N + 31) / 32 * 32;
         c_max += (b * HQ + hq) * N_aligned * (uint)sizeof(half);
         uint M_block = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
@@ -218,9 +218,9 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     tC_max = cl.tensor(max_init)  # [b, hq, M], init must be -inf
     # [1, 32, 64, 256]
     tC_max_wg = cl.tensor(np.zeros([B, Hq, (M_kq + BLOCK_WG_M - 1) // BLOCK_WG_M, N_kq_aligned], np.float16))
-    # [1, 32, 64 * 16, 256]
+    # [1, 32, 256, 64 * 16]
     token_in_block = block_size // stride
-    tC_exp_partial_sum = cl.tensor(np.zeros([B, Hq, (M_kq + token_in_block - 1) // token_in_block, N_kq_aligned], np.float16))
+    tC_exp_partial_sum = cl.tensor(np.zeros([B, Hq, N_kq_aligned, (M_kq + token_in_block - 1) // token_in_block], np.float16))
 
     ################# TODO: fuse gemm+softmax begin
     #assert BLOCK_WG_N % block_size == 0, "a block must be in a workgroup"
@@ -268,7 +268,7 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
         kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
     cl.finish()
 
-    # , [1, 32, 256], [1, 32, 64, 256], [1, 32, 64 * 16, 256]
+    # , [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16]
     C_ref, A_max, A_5d_max_ret, A_exp_partial_sum_ret = get_gemm_ref(q, k, block_size=block_size, S=stride, threshold=threshold, causal=causal, wg_x=BLOCK_WG_M)
     compare(A_max.detach().numpy(), tC_max.numpy())
     print(f'{Colors.GREEN}gemm:max passed{Colors.END}')
