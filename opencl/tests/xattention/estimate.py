@@ -14,7 +14,7 @@ from clops.utils import Colors
 
 cl.profiling(True)
 
-def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_n=256):
+def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_x=256):
     # Q, K, V shape = (B, H, L, d)
     B, num_kv_head, k_len, d = K.shape
     B, num_q_head, q_len, d = Q.shape
@@ -39,21 +39,25 @@ def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9,
     B, _, q_len_strided, k_len_strided = A.shape
     # [1, 32, 256, 1]
     A_max = torch.max(A, dim=-1, keepdim=True)[0]                               # real max needed for compensation [b, num_q_head, q_len_strided, 1]
-    # [1, 32, 256, 32, 256]
-    A_5d = A.reshape(B, num_q_head, q_len_strided, k_len_strided // wg_n, wg_n)
-    # [1, 32, 256, 32, 1]
+    # [1, 32, 256, 64, 128]
+    A_5d = A.reshape(B, num_q_head, q_len_strided, k_len_strided // wg_x, wg_x)
+    # [1, 32, 256, 64, 1]
     A_5d_max = torch.max(A_5d, dim=-1, keepdim=True)[0]                         # local wg max needed for compensation [b, num_q_head, q_len_strided, k_len_strided // wg_n, 1]
-    # [1, 32, 256, 32, 256]
+    # [1, 32, 64, 256]
+    A_5d_max_ret = torch.transpose(A_5d_max, -2, -3).squeeze(dim=-1)
+    # [1, 32, 256, 64, 128]
     A_exp_partial = torch.exp(A_5d - A_5d_max)
-    # [1, 32, 256, 32, 32, 8]
-    A_exp_partial = A_exp_partial.reshape(B, num_q_head, q_len_strided, k_len_strided // wg_n, wg_n // (block_size // S), block_size // S)
-    # [1, 32, 256, 32, 32]
+    # [1, 32, 256, 64, 16, 8]
+    A_exp_partial = A_exp_partial.reshape(B, num_q_head, q_len_strided, k_len_strided // wg_x, wg_x // (block_size // S), block_size // S)
+    # [1, 32, 256, 64, 16]
     A_exp_partial_sum = A_exp_partial.sum(dim=-1)                               # local wg sum
+    # [1, 32, 64 * 16, 256]
+    A_exp_partial_sum_ret = torch.permute(A_exp_partial_sum, (0, 1, 3, 4, 2)).reshape(B, num_q_head, -1, q_len_strided)
 
     # stage 2:
-    # [1, 32, 256, 32, 32] * [1, 32, 256, 32, 1]
+    # [1, 32, 256, 64, 16] * [1, 32, 256, 64, 1]
     A_exp_horz_sum = A_exp_partial_sum * torch.exp(A_5d_max - A_max.unsqueeze(dim=-1))
-    # [1, 32, 256, 32 * 32]
+    # [1, 32, 256, 64 * 16]
     A_exp_horz_sum = A_exp_horz_sum.reshape(B, num_q_head, q_len_strided, -1)
     A_exp_horz_sum = A_exp_horz_sum / A_exp_horz_sum.sum(dim=-1, keepdim=True)
     A_exp_vert_sum = A_exp_horz_sum.reshape(B, num_q_head, q_len_strided // (block_size // S), block_size // S, -1)
@@ -66,7 +70,7 @@ def get_gemm_ref(Q: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9,
     ###################### fuse gemm+softmax end
 
     #A = F.softmax(A, dim=-1, dtype=torch.float32).to(Q.dtype)
-    return A
+    return torch.transpose(A, -1, -2), A_max.squeeze(-1), A_5d_max_ret, A_exp_partial_sum_ret
 
 def get_softmax_ref(A: torch.Tensor, block_size, S, causal=True):
     # [1, 32, 256, 8192]
@@ -138,47 +142,38 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
         }
     }
 
-    _GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t dst ATTR, uint M, uint N, uint K, uint lda, uint ldb, uint ldc, int slice_no, int slice) {
+    _GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR, 
+        uint M, uint N, uint K, uint lda, uint ldb, uint ldc, int slice_no, int slice) {
         const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
         const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
         const uint size_slm_b = 0;
-        auto slm = 0;
         uint b_hq = cm_group_id(2);
         uint b = b_hq / HQ;
         uint hq = b_hq % HQ;
         uint hk = hq / (HQ / HK);
+        const uint slm_size = SG_M * BLOCK_WG_N * sizeof(half);
+        cm_slm_init(slm_size);
+        auto slm = cm_slm_alloc(slm_size);
 
         static_assert(HQ % HK == 0, "HQ must be multiple of HK");
 
         uint id_wg_m, id_wg_n;
         get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
-#if USE_KQ == 1
+
         src_a += (b * HK + hk) * M * lda * (uint)sizeof(half);
         src_b += (b * HQ + hq) * N * ldb * (uint)sizeof(half);
-#else
-        src_a += (b * HQ + hq) * M * lda * (uint)sizeof(half);
-        src_b += (b * HK + hk) * N * ldb * (uint)sizeof(half);
-#endif
-        dst += (b * HQ + hq) * M * ldc * (uint)sizeof(half);
-#if USE_KQ == 0
-#if (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
-            gemm_qk_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#elif (BLOCK_SG_M == 32 && BLOCK_SG_N == 32)
-            gemm_qk_4x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#else
-            static_assert(false, "BLOCK_SG_M and BLOCK_SG_N not support");
-#endif
-#else
-#if (BLOCK_SG_M == 32 && BLOCK_SG_N == 64)
-            gemm_kq_4x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#elif (BLOCK_SG_M == 16 && BLOCK_SG_N == 64)
-            gemm_kq_2x4_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#elif (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
-            gemm_kq_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, dst, M, N, K, lda, ldb, ldc);
-#else
-            static_assert(false, "BLOCK_SG_M and BLOCK_SG_N not support");
-#endif
-#endif
+
+        // c_max: [b, hq, N_aligned]
+        // c_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
+        // c_exp_partial_sum: [b, hq, M/(BLOCK_SIZE/STRIDE), N_aligned]
+        uint N_aligned = (N + 31) / 32 * 32;
+        c_max += (b * HQ + hq) * N_aligned * (uint)sizeof(half);
+        uint M_block = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
+        c_max_wg += (b * HQ + hq) * M_block * N_aligned * (uint)sizeof(half);
+        uint M_block_aligned = (M + BLOCK_SIZE / STRIDE - 1) / (BLOCK_SIZE / STRIDE);
+        c_exp_partial_sum += (b * HQ + hq) * M_block_aligned * N_aligned * (uint)sizeof(half);
+
+        gemm_kq_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, c_max, c_max_wg, c_exp_partial_sum, M, N, K, lda, ldb, ldc);
     }
 
 #if 0
@@ -217,13 +212,23 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     BLOCK_WG_N = BLOCK_SG_N * SG_N
     KV_BLOCK_SIZE = 256
 
+    # [1, 32, 256]
+    N_kq_aligned = (N_kq + 31) // 32 * 32                # aligned for better performance
+    max_init = np.ones([B, Hq, N_kq_aligned], np.float16) * -60000.0
+    tC_max = cl.tensor(max_init)  # [b, hq, M], init must be -inf
+    # [1, 32, 64, 256]
+    tC_max_wg = cl.tensor(np.zeros([B, Hq, (M_kq + BLOCK_WG_M - 1) // BLOCK_WG_M, N_kq_aligned], np.float16))
+    # [1, 32, 64 * 16, 256]
+    token_in_block = block_size // stride
+    tC_exp_partial_sum = cl.tensor(np.zeros([B, Hq, (M_kq + token_in_block - 1) // token_in_block, N_kq_aligned], np.float16))
+
     ################# TODO: fuse gemm+softmax begin
     #assert BLOCK_WG_N % block_size == 0, "a block must be in a workgroup"
 
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                        -DSTRIDE={stride} -DHQ={Hq} -DHK={Hk} -DHEAD_SIZE={S} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                       -DINV_S={1 / math.sqrt(S) / stride} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DUSE_KQ=1''')
+                        -DBLOCK_SIZE={block_size} -DINV_S={1 / math.sqrt(S) / stride} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DUSE_KQ=1''')
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
@@ -260,17 +265,23 @@ def test(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, stride=1
     # gemm
     for i in range(10):
         # kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
-        kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+        kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
     cl.finish()
 
-    C_ref = get_gemm_ref(q, k, block_size=block_size, S=stride, threshold=threshold, causal=causal, wg_n=BLOCK_WG_N)
-    compare(C_ref.transpose(-1, -2).detach().numpy(), tC.numpy())
-    print(f'{Colors.GREEN}gemm passed{Colors.END}')
+    # , [1, 32, 256], [1, 32, 64, 256], [1, 32, 64 * 16, 256]
+    C_ref, A_max, A_5d_max_ret, A_exp_partial_sum_ret = get_gemm_ref(q, k, block_size=block_size, S=stride, threshold=threshold, causal=causal, wg_x=BLOCK_WG_M)
+    compare(A_max.detach().numpy(), tC_max.numpy())
+    print(f'{Colors.GREEN}gemm:max passed{Colors.END}')
+    compare(A_5d_max_ret.detach().numpy(), tC_max_wg.numpy())
+    print(f'{Colors.GREEN}gemm:max_wg passed{Colors.END}')
+    compare(A_exp_partial_sum_ret.detach().numpy(), tC_exp_partial_sum.numpy())
+    print(f'{Colors.GREEN}gemm:exp_partial passed{Colors.END}')
     if 1:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
             # kernels.enqueue(kernel_name, [M // BLOCK_WG_M * N // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tQ, tK, tC, M, N, K, K, K, N, slice_no, slice)
-            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+            #kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
