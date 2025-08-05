@@ -21,13 +21,15 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 
 class flash_attn_cm:
-    def __init__(self, num_heads, num_kv_heads, head_size, is_causal = False):
+    def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         self.is_causal = is_causal
-        self.block_sz = 64
-        self.trunk_sz = 512
+        assert trunk_sz % block_sz == 0, f'Error: trunk_sz must be multiple of block_sz'
+        self.block_sz = block_sz
+        self.trunk_sz = trunk_sz
+
 
         src1 = r'''#include "cm_sdpa_vlen.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
@@ -47,9 +49,7 @@ class flash_attn_cm:
 
     def qkv_fused(self, q, k, v, n_repeats = 1):
         seq_len, _, head_size = q.shape
-        trunk_sz = self.trunk_sz
-        trunk_num = seq_len // trunk_sz
-        assert trunk_sz%self.block_sz == 0 and  seq_len%trunk_sz==0, f'Error: trunk_sz must be multiple of trunk_sz/block_sz'
+        trunk_num = seq_len // self.trunk_sz
 
         old_dtype = q.dtype
         total_heads = (self.num_heads + self.num_kv_heads * 2)
@@ -58,8 +58,8 @@ class flash_attn_cm:
         k = k.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
         v = v.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
-        blks_per_trunk = trunk_sz // self.block_sz
-
+        blks_per_trunk = self.trunk_sz // self.block_sz
+        assert seq_len % self.trunk_sz==0, f'Error: seq_len must be multiple of trunk_sz/block_sz'
         # Q[L, H, S]
         # K/V: [blk_num, H, blk_sz, S]
         for trunk_idx in range(trunk_num):
@@ -72,23 +72,23 @@ class flash_attn_cm:
             for i in  range(len(block_indices)):
                 sub_k[block_indices[i],:] = k[i,:]
                 sub_v[block_indices[i],:] = v[i,:]
-            q_start = trunk_idx*trunk_sz
-            q_end =  q_start + trunk_sz
+            q_start = trunk_idx*self.trunk_sz
+            q_end =  q_start + self.trunk_sz
             sub_q = q[q_start:q_end, :]
 
             t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
             t_k= cl.tensor(sub_k.to(torch.float16).detach().numpy())
             t_v = cl.tensor(sub_v.to(torch.float16).detach().numpy())
-            t_out = cl.tensor([trunk_sz, self.num_heads, self.head_size], np.dtype(np.float16))
+            t_out = cl.tensor([self.trunk_sz, self.num_heads, self.head_size], np.dtype(np.float16))
             wg_size = 16
-            q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
+            q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
             wg_seq_len = wg_size * q_step
-            wg_count = (trunk_sz + wg_seq_len - 1) // wg_seq_len
+            wg_count = (self.trunk_sz + wg_seq_len - 1) // wg_seq_len
 
             GWS = [1, self.num_heads, int(wg_count * wg_size)]
             LWS = [1, 1, wg_size]
             # block_indices = int[blk_num], past_lens = 0, block_indices_begins = 0,
-            past_lens=torch.tensor([trunk_idx*trunk_sz]).to(torch.int32)
+            past_lens=torch.tensor([trunk_idx*self.trunk_sz]).to(torch.int32)
             block_indices_begins=torch.tensor([0, blk_num]).to(torch.int32)
             subsequence_begins=torch.tensor([0,seq_len]).to(torch.int32)
 
@@ -96,7 +96,7 @@ class flash_attn_cm:
             t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
             t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
             t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
-            q_len = trunk_sz
+            q_len = self.trunk_sz
             print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
             for _ in range(n_repeats):
                 self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
@@ -106,8 +106,8 @@ class flash_attn_cm:
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, num_kv_heads, head_size, is_causal):
-        return flash_attn_cm(num_heads, num_kv_heads, head_size, is_causal)
+    def create_instance(num_heads, num_kv_heads, head_size,block_sz, trunk_sz, is_causal):
+        return flash_attn_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     seq_length, num_heads, head_size = q.shape
@@ -146,13 +146,6 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     return attn_output.to(old_dtype)
 
 
-def flash_attn(q, k, v, cu_seqlens):
-    _, num_heads, head_size = q.shape
-    func = flash_attn_cm.create_instance(num_heads, head_size)
-    # return flash_attn_vlen_ref(q, k, v, cu_seqlens)
-    return func(q, k, v, cu_seqlens)
-
-
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
     rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
@@ -167,7 +160,7 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
+def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024)
@@ -184,7 +177,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
 
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, is_causal)
+    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
 
 
     out = func.qkv_fused(q, k, v)
@@ -198,4 +191,4 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=128, trunk_sz=128)
