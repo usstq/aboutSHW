@@ -20,7 +20,7 @@ def get_cm_grf_width():
 
 CM_GRF_WIDTH = get_cm_grf_width()
 
-class flash_attn_cm:
+class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -47,59 +47,76 @@ class flash_attn_cm:
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused(self, q, k, v, n_repeats = 1):
+    def __call__(self, q, k, v, n_repeats = 1):
         seq_len, _, head_size = q.shape
-        trunk_num = seq_len // self.trunk_sz
-
+        padded_k = k
+        padded_v = v
         old_dtype = q.dtype
         total_heads = (self.num_heads + self.num_kv_heads * 2)
-        assert head_size == self.head_size
 
-        k = k.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
-        v = v.reshape(seq_len//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        assert head_size == self.head_size
+        #align seqlen with block_sz.  block is the PA K/V cache minimum unit.
+        aligned_seqlen = seq_len
+        #pad the K, V to align with block_sz
+        if seq_len % self.block_sz != 0:
+            padding_tokens = self.block_sz -  seq_len % self.block_sz
+            assert len(k.shape) == 3
+            kv_padding_dims = (0,0,0,0,0,padding_tokens)
+            aligned_seqlen = seq_len + padding_tokens
+            padded_k = torch.nn.functional.pad(k,kv_padding_dims)
+            padded_v = torch.nn.functional.pad(v,kv_padding_dims)
+
+        # print(f'k.shape:{k.shape}, padded_k.shape:{padded_k.shape}')
+        # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
+        padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        padded_v = padded_v.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        #output memory for the whole SDPA
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
         blks_per_trunk = self.trunk_sz // self.block_sz
-        assert seq_len % self.trunk_sz==0, f'Error: seq_len must be multiple of trunk_sz/block_sz'
+        assert aligned_seqlen % self.block_sz==0, f'Error: aligned_seqlen must be multiple of block_sz'
         # Q[L, H, S]
         # K/V: [blk_num, H, blk_sz, S]
+        trunk_num = (aligned_seqlen+ self.trunk_sz - 1) // self.trunk_sz
+        max_blks = aligned_seqlen // self.block_sz
+
         for trunk_idx in range(trunk_num):
-            blk_num = blks_per_trunk * (trunk_idx + 1)
-            # block_indices =  torch.randperm(blk_num)
-            block_indices =  torch.arange(blk_num)
+            blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
+            block_indices =  torch.randperm(blk_num)
+            #block_indices =  torch.arange(blk_num)
              # print(block_indices)
             sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
             sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
             for i in  range(len(block_indices)):
-                sub_k[block_indices[i],:] = k[i,:]
-                sub_v[block_indices[i],:] = v[i,:]
+                sub_k[block_indices[i],:] = padded_k[i,:]
+                sub_v[block_indices[i],:] = padded_v[i,:]
             q_start = trunk_idx*self.trunk_sz
-            q_end =  q_start + self.trunk_sz
+            q_end =  min(q_start + self.trunk_sz, seq_len)
+            q_len = q_end - q_start
             sub_q = q[q_start:q_end, :]
 
             t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
             t_k= cl.tensor(sub_k.to(torch.float16).detach().numpy())
             t_v = cl.tensor(sub_v.to(torch.float16).detach().numpy())
-            t_out = cl.tensor([self.trunk_sz, self.num_heads, self.head_size], np.dtype(np.float16))
+            t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
             wg_size = 16
             q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
             wg_seq_len = wg_size * q_step
-            wg_count = (self.trunk_sz + wg_seq_len - 1) // wg_seq_len
+            wg_count = (q_len + wg_seq_len - 1) // wg_seq_len
 
             GWS = [1, self.num_heads, int(wg_count * wg_size)]
             LWS = [1, 1, wg_size]
             # block_indices = int[blk_num], past_lens = 0, block_indices_begins = 0,
             past_lens=torch.tensor([trunk_idx*self.trunk_sz]).to(torch.int32)
             block_indices_begins=torch.tensor([0, blk_num]).to(torch.int32)
-            subsequence_begins=torch.tensor([0,seq_len]).to(torch.int32)
+            subsequence_begins=torch.tensor([0,q_len]).to(torch.int32)
 
             t_block_indices=cl.tensor(block_indices.to(torch.int32).detach().numpy())
             t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
             t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
             t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
-            q_len = self.trunk_sz
-            print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
+            print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}")
             for _ in range(n_repeats):
-                self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
+                self.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
             output[q_start:q_end] = torch.from_numpy(t_out.numpy())
 
         return output
@@ -107,7 +124,7 @@ class flash_attn_cm:
     @staticmethod
     @functools.cache
     def create_instance(num_heads, num_kv_heads, head_size,block_sz, trunk_sz, is_causal):
-        return flash_attn_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
+        return page_atten_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     seq_length, num_heads, head_size = q.shape
@@ -160,7 +177,7 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512):
+def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024)
@@ -176,12 +193,10 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
+    pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
 
-    func = flash_attn_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
-
-
-    out = func.qkv_fused(q, k, v)
-    # out = func.qkv_fused(q, k, v, n_repeats=20)
+    out = pa_cm(q, k, v)
+    # out = func(q, k, v, n_repeats=20)
     # latency = cl.finish()
     # # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     # print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
@@ -191,4 +206,10 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=128, trunk_sz=128)
+    for block_sz in range(32, 144, 16):
+        for blocks_per_trunk in range(1, 30, 6):
+            for seq_len in range(8192, 8248):
+                print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
+                print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)

@@ -561,6 +561,7 @@ void sdpa_kernel_lsc_prefetch(
             #pragma unroll
             for(int r = 0; r < cO.n_rows(); r++) {
                 cur_O_f16[r + p*REG_M] = cm_mul<float>(cO.row(r), cur_sum[r + p*REG_M]);
+
             }
         }
         b2dO.set_block_x(k);

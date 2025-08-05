@@ -9,8 +9,8 @@
 
 
 
-extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
-    int q_seqlen,
+extern "C" _GENX_MAIN_ void cm_page_attention(
+    int q_len,
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
@@ -35,25 +35,47 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     auto wg_local_id = cm_local_id(2);
     int local_size = cm_local_size(2);
 
-    int q_start, kv_start, kv_seq_len, q_len;
+    int q_start_sg, kv_start, kv_seq_len, q_len_sg;
 
     // multiple work-groups are required to split a sequence,
     // need to figure out which part of query-tokens to process
     int wg_seq_len = local_size * q_step;
     int past_q_lens = past_lens[0];
     kv_start = 0;
-    kv_seq_len = q_seqlen + past_q_lens;
-    q_start = (wg_id * local_size + wg_local_id) * q_step;
-    q_len = q_step;
-    if (q_start + q_len > q_seqlen) {
-        q_len = q_seqlen - q_start;
+    kv_seq_len = q_len + past_q_lens;
+    q_start_sg = (wg_id * local_size + wg_local_id) * q_step;
+    q_len_sg = q_step;
+    if (q_start_sg + q_len_sg > q_len) {
+        q_len_sg = q_len - q_start_sg;
     }
-    //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start, q_len, kv_start, kv_seq_len);
+    //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start_wg, q_len_wg, kv_start, kv_seq_len);
 
     // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
+        /*
+        --------------------------------
+        |       |       |       |       |
+        |  00   |       |       |       |
+        |       |       |       |       |
+         --------------------------------
+        |       |       |       |       |
+        |  10   |  11   |       |       |
+        |       |       |       |       |
+        ---------------------------------
+        |       |       |       |       |
+        |  20   |  21   |  22   |       |
+        |       |       |       |       |
+         ---------------------------------
+        |       |       |       |       |
+        |  30   |  31   |   32  |   33  |
+        |       |       |       |       |
+        ---------------------------------
+        each grid can be [q_len_per_trunk, q_len_per_trunk].
+        For each trunk, [q_len_per_trunk, past_q_lens] must be calculated. Such as: `20`,`21`. but for the 22,
+        casual mask optimization can be applied. differnt wgs would has different kv stop.
         //todo:kv_stop is wg level, should we change to sg level?
+    */
         kv_stop = (wg_id + 1) * wg_seq_len + past_q_lens;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
@@ -65,8 +87,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
 
     //Q/O[B, L, H, S]
-    uint q_offset = (q_start*num_heads + h)*head_size;
-    uint o_offset = (q_start*num_heads + h)*head_size;
+    uint q_offset = (q_start_sg*num_heads + h)*head_size;
+    uint o_offset = (q_start_sg*num_heads + h)*head_size;
 
     //K/V[block_num, kv_heads, block_sz, head_sz]
     uint k_offset = hkv*head_size*pa_block_sz;
@@ -75,9 +97,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
                                 wg_local_id,
-                                q_start, //q_start,
+                                q_start_sg, //q_start for SG,
                                 kv_stop,
-                                q_len, //q_step,
+                                q_len_sg, //q_step,
                                 kv_seq_len, //kv_len,
                                 reinterpret_cast<svmptr_t>(query + q_offset),
                                 reinterpret_cast<svmptr_t>(key + k_offset),
