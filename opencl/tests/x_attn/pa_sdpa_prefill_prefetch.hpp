@@ -579,6 +579,9 @@ void sdpa_kernel_lsc_prefetch(
     svmptr_t q_base [[type("svmptr_t")]],
     svmptr_t k_base [[type("svmptr_t")]],
     svmptr_t v_base [[type("svmptr_t")]],
+#if SPARSE_BLOCK_SIZE > 1
+    svmptr_t sparse_mask_base [[type("svmptr_t")]],
+#endif
     svmptr_t o_base [[type("svmptr_t")]],
     uint v_before_padding) {
 
@@ -618,8 +621,8 @@ void sdpa_kernel_lsc_prefetch(
     lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     static_assert(wg_local_size == 16);
-    lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base + k_pitch*wg_local_id, kv_stop - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base + v_pitch*wg_local_id, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base + k_pitch, kv_stop - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base + v_pitch, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     int causal_left = q_start;
 
@@ -634,7 +637,7 @@ void sdpa_kernel_lsc_prefetch(
 
             matrix<half, num_K, REG_M * REG_K> Kmat;
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
-            prefetch_K.set_block_y(kv_pos + kv_step);
+            prefetch_K.set_block_y(wg_local_id + kv_pos + kv_step);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
             b2dK.set_block_y(kv_pos);
@@ -681,7 +684,7 @@ void sdpa_kernel_lsc_prefetch(
         Transpose2DMatrix(St, P);
 
         b2dV.set_block_y(kv_pos);
-        prefetch_V.set_block_y(kv_pos + kv_step);
+        prefetch_V.set_block_y(wg_local_id + kv_pos + kv_step);
         if (kv_pos == 0) {
             // ugemm_PV0(slm_V, P, rO, slm_offset);
             auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
@@ -763,6 +766,9 @@ extern "C" _GENX_MAIN_ void cm_pa_sdpa_prefill(
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
+#if SPARSE_BLOCK_SIZE > 1
+    bool* sparse_block_mask [[type("svmptr_t")]],
+#endif
     half* output [[type("svmptr_t")]],
     int seqlen,
     int kv_len,
@@ -775,6 +781,7 @@ extern "C" _GENX_MAIN_ void cm_pa_sdpa_prefill(
     //# query [batch, q_len, num_heads, S]
     //#   key [batch, kv_len, num_heads, S]
     //# value [batch, kv_len, num_heads, S]
+    //# sparse_block_mask [batch, num_heads, q_blocks, kv_blocks]
     //# to load Q
 
 #if USE_LSC_PREFETCH
@@ -792,6 +799,7 @@ extern "C" _GENX_MAIN_ void cm_pa_sdpa_prefill(
     auto wg_id = cm_group_id(2); // each work-group handles a sequence
     auto wg_local_id = cm_local_id(2);
     const int local_size = cm_local_size(2);
+    auto global_id = cm_global_id(2);
     // auto q_group_id = cm_group_id(2);
     int q_start, kv_start, kv_seq_len, q_len;
 
@@ -811,11 +819,20 @@ extern "C" _GENX_MAIN_ void cm_pa_sdpa_prefill(
     auto o_base = reinterpret_cast<svmptr_t>(output + ((batch * q_len + q_start)*num_heads + h)*head_size);
     auto v_base = reinterpret_cast<svmptr_t>(value + (batch*num_kv_heads*kv_len + hkv)*head_size + v_before_padding);
 
+#if SPARSE_BLOCK_SIZE > 1
+    auto q_start_block = (q_start + SPARSE_BLOCK_SIZE -1) / SPARSE_BLOCK_SIZE;
+    int q_blocks = (seqlen + SPARSE_BLOCK_SIZE - 1) / SPARSE_BLOCK_SIZE;
+    int kv_blocks = (kv_len + SPARSE_BLOCK_SIZE - 1) / SPARSE_BLOCK_SIZE;
+    auto block_mask_base = reinterpret_cast<svmptr_t>(sparse_block_mask + (((batch*num_heads + h) * q_blocks) + q_start_block)*kv_blocks);
+#endif
+
     int kv_stop = kv_len;
     if constexpr (causal_mask) {
         kv_stop = (wg_id + 1) * local_size * q_step;
         if (kv_stop > seqlen) kv_stop = kv_len;
     }
+
+    printf("=== [%d - %d, %d] q_len: %d, q_start: %d, kv_stop: %d\n", global_id, wg_id, wg_local_id, q_len, q_start, kv_stop);
 
 #if USE_LSC_PREFETCH
     sdpa_kernel_lsc_prefetch<causal_mask, num_heads, num_kv_heads, head_size, 0, 16>(
@@ -827,6 +844,9 @@ extern "C" _GENX_MAIN_ void cm_pa_sdpa_prefill(
                                 q_base,
                                 k_base,
                                 v_base,
+#if SPARSE_BLOCK_SIZE > 1
+                                block_mask_base,
+#endif
                                 o_base,
                                 v_before_padding);
 #else
