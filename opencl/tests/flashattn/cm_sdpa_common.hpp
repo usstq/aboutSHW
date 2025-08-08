@@ -377,6 +377,40 @@ constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
     }
 }
 
+template <int N, int M>
+void apply_causal_mask(matrix_ref<float, N, M> St , const uint row) {
+    if (row == 1) {
+            apply_causal_mask<1>(St);
+    } else if (row == 2) {
+            apply_causal_mask<2>(St);
+    }  else if(row == 3) {
+            apply_causal_mask<3>(St);
+    }  else if(row == 4) {
+            apply_causal_mask<4>(St);
+    }  else if(row == 5) {
+            apply_causal_mask<5>(St);
+    }  else if(row == 6) {
+            apply_causal_mask<6>(St);
+    }  else if(row == 7) {
+            apply_causal_mask<7>(St);
+    }  else if(row == 8) {
+            apply_causal_mask<8>(St);
+    }  else if(row == 9) {
+            apply_causal_mask<9>(St);
+    }  else if(row == 10) {
+            apply_causal_mask<10>(St);
+    }  else if(row == 11) {
+            apply_causal_mask<11>(St);
+    }  else if(row == 12) {
+            apply_causal_mask<12>(St);
+    }  else if(row == 13) {
+            apply_causal_mask<13>(St);
+    }  else if(row == 14) {
+            apply_causal_mask<14>(St);
+    }  else if(row == 15) {
+            apply_causal_mask<15>(St);
+    }
+}
 
 template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused, int wg_local_size>
 void sdpa_kernel_lsc_prefetch(
@@ -390,7 +424,8 @@ void sdpa_kernel_lsc_prefetch(
     svmptr_t v_base [[type("svmptr_t")]],
     svmptr_t o_base [[type("svmptr_t")]],
     int32_t past_lens,
-    int32_t* block_indices [[type("svmptr_t")]]) {
+    int32_t* block_indices [[type("svmptr_t")]],
+    int32_t block_indices_begins) {
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
     constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
     // constexpr uint k_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
@@ -398,6 +433,9 @@ void sdpa_kernel_lsc_prefetch(
     //[block_num, kv_heads, block_size, head_size]
     constexpr uint k_pitch =  head_size * sizeof(half);
     constexpr uint v_pitch = k_pitch;
+    bool debug_data=false;
+    // if (cm_local_id(2) == 0 && (cm_group_id(2) == 0))
+    //     debug_data=true;
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
@@ -419,8 +457,14 @@ void sdpa_kernel_lsc_prefetch(
         lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(q_base), q_tokens_left - 1, head_size*sizeof(half) - 1, q_pitch - 1, 0, 0);
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
+            if (debug_data) {
+                cm_load<lsc::Normal>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
+                printf("qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq:wg:%d\n", cm_group_id(2));
+                show(rQ.format<half, 16, head_size>());
+            }
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
             rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
+
         }
     }
 
@@ -434,8 +478,8 @@ void sdpa_kernel_lsc_prefetch(
     int causal_left = q_start+past_lens;
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
-        auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
-        auto prefetch_block_id = block_indices[(kv_pos+kv_step) / CMPA_BLOCK_SZ];
+        auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ + block_indices_begins];
+        auto prefetch_block_id = block_indices[(kv_pos+kv_step) / CMPA_BLOCK_SZ + block_indices_begins];
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
@@ -452,6 +496,10 @@ void sdpa_kernel_lsc_prefetch(
             b2dK.set_base_ptr((reinterpret_cast<half*>(k_base)+cur_block_id*blk_stride));
             b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
             cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
+            if (debug_data) {
+                    printf("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk:wg:%d\n", cm_group_id(2));
+                    show(Kmat.format<half, 16, 16>());
+                }
             #pragma unroll
             for(int k = 0; k < num_K; k++)
                 St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -464,6 +512,11 @@ void sdpa_kernel_lsc_prefetch(
                 //cm_slm_block_read(slm_K, GENX_NONE, slm_offset + ri * Kmat.n_elems() * sizeof(half), Kmat.format<half>());
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(ri*REG_K));
                 cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(ri*REG_K));
+                if (debug_data) {
+                    printf("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk:wg%d\n", cm_group_id(2));
+                    show(Kmat.format<half, 16, 16>());
+                }
+
                 #pragma unroll
                 for(int k = 0; k < num_K; k++) {
                     St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -473,20 +526,32 @@ void sdpa_kernel_lsc_prefetch(
                 }
             }
         }
+        if (debug_data) {
+                    printf("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\score0:wg:%d\n", cm_group_id(2));
+                    show(St.format<float, 16, 16>());
+                    printf("causal_left:%d use_causal_mask%d\n", causal_left, use_causal_mask);
+
+        }
+
         if constexpr (use_causal_mask) {
+            causal_left -= kv_step;
+
             // since kv_step == q_step == 16, causal_left is n*kv_step
-            if (causal_left == 0) {
-                apply_causal_mask<1>(St);
-            } else if (causal_left < 0) {
+            if (causal_left >= -16  && causal_left <= -1) {
+                apply_causal_mask(St , (causal_left+kv_step+1)%16);
+            } else if (causal_left < -16) {
                 St = -3.4e38f;
             }
-            causal_left -= kv_step;
         } else {
             int kv_tokens = kv_stop - kv_pos;
             // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
             for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         }
 
+        if (debug_data) {
+                    printf("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\score1 :wg:%d\n", cm_group_id(2));
+                    show(St.format<float, 16, 16>());
+        }
         //show(St);
         auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
@@ -505,6 +570,12 @@ void sdpa_kernel_lsc_prefetch(
             for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
                 matrix<half, REG_K/2, REG_N*2> Vmat;
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+
+                if (debug_data) {
+                    cm_load<lsc::Normal>(Vmat.format<half>(), b2dV.set_block_x(k));
+                    printf("vvvvvvvvvvvvvvvvvvvvvvvv :wg%d\n", cm_group_id(2));
+                    show(Vmat.format<half, 16, 16>());
+                }
                 cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
                 #pragma unroll
                 for(int p = 0; p < num_P_tiles; p++) {
@@ -523,6 +594,11 @@ void sdpa_kernel_lsc_prefetch(
                 matrix<half, REG_K/2, REG_N*2> Vmat;
 
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+                if (debug_data) {
+                    cm_load<lsc::Normal>(Vmat.format<half>(), b2dV.set_block_x(k));
+                    printf("vvvvvvvvvvvvvvvvvvvvvvvv :wg%d\n", cm_group_id(2));
+                    show(Vmat.format<half, 16, 16>());
+                }
                 cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
 
                 //# compensate cur_O
@@ -563,6 +639,10 @@ void sdpa_kernel_lsc_prefetch(
                 cur_O_f16[r + p*REG_M] = cm_mul<float>(cO.row(r), cur_sum[r + p*REG_M]);
 
             }
+        }
+        if (debug_data) {
+            printf("oooooooooooooooooooooooooooooooo :wg%d\n", cm_group_id(2));
+            show(cur_O_f16.format<half, 16, 16>());
         }
         b2dO.set_block_x(k);
         cm_store(b2dO.set_block_y(0), cur_O_f16.format<half, num_P_tiles, REG_M * REG_N>().row(0));

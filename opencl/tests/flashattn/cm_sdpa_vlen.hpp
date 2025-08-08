@@ -8,9 +8,7 @@
 #endif
 
 
-
 extern "C" _GENX_MAIN_ void cm_page_attention(
-    int q_len,
     half* query [[type("svmptr_t")]],
     half* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
@@ -18,7 +16,9 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     int32_t* block_indices [[type("svmptr_t")]],
     int32_t* block_indices_begins [[type("svmptr_t")]],
     int32_t* subsequence_begins [[type("svmptr_t")]],
+    int32_t* wg_begins [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]) {
+
     constexpr int is_causal = CMFLA_IS_CAUSAL;
     constexpr int num_heads = CMFLA_NUM_HEADS;
     constexpr int head_size = CMFLA_HEAD_SIZE;
@@ -27,56 +27,62 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
+    int subseq_idx = 0;
 
-    auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
     auto hkv = h / (num_heads/num_kv_heads);
     auto wg_id = cm_group_id(2); // each work-group handles a sequence
     auto wg_local_id = cm_local_id(2);
     int local_size = cm_local_size(2);
-
+    //@todo: get the subseq number.
+    for (int idx=0; idx < 1000000;idx++) {
+        if (wg_id <  wg_begins[idx+1]) {
+            subseq_idx = idx;
+            break;
+        }
+    }
+    int q_len = subsequence_begins[subseq_idx+1] - subsequence_begins[subseq_idx];
     int q_start_sg, kv_start, kv_seq_len, q_len_sg;
 
     // multiple work-groups are required to split a sequence,
     // need to figure out which part of query-tokens to process
     int wg_seq_len = local_size * q_step;
-    int past_q_lens = past_lens[0];
+    int past_q_lens = past_lens[subseq_idx];
     kv_start = 0;
     kv_seq_len = q_len + past_q_lens;
-    q_start_sg = (wg_id * local_size + wg_local_id) * q_step;
+    q_start_sg = ((wg_id-wg_begins[subseq_idx]) * local_size + wg_local_id) * q_step;
     q_len_sg = q_step;
     if (q_start_sg + q_len_sg > q_len) {
         q_len_sg = q_len - q_start_sg;
     }
-    //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start_wg, q_len_wg, kv_start, kv_seq_len);
 
     // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
         /*
-        --------------------------------
-        |       |       |       |       |
-        |  00   |       |       |       |
-        |       |       |       |       |
-         --------------------------------
-        |       |       |       |       |
-        |  10   |  11   |       |       |
-        |       |       |       |       |
-        ---------------------------------
-        |       |       |       |       |
-        |  20   |  21   |  22   |       |
-        |       |       |       |       |
-         ---------------------------------
-        |       |       |       |       |
-        |  30   |  31   |   32  |   33  |
-        |       |       |       |       |
-        ---------------------------------
-        each grid can be [q_len_per_trunk, q_len_per_trunk].
-        For each trunk, [q_len_per_trunk, past_q_lens] must be calculated. Such as: `20`,`21`. but for the 22,
-        casual mask optimization can be applied. differnt wgs would has different kv stop.
-        //todo:kv_stop is wg level, should we change to sg level?
-    */
-        kv_stop = (wg_id + 1) * wg_seq_len + past_q_lens;
+            --------------------------------
+            |       |       |       |       |
+            |  00   |       |       |       |
+            |       |       |       |       |
+            --------------------------------
+            |       |       |       |       |
+            |  10   |  11   |       |       |
+            |       |       |       |       |
+            ---------------------------------
+            |       |       |       |       |
+            |  20   |  21   |  22   |       |
+            |       |       |       |       |
+            ---------------------------------
+            |       |       |       |       |
+            |  30   |  31   |   32  |   33  |
+            |       |       |       |       |
+            ---------------------------------
+            each grid can be [q_len_per_trunk, q_len_per_trunk].
+            For each trunk, [q_len_per_trunk, past_q_lens] must be calculated. Such as: `20`,`21`. but for the 22,
+            casual mask optimization can be applied. differnt wgs would has different kv stop.
+            //todo:kv_stop is wg level, should we change to sg level?
+        */
+        kv_stop = (wg_id + 1-wg_begins[subseq_idx]) * wg_seq_len + past_q_lens;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
 
@@ -87,12 +93,14 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
 
     //Q/O[B, L, H, S]
-    uint q_offset = (q_start_sg*num_heads + h)*head_size;
-    uint o_offset = (q_start_sg*num_heads + h)*head_size;
+    uint q_subseq_offset = subsequence_begins[subseq_idx];
+    uint q_offset = ((q_start_sg+subsequence_begins[subseq_idx])*num_heads + h)*head_size;
+    uint o_offset = ((q_start_sg+subsequence_begins[subseq_idx])*num_heads + h)*head_size;
 
     //K/V[block_num, kv_heads, block_sz, head_sz]
     uint k_offset = hkv*head_size*pa_block_sz;
     uint v_offset = hkv*head_size*pa_block_sz;
+    // printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start_sg, q_len_sg, past_q_lens, kv_seq_len);
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
@@ -106,7 +114,8 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
                                 reinterpret_cast<svmptr_t>(value + v_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset),
                                 past_q_lens,
-                                block_indices);
+                                block_indices,
+                                block_indices_begins[subseq_idx]);
 #else
     static_assert(0);
 
