@@ -27,7 +27,7 @@ _GENX_MAIN_ void sort(svmptr_t src ATTR, svmptr_t sorted_value ATTR, svmptr_t so
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
-    sort(slm, src, sorted_value, sorted_index, sort_tmp, n);
+    sort<half>(slm, src, sorted_value, sorted_index, sort_tmp, n);
 }
 
 ''')
@@ -43,9 +43,10 @@ kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_registe
 def test_sort(src:torch.Tensor):
     n = src.shape[0]
     tSrc = cl.tensor(src.detach().numpy())
-    tSorted_value = cl.tensor(np.zeros([n,], np.int16))
-    tSorted_index = cl.tensor(np.zeros([n,], np.int16))
-    tSorted_tmp = cl.tensor(np.zeros([n,], np.int16))
+    #tSorted_value = cl.tensor(np.zeros([n,], np.int16))
+    tSorted_value = cl.tensor(np.zeros([n,], np.float16))
+    tSorted_index = cl.tensor(np.zeros([n,], np.uint16))
+    tSorted_tmp = cl.tensor(np.zeros([n,], np.uint16))
 
     # gemm
     for i in range(1):
@@ -66,9 +67,16 @@ def test_sort(src:torch.Tensor):
         raise('error')
     compare(index_ref.detach().numpy(), tSorted_index.numpy())
     print(f'{Colors.GREEN}sort:index passed{Colors.END}')
+    if 1:
+        for i in range(0, 100):
+            kernels.enqueue("sort", [1], [1], tSrc, tSorted_value, tSorted_index, tSorted_tmp, n)
+            ns = cl.finish()
+            for i, time_opt in enumerate(ns):
+                print(f'(SORT)TPUT_{i}:[{n}] {time_opt*1e-3:,.0f} us')
 
 def main():
-    data = torch.randint(0, 30000, size=[32*200], dtype=torch.int16)
+    #data = torch.randint(-0, 30000, size=[32*200], dtype=torch.int16)
+    data = torch.rand([32*2000], dtype=torch.float16)
     test_sort(data)
 
 if __name__ == "__main__":
