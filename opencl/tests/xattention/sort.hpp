@@ -28,6 +28,7 @@
 #define ATTR_BUF [[type("buffer_t")]]
 #endif
 
+#if 0
 template<typename T, int N>
 void show(const vector<T, N> mat, bool is_hex=true) {
     printf("vector [%d]:\n[", N);
@@ -52,6 +53,7 @@ void show(const matrix<T, M, N> mat) {
     }
     printf("]\n");
 }
+#endif
 
 // https://gpuopen.com/download/Introduction_to_GPU_Radix_Sort.pdf
 template<typename TYPE>

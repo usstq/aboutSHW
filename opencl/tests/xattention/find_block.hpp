@@ -50,7 +50,7 @@ void show(const matrix<T, M, N> mat) {
 // c_max_wg:          [b, hq, m_groups, m_pad]
 // c_exp_partial_sum: [b, hq, m_pad, n_after_sum_pad]
 // c_sum:             [b, hq, m_pad/TOKEN_IN_BLOCK, n_after_sum_pad]
-CM_INLINE void find(int m_block, svmptr_t c_max, svmptr_t c_max_wg, svmptr_t c_exp_partial_sum, svmptr_t c_sum, uint m_pad, uint n_after_sum_pad) {
+CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, svmptr_t c_exp_partial_sum, svmptr_t c_sum, svmptr_t block_mask, uint m_pad, uint n_after_sum_pad, float thresh) {
     constexpr int SG_SIZE = 16;
 #ifndef BLOCK_SG_M
     #define BLOCK_SG_M  64
@@ -95,7 +95,9 @@ CM_INLINE void find(int m_block, svmptr_t c_max, svmptr_t c_max_wg, svmptr_t c_e
         inv_sum_v[i] = 1.0f / cm_sum<float>(sum_m.row(i));
     }
     // compensation: sum(val*inv_sum_v)
+    vector<float, TOKEN_SHARE_MAX> sum_m_after_add = 0;
     desc_sum.set_block_x(0);
+    c_sum += m_block * n_after_sum_pad * (int)sizeof(half);
     for (int j = 0; j < n_after_sum_pad; j += TOKEN_SHARE_MAX) {
         cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(data.format<half>(), desc_sum);
         data.row(0) *= inv_sum_v[0];
@@ -103,7 +105,48 @@ CM_INLINE void find(int m_block, svmptr_t c_max, svmptr_t c_max_wg, svmptr_t c_e
             data.row(0) += data.row(i) * inv_sum_v[i];
         }
         desc_sum.set_block_x(desc_sum.get_block_x() + TOKEN_SHARE_MAX);
-        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)c_sum, (m_block * n_after_sum_pad + j) * (int)sizeof(half), data.row(0).format<int>());
+        sum_m_after_add += data.row(0);
+        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)c_exp_partial_sum, j * (int)sizeof(half), data.row(0).format<int>());
+#if DEBUG_ACC == 1
+        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)c_sum, j * (int)sizeof(half), data.row(0).format<int>());
+#endif
+    }
+    auto thresh_act = cm_sum<float>(sum_m_after_add) * thresh;
+
+    // content of 8(aka stride) lines:
+    // line 0: score
+    // line 1: sorted value
+    // line 2: sorted index
+    // line 3: sorted tmp
+    // line 4: accumalative score
+    block_mask += m_block * n_after_sum_pad;
+    auto score        = c_exp_partial_sum + 0 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_value = c_exp_partial_sum + 1 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_index = c_exp_partial_sum + 2 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_tmp   = c_exp_partial_sum + 3 * n_after_sum_pad * (int)sizeof(half);
+    auto acc_score    = c_exp_partial_sum + 4 * n_after_sum_pad * (int)sizeof(half);
+    sort<half>(slm, score, sorted_value, sorted_index, sorted_tmp, n_after_sum_pad);
+    uchar* block_mask_p = (uchar*)block_mask;
+    auto sorted_value_p = (half*)sorted_value;
+    auto sorted_index_p = (ushort*)sorted_index;
+    auto acc_score_p = (half*)acc_score;
+    block_mask_p[0] = 1;
+    float sum_cur = 0;
+#if DEBUG_ACC == 1
+    acc_score_p[0] = 0;
+#endif
+    for (int j = 0; j < n_after_sum_pad - 1; j++) {
+        sum_cur += sorted_value_p[j];
+#if DEBUG_ACC == 1
+        acc_score_p[j + 1] = sum_cur;
+#endif
+        if (sum_cur < thresh_act) {
+            block_mask_p[sorted_index_p[j]] = 1;
+        } else {
+            block_mask_p[sorted_index_p[j]] = 1;
+#if DEBUG_ACC != 1
+            break;
+#endif
+        }
     }
 }
-
