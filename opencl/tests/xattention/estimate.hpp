@@ -454,14 +454,14 @@ CM_INLINE void gemm_kq_2x4_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
 #if 1 or (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
 // register tile: [8, 2] aka[(8*8,16), (16, 16*2)]
 // src_a is key, src_b is query
-CM_INLINE void gemm_kq_8x2_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR,
-uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
+CM_INLINE void gemm_kq_8x2_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR,
+uint M, uint N, uint K, uint ldb) {
     constexpr int SG_SIZE = 16;
     constexpr int BLOCK_WG_K = 64;	// same in sg
 #ifndef BLOCK_SG_M
     #define BLOCK_SG_M  64
     #define BLOCK_SG_N  32
-    #define SG_M  2
+    #define SG_M  4
     #define SG_N  4
     #define HEAD_SIZE  128
     #define KV_BLOCK_SIZE  256
@@ -494,36 +494,42 @@ uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
     static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
     static_assert(HEAD_SIZE % BLOCK_WG_K == 0, "K dimension must be multiple of BLOCK_WG_K");
     static_assert(KV_BLOCK_SIZE == 256, "block size of key(src_a) should be 256");
+    // assume block index coming from 0 in block_indices_begins
+    int block_index_begin = ((int*)block_indices_begins)[0];
+    int* block_indices_p = (int*)block_indices + block_index_begin;
+    int b_adjacent_between_head = ldb / STRIDE;
     // N[0:16*2]xK[0:16]
-    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
-        (STRIDE - 1) * HEAD_SIZE / 2, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
+    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)((ldb - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
+        (STRIDE - 1) * b_adjacent_between_head / 2, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
     // prefetch B
     static constexpr int SG_MN = SG_M * SG_N;
-    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)(K * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
-        (STRIDE - 1) * HEAD_SIZE, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
+    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)((ldb - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
+        (STRIDE - 1) * b_adjacent_between_head, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
     // N[0:16*2]xK[0:16]                                                                  --> 8+8 regs
     matrix<half, REG_N, BLOCK_REG_B> b0, b1;
 
     // M[0:16]xK[0:32]
-    uint offset = (uint)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(half) * lda;
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a0{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
+    uint block_idx = (uint)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * STRIDE / KV_BLOCK_SIZE;
+    uint offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a0{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[16:32]xK[0:32]
-    offset += KEY_LINES_PER_LOAD * (uint)sizeof(half) * lda;
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a1{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
+    offset = block_indices_p[block_idx + 1] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a1{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[32:48]xK[0:32]
-    offset += KEY_LINES_PER_LOAD * (uint)sizeof(half) * lda;
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a2{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
+    offset = block_indices_p[block_idx + 2] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a2{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[48:64]xK[0:32]
-    offset += KEY_LINES_PER_LOAD * (uint)sizeof(half) * lda;
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a3{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
+    offset = block_indices_p[block_idx + 3] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a3{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // prefetch A
-    offset = (uint)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) * (uint)sizeof(half) * lda;
+    block_idx = (uint)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) * STRIDE / KV_BLOCK_SIZE;
+    offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
     static_assert(BLOCK_WG_M / SG_MN <= KEY_LINES_PER_LOAD, "prefetch lines should be inside one block");
-    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(lda * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // 0~2 M[:]xK[0:16] 2~4 K[16:32]                                                     --> 32 * 2 regs
     matrix<half, 4, BLOCK_REG_A> a0, a1, a2, a3;
@@ -575,7 +581,7 @@ uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
-                desc_prefetch_b.set_block_x((STRIDE - 1 - s - 1) * HEAD_SIZE);
+                desc_prefetch_b.set_block_x((STRIDE - 1 - s - 1) * b_adjacent_between_head);
             else
                 desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
 
@@ -618,7 +624,7 @@ uint M, uint N, uint K, uint lda, uint ldb, uint ldc) {
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0,  0>(b1.row(0).format<int>(), desc_b0);
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(b1.row(1).format<int>(), desc_b0);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
-                desc_b0.set_block_x((STRIDE - 1 - s - 1) * HEAD_SIZE / 2);
+                desc_b0.set_block_x((STRIDE - 1 - s - 1) * b_adjacent_between_head / 2);
             else
                 desc_b0.set_block_x(desc_b0.get_block_x() + 8);
             // load a: M[0:32]xK[32:64]

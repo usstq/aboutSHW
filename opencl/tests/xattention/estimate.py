@@ -161,14 +161,12 @@ CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no
     }
 }
 
-_GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR, 
-    uint M, uint N, uint K, uint lda, uint ldb, uint ldc, int slice_no, int slice) {
+_GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR, 
+    uint M, uint N, uint K, uint ldb, int slice_no, int slice) {
     const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
     const uint size_slm_b = 0;
-    uint b_hq = cm_group_id(2);
-    uint b = b_hq / HQ;
-    uint hq = b_hq % HQ;
+    uint hq = cm_group_id(2);
     uint hk = hq / (HQ / HK);
     const uint slm_size = SG_M * BLOCK_WG_N * sizeof(half);
     cm_slm_init(slm_size);
@@ -179,23 +177,25 @@ _GENX_MAIN_ void gemm_qk(svmptr_t src_a ATTR, svmptr_t src_b ATTR, svmptr_t c_ma
     uint id_wg_m, id_wg_n;
     get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
 
-    src_a += (b * HK + hk) * M * lda * (uint)sizeof(half);
-    src_b += (b * HQ + hq) * N * ldb * (uint)sizeof(half);
+    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE]
+    src_a += hk * (KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    // query: [l_q, HQ * HEAD_SIZE]
+    src_b += hq * HEAD_SIZE * (uint)sizeof(half);
 
-    // c_max: [b, hq, n_pad]
-    // c_max_wg: [b, hq, m_groups, n_pad]
-    // c_exp_partial_sum: [b, hq, n_pad, m_groups*BLOCK_WG_M/(BLOCK_SIZE/STRIDE)]
+    // c_max: [hq, n_pad]
+    // c_max_wg: [hq, m_groups, n_pad]
+    // c_exp_partial_sum: [hq, n_pad, m_groups*BLOCK_WG_M/(BLOCK_SIZE/STRIDE)]
     uint n_pad = (N + BLOCK_WG_N - 1) / BLOCK_WG_N * BLOCK_WG_N;
-    c_max += (b * HQ + hq) * n_pad * (uint)sizeof(half);
+    c_max += hq * n_pad * (uint)sizeof(half);
     uint m_groups = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
-    c_max_wg += (b * HQ + hq) * m_groups * n_pad * (uint)sizeof(half);
+    c_max_wg += hq * m_groups * n_pad * (uint)sizeof(half);
 
     const uint sum_per_n_token_in_block = BLOCK_SIZE / STRIDE;
     const uint m_after_sum_in_group = BLOCK_WG_M / sum_per_n_token_in_block;
     const uint m_after_sum_pad = m_after_sum_in_group * m_groups;
-    c_exp_partial_sum += (b * HQ + hq) * m_after_sum_pad * n_pad * (uint)sizeof(half);
+    c_exp_partial_sum += hq * m_after_sum_pad * n_pad * (uint)sizeof(half);
 
-    gemm_kq_8x2_xe2(id_wg_m, id_wg_n, slm, src_a, src_b, c_max, c_max_wg, c_exp_partial_sum, M, N, K, lda, ldb, ldc);
+    gemm_kq_8x2_xe2(id_wg_m, id_wg_n, hq, slm, src_a, src_b, block_indices, block_indices_begins, c_max, c_max_wg, c_exp_partial_sum, M, N, K, ldb);
 }
 
 _GENX_MAIN_ void find_block(svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR, svmptr_t c_sum ATTR, svmptr_t block_mask ATTR, uint m_pad, uint n_after_sum_pad, float thresh) {
@@ -291,9 +291,29 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
     M_kq = N
     N_kq = M
 
-    tQ = cl.tensor(q.detach().numpy())
-    tK = cl.tensor(k.detach().numpy())
-    tC = cl.tensor(np.zeros([B, Hq, M_kq, N_kq], np.float16))
+    # k -> key_cache blocked layout
+    block_indices_begins = torch.zeros(B + 1).to(torch.int32)
+    block_indices = torch.arange((Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE)
+    # simulate random block allocation
+    perm_idx = torch.randperm(block_indices.shape[0])
+    inv_per_idx = torch.argsort(perm_idx)
+    block_indices = block_indices[inv_per_idx]
+
+    t_block_indices = cl.tensor(block_indices.to(torch.int32).detach().numpy())
+    # t_past_lens = cl.tensor(past_lens.to(torch.int32).detach().numpy())                   # M_kq has already been calculated
+    t_block_indices_begins = cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
+    # t_subsequence_begins = cl.tensor(subsequence_begins.to(torch.int32).detach().numpy()) # N_kq has already been calculated
+
+    key_cache = k.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(0, 2, 1, 3, 4)
+    key_cache = key_cache[:,perm_idx,:,:,:].contiguous()
+    tK = cl.tensor(key_cache.detach().numpy())
+
+    # [B, Hq, L, S] -> [B, L, Hq * S]
+    q_3d = q.permute(0, 2, 1, 3).reshape([B, Lq, -1])
+    # simulate layout of q,k,v is [B, L, Hq * S..Hkv * S]
+    q_3d_with_padding = torch.zeros([B, Lq, Hq * S * 2], dtype=q_3d.dtype)
+    q_3d_with_padding[:, :, : Hq * S] = q_3d
+    tQ = cl.tensor(q_3d_with_padding.detach().numpy())
 
     # [1, 32, 256]
     N_kq_out_pad = (N_kq + BLOCK_WG_N - 1) // BLOCK_WG_N * BLOCK_WG_N
@@ -343,7 +363,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
 
     # gemm
     for i in range(10):
-        kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+        kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, Hq], [SG_N, SG_M, 1], tK, tQ, t_block_indices, t_block_indices_begins, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
     cl.finish()
 
     # , [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
@@ -357,7 +377,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
     if 1:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
-            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, B * Hq], [SG_N, SG_M, 1], tK, tQ, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K, K, N_kq, slice_no, slice)
+            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq // BLOCK_WG_N * SG_N, SG_M, Hq], [SG_N, SG_M, 1], tK, tQ, t_block_indices, t_block_indices_begins, tC_max, tC_max_wg, tC_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
@@ -449,7 +469,7 @@ def main():
     # stride = 16
 
     # 84 T/s:
-    bsz = 1
+    bsz = 1 # must be 1
     q_head = HQ
     k_head = HK
     q_len = Q_LEN
