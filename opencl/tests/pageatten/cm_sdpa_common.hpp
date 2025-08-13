@@ -388,6 +388,9 @@ void sdpa_kernel_lsc_prefetch(
     svmptr_t q_base [[type("svmptr_t")]],
     svmptr_t k_base [[type("svmptr_t")]],
     svmptr_t v_base [[type("svmptr_t")]],
+#if SPARSE_BLOCK_SIZE > 1
+    svmptr_t sparse_mask_base [[type("svmptr_t")]],
+#endif
     svmptr_t o_base [[type("svmptr_t")]],
     int32_t past_lens,
     int32_t* block_indices [[type("svmptr_t")]]) {
@@ -402,18 +405,24 @@ void sdpa_kernel_lsc_prefetch(
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
 
+    bool need_comp = false;
+
     cur_max = -3e38f;
     cur_sum = 0;
     constexpr int num_P_tiles = REG_N / REG_M;
     matrix<half, head_size/REG_K, REG_K*REG_N> rQ;
     matrix <float, head_size/REG_N*num_P_tiles, REG_M*REG_N> rO;
 
-    auto q_tokens_left = q_len;// - q_start;
+    auto q_tokens_left = q_len;
     static_assert(q_step == REG_N);
     static_assert(kv_step == REG_K);
 
     if (q_tokens_left < 0) q_tokens_left = 0;
     if (q_tokens_left > q_step) q_tokens_left = q_step;
+
+#if SPARSE_BLOCK_SIZE > 1
+    // printf("wg:%d.%d  q: %d, +%d   kv: %d, x-attn: %p\n", 0, wg_local_id, q_start, q_tokens_left, kv_stop, reinterpret_cast<bool*>(sparse_mask_base));
+#endif
 
     if (q_tokens_left > 0) {
         lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(q_base), q_tokens_left - 1, head_size*sizeof(half) - 1, q_pitch - 1, 0, 0);
@@ -448,6 +457,19 @@ void sdpa_kernel_lsc_prefetch(
             prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_base)+prefetch_block_id*blk_stride));
             prefetch_K.set_block_y((kv_pos + kv_step + wg_local_id) % CMPA_BLOCK_SZ);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
+
+#if SPARSE_BLOCK_SIZE > 1
+            {
+                auto kv_start_block = kv_pos/ SPARSE_BLOCK_SIZE;
+                bool sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_start_block);
+                if (!sparse_mask) {
+                    if constexpr (use_causal_mask) {
+                        causal_left -= kv_step;
+                    }
+                    continue;
+                }
+            }
+#endif
 
             b2dK.set_base_ptr((reinterpret_cast<half*>(k_base)+cur_block_id*blk_stride));
             b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
@@ -487,7 +509,7 @@ void sdpa_kernel_lsc_prefetch(
             for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         }
 
-        //show(St);
+        // show(St);
         auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
         matrix<half, REG_N, REG_K> P;
@@ -498,7 +520,7 @@ void sdpa_kernel_lsc_prefetch(
 
         b2dV.set_base_ptr((reinterpret_cast<half*>(v_base)+cur_block_id*blk_stride));
         b2dV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
-        if (kv_pos == 0) {
+        if (need_comp == false) {
             // ugemm_PV0(slm_V, P, rO, slm_offset);
             auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
             #pragma unroll
@@ -512,8 +534,11 @@ void sdpa_kernel_lsc_prefetch(
                                     0,
                                     Vmat.format<int32_t>(),
                                     P2.row(p).format<int32_t>());
+                    // show(rO[ri + p].format<float, REG_M, REG_N>());
                 }
             }
+
+            need_comp = true;
         }
         else {
             //ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
@@ -541,6 +566,7 @@ void sdpa_kernel_lsc_prefetch(
                                 rO[ri + p].format<float>(),
                                 Vmat.format<int32_t>(),
                                 P2.row(p).format<int32_t>());
+                    // show(rO[ri + p].format<float, REG_M, REG_N>());
                 }
             }
         }
