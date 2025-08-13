@@ -33,6 +33,31 @@
 #define ATTR_BUF [[type("buffer_t")]]
 #endif
 
+#define MYMIN(x, y) ((x) < (y) ? (x) : (y))
+
+template<typename T, int N>
+void show(const vector<T, N> mat) {
+    printf("vector [%d]:\n[", N);
+    for(int n = 0; n < N; n ++) {
+        printf("%8.4f,", mat[n]);
+    }
+    printf("]\n");
+}
+
+template<typename T, int M, int N>
+void show(const matrix<T, M, N> mat) {
+    printf("Matrix [%d, %d]:\n", M, N);
+    for(int m = 0; m < M; m ++) {
+        printf("\t[");
+        for(int n = 0; n < N; n ++) {
+            printf("%8.4f,", mat[m][n]);
+        }
+        printf("],\n");
+    }
+    printf("]\n");
+}
+
+
 template <typename T1, typename T2>
 CM_INLINE void Transpose_8x8(matrix_ref<T1, 8, 8> in, matrix_ref<T2, 8, 8> out) {
     matrix<T2, 8, 8> temp;
@@ -454,8 +479,8 @@ CM_INLINE void gemm_kq_2x4_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
 #if 1 or (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
 // register tile: [8, 2] aka[(8*8,16), (16, 16*2)]
 // src_a is key, src_b is query
-CM_INLINE void gemm_kq_8x2_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t src_a, svmptr_t src_b, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t c_max ATTR, svmptr_t c_max_wg ATTR, svmptr_t c_exp_partial_sum ATTR,
-uint M, uint N, uint K, uint ldb) {
+CM_INLINE void gemm_kq_8x2_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t key_cache, svmptr_t query, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR,
+uint M, uint N, uint K, uint query_stride) {
     constexpr int SG_SIZE = 16;
     constexpr int BLOCK_WG_K = 64;	// same in sg
 #ifndef BLOCK_SG_M
@@ -493,17 +518,17 @@ uint M, uint N, uint K, uint ldb) {
 
     static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
     static_assert(HEAD_SIZE % BLOCK_WG_K == 0, "K dimension must be multiple of BLOCK_WG_K");
-    static_assert(KV_BLOCK_SIZE == 256, "block size of key(src_a) should be 256");
+    static_assert(KV_BLOCK_SIZE == 256, "block size of key(key_cache) should be 256");
     // assume block index coming from 0 in block_indices_begins
     int block_index_begin = ((int*)block_indices_begins)[0];
     int* block_indices_p = (int*)block_indices + block_index_begin;
-    int b_adjacent_between_head = ldb / STRIDE;
+    int b_adjacent_between_head = query_stride / STRIDE;
     // N[0:16*2]xK[0:16]
-    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ src_b, N - 1, (uint)((ldb - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
+    lsc::block_2d_desc<int, 1, BLOCK_REG_N, BLOCK_REG_K / 2> desc_b0{ query, N - 1, (uint)((query_stride - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(query_stride * sizeof(half) - 1),
         (STRIDE - 1) * b_adjacent_between_head / 2, (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
     // prefetch B
     static constexpr int SG_MN = SG_M * SG_N;
-    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{src_b, N - 1, (uint)((ldb - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(ldb * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{query, N - 1, (uint)((query_stride - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(query_stride * sizeof(half) - 1),
         (STRIDE - 1) * b_adjacent_between_head, (int)(id_wg_n * BLOCK_WG_N + id_sg_mn * (BLOCK_WG_N / SG_MN)) };
     // N[0:16*2]xK[0:16]                                                                  --> 8+8 regs
     matrix<half, REG_N, BLOCK_REG_B> b0, b1;
@@ -511,25 +536,25 @@ uint M, uint N, uint K, uint ldb) {
     // M[0:16]xK[0:32]
     uint block_idx = (uint)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * STRIDE / KV_BLOCK_SIZE;
     uint offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a0{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a0{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[16:32]xK[0:32]
     offset = block_indices_p[block_idx + 1] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a1{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a1{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[32:48]xK[0:32]
     offset = block_indices_p[block_idx + 2] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a2{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a2{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // M[48:64]xK[0:32]
     offset = block_indices_p[block_idx + 3] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
-    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a3{ src_a + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 2, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_a3{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // prefetch A
     block_idx = (uint)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) * STRIDE / KV_BLOCK_SIZE;
     offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
     static_assert(BLOCK_WG_M / SG_MN <= KEY_LINES_PER_LOAD, "prefetch lines should be inside one block");
-    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ src_a + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ key_cache + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
         0, 0 };
     // 0~2 M[:]xK[0:16] 2~4 K[16:32]                                                     --> 32 * 2 regs
     matrix<half, 4, BLOCK_REG_A> a0, a1, a2, a3;
@@ -666,69 +691,129 @@ uint M, uint N, uint K, uint ldb) {
         }
     }
 
-    uint N_aligned = (N + 31) / 32 * 32;
+    // if N(aka query) has tails, the following will not change the accuracy:
+    //    gemm will compute results for the padding N(all should be zeros), the kq_max/kq_max_wg/kq_exp_partial_sum are along the query dimension and
+    //    the results can be dropped in the future stage. To simplify the logic, the size of kq_max/kq_max_wg/kq_exp_partial_sum must be enough to hold
+    //    all tails + padding results.
+    uint N_aligned = (N + BLOCK_WG_N - 1) / BLOCK_WG_N * BLOCK_WG_N;
     uint M_block = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
-    uint M_block_aligned = (M + BLOCK_SIZE / STRIDE - 1) / (BLOCK_SIZE / STRIDE);
-    vector<half, BLOCK_SG_N> max_n = acc_half.row(0);
-#pragma unroll
-    for (uint reg_m = 1; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-        max_n = cm_max<half>(max_n, acc_half.row(reg_m));
-    }
-
-    {
-        uint slm_offset = (id_sg_m * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
-        // current max -> slm
-        cm_slm_block_write(slm, slm_offset, max_n.format<int>());
-        cm_slm_fence(CM_LOCAL_BARRIER);
-        cm_barrier();
-        // max inside wg
-        cm_slm_block_read(slm, id_sg_n * BLOCK_SG_N * (uint)sizeof(half), max_n.format<int>());
-        vector<half, BLOCK_SG_N> tmp;
-#pragma unroll
-        for (uint i = 1; i < SG_M; i++) {
-            slm_offset = (i * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
-            cm_slm_block_read(slm, slm_offset, tmp.format<int>());
-            max_n = cm_max<half>(max_n, tmp);
+    uint M_block_aligned = M_block * (BLOCK_WG_M / (BLOCK_SIZE / STRIDE));
+    int m_start = (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M);
+    m_start = MYMIN(m_start, M);
+    int m_end = MYMIN(m_start + BLOCK_SG_M, M);
+    int valid_m = m_end - m_start;
+    matrix<half, 32, 8> sum_t;
+    const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
+    if (valid_m == BLOCK_SG_M) {
+        vector<half, BLOCK_SG_N> max_n = acc_half.row(0);
+    #pragma unroll
+        for (uint reg_m = 1; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
+            max_n = cm_max<half>(max_n, acc_half.row(reg_m));
         }
-        // max across wg
-        // c_max: [b, hq, N_aligned]
-        vector<int, BLOCK_SG_N> seq;
-        cmtl::cm_vector_assign(seq.select_all(), 0, 1);
-        vector<uint, BLOCK_SG_N> max_offsets = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + seq) * (uint)sizeof(half);
-        cm_ptr_atomic<AtomicOp::FMAX, half>((half*)c_max, max_offsets, max_n);
-        
-        // current max -> mem
-        // c_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
-        uint offset = (id_wg_m * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
-        cm_ptr_store<int>((int*)c_max_wg, offset, max_n.format<int>());
-    }
-    {
-        // c_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
-        const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
-        uint offset = ((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
-        constexpr half log2e = 1.4426950408889634f;
-        matrix<half, 8, 32> sum;
-        static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
-        static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
-#pragma unroll
-        for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
-            sum.row(m) = cm_exp((acc_half.row(m * block_size_div_stride) - max_n) * log2e);
-#pragma unroll
-            for (uint sub_m = 1; sub_m < block_size_div_stride; sub_m++) {
-                uint real_m = m * block_size_div_stride + sub_m;
-                sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+
+        {
+            uint slm_offset = (id_sg_m * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
+            // current max -> slm
+            cm_slm_block_write(slm, slm_offset, max_n.format<int>());
+            cm_slm_fence(CM_LOCAL_BARRIER);
+            cm_barrier();
+            // max inside wg
+            cm_slm_block_read(slm, id_sg_n * BLOCK_SG_N * (uint)sizeof(half), max_n.format<int>());
+            vector<half, BLOCK_SG_N> tmp;
+    #pragma unroll
+            for (uint i = 1; i < SG_M; i++) {
+                slm_offset = (i * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
+                cm_slm_block_read(slm, slm_offset, tmp.format<int>());
+                max_n = cm_max<half>(max_n, tmp);
             }
+            // max across wg
+            // kq_max: [b, hq, N_aligned]
+            vector<int, BLOCK_SG_N> seq;
+            cmtl::cm_vector_assign(seq.select_all(), 0, 1);
+            vector<uint, BLOCK_SG_N> max_offsets = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + seq) * (uint)sizeof(half);
+            cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_n);
+            
+            // current max -> mem
+            // kq_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
+            uint offset = (id_wg_m * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
+            cm_ptr_store<int>((int*)kq_max_wg, offset, max_n.format<int>());
         }
-        matrix<half, 32, 8> sum_t;
+        {
+            // kq_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
+            constexpr half log2e = 1.4426950408889634f;
+            matrix<half, 8, 32> sum;
+            static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
+            static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
+    #pragma unroll
+            for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
+                sum.row(m) = cm_exp((acc_half.row(m * block_size_div_stride) - max_n) * log2e);
+    #pragma unroll
+                for (uint sub_m = 1; sub_m < block_size_div_stride; sub_m++) {
+                    uint real_m = m * block_size_div_stride + sub_m;
+                    sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+                }
+            }
 
-        Transpose_8x32(sum, sum_t);
-        // store
-        lsc::block_2d_desc<half, 1, 8, 8> desc_c{ c_exp_partial_sum, N_aligned - 1, (uint)(M_block_aligned * sizeof(half) - 1), (uint)(M_block_aligned * sizeof(half) - 1),
-            (int)((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride), (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
-        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 8, 1>( 0).format<half>());
-        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.select<8, 1, 8, 1>( 8).format<half>());
-        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.select<8, 1, 8, 1>(16).format<half>());
-        cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.select<8, 1, 8, 1>(24).format<half>());
+            Transpose_8x32(sum, sum_t);
+        }
+    } else {
+        // M tails
+        vector<half, BLOCK_SG_N> max_n = -60000;
+        for (uint reg_m = 0; reg_m < valid_m; reg_m++) {
+            max_n = cm_max<half>(max_n, acc_half.row(reg_m));
+        }
+
+        {
+            uint slm_offset = (id_sg_m * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
+            // current max -> slm
+            cm_slm_block_write(slm, slm_offset, max_n.format<int>());
+            cm_slm_fence(CM_LOCAL_BARRIER);
+            cm_barrier();
+            // max inside wg
+            cm_slm_block_read(slm, id_sg_n * BLOCK_SG_N * (uint)sizeof(half), max_n.format<int>());
+            vector<half, BLOCK_SG_N> tmp;
+    #pragma unroll
+            for (uint i = 1; i < SG_M; i++) {
+                slm_offset = (i * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * (uint)sizeof(half);
+                cm_slm_block_read(slm, slm_offset, tmp.format<int>());
+                max_n = cm_max<half>(max_n, tmp);
+            }
+            // max across wg
+            // kq_max: [b, hq, N_aligned]
+            vector<int, BLOCK_SG_N> seq;
+            cmtl::cm_vector_assign(seq.select_all(), 0, 1);
+            vector<uint, BLOCK_SG_N> max_offsets = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + seq) * (uint)sizeof(half);
+            cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_n);
+
+            // current max -> mem
+            // kq_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
+            uint offset = (id_wg_m * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
+            cm_ptr_store<int>((int*)kq_max_wg, offset, max_n.format<int>());
+        }
+        {
+            // kq_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
+            constexpr half log2e = 1.4426950408889634f;
+            matrix<half, 8, 32> sum = 0;
+            static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
+            static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
+    #pragma unroll
+            for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
+    #pragma unroll
+                for (uint sub_m = 0; sub_m < block_size_div_stride; sub_m++) {
+                    uint real_m = m * block_size_div_stride + sub_m;
+                    if (real_m < valid_m)
+                        sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+                }
+            }
+            Transpose_8x32(sum, sum_t);
+        }
     }
+    // store
+    lsc::block_2d_desc<half, 1, 8, 8> desc_c{ kq_exp_partial_sum, N - 1, (uint)(M_block_aligned * sizeof(half) - 1), (uint)(M_block_aligned * sizeof(half) - 1),
+        (int)((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride), (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 8, 1>( 0).format<half>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.select<8, 1, 8, 1>( 8).format<half>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.select<8, 1, 8, 1>(16).format<half>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.select<8, 1, 8, 1>(24).format<half>());
 }
 #endif

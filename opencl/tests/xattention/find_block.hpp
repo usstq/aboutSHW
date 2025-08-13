@@ -24,33 +24,11 @@
 #include <cm/cmtl.h>
 
 
-template<typename T, int N>
-void show(const vector<T, N> mat) {
-    printf("vector [%d]:\n[", N);
-    for(int n = 0; n < N; n ++) {
-        printf("%8.4f,", mat[n]);
-    }
-    printf("]\n");
-}
-
-template<typename T, int M, int N>
-void show(const matrix<T, M, N> mat) {
-    printf("Matrix [%d, %d]:\n", M, N);
-    for(int m = 0; m < M; m ++) {
-        printf("\t[");
-        for(int n = 0; n < N; n ++) {
-            printf("%8.4f,", mat[m][n]);
-        }
-        printf("],\n");
-    }
-    printf("]\n");
-}
-
-// c_max:             [b, hq, m_pad]
-// c_max_wg:          [b, hq, m_groups, m_pad]
-// c_exp_partial_sum: [b, hq, m_pad, n_after_sum_pad]
-// c_sum:             [b, hq, m_pad/TOKEN_IN_BLOCK, n_after_sum_pad]
-CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, svmptr_t c_exp_partial_sum, svmptr_t c_sum, svmptr_t block_mask, uint m_pad, uint n_after_sum_pad, float thresh) {
+// kq_max:             [b, hq, m_pad]
+// kq_max_wg:          [b, hq, m_groups, m_pad]
+// kq_exp_partial_sum: [b, hq, m_pad, n_after_sum_pad]
+// kq_sum:             [b, hq, m_pad/TOKEN_IN_BLOCK, n_after_sum_pad]
+CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, svmptr_t kq_exp_partial_sum, svmptr_t kq_sum, svmptr_t block_mask, uint m_pad, uint n_after_sum_pad, float thresh) {
     constexpr int SG_SIZE = 16;
 #ifndef BLOCK_SG_M
     #define BLOCK_SG_M  64
@@ -67,19 +45,19 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, sv
     const int TOKEN_IN_BLOCK = (BLOCK_SIZE / STRIDE);
     int m = m_block * TOKEN_IN_BLOCK;
     vector<half, TOKEN_IN_BLOCK> max_m;
-    max_m.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)c_max, m * (int)sizeof(half));
+    max_m.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)kq_max, m * (int)sizeof(half));
     const int TOKEN_SHARE_MAX = BLOCK_SHARE_MAX / TOKEN_IN_BLOCK;
-    c_exp_partial_sum += m * n_after_sum_pad * (int)sizeof(half);
-    c_max_wg += m * (int)sizeof(half);
+    kq_exp_partial_sum += m * n_after_sum_pad * (int)sizeof(half);
+    kq_max_wg += m * (int)sizeof(half);
     constexpr half log2e = 1.4426950408889634f;
-    lsc::block_2d_desc<half, 1, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> desc_sum{ c_exp_partial_sum, TOKEN_IN_BLOCK - 1, (uint)(n_after_sum_pad * sizeof(half) - 1), (uint)(n_after_sum_pad * sizeof(half) - 1),
+    lsc::block_2d_desc<half, 1, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> desc_sum{ kq_exp_partial_sum, TOKEN_IN_BLOCK - 1, (uint)(n_after_sum_pad * sizeof(half) - 1), (uint)(n_after_sum_pad * sizeof(half) - 1),
         0, 0 };
     matrix<float, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> sum_m = 0;
     matrix<half, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> data;
     // compensation: val*exp(local - global)
     for (int j = 0, idx = 0; j < n_after_sum_pad; j += TOKEN_SHARE_MAX, idx++) {
         vector<half, TOKEN_IN_BLOCK> max_m_in_group;
-        max_m_in_group.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)c_max_wg, m_pad * idx * (int)sizeof(half));
+        max_m_in_group.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)kq_max_wg, m_pad * idx * (int)sizeof(half));
         cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(data.format<half>(), desc_sum);
         for (int i = 0; i < TOKEN_IN_BLOCK; i++) {
             data.row(i) *= cm_exp((max_m_in_group[i] - max_m[i]) * log2e);
@@ -97,7 +75,7 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, sv
     // compensation: sum(val*inv_sum_v)
     vector<float, TOKEN_SHARE_MAX> sum_m_after_add = 0;
     desc_sum.set_block_x(0);
-    c_sum += m_block * n_after_sum_pad * (int)sizeof(half);
+    kq_sum += m_block * n_after_sum_pad * (int)sizeof(half);
     for (int j = 0; j < n_after_sum_pad; j += TOKEN_SHARE_MAX) {
         cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(data.format<half>(), desc_sum);
         data.row(0) *= inv_sum_v[0];
@@ -106,9 +84,9 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, sv
         }
         desc_sum.set_block_x(desc_sum.get_block_x() + TOKEN_SHARE_MAX);
         sum_m_after_add += data.row(0);
-        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)c_exp_partial_sum, j * (int)sizeof(half), data.row(0).format<int>());
+        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)kq_exp_partial_sum, j * (int)sizeof(half), data.row(0).format<int>());
 #if DEBUG_ACC == 1
-        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)c_sum, j * (int)sizeof(half), data.row(0).format<int>());
+        cm_ptr_store<int, TOKEN_SHARE_MAX / 2>((int*)kq_sum, j * (int)sizeof(half), data.row(0).format<int>());
 #endif
     }
     auto thresh_act = cm_sum<float>(sum_m_after_add) * thresh;
@@ -120,11 +98,11 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t c_max, svmptr_t c_max_wg, sv
     // line 3: sorted tmp
     // line 4: accumalative score
     block_mask += m_block * n_after_sum_pad;
-    auto score        = c_exp_partial_sum + 0 * n_after_sum_pad * (int)sizeof(half);
-    auto sorted_value = c_exp_partial_sum + 1 * n_after_sum_pad * (int)sizeof(half);
-    auto sorted_index = c_exp_partial_sum + 2 * n_after_sum_pad * (int)sizeof(half);
-    auto sorted_tmp   = c_exp_partial_sum + 3 * n_after_sum_pad * (int)sizeof(half);
-    auto acc_score    = c_exp_partial_sum + 4 * n_after_sum_pad * (int)sizeof(half);
+    auto score        = kq_exp_partial_sum + 0 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_value = kq_exp_partial_sum + 1 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_index = kq_exp_partial_sum + 2 * n_after_sum_pad * (int)sizeof(half);
+    auto sorted_tmp   = kq_exp_partial_sum + 3 * n_after_sum_pad * (int)sizeof(half);
+    auto acc_score    = kq_exp_partial_sum + 4 * n_after_sum_pad * (int)sizeof(half);
     sort<half>(slm, score, sorted_value, sorted_index, sorted_tmp, n_after_sum_pad);
     uchar* block_mask_p = (uchar*)block_mask;
     auto sorted_value_p = (half*)sorted_value;
