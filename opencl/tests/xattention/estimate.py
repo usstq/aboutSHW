@@ -14,7 +14,7 @@ from clops.utils import Colors
 
 cl.profiling(True)
 
-def get_partial_softmax_ref(A: torch.Tensor, block_size, S, wg_k=256, wg_q=128):
+def get_partial_softmax_ref(A: torch.Tensor, block_size, S, wg_k=256, wg_q=128, valid_q=0):
     ################# TODO: fuse gemm+softmax begin
     # [1, 32, 256, 8192]
     B, num_q_head, q_len_strided, k_len_strided = A.shape
@@ -37,15 +37,25 @@ def get_partial_softmax_ref(A: torch.Tensor, block_size, S, wg_k=256, wg_q=128):
     # [1, 32, 256, 64 * 16]
     A_exp_partial_sum_ret = torch.reshape(A_exp_partial_sum, (B, num_q_head, q_len_strided, -1))
 
+    # set invalid q to 0
+    if valid_q:
+        A_max[:,:,valid_q:,:] = 0
+        A_5d_max_ret[:,:,:,valid_q:] = 0
+        A_exp_partial_sum_ret[:,:,valid_q:,:] = 0
+
     # stage 2:
     # [1, 32, 256, 64, 16] * [1, 32, 256, 64, 1]
     A_exp_horz_sum = A_exp_partial_sum * torch.exp(A_5d_max - A_max.unsqueeze(dim=-1))
     # [1, 32, 256, 64 * 16]
     A_exp_horz_sum = A_exp_horz_sum.reshape(B, num_q_head, q_len_strided, -1)
-    A_exp_horz_sum = A_exp_horz_sum / A_exp_horz_sum.sum(dim=-1, keepdim=True)
+    A_exp_horz_sum = A_exp_horz_sum / (A_exp_horz_sum.sum(dim=-1, keepdim=True)+1e-5)
     A_exp_vert_sum = A_exp_horz_sum.reshape(B, num_q_head, q_len_strided // (block_size // S), block_size // S, -1)
     A_exp_vert_sum = A_exp_vert_sum.sum(dim=-2)
-    A_sum = F.softmax(A_pad, dim=-1).reshape(B, num_q_head, q_len_strided // (block_size // S), (block_size // S), (k_len_strided + wg_k - 1) // wg_k * wg_k // (block_size // S), (block_size // S))
+    A_sum = F.softmax(A_pad, dim=-1)
+    if valid_q:
+        A_sum[:,:,valid_q:,:] = 0
+    A_sum = A_sum.reshape(B, num_q_head, q_len_strided // (block_size // S), (block_size // S), (k_len_strided + wg_k - 1) // wg_k * wg_k // (block_size // S), (block_size // S))
+
     A_sum = A_sum.sum(dim=-1).sum(dim=-2)
     # [1, 32, 32, 64 * 16]
     if not torch.allclose(A_sum, A_exp_vert_sum, atol=0.01, rtol=0.01):
@@ -54,15 +64,20 @@ def get_partial_softmax_ref(A: torch.Tensor, block_size, S, wg_k=256, wg_q=128):
     ###################### fuse gemm+softmax end
     return A_max.squeeze(-1).contiguous(), A_5d_max_ret.contiguous(), A_exp_partial_sum_ret.contiguous(), A_sum.contiguous()
 
-def get_gemm_ref(Q_org: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_k=256, wg_q=128):
-    # Q, K, V shape = (B, H, L, d)
-    B, num_kv_head, k_len, d = K.shape
+def get_pad_query(Q_org: torch.Tensor, S, wg_q):
     # drop tails which are less than stride
     Q_org = Q_org[:,:,:Q_org.shape[2]//S*S,:]
     B, num_q_head, q_len, d = Q_org.shape
     # align GPU impl: padding query to a full workgroup
     Q = torch.zeros([B, num_q_head, (q_len // S + wg_q - 1) // wg_q * wg_q * S, d], dtype=Q_org.dtype)
     Q[:,:,:q_len,:] = Q_org
+    return Q
+
+def get_gemm_ref(Q_org: torch.Tensor, K: torch.Tensor, block_size, S, threshold=0.9, causal=True, wg_k=256, wg_q=128):
+    # Q, K, V shape = (B, H, L, d)
+    B, num_kv_head, k_len, d = K.shape
+    Q = get_pad_query(Q_org, S, wg_q)
+
     B, num_q_head, q_len, d = Q.shape
     assert num_q_head % num_kv_head == 0
     H = num_q_head
@@ -83,7 +98,7 @@ def get_gemm_ref(Q_org: torch.Tensor, K: torch.Tensor, block_size, S, threshold=
     #A = F.softmax(A, dim=-1, dtype=torch.float32).to(Q.dtype)
     return get_partial_softmax_ref(A, block_size=block_size, S=S, wg_k=wg_k, wg_q=wg_q)
 
-def find_blocks_ref(input_tensor, threshold):
+def find_blocks_ref(input_tensor, threshold, q_len, k_len):
     B, HQ, Q_block, K_block = input_tensor.shape
     #input_tensor = input_tensor.to(float)
     input_tensor = input_tensor.to(torch.float32)
@@ -206,30 +221,30 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     gemm_kq_8x2_xe2(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride);
 }
 
-_GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t kq_sum ATTR, svmptr_t block_mask ATTR, uint m_pad, uint n_after_sum_pad, float thresh) {
-    // kq_max:             [b, hq, m_pad]
-    // kq_max_wg:          [b, hq, m_groups, m_pad]
-    // kq_exp_partial_sum: [b, hq, m_pad, n_after_sum_pad]
-    // kq_sum:             [b, hq, m_pad/TOKEN_IN_BLOCK, n_after_sum_pad]
-    // block_mask:         [b, hq, m_pad/TOKEN_IN_BLOCK, n_after_sum_pad]
+_GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t kq_sum ATTR, svmptr_t block_mask ATTR, uint q_stride, uint k_block, uint q_stride_pad, uint k_block_pad, float thresh) {
+    // kq_max:             [b, hq, q_stride_pad]
+    // kq_max_wg:          [b, hq, m_groups, q_stride_pad]
+    // kq_exp_partial_sum: [b, hq, q_stride_pad, k_block_pad]
+    // kq_sum:             [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
+    // block_mask:         [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
     // [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
-    // global:            [m_pad/TOKEN_IN_BLOCK, hq, b]
+    // global:            [q_stride_pad/TOKEN_IN_BLOCK, hq, b]
     const int TOKEN_IN_BLOCK = BLOCK_SIZE / STRIDE;
     const int TOKEN_SHARE_MAX = BLOCK_SHARE_MAX / TOKEN_IN_BLOCK;
     uint m = cm_group_id(0);
     uint hq = cm_group_id(1);
     uint b = cm_group_id(2);
-    kq_max += (b * HQ + hq) * m_pad * (uint)sizeof(half);
-    kq_max_wg += (b * HQ + hq) * (n_after_sum_pad / TOKEN_SHARE_MAX) * m_pad * (uint)sizeof(half);
-    kq_exp_partial_sum += (b * HQ + hq) * m_pad * n_after_sum_pad * (uint)sizeof(half);
-    kq_sum += (b * HQ + hq) * m_pad / TOKEN_IN_BLOCK * n_after_sum_pad * (uint)sizeof(half);
-    block_mask += (b * HQ + hq) * m_pad / TOKEN_IN_BLOCK * n_after_sum_pad;
+    kq_max += (b * HQ + hq) * q_stride_pad * (uint)sizeof(half);
+    kq_max_wg += (b * HQ + hq) * (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad * (uint)sizeof(half);
+    kq_exp_partial_sum += (b * HQ + hq) * q_stride_pad * k_block_pad * (uint)sizeof(half);
+    kq_sum += (b * HQ + hq) * q_stride_pad / TOKEN_IN_BLOCK * k_block_pad * (uint)sizeof(half);
+    block_mask += (b * HQ + hq) * q_stride_pad / TOKEN_IN_BLOCK * k_block_pad;
 
     const uint slm_size = 32 * 16 * sizeof(ushort);
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
-    find(slm, m, kq_max, kq_max_wg, kq_exp_partial_sum, kq_sum, block_mask, m_pad, n_after_sum_pad, thresh);
+    find(slm, m, kq_max, kq_max_wg, kq_exp_partial_sum, kq_sum, block_mask, q_stride, k_block, q_stride_pad, k_block_pad, thresh);
 }
 
 ''')
@@ -303,17 +318,17 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
     t_query = cl.tensor(q_3d_with_padding.detach().numpy())
 
     # [1, 32, 256]
-    N_kq_out_pad = (N_kq + BLOCK_WG_N - 1) // BLOCK_WG_N * BLOCK_WG_N
-    max_init = np.ones([B, Hq, N_kq_out_pad], np.float16) * -60000.0
+    q_stride_pad = (N_kq + BLOCK_WG_N - 1) // BLOCK_WG_N * BLOCK_WG_N
+    max_init = np.ones([B, Hq, q_stride_pad], np.float16) * -60000.0
     t_kq_max = cl.tensor(max_init)  # [b, hq, M], init must be -inf
     # [1, 32, 64, 256]
     M_kq_groups = (M_kq + BLOCK_WG_M - 1) // BLOCK_WG_M
-    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, M_kq_groups, N_kq_out_pad], np.float16))
+    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, M_kq_groups, q_stride_pad], np.float16))
     # [1, 32, 256, 64 * 16]
     sum_per_token_in_block = block_size // stride
     M_kq_after_sum_in_group = BLOCK_WG_M // sum_per_token_in_block
-    M_kq_after_sum_pad = M_kq_after_sum_in_group * M_kq_groups
-    t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, N_kq_out_pad, M_kq_after_sum_pad], np.float16))
+    k_block_pad = M_kq_after_sum_in_group * M_kq_groups
+    t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, q_stride_pad, k_block_pad], np.float16))
 
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
@@ -350,7 +365,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
 
     # gemm
     for i in range(1):
-        kernels.enqueue(kernel_name, [M_kq_groups * (N_kq_out_pad // BLOCK_WG_N) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
+        kernels.enqueue(kernel_name, [M_kq_groups * (q_stride_pad // BLOCK_WG_N) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
     cl.finish()
 
     # [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
@@ -370,7 +385,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
     if perf:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
-            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * N_kq_out_pad // BLOCK_WG_N * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
+            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * q_stride_pad // BLOCK_WG_N * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
@@ -378,31 +393,41 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, threshold=0.9, str
     return t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum
 
 
-def test_find(A_shape, block_size, S, wg_x):
-    # NOTE: to avoid accumulative error, reset ref input
-    A = torch.randint(-2000, 3000, size=A_shape, dtype=torch.int16).to(dtype=torch.float16)
-    A_max, A_5d_max_ret, A_exp_partial_sum_ret, A_sum = get_partial_softmax_ref(A, block_size, S, wg_x)
-    t_kq_max = cl.tensor(A_max.detach().numpy())
-    t_kq_max_wg = cl.tensor(A_5d_max_ret.detach().numpy())
-    t_kq_exp_partial_sum = cl.tensor(A_exp_partial_sum_ret.detach().numpy())
+# q_stride = q_len // stride
+# k_stride = k_len // stride
+def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf):
+    def get_pad_score(qk_org):
+        # align GPU impl: padding query to a full workgroup
+        qk = torch.zeros([1, HQ, (q_stride + wg_q - 1) // wg_q * wg_q, k_stride], dtype=qk_org.dtype)
+        qk[:,:,:q_stride,:] = qk_org
+        return qk
+    qk = torch.randint(-2000, 3000, size=[1, HQ, q_stride, k_stride], dtype=torch.int16).to(dtype=torch.float16)
+    qk = get_pad_score(qk)
+    assert wg_k % block_size == 0, "wg_k should be multiple of block_size then there is no tails from block_size"
+    assert wg_q % block_size == 0, "wg_q should be multiple of block_size then there is no tails from block_size"
+    qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, valid_q=q_stride)
+    t_kq_max = cl.tensor(qk_max.detach().numpy())
+    t_kq_max_wg = cl.tensor(kq_5d_max.detach().numpy())
+    t_kq_exp_partial_sum = cl.tensor(qk_exp_partial_sum.detach().numpy())
 
-    mask_ref, sorted_value_ref, sorte_index_ref, cumulative_sum_without_self, required_sum = find_blocks_ref(A_sum, THRESH)
+    mask_ref, sorted_value_ref, sorte_index_ref, cumulative_sum_without_self, required_sum = find_blocks_ref(qk_sum, THRESH, q_stride, k_stride)
 
     # [1, 32, 256, 64 * 16]
-    B, _, N_kq_out_pad, M_kq_after_sum_pad = t_kq_exp_partial_sum.shape
-    N_after_sum_pad = M_kq_after_sum_pad  # 1024=8192/8
-    M_pad = N_kq_out_pad                        # multiple of 128
+    B, _, q_stride_pad, k_block_pad = t_kq_exp_partial_sum.shape
     sum_per_n_token_in_block = BLOCK_SIZE // STRIDE
+    k_block = (k_stride + block_size - 1) // block_size
+    assert k_block_pad == (k_stride + wg_k - 1) // wg_k * wg_k // sum_per_n_token_in_block, "k_block padded to wg_k / block_size"
+    assert q_stride_pad == (q_stride + wg_q - 1) // wg_q * wg_q, "q_stride_pad padded to wg_q / stride"
 
     # [1, 32, 32, 64 * 16]
-    t_kq_sum = cl.tensor(np.zeros([B, HQ, M_pad // sum_per_n_token_in_block, N_after_sum_pad], np.float16))
-    t_mask = cl.tensor(np.zeros([B, HQ, M_pad // sum_per_n_token_in_block, N_after_sum_pad], np.int8))
+    t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.float16))
+    t_mask = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8))
     # find
     for i in range(1):
-        kernels.enqueue("find_block", [M_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, M_pad, N_after_sum_pad, THRESH)
+        kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, q_stride, k_block, q_stride_pad, k_block_pad, THRESH)
     cl.finish()
     if FIND_DEBUG_ACC == 1:
-        compare(A_sum.detach().numpy(), t_kq_sum.numpy())
+        compare(qk_sum.detach().numpy(), t_kq_sum.numpy())
         print(f'{Colors.GREEN}find:sum passed{Colors.END}')
 
     kq_exp_partial_sum_np = t_kq_exp_partial_sum.numpy()
@@ -441,9 +466,9 @@ def test_find(A_shape, block_size, S, wg_x):
     #         raise Exception(f'the diff value should be smaller than 0.01, ref={A_sum[error_idx]} cur={tC_sum.numpy()[error_idx]}')
     # print(f'{Colors.GREEN}find:mask passed{Colors.END}')
 
-    if 1:
+    if perf:
         for i in range(0, 100):
-            kernels.enqueue("find_block", [M_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, M_pad, N_after_sum_pad, THRESH)
+            kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, q_stride, k_block, q_stride_pad, k_block_pad, THRESH)
         ns = cl.finish()
         for i, time_opt in enumerate(ns):
             print(f'(FIND)TPUT_{i}: {time_opt*1e-3:,.0f} us')
@@ -482,6 +507,7 @@ def test_func():
         k = torch.randint(-2, 3, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
         test_gemm(q, k, block_size=block_size, threshold=THRESH, stride=stride, causal=False, perf=False)
+        test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=False)
 
 def test_perf():
     # 106 T/s:
@@ -513,14 +539,13 @@ def test_perf():
     k = torch.randint(-2, 3, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
     test_gemm(q, k, block_size=block_size, threshold=THRESH, stride=stride, causal=False)
-    A_shape = [bsz, q_head, q_len // stride, k_len // stride]
-    test_find(A_shape, block_size, stride, wg_x=BLOCK_WG_M)
+    test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True)
 
 
 def main():
     if 1:
         test_func()
-    if 0:
+    if 1:
         test_perf()
 
 if __name__ == "__main__":
