@@ -21,7 +21,7 @@ def get_cm_grf_width():
     cm_kernels.enqueue("cm_get_grf_width", [1], [1], t_info)
     return t_info.numpy()[0]
 
-CM_GRF_WIDTH = 512 # get_cm_grf_width()
+CM_GRF_WIDTH = get_cm_grf_width()
 
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = True, sparse_block_sz = 128):
@@ -102,11 +102,11 @@ class page_atten_cm:
 
             if self.sparse_block_sz > 1:
                 kv_len = trunk_idx*self.trunk_sz + q_len
-                q_start_block = q_start // self.sparse_block_sz
-                q_block_num = (q_len + sparse_block_sz -1) // sparse_block_sz
-                kv_block_num = (kv_len + sparse_block_sz -1) // sparse_block_sz
+                q_start_block = 0
+                q_block_num = (q_len + self.sparse_block_sz -1) // self.sparse_block_sz
+                kv_block_num = (kv_len + self.sparse_block_sz -1) // self.sparse_block_sz
                 sub_block_mask = torch.zeros(self.num_heads, q_block_num, kv_block_num).to(torch.bool)
-                sub_block_mask[...] = block_mask[:, q_start_block : q_start_block + q_block_num, : kv_block_num]
+                sub_block_mask[...] = block_mask[trunk_idx, :, q_start_block : q_start_block + q_block_num, : kv_block_num]
                 # print(f"============ {sub_block_mask.shape=} {sub_block_mask.is_contiguous()=}")
                 # print(f"============ {sub_block_mask=}")
 
@@ -147,17 +147,24 @@ class page_atten_cm:
         return page_atten_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal, sparse_block_sz)
 
 # sparse to dense mask 
-def block_mask_to_attention_mask(block_mask: torch.Tensor, q_len: int, k_len: int, sparse_block_size: int) -> torch.Tensor:
-    # block_mask shape [num_head, q_block_num, k_block_num] dtype bool ->
+def block_mask_to_attention_mask(block_mask: torch.Tensor, q_len: int, kv_len: int, sparse_block_size: int, trunk_sz: int) -> torch.Tensor:
+    # block_mask shape [num_trunks, num_head, q_block_num, k_block_num] dtype bool ->
     # attention_mask shape [num_head, q_len, kv_len] dtype bool
-    q_block_num = (q_len + sparse_block_size -1) // sparse_block_size
-    k_block_num = (k_len + sparse_block_size -1) // sparse_block_size
-    assert(block_mask.shape[-2] == q_block_num)
-    assert(block_mask.shape[-1] == k_block_num)
+    trunk_num, num_head, q_block_num, kv_block_num = block_mask.shape
+    assert((q_len + trunk_sz -1) // trunk_sz == trunk_num)
+    assert((trunk_sz + sparse_block_size -1) // sparse_block_size == q_block_num)
+    assert((kv_len + sparse_block_size -1) // sparse_block_size == kv_block_num)
 
-    expanded = block_mask.repeat_interleave(sparse_block_size, dim=1)
-    expanded = expanded.repeat_interleave(sparse_block_size, dim=2)
-    return expanded[:, :q_len, :k_len]
+    attention_mask = torch.zeros([num_head, q_len, kv_len], device=block_mask.device, dtype=torch.bool)
+    for trunk_idx in range(trunk_num):
+        expanded = block_mask[trunk_idx].repeat_interleave(sparse_block_size, dim=1)
+        expanded = expanded.repeat_interleave(sparse_block_size, dim=2)
+        q_start = trunk_idx * trunk_sz
+        q_end = min(q_start + trunk_sz, q_len)
+        remaining = q_end - q_start
+        attention_mask[ : , q_start : q_end, : ] = expanded[:, :remaining, :kv_len]
+
+    return attention_mask
     
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = True, attention_mask = None):
@@ -208,14 +215,14 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = True, attention_mask = 
     print(".")
     return attn_output.to(old_dtype)
 
-def get_attention_mask(q, k, v, approx_simple_mask, sparse_block_size, is_causal = True):
+def get_attention_mask(q, k, v, approx_simple_mask, sparse_block_size, trunk_sz, is_causal = True):
     q_len, num_heads, head_size = q.shape
     kv_len, num_kv_heads, head_size = k.shape
 
     # [num_head, q_len, kv_len] dtype bool ->
     # [1, num_head, q_len, kv_len] dtype float16
     if sparse_block_size > 1:
-        attention_mask = block_mask_to_attention_mask(approx_simple_mask, q_len, kv_len, sparse_block_size)
+        attention_mask = block_mask_to_attention_mask(approx_simple_mask, q_len, kv_len, sparse_block_size, trunk_sz)
     else:
         attention_mask = torch.full([num_heads, q_len, kv_len], True).to(dtype=torch.bool)
     if is_causal:
@@ -248,8 +255,8 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
         print(f"Not close indices: {not_close_indices}")
-        print(f"    input_tensor: {input[not_close_indices]}")
-        print(f"    other_tensor: {other[not_close_indices]}")
+        # print(f"    input_tensor: {input[not_close_indices]}")
+        # print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
 def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512, sparse_block_sz=128, sparse_ratio=0.5, check_acc = True):
@@ -279,15 +286,26 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         non_diag_causal = causal_without_diag & (rand_mask < ratio)
         return diag | non_diag_causal
 
-    def generate_block_mask_with_ratio(H, Q_block, K_block, true_ratio=sparse_ratio, is_causal=True, device='cpu'):
-        if is_causal:
-            causal_pattern = torch.tril(torch.ones(Q_block, K_block, dtype=torch.bool, device=device))
-            block_mask = (torch.rand(H, Q_block, K_block, device=device) < true_ratio) & causal_pattern
+    def generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, true_ratio=sparse_ratio, is_causal=True, device='cpu'):
+        trunk_num = (seq_len + trunk_sz -1) // trunk_sz
+        q_block_num = (trunk_sz + sparse_block_sz -1) // sparse_block_sz
+        k_block_num = (seq_len + sparse_block_sz -1) // sparse_block_sz
+
+        if true_ratio <= 0:
+            block_mask = torch.full([trunk_num, num_heads, q_block_num, k_block_num], False).to(dtype=torch.bool)
+        elif true_ratio >= 1:
+            block_mask = torch.full([trunk_num, num_heads, q_block_num, k_block_num], True).to(dtype=torch.bool)
         else:
-            block_mask = torch.rand(H, Q_block, K_block, device=device) < true_ratio
-        block_mask[:,:,0] = True  # the first column is always True
-        if Q_block == 2 and K_block == 2: # HARD CODE FOR DEBUG
-            block_mask = torch.tensor([True, False, False, True], dtype=torch.bool).reshape(Q_block, K_block).expand(H, Q_block, K_block)
+            block_mask = torch.rand(trunk_num, num_heads, q_block_num, k_block_num, device=device) < true_ratio
+
+        if is_causal:
+            causal_pattern = torch.tril(torch.ones(q_block_num, k_block_num, dtype=torch.bool, device=device))
+            block_mask = block_mask & causal_pattern
+        else:
+            block_mask = block_mask
+        block_mask[:,:,:,0] = True  # the first column is always True
+        # if q_block_num == 2 and k_block_num == 2: # HARD CODE FOR DEBUG
+        #     block_mask = torch.tensor([True, False, False, True], dtype=torch.bool).reshape(q_block_num, k_block_num).expand(trunk_num, num_heads, q_block_num, k_block_num)
             
         # print(f"============ {block_mask.shape=} {block_mask.is_contiguous()=}")
         # print(f"============ {block_mask=}")
@@ -295,17 +313,15 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
 
     approx_simple_mask = None
     if sparse_block_sz > 1:
-        q_block_num = (seq_len + sparse_block_sz -1) // sparse_block_sz
-        k_block_num = (seq_len + sparse_block_sz -1) // sparse_block_sz
-        approx_simple_mask = generate_block_mask_with_ratio(num_heads, q_block_num, k_block_num, 0.5)
-
-    attention_mask = get_attention_mask(q, k, v, approx_simple_mask, sparse_block_sz)
+        approx_simple_mask = generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, 1.0 - sparse_ratio)
 
     is_causal = True  # PageAttention implictly means causal_mask
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal, sparse_block_sz)
     out = pa_cm(q, k, v, approx_simple_mask)
+    latency = cl.finish()
 
     if check_acc:
+        attention_mask = get_attention_mask(q, k, v, approx_simple_mask, sparse_block_sz, trunk_sz)
         ref = flash_attn_vlen_ref(q, k, v, [], is_causal, attention_mask)
         # ref0 = flash0_ref(q, k, v, attention_mask)
         # check_close(ref, ref0, atol=1e-2, rtol=1e-3)
@@ -313,55 +329,53 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     else:
         out = pa_cm(q, k, v, approx_simple_mask, n_repeats=10)
         latency = cl.finish()
-        # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
-        print(f" page_atten_cm average latency: {sum(latency)/len(latency)*1e-6:.3f} ms")
+        for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
+        trunk_num = (seq_len+ trunk_sz - 1) // trunk_sz
+        print(f" page_atten_cm average latency: {sum(latency)/len(latency)*trunk_num*1e-6:.3f} ms")
 
 if __name__ == "__main__":
-    # brutal-force run
-    # for sparse_block_sz in [1, 128, 64, 32, 16]:   # 'sparse_block_sz == 1' means dense
-    #     for block_sz in range(32, 144, 16):
-    #         for blocks_per_trunk in range(1, 30, 6):
-    #             for seq_len in range(8192, 8248):
+    # brutal-force run for PA
+    # for block_sz in range(32, 144, 16):
+    #     for blocks_per_trunk in range(1, 30, 6):
+    #         for seq_len in range(8192, 8248):
+    #             sparse_block_sz = 1# 'sparse_block_sz == 1' means dense
+    #             print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    #             print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
+    #             print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    #             test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
+
+    # smoke test for sparse-attn
+    # for sparse_block_sz in [128, 256]:   # 'sparse_block_sz == 1' means dense
+    #     for block_sz in [128, 256]:
+    #         for blocks_per_trunk in [1, 15, 16, 17, 32, 300]:
+    #             for seq_len in [16*15, 16*16, 16*16+1, 1024, 1024+1, 8*1024, 8*1024+3, 32*1024]:
     #                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
     #                 print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
     #                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
     #                 test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
 
-    # smoke test
-    for sparse_block_sz in [128, 256]:   # 'sparse_block_sz == 1' means dense
-        for block_sz in [128, 256]:
-            for blocks_per_trunk in [1, 15, 16, 17, 32, 300]:
-                for seq_len in [16*15, 16*16, 16*16+1, 1024, 1024+1, 8*1024, 8*1024+3, 32*1024]:
-                    if seq_len==8192 and block_sz==128 and blocks_per_trunk==15 and sparse_block_sz==256: continue # acc failure
-                    if seq_len==8195 and block_sz==128 and blocks_per_trunk==15 and sparse_block_sz==256: continue # acc failure
-                    if seq_len==32768 and block_sz==128 and blocks_per_trunk==15 and sparse_block_sz==256: continue # acc failure
-                    if seq_len==8192 and block_sz==128 and blocks_per_trunk==17 and sparse_block_sz==256: continue # acc failure
-                    if seq_len==8195 and block_sz==128 and blocks_per_trunk==17 and sparse_block_sz==256: continue # acc failure
-                    if seq_len==32768 and block_sz==128 and blocks_per_trunk==17 and sparse_block_sz==256: continue # acc failure
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
-
-
-    # failure cases of PA
-    # 1. seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 3+16*512, 16, 1, 1
-    # 2. seq_len=32771 block_sz=128 blocks_per_trunk=1 sparse_block_sz=1
-    # 3. seq_len=16 block_sz=128 blocks_per_trunk=15 sparse_block_sz=1
-    # failure cases of sparse-attn
-    # 1. seq_len=8192 block_sz=128 blocks_per_trunk=15 sparse_block_sz=256
-    # 2. seq_len=8195 block_sz=128 blocks_per_trunk=15 sparse_block_sz=256
-    # 3. seq_len=32768 block_sz=128 blocks_per_trunk=15 sparse_block_sz=256
-    # 4. seq_len=8192 block_sz=128 blocks_per_trunk=17 sparse_block_sz=256
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 8192, 128, 15, 256
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 2048+1, 128, 15, 128*2
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 16*15+16+1, 16, 15, 32
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 16*3+16+1, 16, 3, 16*2
     # print("-----------------------------------------------------------------------------------------------------------------------------------------")
     # print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
     # print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
+    # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
+
+    # failure cases of PA
+    seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 3+16*512, 16, 1, 1
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 32771, 16, 1, 1
+    print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
+    print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
 
     # QWen3 8K case
     # for sparse_block_sz in [1, 128]:
-    #     seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16
+    #     # seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16*2
+    #     seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
     #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
     #     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
     #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, check_acc=False)
+    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
