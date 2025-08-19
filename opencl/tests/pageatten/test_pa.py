@@ -19,6 +19,7 @@ def get_cm_grf_width():
     return t_info.numpy()[0]
 
 CM_GRF_WIDTH = get_cm_grf_width()
+# print(f'CM_GRF_WIDTH is {CM_GRF_WIDTH}')
 
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
@@ -26,7 +27,7 @@ class page_atten_cm:
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         self.is_causal = is_causal
-        assert trunk_sz % block_sz == 0, f'Error: trunk_sz must be multiple of block_sz'
+        assert trunk_sz % block_sz == 0, f'Error: trunk_sz{trunk_sz} must be multiple of block_sz{trunk_sz}'
         self.block_sz = block_sz
         self.trunk_sz = trunk_sz
 
@@ -81,9 +82,9 @@ class page_atten_cm:
 
         for trunk_idx in range(trunk_num):
             blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
-            block_indices =  torch.randperm(blk_num)
+            block_indices =  torch.randperm(blk_num).to(torch.uint32)
             #block_indices =  torch.arange(blk_num)
-             # print(block_indices)
+            # print(block_indices)
             sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
             sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
             for i in  range(len(block_indices)):
@@ -206,10 +207,25 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     #assert 0
 
 if __name__ == "__main__":
-    for block_sz in range(32, 144, 16):
-        for blocks_per_trunk in range(1, 30, 6):
-            for seq_len in range(8192, 8248):
+    for block_sz in range(16, 32, 16):
+        for blocks_per_trunk in [1,]:
+            for seq_len in range(1024*32, 1024*32+4):
                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
                 print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+                test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+
+    # test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
+    # test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
+    # for block_sz in range(128, 257, 32):
+    #     for seq_len in range(32768, 32810):
+    #         for trunk_num in range(1, 21):
+    #             seq_in_blks = (seq_len + block_sz -1 ) // block_sz
+    #             blocks_per_trunk = seq_in_blks // trunk_num if seq_in_blks % trunk_num == 0 else seq_in_blks // (trunk_num - 1)
+    #             print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    #             print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
+    #             print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    #             test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+
+
+
