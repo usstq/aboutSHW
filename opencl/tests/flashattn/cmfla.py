@@ -9,7 +9,7 @@ import os
 
 import numpy as np
 
-debug = False
+debug = True
 def get_cm_grf_width():
     cm_kernels = cl.kernels(r'''
     extern "C" _GENX_MAIN_ void cm_get_grf_width(int * info [[type("svmptr_t")]]) {
@@ -381,6 +381,15 @@ def test_dynamic_batch(qstart_list, qlen_list,num_heads, num_kv_heads, head_size
 
 if __name__ == "__main__":
     if 0:
+
+        for block_sz in range(16, 32, 16):
+            for blocks_per_trunk in [1,]:
+                for seq_len in range(1024*32, 1024*32+4):
+                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
+                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+
         # for block_sz in range(32, 144, 16):
         for block_sz in range(17, 32, 2):
             for blocks_per_trunk in range(1, 30, 6):
@@ -392,8 +401,10 @@ if __name__ == "__main__":
         # test_page_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=32, trunk_sz=64)
     else:
         # qstart_list = [32]
-        qstart_list = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
-        qlen_list = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        # qstart_list = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+        # qlen_list = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 
+        qstart_list = [2]
+        qlen_list = [2]
         test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16)
 

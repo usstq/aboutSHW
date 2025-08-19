@@ -479,7 +479,9 @@ void sdpa_kernel_lsc_prefetch(
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ + block_indices_begins];
-        auto prefetch_block_id = block_indices[(kv_pos+kv_step) / CMPA_BLOCK_SZ + block_indices_begins];
+        uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
+
+        auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ + block_indices_begins];
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
@@ -490,7 +492,7 @@ void sdpa_kernel_lsc_prefetch(
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
 
             prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_base)+prefetch_block_id*blk_stride));
-            prefetch_K.set_block_y((kv_pos + kv_step + wg_local_id) % CMPA_BLOCK_SZ);
+            prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
             b2dK.set_base_ptr((reinterpret_cast<half*>(k_base)+cur_block_id*blk_stride));
@@ -534,14 +536,33 @@ void sdpa_kernel_lsc_prefetch(
         }
 
         if constexpr (use_causal_mask) {
-            causal_left -= kv_step;
 
             // since kv_step == q_step == 16, causal_left is n*kv_step
-            if (causal_left >= -16  && causal_left <= -1) {
-                apply_causal_mask(St , (causal_left+kv_step+1)%16);
-            } else if (causal_left < -16) {
+            if (causal_left >= 0  && causal_left <= 15) {
+                printf("\\\\\\\\\\causal_left: %d, q_start:%d, past_lens:%d, q_len:%d\n", causal_left, q_start, past_lens, q_tokens_left);
+                //apply_causal_mask(St , (causal_left+1));
+                //apply_causal_mask<3>(St);
+                St.row(3).select<1, 1>(0) = -3.4e38f;
+                St.row(4).select<2, 1>(0) = -3.4e38f;
+                St.row(5).select<3, 1>(0) = -3.4e38f;
+                St.row(6).select<4, 1>(0) = -3.4e38f;
+                St.row(7).select<5, 1>(0) = -3.4e38f;
+                St.row(8).select<6, 1>(0) = -3.4e38f;
+                St.row(9).select<7, 1>(0) = -3.4e38f;
+                St.row(10).select<8, 1>(0) = -3.4e38f;
+                St.row(11).select<9, 1>(0) = -3.4e38f;
+                St.row(12).select<10, 1>(0) = -3.4e38f;
+                St.row(13).select<11, 1>(0) = -3.4e38f;
+                St.row(14).select<12, 1>(0) = -3.4e38f;
+                St.row(15).select<13, 1>(0) = -3.4e38f;
+
+
+
+            } else if (causal_left < 0) {
                 St = -3.4e38f;
             }
+            causal_left -= kv_step;
+
         } else {
             int kv_tokens = kv_stop - kv_pos;
             // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
@@ -559,7 +580,7 @@ void sdpa_kernel_lsc_prefetch(
         Transpose2DMatrix(St, P);
 
         prefetch_V.set_base_ptr((reinterpret_cast<half*>(v_base)+prefetch_block_id*blk_stride));
-        prefetch_V.set_block_y((kv_pos + kv_step + wg_local_id) % CMPA_BLOCK_SZ);
+        prefetch_V.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
 
         b2dV.set_base_ptr((reinterpret_cast<half*>(v_base)+cur_block_id*blk_stride));
         b2dV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
