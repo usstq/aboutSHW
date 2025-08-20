@@ -480,7 +480,7 @@ CM_INLINE void gemm_kq_2x4_xe2(uint id_wg_m, uint id_wg_n, uint slm, svmptr_t sr
 // register tile: [8, 2] aka[(8*8,16), (16, 16*2)]
 // src_a is key, src_b is query
 CM_INLINE void gemm_kq_8x2_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t key_cache, svmptr_t query, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR,
-uint M, uint N, uint K, uint query_stride) {
+uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     constexpr int SG_SIZE = 16;
     constexpr int BLOCK_WG_K = 64;	// same in sg
 #ifndef BLOCK_SG_M
@@ -519,6 +519,38 @@ uint M, uint N, uint K, uint query_stride) {
     static_assert(REG_N == 2, "block_2d_desc for b is manually unrolled by 2");
     static_assert(HEAD_SIZE % BLOCK_WG_K == 0, "K dimension must be multiple of BLOCK_WG_K");
     static_assert(KV_BLOCK_SIZE == 256, "block size of key(key_cache) should be 256");
+    uint M_block = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
+    uint N_aligned = (N + BLOCK_WG_N - 1) / BLOCK_WG_N * BLOCK_WG_N;
+    uint M_block_aligned = M_block * (BLOCK_WG_M / (BLOCK_SIZE / STRIDE));
+    const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
+    constexpr half log2e = 1.4426950408889634f;
+    static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
+    static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
+
+#if IS_CAUSAL == 1
+    if ((int)(id_wg_m * BLOCK_WG_M) >= ((int)id_wg_n + 1) * BLOCK_WG_N + q_start_strided) {
+        // fill -inf -> max in group, 0 -> exp_sum to make compensation work
+        {
+            // current max -> mem
+            vector<half, BLOCK_SG_N> max_n = -60000;
+            // kq_max_wg: [b, hq, M/BLOCK_WG_M, N_aligned]
+            uint offset = (id_wg_m * N_aligned + id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * sizeof(half);
+            cm_ptr_store<int>((int*)kq_max_wg, offset, max_n.format<int>());
+        }
+        {
+            // store
+            matrix<half, 8, 8> sum_t = 0;
+            lsc::block_2d_desc<half, 1, 8, 8> desc_c{ kq_exp_partial_sum, N - 1, (uint)(M_block_aligned * sizeof(half) - 1), (uint)(M_block_aligned * sizeof(half) - 1),
+                (int)((id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) / block_size_div_stride), (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) };
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.format<half>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.format<half>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.format<half>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.format<half>());
+        }
+
+        return;
+    }
+#endif
     // assume block index coming from 0 in block_indices_begins
     int block_index_begin = ((int*)block_indices_begins)[0];
     int* block_indices_p = (int*)block_indices + block_index_begin;
@@ -695,16 +727,34 @@ uint M, uint N, uint K, uint query_stride) {
     //    gemm will compute results for the padding N(all should be zeros), the kq_max/kq_max_wg/kq_exp_partial_sum are along the query dimension and
     //    the results can be dropped in the future stage. To simplify the logic, the size of kq_max/kq_max_wg/kq_exp_partial_sum must be enough to hold
     //    all tails + padding results.
-    uint N_aligned = (N + BLOCK_WG_N - 1) / BLOCK_WG_N * BLOCK_WG_N;
-    uint M_block = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
-    uint M_block_aligned = M_block * (BLOCK_WG_M / (BLOCK_SIZE / STRIDE));
     int m_start = (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M);
     m_start = MYMIN(m_start, M);
     int m_end = MYMIN(m_start + BLOCK_SG_M, M);
     int valid_m = m_end - m_start;
     matrix<half, 32, 8> sum_t;
-    const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
-    if (valid_m == BLOCK_SG_M) {
+    vector<int, BLOCK_SG_N> seq;
+    cmtl::cm_vector_assign(seq.select_all(), 0, 1);
+#if IS_CAUSAL == 1
+    bool skip_mask = false;
+    // in streaming scenario, the past kvcache length may be arbitrary so valid causal mask of a workgroup may start at arbitrary position
+    if (m_end <= (int)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + q_start_strided)) {
+        // all are inside causal mask == 1
+        skip_mask = true;
+    } else {
+        vector<uint, BLOCK_SG_N> n_pos = (uint)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + q_start_strided) + seq;
+    #pragma unroll
+        for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
+            SIMD_IF_BEGIN (m_start + reg_m > n_pos) {
+                acc_half.row(reg_m) = half{-60000};
+            } SIMD_IF_END;
+        }
+    }
+#else
+    bool skip_mask = true;
+#endif
+    // case for valid_m == BLOCK_SG_M but skip_mask == false which needs to handle causal mask:
+    //  query = 128 * 2 + 1, key = 256 * 2
+    if (valid_m == BLOCK_SG_M && skip_mask) {
         vector<half, BLOCK_SG_N> max_n = acc_half.row(0);
     #pragma unroll
         for (uint reg_m = 1; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
@@ -728,8 +778,6 @@ uint M, uint N, uint K, uint query_stride) {
             }
             // max across wg
             // kq_max: [b, hq, N_aligned]
-            vector<int, BLOCK_SG_N> seq;
-            cmtl::cm_vector_assign(seq.select_all(), 0, 1);
             vector<uint, BLOCK_SG_N> max_offsets = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + seq) * (uint)sizeof(half);
             cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_n);
             
@@ -740,10 +788,7 @@ uint M, uint N, uint K, uint query_stride) {
         }
         {
             // kq_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
-            constexpr half log2e = 1.4426950408889634f;
             matrix<half, 8, 32> sum;
-            static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
-            static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
     #pragma unroll
             for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
                 sum.row(m) = cm_exp((acc_half.row(m * block_size_div_stride) - max_n) * log2e);
@@ -780,8 +825,6 @@ uint M, uint N, uint K, uint query_stride) {
             }
             // max across wg
             // kq_max: [b, hq, N_aligned]
-            vector<int, BLOCK_SG_N> seq;
-            cmtl::cm_vector_assign(seq.select_all(), 0, 1);
             vector<uint, BLOCK_SG_N> max_offsets = (id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + seq) * (uint)sizeof(half);
             cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_n);
 
@@ -792,17 +835,26 @@ uint M, uint N, uint K, uint query_stride) {
         }
         {
             // kq_exp_partial_sum: [b, hq, N_aligned, M/(BLOCK_SIZE/STRIDE)]
-            constexpr half log2e = 1.4426950408889634f;
             matrix<half, 8, 32> sum = 0;
-            static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
-            static_assert(BLOCK_SG_N == 32, "BLOCK_SG_N should be 32");
+            vector<uint, BLOCK_SG_N> n_pos = (uint)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N + q_start_strided) + seq;
     #pragma unroll
             for (uint m = 0; m < BLOCK_SG_M / block_size_div_stride; m++) {
     #pragma unroll
                 for (uint sub_m = 0; sub_m < block_size_div_stride; sub_m++) {
                     uint real_m = m * block_size_div_stride + sub_m;
+#if IS_CAUSAL == 1
+                    // to following case:
+                    // 0 0 1 1
+                    // 0 0 0 1
+                    // the acc value of first column should be -inf --> max(first column) == -inf --> exp(first column - max) == 1, this is incorrect
+                    // so need to use simd_if to detect per element state
+                    SIMD_IF_BEGIN ((m_start + real_m <= n_pos) & (real_m < valid_m)) {
+                        sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+                    } SIMD_IF_END;
+#else
                     if (real_m < valid_m)
                         sum.row(m) += cm_exp((acc_half.row(real_m) - max_n) * log2e);
+#endif
                 }
             }
             Transpose_8x32(sum, sum_t);

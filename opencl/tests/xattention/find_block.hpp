@@ -28,7 +28,8 @@
 // kq_max_wg:          [b, hq, m_groups, q_stride_pad]
 // kq_exp_partial_sum: [b, hq, q_stride_pad, k_block_pad]
 // kq_sum:             [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
-CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, svmptr_t kq_exp_partial_sum, svmptr_t kq_sum, svmptr_t block_mask, uint q_stride, uint k_block, uint q_stride_pad, uint k_block_pad, float thresh) {
+CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, svmptr_t kq_exp_partial_sum, svmptr_t kq_sum, svmptr_t block_mask, uint q_stride, uint q_stride_pad, uint k_block_pad, float thresh,
+    uint causal_start_index) {
     constexpr int SG_SIZE = 16;
 #ifndef BLOCK_SG_M
     #define BLOCK_SG_M  64
@@ -73,7 +74,7 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, 
     }
 
     // exp/sum
-    vector<half, TOKEN_IN_BLOCK> inv_sum_v;
+    vector<float, TOKEN_IN_BLOCK> inv_sum_v;
     for (int i = 0; i < TOKEN_IN_BLOCK; i++) {
         if (i < valid_m)
             inv_sum_v[i] = 1.0f / cm_sum<float>(sum_m.row(i));
@@ -102,15 +103,54 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, 
     // content of 8(aka stride) lines:
     // line 0: score
     // line 1: sorted value
-    // line 2: sorted index
-    // line 3: sorted tmp
-    // line 4: accumalative score
+    // line 3: sorted index
+    // line 5: sorted tmp
+    // line 6: accumalative score
     block_mask += m_block * k_block_pad;
     auto score        = kq_exp_partial_sum + 0 * k_block_pad * (int)sizeof(half);
     auto sorted_value = kq_exp_partial_sum + 1 * k_block_pad * (int)sizeof(half);
-    auto sorted_index = kq_exp_partial_sum + 2 * k_block_pad * (int)sizeof(half);
-    auto sorted_tmp   = kq_exp_partial_sum + 3 * k_block_pad * (int)sizeof(half);
-    auto acc_score    = kq_exp_partial_sum + 4 * k_block_pad * (int)sizeof(half);
+    auto sorted_index = kq_exp_partial_sum + 3 * k_block_pad * (int)sizeof(half);
+    auto sorted_tmp   = kq_exp_partial_sum + 5 * k_block_pad * (int)sizeof(half);
+    auto acc_score    = kq_exp_partial_sum + 6 * k_block_pad * (int)sizeof(half);
+
+#if IS_CAUSAL == 1
+    auto score_p = (half*)score;
+    half s_0 = score_p[0];
+    half s_causal = score_p[causal_start_index + m_block];
+    half s_sum = s_0;
+    if (causal_start_index + m_block) s_sum += s_causal;
+    score_p[0] = -1;
+    score_p[causal_start_index + m_block] = -1;
+    sort<half>(slm, score, sorted_value + 2 * sizeof(half), sorted_index + 2 * sizeof(half), sorted_tmp, k_block_pad);
+    uchar* block_mask_p = (uchar*)block_mask;
+    auto sorted_value_p = (half*)sorted_value;
+    auto sorted_index_p = (ushort*)sorted_index;
+    auto acc_score_p = (half*)acc_score;
+    sorted_value_p[0] = 0;
+    sorted_value_p[1] = s_sum;
+    block_mask_p[0] = 1;
+    block_mask_p[causal_start_index + m_block] = 1;
+    float sum_cur = s_sum;
+#if DEBUG_ACC == 1
+    acc_score_p[0] = 0;
+    acc_score_p[1] = 0;
+#endif
+    for (int j = 2; j < k_block_pad - 2; j++) {
+#if DEBUG_ACC == 1
+        acc_score_p[j] = sum_cur;
+#endif
+        if (sum_cur < thresh_act) {
+            block_mask_p[sorted_index_p[j]] = 1;
+        } else {
+#if DEBUG_ACC != 1
+            break;
+#endif
+        }
+        sum_cur += sorted_value_p[j];
+    }
+
+#else
+
     sort<half>(slm, score, sorted_value, sorted_index, sorted_tmp, k_block_pad);
     uchar* block_mask_p = (uchar*)block_mask;
     auto sorted_value_p = (half*)sorted_value;
@@ -135,4 +175,5 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, 
 #endif
         }
     }
+#endif
 }
