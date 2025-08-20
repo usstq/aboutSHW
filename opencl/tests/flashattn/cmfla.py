@@ -8,6 +8,7 @@ from clops import cl
 import os
 
 import numpy as np
+import random
 
 debug = False
 def get_cm_grf_width():
@@ -400,11 +401,10 @@ if __name__ == "__main__":
                     test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
         # test_page_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=32, trunk_sz=64)
     else:
-        # qstart_list = [32]
-        # qstart_list = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
-        # qlen_list = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
-
-        qstart_list = [127, 1023, 1, 255, 54]
-        qlen_list = [32,11, 2, 1,7]
-        test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16)
+        for iter in range(0, 200):
+            random.seed()
+            subseq_num = 20
+            qstart_list= random.sample(range(1024, 2048), subseq_num)
+            qlen_list= random.sample(range(1, 2048), subseq_num)
+            test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=128)
 

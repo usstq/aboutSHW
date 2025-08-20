@@ -368,101 +368,6 @@ vector<float, cols> online_softmax_update(matrix_ref<T, rows, cols> St, vector_r
 
 
 
-// //===============================================================================================
-// template <int i, int N, int M>
-// constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
-//     if constexpr (i < N) {
-//         St.row(i).select<i, 1>(0) = -3.4e38f;
-//         apply_causal_mask<i + 1>(St);
-//     }
-// }
-
-
-//===============================================================================================
-template <int row, int maskcnt, int N, int M>
-constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
-    if constexpr (row < N) {
-        if constexpr(maskcnt < M) {
-            St.row(row).select<maskcnt, 1>(0) = -3.4e38f;
-        } else {
-            St.row(row) = -3.4e38f;
-
-        }
-        apply_causal_mask<row + 1, maskcnt + 1>(St);
-    }
-}
-
-template <int N, int M>
-void apply_causal_mask_with_row(matrix_ref<float, N, M> St , const int row) {
-    if (row == 1) {
-            apply_causal_mask<1, 1>(St);
-    } else if (row == 2) {
-            apply_causal_mask<2, 1>(St);
-    }  else if(row == 3) {
-            apply_causal_mask<3, 1>(St);
-    }  else if(row == 4) {
-            apply_causal_mask<4, 1>(St);
-    }  else if(row == 5) {
-            apply_causal_mask<5, 1>(St);
-    }  else if(row == 6) {
-            apply_causal_mask<6, 1>(St);
-    }  else if(row == 7) {
-            apply_causal_mask<7, 1>(St);
-    }  else if(row == 8) {
-            apply_causal_mask<8, 1>(St);
-    }  else if(row == 9) {
-            apply_causal_mask<9, 1>(St);
-    }  else if(row == 10) {
-            apply_causal_mask<10, 1>(St);
-    }  else if(row == 11) {
-            apply_causal_mask<11, 1>(St);
-    }  else if(row == 12) {
-            apply_causal_mask<12, 1>(St);
-    }  else if(row == 13) {
-            apply_causal_mask<13, 1>(St);
-    }  else if(row == 14) {
-            apply_causal_mask<14, 1>(St);
-    }  else if(row == 15) {
-            apply_causal_mask<15, 1>(St);
-    }
-}
-
-
-template <int N, int M>
-void apply_causal_mask_with_maskcnt(matrix_ref<float, N, M> St , const int mask_cnt_base) {
-    if (mask_cnt_base == 1) {
-            apply_causal_mask<0, 1>(St);
-    } else if (mask_cnt_base == 2) {
-            apply_causal_mask<0, 2>(St);
-    }  else if(mask_cnt_base == 3) {
-            apply_causal_mask<0, 3>(St);
-    }  else if(mask_cnt_base == 4) {
-            apply_causal_mask<0, 4>(St);
-    }  else if(mask_cnt_base == 5) {
-            apply_causal_mask<0, 5>(St);
-    }  else if(mask_cnt_base == 6) {
-            apply_causal_mask<0, 6>(St);
-    }  else if(mask_cnt_base == 7) {
-            apply_causal_mask<0, 7>(St);
-    }  else if(mask_cnt_base == 8) {
-            apply_causal_mask<0, 8>(St);
-    }  else if(mask_cnt_base == 9) {
-            apply_causal_mask<0, 9>(St);
-    }  else if(mask_cnt_base == 10) {
-            apply_causal_mask<0, 10>(St);
-    }  else if(mask_cnt_base == 11) {
-            apply_causal_mask<0, 11>(St);
-    }  else if(mask_cnt_base == 12) {
-            apply_causal_mask<0, 12>(St);
-    }  else if(mask_cnt_base == 13) {
-            apply_causal_mask<0, 13>(St);
-    }  else if(mask_cnt_base == 14) {
-            apply_causal_mask<0, 14>(St);
-    }  else if(mask_cnt_base == 15) {
-            apply_causal_mask<0, 15>(St);
-    }
-}
-
 template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused, int wg_local_size>
 void sdpa_kernel_lsc_prefetch(
     int wg_local_id,
@@ -587,34 +492,20 @@ void sdpa_kernel_lsc_prefetch(
         }
 
         if constexpr (use_causal_mask) {
-
             // since kv_step == q_step == 16, causal_left is n*kv_step
-            if (causal_left >= 0  && causal_left <= 14) {
-                // printf("\\\\\\\\\\causal_left: %d, q_start:%d, past_lens:%d, q_len:%d\n", causal_left, q_start, past_lens, q_tokens_left);
-                apply_causal_mask_with_row(St , (causal_left+1));
-                //apply_causal_mask<3, 1>(St);
-                //apply_causal_mask(St , (causal_left+1));
-                // St.row(3).select<1, 1>(0) = -3.4e38f;
-                // St.row(4).select<2, 1>(0) = -3.4e38f;
-                // St.row(5).select<3, 1>(0) = -3.4e38f;
-                // St.row(6).select<4, 1>(0) = -3.4e38f;
-                // St.row(7).select<5, 1>(0) = -3.4e38f;
-                // St.row(8).select<6, 1>(0) = -3.4e38f;
-                // St.row(9).select<7, 1>(0) = -3.4e38f;
-                // St.row(10).select<8, 1>(0) = -3.4e38f;
-                // St.row(11).select<9, 1>(0) = -3.4e38f;
-                // St.row(12).select<10, 1>(0) = -3.4e38f;
-                // St.row(13).select<11, 1>(0) = -3.4e38f;
-                // St.row(14).select<12, 1>(0) = -3.4e38f;
-                // St.row(15).select<13, 1>(0) = -3.4e38f;
-
-            } else if (causal_left < 0 && causal_left > -16) {
-                apply_causal_mask_with_maskcnt(St , (0-causal_left));
+            if (causal_left > -16  && causal_left < 16) {
+                vector<uint32_t, q_step> q_idx;
+                cmtl::cm_vector_assign(q_idx,  q_start+past_lens, 1);
+                for (int kv_idx = kv_pos; kv_idx < kv_pos + kv_step; kv_idx++) {
+                    auto St_row = St.row(kv_idx%16);
+                    SIMD_IF_BEGIN(q_idx < kv_idx) {
+                        St_row = -3.4e38f;;
+                    } SIMD_IF_END;
+                }
             } else if (causal_left <= -16) {
                 St = -3.4e38f;
             }
             causal_left -= kv_step;
-
         } else {
             int kv_tokens = kv_stop - kv_pos;
             // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
