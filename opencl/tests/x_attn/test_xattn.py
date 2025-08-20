@@ -169,7 +169,9 @@ def find_blocks_chunked(
             ).cumsum(dim=-1)
             index_mask = cumulative_sum_without_self < required_sum
             index = torch.where(index_mask, index, 0)
+            print(f'{index.shape=}')
             mask = mask.view(batch_size, head_num * chunk_num, block_num)
+            print(f'{torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1)}')
             index = index.view(batch_size, head_num * chunk_num, block_num)
             mask[
                 :,
@@ -550,6 +552,7 @@ def importance_estimate(
             index = torch.where(index_mask, index, 0)
             mask = mask.view(B, H * Q_block, K_block)
             index = index.view(B, H * Q_block, K_block)
+            print(f'------------------------------ {mask.shape=} {index.shape=} {torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1)}')
             mask[
                 :,
                 torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
@@ -682,7 +685,7 @@ def main():
     # q = torch.arange(0, bsz*heads*seq_len*dim,dtype=torch.bfloat16).view(bsz,heads,seq_len,dim).to(device)
     # k = torch.randn((bsz,heads,seq_len,dim),dtype=torch.bfloat16).to(device)
 
-    attention_output = Xattention_prefill(query_states=q,key_states=k,value_states=v,stride=16,block_size=128,use_triton=False,causal=False,chunk_size=1024)
+    attention_output = Xattention_prefill(query_states=q,key_states=k,value_states=v,stride=16,block_size=128,use_triton=False,causal=True,chunk_size=1024)
 
 if __name__ == "__main__":
     torch.manual_seed(3)
