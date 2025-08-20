@@ -9,7 +9,7 @@ import os
 
 import numpy as np
 
-debug = True
+debug = False
 def get_cm_grf_width():
     cm_kernels = cl.kernels(r'''
     extern "C" _GENX_MAIN_ void cm_get_grf_width(int * info [[type("svmptr_t")]]) {
@@ -404,7 +404,7 @@ if __name__ == "__main__":
         # qstart_list = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
         # qlen_list = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 
-        qstart_list = [2]
-        qlen_list = [2]
+        qstart_list = [127, 1023, 1, 255, 54]
+        qlen_list = [32,11, 2, 1,7]
         test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16)
 
