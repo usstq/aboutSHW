@@ -328,13 +328,13 @@ kernel_name = 'gemm_qk'
 BLOCK_SG_M = 64 #32
 BLOCK_SG_N = 32
 SG_M = 4
-SG_N = 4
+SG_N = 8
 BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
 KV_BLOCK_SIZE = 256
 
 HQ = 32
-HK = 4
+HK = 8
 HEAD_SIZE = 128
 STRIDE = 16
 BLOCK_SIZE = 128
@@ -471,7 +471,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     qk = torch.randint(-2000, 3000, size=[1, HQ, q_stride, k_stride], dtype=torch.int16).to(dtype=torch.float16)
     assert wg_k % block_size == 0, "wg_k should be multiple of block_size then there is no tails from block_size"
     assert wg_q % block_size == 0, "wg_q should be multiple of block_size then there is no tails from block_size"
-    qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, valid_q=q_stride)
+    qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, wg_q, valid_q=q_stride)
     t_kq_max = cl.tensor(qk_max.detach().numpy())
     t_kq_max_wg = cl.tensor(kq_5d_max.detach().numpy())
     t_kq_exp_partial_sum = cl.tensor(qk_exp_partial_sum.detach().numpy())
@@ -617,7 +617,7 @@ def test_perf():
     block_size = BLOCK_SIZE
     stride = STRIDE
 
-    Q_LEN = 1024*4*1  # if q_len=1024*4*2 ==> 95 T/s
+    Q_LEN = 1024*4*2  # if q_len=1024*4*2 ==> 95 T/s
     K_LEN = 1024*128
     q_len = Q_LEN
     k_len = K_LEN
