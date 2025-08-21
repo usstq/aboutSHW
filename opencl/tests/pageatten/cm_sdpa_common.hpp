@@ -444,7 +444,9 @@ void sdpa_kernel_lsc_prefetch(
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
-        auto prefetch_block_id = block_indices[(kv_pos+kv_step) / CMPA_BLOCK_SZ];
+        //For the last step, duplicate prefetch here.
+        uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
+        auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
@@ -455,7 +457,7 @@ void sdpa_kernel_lsc_prefetch(
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
 
             prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_base)+prefetch_block_id*blk_stride));
-            prefetch_K.set_block_y((kv_pos + kv_step + wg_local_id) % CMPA_BLOCK_SZ);
+            prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
 #if SPARSE_BLOCK_SIZE > 1
@@ -516,7 +518,7 @@ void sdpa_kernel_lsc_prefetch(
         Transpose2DMatrix(St, P);
 
         prefetch_V.set_base_ptr((reinterpret_cast<half*>(v_base)+prefetch_block_id*blk_stride));
-        prefetch_V.set_block_y((kv_pos + kv_step + wg_local_id) % CMPA_BLOCK_SZ);
+        prefetch_V.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
 
         b2dV.set_base_ptr((reinterpret_cast<half*>(v_base)+cur_block_id*blk_stride));
         b2dV.set_block_y(kv_pos%CMPA_BLOCK_SZ);

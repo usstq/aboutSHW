@@ -146,7 +146,7 @@ class page_atten_cm:
     def create_instance(num_heads, num_kv_heads, head_size,block_sz, trunk_sz, is_causal, sparse_block_sz):
         return page_atten_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal, sparse_block_sz)
 
-# sparse to dense mask 
+# sparse to dense mask
 def block_mask_to_attention_mask(block_mask: torch.Tensor, q_len: int, kv_len: int, sparse_block_size: int, trunk_sz: int) -> torch.Tensor:
     # block_mask shape [num_trunks, num_head, q_block_num, k_block_num] dtype bool ->
     # attention_mask shape [num_head, q_len, kv_len] dtype bool
@@ -165,7 +165,7 @@ def block_mask_to_attention_mask(block_mask: torch.Tensor, q_len: int, kv_len: i
         attention_mask[ : , q_start : q_end, : ] = expanded[:, :remaining, :kv_len]
 
     return attention_mask
-    
+
 
 def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = True, attention_mask = None):
     seq_length, num_heads, head_size = q.shape
@@ -188,7 +188,7 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = True, attention_mask = 
         # print(f"============2 {attn_output.shape=} ")
         print(".")
         return attn_output.to(old_dtype)
-        
+
     if is_causal:
         attn_output = F.scaled_dot_product_attention(
             q.unsqueeze(0).to(torch.float16), k.unsqueeze(0).to(torch.float16), v.unsqueeze(0).to(torch.float16),
@@ -274,7 +274,7 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     # print("====================",q[16:,...])
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-    
+
     def create_block_mask(num_q_blocks: int, num_k_blocks: int, ratio: float) -> torch.Tensor:
         diag = torch.eye(num_q_blocks, num_k_blocks, dtype=torch.bool)
         if ratio <= 0:
@@ -306,7 +306,7 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         block_mask[:,:,:,0] = True  # the first column is always True
         # if q_block_num == 2 and k_block_num == 2: # HARD CODE FOR DEBUG
         #     block_mask = torch.tensor([True, False, False, True], dtype=torch.bool).reshape(q_block_num, k_block_num).expand(trunk_num, num_heads, q_block_num, k_block_num)
-            
+
         # print(f"============ {block_mask.shape=} {block_mask.is_contiguous()=}")
         # print(f"============ {block_mask=}")
         return block_mask
@@ -372,10 +372,10 @@ if __name__ == "__main__":
     test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
 
     # QWen3 8K case
-    # for sparse_block_sz in [1, 128]:
-    #     # seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16*2
-    #     seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
-    #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    #     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
-    #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
+    for sparse_block_sz in [1, 128]:
+        # seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16*2
+        seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
+        print("-----------------------------------------------------------------------------------------------------------------------------------------")
+        print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
+        print("-----------------------------------------------------------------------------------------------------------------------------------------")
+        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
