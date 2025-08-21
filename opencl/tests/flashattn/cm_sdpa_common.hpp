@@ -534,6 +534,14 @@ void sdpa_kernel_lsc_prefetch(
                                         kv_start         kv_end
                                         |-------------------|
         */
+
+        /*
+        As for the kv_tail(kv_stop < kv_pos + kv_step) and q_tail(q_len < q_step):
+           Here, we would assump all the kv and q are valid(not tail), update causual mask on the whole [kv_step, q_step] attention matrix even some data is `invalid`
+           With this assumption, For a 'valid' query in the qtail , all the `invalid` kv tails would be masked natually based on the logic above, which is what we needed in softmax calculated.
+                                 For a 'invalid' query, in the qtail, we don't care about this data, because would not store this data into output.
+
+        */
             if (kv_pos > (qstart_id_in_seq + q_step-1)) {
                 //case 2: kv_start > q_end, q_end = qstart_id_in_seq + q_step-1
                 St = -3.4e38f;

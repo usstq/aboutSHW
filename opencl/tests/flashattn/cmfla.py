@@ -401,14 +401,16 @@ if __name__ == "__main__":
                     test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
         # test_page_attn_causal_batch1(1025, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=32, trunk_sz=64)
     else:
+        ###########################################################################################################
         # Casual mask all cases should be covered.
-        qstart_list =   [254,254,255,255,257,257,258,258]
-        qlen_list = [255,257,255,257,255,257,1,15]
+        qstart_list =   [254,254,254, 255,255,255, 257,257,257, 258,258,258]
+        qlen_list = [255,256,257, 255,256,257, 255,256,257, 255,256,257]
         test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=128)
         qstart_list =   [256,272,240,256,272,240]
         qlen_list =     [64,128,16,32,144,160]
-
         test_dynamic_batch(qstart_list, qlen_list, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=128)
+        ###########################################################################################################
+
         for iter in range(0, 50):
             random.seed()
             subseq_num = 50
