@@ -431,7 +431,7 @@ void sdpa_kernel_lsc_prefetch(
     lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
     constexpr int blk_stride = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE*CMPA_BLOCK_SZ;
-    int causal_left = q_start+past_lens;
+    int qstart_id_in_seq = q_start+past_lens;
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ + block_indices_begins];
@@ -487,25 +487,70 @@ void sdpa_kernel_lsc_prefetch(
         if (debug_data) {
                     printf("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\score0:wg:%d\n", cm_group_id(2));
                     show(St.format<float, 16, 16>());
-                    printf("causal_left:%d use_causal_mask%d\n", causal_left, use_causal_mask);
+                    // printf("causal_left:%d use_causal_mask%d\n", causal_left, use_causal_mask);
 
         }
 
         if constexpr (use_causal_mask) {
-            // since kv_step == q_step == 16, causal_left is n*kv_step
-            if (causal_left > -16  && causal_left < 16) {
-                vector<uint32_t, q_step> q_idx;
-                cmtl::cm_vector_assign(q_idx,  q_start+past_lens, 1);
-                for (int kv_idx = kv_pos; kv_idx < kv_pos + kv_step; kv_idx++) {
-                    auto St_row = St.row(kv_idx%16);
-                    SIMD_IF_BEGIN(q_idx < kv_idx) {
+        /////////////////////////////////////////////////////////////////////////////////////
+        /////////////////////////////////////////////////////////////////////////////////////
+        /*
+            The genera logic is kv_idx > q_idx, this attenion score would be needed to be masked.
+           Each time would need to check [kv_step, q_step] matix.
+
+           q_end  =  q_start + q_step - 1
+           kv_end = kv_start + kv_step - 1
+
+           q_end and kv_end would be inclusive in this example. Based on the relation between q_set :[q_start, q_end] and kv_set: [kv_start, kv_end]
+
+           intersection between q_set and kv_set: q_set ∩ kv_set
+           So there would be 4 cases. In the case1 and case2,  q_set ∩ kv_set would be almost empty except the cases 1 corner case( q_start == kv_en).  case3 and case4 would have different intersection .
+
+           ###case1:  q_start >= kv_end, which means all the attention is valid, no need to mask for the St matrix.  q_set ∩ kv_set  is not empty only when q_start == kv_end, otherwise  q_set ∩ kv_set  is empty.
+
+                                    q_start            q_end
+                                    |-------------------|
+            kv_start         kv_end
+            |-------------------|
+
+          ###case2:  kv_start > q_end, which means all the attention is invalid. need to mask all the St matrix. q_set ∩ kv_set would be always empty.
+                q_start            q_end
+                |-------------------|
+                                        kv_start         kv_end
+                                        |-------------------|
+
+
+          ###case3:   q_start < kv_end <= q_end, for the , for the  q subset [kv_end, q_end], all the kv is valid no need to mask. But for the  q subset [q_start, kv_end-1], partially KV is valid, need to mask.
+
+                                                    q_start            q_end
+                                                    |-------|------------|
+                                        kv_start         kv_end
+                                        |-------------------|
+
+          ###case4:   q_start < kv_start <= q_end, for the , for the q subset [q_start, kv_start-1], all the kv is valid no need to mask. But for the q subset  of [kv_start, q_end], partially KV is valid, need to mask.
+
+                              q_start            q_end
+                                |-------|------------|
+                                        kv_start         kv_end
+                                        |-------------------|
+        */
+            if (kv_pos > (qstart_id_in_seq + q_step-1)) {
+                //case 2: kv_start > q_end, q_end = qstart_id_in_seq + q_step-1
+                St = -3.4e38f;
+            } else if (qstart_id_in_seq < (kv_pos+kv_step-1)) {
+                // case3||case4 = !(case1||case2)
+                vector<uint32_t, q_step> qid_vec;
+                cmtl::cm_vector_assign(qid_vec,  qstart_id_in_seq, 1);
+                for (int kv_id = kv_pos; kv_id < kv_pos + kv_step; kv_id++) {
+                    auto St_row = St.row(kv_id%16);
+                    SIMD_IF_BEGIN(qid_vec < kv_id) {
                         St_row = -3.4e38f;;
                     } SIMD_IF_END;
                 }
-            } else if (causal_left <= -16) {
-                St = -3.4e38f;
-            }
-            causal_left -= kv_step;
+            } /*else {
+                //case1:
+                ;
+            }*/
         } else {
             int kv_tokens = kv_stop - kv_pos;
             // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
