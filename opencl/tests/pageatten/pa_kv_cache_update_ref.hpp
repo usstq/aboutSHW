@@ -76,7 +76,7 @@ extern "C" _GENX_MAIN_ void pa_kv_cache_update(
             break;
         }
     }
-    printf("wg:%d.%d, token_idx: %d, subsequence_idx: %d\n", wg_id, wg_local_id, token_idx, subsequence_idx);
+    // printf("wg:%d.%d, token_idx: %d, subsequence_idx: %d\n", wg_id, wg_local_id, token_idx, subsequence_idx);
 
     const uint subsequence_begin_idx = subsequence_begins[subsequence_idx];
 

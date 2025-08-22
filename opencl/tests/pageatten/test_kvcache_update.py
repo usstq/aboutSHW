@@ -46,10 +46,10 @@ class pa_kvcache_update_cm:
         batch_size_in_sequences = len(past_lens)
         key_pitch = key.stride()[0]
         val_pitch = value.stride()[0]
-        print(f"============ {key.shape=} {key.is_contiguous()=}")
-        print(f"============ {value.shape=} {value.is_contiguous()=}")
-        print(f"============ {batch_size_in_tokens=} {batch_size_in_sequences=}")
-        print(f"============ {key.stride()=} {value.stride()=}")
+        # print(f"============ {key.shape=} {key.is_contiguous()=}")
+        # print(f"============ {value.shape=} {value.is_contiguous()=}")
+        # print(f"============ {batch_size_in_tokens=} {batch_size_in_sequences=}")
+        # print(f"============ {key.stride()=} {value.stride()=}")
 
         t_key = cl.tensor(key.to(torch.float16).detach().numpy())
         t_value = cl.tensor(value.to(torch.float16).detach().numpy())
@@ -73,7 +73,7 @@ class pa_kvcache_update_cm:
                             key_pitch, val_pitch, batch_size_in_sequences)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
-                print(f'(pa_kv_cache_update)TPUT_{i}:[{key.numel()=}] [{value.numel()=}] {time_opt*1e-3:,.0f} us')
+                print(f'(pa_kv_cache_update)TPUT_{i}:[{key.numel()=}]+[{value.numel()=}] {time_opt*1e-3:,.0f} us')
 
         return t_key_cache.numpy(), t_value_cache.numpy()
                     
@@ -117,9 +117,9 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
     perm_idx = torch.randperm(block_indices.shape[0])
     inv_per_idx = torch.argsort(perm_idx)
     block_indices = block_indices[inv_per_idx]
-    print(f'{Colors.BLUE} ============ {subsequence_begins=} {Colors.END}')
-    print(f'{Colors.BLUE} ============ {block_indices_begins=} {Colors.END}')
-    print(f'{Colors.BLUE} ============ {block_indices=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {subsequence_begins=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {block_indices_begins=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {block_indices=} {Colors.END}')
 
     # generate key / value inputs
     def get_kv_input(num_kv_heads, head_size, input_data):
@@ -130,12 +130,12 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
         return mem
     key = get_kv_input(num_kv_heads, k_head_size, key_data)
     value = get_kv_input(num_kv_heads, v_head_size, value_data)
-    print(f'{Colors.BLUE} ============ {key.shape=} {key.is_contiguous()=}" {Colors.END}')
-    print(f'{Colors.BLUE} ============ {value.shape=} {value.is_contiguous()=}" {Colors.END}')
-    print(f'{Colors.BLUE} {key_data=} {Colors.END}')
-    print(f'{Colors.BLUE} {key=} {Colors.END}')
-    print(f'{Colors.BLUE} {value_data=} {Colors.END}')
-    print(f'{Colors.BLUE} {value=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {key.shape=} {key.is_contiguous()=}" {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {value.shape=} {value.is_contiguous()=}" {Colors.END}')
+    # print(f'{Colors.BLUE} {key_data=} {Colors.END}')
+    # print(f'{Colors.BLUE} {key=} {Colors.END}')
+    # print(f'{Colors.BLUE} {value_data=} {Colors.END}')
+    # print(f'{Colors.BLUE} {value=} {Colors.END}')
     
     # generate key_cache / value_cache
     # input_data list of torch.Tensor with shape [subsequence_length, num_kv_heads, kv_head_size] for each sequence
@@ -148,7 +148,7 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
                 for block_idx in range(blocks_num):
                     last_token_idx = process_len % block_size if block_idx == blocks_num -1 else block_size
                     if last_token_idx == 0: last_token_idx = block_size
-                    print(f'{Colors.RED} {block_idx=} {blocks_num=} {process_len=} {last_token_idx=} {Colors.END}')
+                    # print(f'{Colors.RED} {block_idx=} {blocks_num=} {process_len=} {last_token_idx=} {Colors.END}')
                     for token_idx in range(last_token_idx):
                         input_token_offset = block_idx * block_size + token_idx
                         block_pos = block_indices[block_indices_begins[i] + block_idx]
@@ -156,22 +156,22 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
         return cache_data.reshape(num_blocks, block_size, num_kv_heads, head_size).transpose(1, 2).contiguous()
     key_cache = get_kv_cache(num_blocks, block_size, num_kv_heads, k_head_size, key_data)
     value_cache = get_kv_cache(num_blocks, block_size, num_kv_heads, v_head_size, value_data)
-    print(f'{Colors.BLUE} ============ {key_cache.shape=} {key_cache.is_contiguous()=} {Colors.END}')
-    print(f'{Colors.BLUE} ============ {value_cache.shape=} {value_cache.is_contiguous()=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {key_cache.shape=} {key_cache.is_contiguous()=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {value_cache.shape=} {value_cache.is_contiguous()=} {Colors.END}')
     # print(f'{Colors.BLUE} {key_cache=} {Colors.END}')
     # print(f'{Colors.BLUE} {value_cache=} {Colors.END}')
 
     # generate reference key/value cache
     key_cache_ref = get_kv_cache(num_blocks, block_size, num_kv_heads, k_head_size, key_data, False)
     value_cache_ref = get_kv_cache(num_blocks, block_size, num_kv_heads, v_head_size, value_data, False)
-    print(f'{Colors.BLUE} ============ {key_cache_ref.shape=} {key_cache_ref.is_contiguous()=} {Colors.END}')
-    print(f'{Colors.BLUE} ============ {value_cache_ref.shape=} {value_cache_ref.is_contiguous()=} {Colors.END}')
-    print(f'{Colors.BLUE} {key_cache_ref=} {Colors.END}')
-    print(f'{Colors.BLUE} {value_cache_ref=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {key_cache_ref.shape=} {key_cache_ref.is_contiguous()=} {Colors.END}')
+    # print(f'{Colors.BLUE} ============ {value_cache_ref.shape=} {value_cache_ref.is_contiguous()=} {Colors.END}')
+    # print(f'{Colors.BLUE} {key_cache_ref=} {Colors.END}')
+    # print(f'{Colors.BLUE} {value_cache_ref=} {Colors.END}')
     
     # opt
     pa_cm = pa_kvcache_update_cm.create_instance(num_kv_heads, k_head_size, v_head_size, block_size)
-    n_repeats = 100 if check_perf else 1
+    n_repeats = 20 if check_perf else 1
     out_key_cache, out_value_cache = pa_cm(key, value, key_cache, value_cache, past_lens, subsequence_begins, block_indices, block_indices_begins, n_repeats)
 
     compare(key_cache_ref.detach().numpy(), out_key_cache)
@@ -184,4 +184,9 @@ if __name__ == "__main__":
     
     cl.profiling(True)
     
-    test_pa_kv_cache_update([1024, 16, 17], [16, 0, 1])
+    # test_pa_kv_cache_update([1024, 16, 17], [16, 0, 1])
+    test_pa_kv_cache_update([32*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    test_pa_kv_cache_update([64*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    test_pa_kv_cache_update([128*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    test_pa_kv_cache_update([32*1024], [4*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    test_pa_kv_cache_update([128*1024], [1*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
