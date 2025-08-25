@@ -59,8 +59,10 @@ void show(const matrix<T, M, N> mat) {
 template<typename TYPE>
 CM_INLINE void sort(uint slm, svmptr_t src, svmptr_t sorted_value, svmptr_t sorted_index, svmptr_t sort_tmp, uint n) {
     const ushort THREADS = 32;
+    vector<unsigned, THREADS> seq_u32;
     vector<ushort, THREADS> seq;
     cmtl::cm_vector_assign(seq.select_all(), 0, 1);
+    cmtl::cm_vector_assign(seq_u32.select_all(), 0, 1);
     svmptr_t sorted_src = src;
     svmptr_t sorted_tmp = sorted_value;
     svmptr_t cur_idx = sorted_index;
@@ -88,19 +90,37 @@ CM_INLINE void sort(uint slm, svmptr_t src, svmptr_t sorted_value, svmptr_t sort
             // f16 to u16
             vector<ushort, THREADS> data;
             vector<half, THREADS> data_f;
-            for (int i = 0; i < n; i += THREADS) {
+            int i;
+            for (i = 0; i + THREADS <= n / THREADS * THREADS; i += THREADS) {
                 data_f.format<int>() = cm_ptr_load<int, THREADS / 2>((int*)src, i * (int)sizeof(short));
                 f16_u16(data_f, data);
                 cm_ptr_store<int, THREADS / 2>((int*)src, i * (int)sizeof(short), data.format<int>());
+            }
+            if (i < n) {
+                auto pos = seq_u32 + i;
+                SIMD_IF_BEGIN (pos < n) {
+                    data_f = cm_ptr_load<half>((half*)src, pos * (uint)sizeof(half));
+                    f16_u16(data_f, data);
+                    cm_ptr_store<ushort>((ushort*)src, pos * (uint)sizeof(ushort), data);
+                } SIMD_IF_END;
             }
         }
     }
     {
         // generate idx
         vector<ushort, THREADS> data;
-        for (int i = 0; i < n; i += THREADS) {
+        int i;
+        for (i = 0; i + THREADS <= n / THREADS * THREADS; i += THREADS) {
             data = seq + i;
             cm_ptr_store<int, THREADS / 2>((int*)cur_idx, i * (int)sizeof(short), data.format<int>());
+        }
+        if (i < n) {
+            auto pos = seq_u32 + i;
+            data = seq + i;
+
+            SIMD_IF_BEGIN (pos < n) {
+                cm_ptr_store<ushort>((ushort*)cur_idx, pos * (uint)sizeof(ushort), data);
+            } SIMD_IF_END;
         }
     }
     // 4bit per pass, 4 pass for f16
@@ -115,7 +135,7 @@ CM_INLINE void sort(uint slm, svmptr_t src, svmptr_t sorted_value, svmptr_t sort
             // counting phase
             vector<ushort, THREADS> data;
             for (int i = 0; i < iter; i++) {
-                data = cm_ptr_load<ushort>((ushort*)sorted_src, (offset_src + i) * (uint)sizeof(ushort));
+                data = cm_ptr_load<ushort>((ushort*)sorted_src, (offset_src + i) * (uint)sizeof(ushort), (offset_src + i) < n);
                 vector<ushort, THREADS> bits = 0xf - ((data >> (pass * 4)) & 0xf);
                 vector<ushort, THREADS> addr = bits * THREADS + seq;
                 vector<ushort, THREADS> total;
@@ -169,16 +189,16 @@ CM_INLINE void sort(uint slm, svmptr_t src, svmptr_t sorted_value, svmptr_t sort
             // reorder
             vector<ushort, THREADS> data;
             for (int i = 0; i < iter; i++) {
-                data = cm_ptr_load((ushort*)sorted_src, (offset_src + i) * (uint)sizeof(ushort));
+                data = cm_ptr_load((ushort*)sorted_src, (offset_src + i) * (uint)sizeof(ushort), (offset_src + i) < n);
                 vector<ushort, THREADS> bits = 0xf - ((data >> (pass * 4)) & 0xf);
                 vector<ushort, THREADS> addr = bits * THREADS + seq;
                 vector<ushort, THREADS> index;
                 cm_slm_read(slm, addr, index);
                 vector<unsigned, THREADS> offset_i32 = index * (uint)sizeof(ushort);
-                cm_ptr_store((ushort*)sorted_tmp, offset_i32, data);
+                cm_ptr_store((ushort*)sorted_tmp, offset_i32, data, index < n);
 
                 data = cm_ptr_load((ushort*)cur_idx, (offset_src + i) * (uint)sizeof(ushort));
-                cm_ptr_store((ushort*)cur_idx_tmp, offset_i32, data);
+                cm_ptr_store((ushort*)cur_idx_tmp, offset_i32, data, (offset_src + i) < n);
 
                 index += 1;
                 cm_slm_write(slm, addr, index);
@@ -195,13 +215,29 @@ CM_INLINE void sort(uint slm, svmptr_t src, svmptr_t sorted_value, svmptr_t sort
         // copy to output
         vector<ushort, THREADS> data;
         vector<half, THREADS> data_f;
-        for (int i = 0; i < n; i += THREADS) {
+        int i;
+        for (i = 0; i + THREADS <= n / THREADS * THREADS; i += THREADS) {
             data.format<int>() = cm_ptr_load<int, THREADS / 2>((int*)src, i * (int)sizeof(short));
             if constexpr(std::is_same<TYPE, half>::value) {
                 u16_f16(data, data_f);
                 cm_ptr_store<int, THREADS / 2>((int*)sorted_value, i * (int)sizeof(short), data_f.format<int>());
             } else {
                 cm_ptr_store<int, THREADS / 2>((int*)sorted_value, i * (int)sizeof(short), data.format<int>());
+            }
+        }
+        if (i < n) {
+            auto pos = seq_u32 + i;
+            if constexpr(std::is_same<TYPE, half>::value) {
+                SIMD_IF_BEGIN (pos < n) {
+                    data = cm_ptr_load((ushort*)src, pos * (uint)sizeof(half));
+                    u16_f16(data, data_f);
+                    cm_ptr_store<half>((half*)sorted_value, pos * (uint)sizeof(half), data_f);
+                } SIMD_IF_END;
+            } else {
+                SIMD_IF_BEGIN (pos < n) {
+                    data = cm_ptr_load((ushort*)src, pos * (uint)sizeof(ushort));
+                    cm_ptr_store<ushort>((ushort*)sorted_value, pos * (uint)sizeof(ushort), data);
+                } SIMD_IF_END;
             }
         }
     }

@@ -291,7 +291,10 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     const uint m_after_sum_pad = m_after_sum_in_group * m_groups;
     kq_exp_partial_sum += hq * m_after_sum_pad * n_pad * (uint)sizeof(half);
 
-    gemm_kq_8x2_xe2(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
+#define CONCAT_IMPL(a, b) gemm_kq_ ##a ##x ##b ##_xe2
+#define CONCAT(x, y) CONCAT_IMPL(x, y)
+#define FUNC CONCAT(BLOCK_SG_M, BLOCK_SG_N)
+    FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
 }
 
 _GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t kq_sum ATTR, svmptr_t block_mask ATTR, uint q_stride, uint q_stride_pad, uint k_block_pad,
@@ -325,10 +328,10 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmpt
 src = '\n'.join(src)
 
 kernel_name = 'gemm_qk'
-BLOCK_SG_M = 64 #32
+BLOCK_SG_M = 32 #32
 BLOCK_SG_N = 32
 SG_M = 4
-SG_N = 8
+SG_N = 4
 BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
 KV_BLOCK_SIZE = 256
