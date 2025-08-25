@@ -27,12 +27,16 @@ static_assert(kv_step == 16);
 static_assert(CM_HAS_DPAS);
 
 template<typename T, int M, int N>
-void show(const matrix<T, M, N> mat) {
+void show(const matrix<T, M, N> mat, bool isfloat=true) {
     printf("Matrix [%d, %d]:\n", M, N);
     for(int m = 0; m < M; m ++) {
         printf("\t[");
         for(int n = 0; n < N; n ++) {
-            printf("%8.4f,", mat[m][n]);
+            if (isfloat)
+                printf("%8.4f,", mat[m][n]);
+            else
+                printf("%8d,", mat[m][n]);
+
         }
         printf("],\n");
     }
@@ -393,11 +397,9 @@ void sdpa_kernel_lsc_prefetch(
     int32_t* block_indices [[type("svmptr_t")]]) {
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
     constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
-    // constexpr uint k_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
-    // constexpr uint v_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
     //[block_num, kv_heads, block_size, head_size]
-    constexpr uint k_pitch =  head_size * sizeof(half);
-    constexpr uint v_pitch = k_pitch;
+    constexpr uint k_pitch =   head_size * sizeof(int8_t);
+    constexpr uint v_pitch = head_size * sizeof(half);
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
@@ -424,36 +426,61 @@ void sdpa_kernel_lsc_prefetch(
         }
     }
 
-    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dK(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, k_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     static_assert(wg_local_size == 16);
-    lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, k_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
-    constexpr int blk_stride = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE*CMPA_BLOCK_SZ;
+    constexpr int blk_stride = CMFLA_NUM_KV_HEADS * CMFLA_HEAD_SIZE * CMPA_BLOCK_SZ;
+    constexpr int quna_blk_stride = CMFLA_NUM_KV_HEADS * (CMFLA_HEAD_SIZE+4) * CMPA_BLOCK_SZ * sizeof(int8_t);
+
+
+    // lsc::block_2d_desc<half, 1, 1, kv_step> b2quan(reinterpret_cast<half*>(k_base), CMPA_BLOCK_SZ/kv_step-1, kv_step*sizeof(half) - 1, kv_step*sizeof(half) - 1, 0, 0);
+
     int causal_left = q_start+past_lens;
+    uint32_t quandata_offset = CMPA_BLOCK_SZ * head_size * sizeof(int8_t);
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
         //For the last step, duplicate prefetch here.
         uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
         auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
+
+
+        vector<half, kv_step> dq_scale;
+        cm_svm_block_read(reinterpret_cast<svmptr_t>( k_base + cur_block_id*quna_blk_stride + quandata_offset + kv_pos%CMPA_BLOCK_SZ*sizeof(half)), dq_scale);
+        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+           //show(dq_scale.format<half, 16, 1>());
+        }
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
             constexpr int num_K = kv_step/REG_M;
             auto St2 = St.format<float, num_K, REG_M*REG_N>();
-
             matrix<half, num_K, REG_M * REG_K> Kmat;
+            auto quan_Kmat = Kmat.format<int8_t, 2, num_K*REG_M*REG_K>().row(1).format<int8_t, REG_M*num_K, REG_K>();
+            auto dq_Kmat =  Kmat.format<half, REG_M*num_K, REG_K>();
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
 
-            prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_base)+prefetch_block_id*blk_stride));
+            prefetch_K.set_base_ptr(reinterpret_cast<int8_t*>(k_base+prefetch_block_id*quna_blk_stride));
             prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
-            b2dK.set_base_ptr((reinterpret_cast<half*>(k_base)+cur_block_id*blk_stride));
+            b2dK.set_base_ptr(reinterpret_cast<int8_t*>(k_base+cur_block_id*quna_blk_stride));
             b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
-            cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
+
+            cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dK.set_block_x(0));
+            if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+                //show(quan_Kmat.format<int8_t, 16, 16>(), false);
+            }
+            #pragma unroll
+            for(int r = 0; r < kv_step; r++)  {
+                dq_Kmat[r] = cm_mul<half>(quan_Kmat[r], dq_scale[r]);
+            }
+            if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+                //show(dq_Kmat.format<half, 16, 16>(), true);
+            }
             #pragma unroll
             for(int k = 0; k < num_K; k++)
                 St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -463,9 +490,13 @@ void sdpa_kernel_lsc_prefetch(
 
             #pragma unroll
             for(int ri = 1; ri < head_size/REG_K; ri++) {
-                //cm_slm_block_read(slm_K, GENX_NONE, slm_offset + ri * Kmat.n_elems() * sizeof(half), Kmat.format<half>());
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(ri*REG_K));
-                cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(ri*REG_K));
+                //cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(ri*REG_K));
+                cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dK.set_block_x(ri*REG_K));
+                #pragma unroll
+                for(int r = 0; r < kv_step; r++)  {
+                    dq_Kmat[r] = cm_mul<half>(quan_Kmat[r], dq_scale[r]);
+                }
                 #pragma unroll
                 for(int k = 0; k < num_K; k++) {
                     St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(

@@ -12,7 +12,7 @@
 extern "C" _GENX_MAIN_ void cm_page_attention(
     int q_len,
     half* query [[type("svmptr_t")]],
-    half* key [[type("svmptr_t")]],
+    int8_t* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     int32_t* past_lens [[type("svmptr_t")]],
     int32_t* block_indices [[type("svmptr_t")]],
@@ -90,8 +90,8 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
     uint o_offset = (q_start_sg*num_heads + h)*head_size;
 
-    //K/V[block_num, kv_heads, block_sz, head_sz]
-    uint k_offset = hkv*head_size*pa_block_sz;
+    //K/V[block_num, kv_heads, block_sz*head_sz+block_sz*4]
+    uint k_offset = hkv*(head_size+4)*pa_block_sz;
     uint v_offset = hkv*head_size*pa_block_sz;
 
 #if USE_LSC == 1
