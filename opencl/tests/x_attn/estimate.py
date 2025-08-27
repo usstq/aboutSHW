@@ -273,8 +273,12 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     uint id_wg_m, id_wg_n;
     get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
 
-    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE]
-    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE_KEY]
+#if USE_INT8
+    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
+#else
+    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(half));
+#endif
     // query: [l_q, HQ * HEAD_SIZE]
     query += hq * HEAD_SIZE * (uint)sizeof(half);
 
@@ -343,6 +347,11 @@ STRIDE = 16
 BLOCK_SIZE = 128
 THRESH = 0.9
 IS_CAUSAL = 1
+USE_INT8 = 1
+if USE_INT8:
+    HEAD_SIZE_KEY = HEAD_SIZE + 2 * 2
+else:
+    HEAD_SIZE_KEY = HEAD_SIZE
 
 FIND_DEBUG_ACC = 0 # only acc test needed
 
@@ -350,7 +359,31 @@ jit_option = '-abortonspill -noschedule '
 kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                     -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
                     -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_M} -DUSE_KQ=1
-                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL}''')
+                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY}''')
+
+def quant_i8(k:torch.Tensor):
+    B, Hk, Lk, S = k.shape
+    k_pad = torch.zeros([B, Hk, rnd_up(Lk, KV_BLOCK_SIZE), HEAD_SIZE], dtype=k.dtype)
+    k_pad[:, :, :Lk,:] = k
+
+    B, Hk, Lk, S = k_pad.shape
+    k_i8 = torch.zeros([B, Hk, Lk, HEAD_SIZE_KEY], dtype=torch.int8)
+    k_i8_4d = k_i8.reshape([B, Hk, -1, KV_BLOCK_SIZE * HEAD_SIZE_KEY])
+    max = torch.max(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
+    min = torch.min(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
+    diff_value = torch.masked_fill(max - min, max == min, 0.001)
+    scale = 255/ diff_value
+    zp = -min * scale + (-128)
+    quanted = k_pad * scale + zp
+    quanted = quanted.clamp(-128, 127)
+    # weights
+    k_i8_4d[:, :, :, :KV_BLOCK_SIZE * HEAD_SIZE] = torch.reshape(quanted, [B, Hk, Lk // KV_BLOCK_SIZE, -1])
+    # scale
+    k_i8_4d[:, :, :, KV_BLOCK_SIZE * HEAD_SIZE : (KV_BLOCK_SIZE * (HEAD_SIZE + 2))] = (1.0 / scale).to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.int8)
+    # zp
+    k_i8_4d[:, :, :, (KV_BLOCK_SIZE * (HEAD_SIZE + 2)) : ] = zp.to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.int8)
+
+    return k_i8
 
 # q: [B, Hq, L_q, S]
 # k: [B, Hk, L_k, S]
@@ -379,9 +412,13 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     t_block_indices_begins = cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
     # t_subsequence_begins = cl.tensor(subsequence_begins.to(torch.int32).detach().numpy()) # N_kq has already been calculated
 
-    k_pad = torch.zeros([B, Hk, (Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE * KV_BLOCK_SIZE, HEAD_SIZE], dtype=k.dtype)
-    k_pad[:, :, :Lk,:] = k
-    key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(0, 2, 1, 3, 4)
+    if USE_INT8:
+        k_pad = quant_i8(k)
+        key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE_KEY]).permute(0, 2, 1, 3, 4)
+    else:
+        k_pad = torch.zeros([B, Hk, (Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE * KV_BLOCK_SIZE, HEAD_SIZE], dtype=k.dtype)
+        k_pad[:, :, :Lk,:] = k
+        key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(0, 2, 1, 3, 4)
     key_cache = key_cache[:,perm_idx,:,:,:].contiguous()
     t_key_cache = cl.tensor(key_cache.detach().numpy())
 
