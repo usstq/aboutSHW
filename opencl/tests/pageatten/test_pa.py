@@ -26,6 +26,10 @@ def quan_per_toke(qk):
         qk_max = qk.abs().amax(dim=-1, keepdim = True)
         qk_INT8 =  (qk/qk_max*127.0).to(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
         qk_scale = (qk_max/127.0).to(dtype=torch.half)
+
+        # print("################################################################################")
+        # print(qk)
+        # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
         # print(qk_scale)
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
@@ -80,14 +84,15 @@ class page_atten_cm:
             assert len(k.shape) == 3
             kv_padding_dims = (0,0,0,0,0,padding_tokens)
             aligned_seqlen = seq_len + padding_tokens
-            padded_k = torch.nn.functional.pad(k,kv_padding_dims)
-            padded_v = torch.nn.functional.pad(v,kv_padding_dims)
+            padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 1)
+            padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
 
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
         padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
         padded_v = padded_v.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
 
         k_quan = quan_per_toke(padded_k)
+        v_quan = quan_per_toke(padded_v)
 
         #output memory for the whole SDPA
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
@@ -103,10 +108,10 @@ class page_atten_cm:
             #block_indices =  torch.randperm(blk_num).to(torch.uint32)
             block_indices =  torch.arange(blk_num)
             sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
-            sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz, head_size).to(torch.float16)
+            sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
             for i in  range(len(block_indices)):
                 sub_k[block_indices[i],:] = k_quan[i,:]
-                sub_v[block_indices[i],:] = padded_v[i,:]
+                sub_v[block_indices[i],:] = v_quan[i,:]
             q_start = trunk_idx*self.trunk_sz
             q_end =  min(q_start + self.trunk_sz, seq_len)
             q_len = q_end - q_start
@@ -114,7 +119,7 @@ class page_atten_cm:
 
             t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
             t_k= cl.tensor(sub_k.to(torch.int8).detach().numpy())
-            t_v = cl.tensor(sub_v.to(torch.float16).detach().numpy())
+            t_v = cl.tensor(sub_v.to(torch.int8).detach().numpy())
             t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
             wg_size = 16
             q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
@@ -132,7 +137,7 @@ class page_atten_cm:
             t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
             t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
             t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
-            # print(f'input K data is {t_k.numpy()}')
+            # print(f'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV data is {t_v.numpy()}')
             print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}")
             for _ in range(n_repeats):
                 self.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
@@ -231,8 +236,8 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
 
 if __name__ == "__main__":
 
-    seq_len = 1024
-    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=64, trunk_sz=128)
+    seq_len = 32
+    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16, trunk_sz=16)
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:
@@ -240,8 +245,8 @@ if __name__ == "__main__":
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
                     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
-    if 0:
+                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+    if 1:
         test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
         test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
         for block_sz in range(128, 257, 32):
@@ -252,7 +257,7 @@ if __name__ == "__main__":
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
                     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
 
 
 

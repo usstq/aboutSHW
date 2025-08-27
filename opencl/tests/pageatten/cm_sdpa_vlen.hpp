@@ -13,7 +13,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     int q_len,
     half* query [[type("svmptr_t")]],
     int8_t* key [[type("svmptr_t")]],
-    half* value [[type("svmptr_t")]],
+    int8_t* value [[type("svmptr_t")]],
     int32_t* past_lens [[type("svmptr_t")]],
     int32_t* block_indices [[type("svmptr_t")]],
     int32_t* block_indices_begins [[type("svmptr_t")]],
@@ -88,11 +88,9 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
 
     //Q/O[B, L, H, S]
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
-    uint o_offset = (q_start_sg*num_heads + h)*head_size;
 
     //K/V[block_num, kv_heads, block_sz*head_sz+block_sz*4]
-    uint k_offset = hkv*(head_size+4)*pa_block_sz;
-    uint v_offset = hkv*head_size*pa_block_sz;
+    uint kv_offset = hkv*(head_size+4)*pa_block_sz;
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
@@ -102,9 +100,9 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
                                 q_len_sg, //q_step,
                                 kv_seq_len, //kv_len,
                                 reinterpret_cast<svmptr_t>(query + q_offset),
-                                reinterpret_cast<svmptr_t>(key + k_offset),
-                                reinterpret_cast<svmptr_t>(value + v_offset),
-                                reinterpret_cast<svmptr_t>(output + o_offset),
+                                reinterpret_cast<svmptr_t>(key + kv_offset),
+                                reinterpret_cast<svmptr_t>(value + kv_offset),
+                                reinterpret_cast<svmptr_t>(output + q_offset),
                                 past_q_lens,
                                 block_indices);
 #else
