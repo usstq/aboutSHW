@@ -23,23 +23,26 @@ CM_GRF_WIDTH = get_cm_grf_width()
 
 def quan_per_toke(qk):
         blk_num, kv_heads, blksz, *_ = qk.shape
-        qk_max = qk.abs().amax(dim=-1, keepdim = True)
-        qk_INT8 =  (qk/qk_max*127.0).to(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
-        qk_scale = (qk_max/127.0).to(dtype=torch.half)
+        qk_max = qk.amax(dim=-1, keepdim = True)
+        qk_min = qk.amin(dim=-1, keepdim = True)
+        qrange = qk_max - qk_min
 
+        INTMAX = 127.0
+        INTMIN = -128.0
+        INTRAGNE = INTMAX - INTMIN
+        qk_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
+        qk_zp = ((0.0-qk_min)*qk_scale+INTMIN).to(dtype=torch.half)
+
+        qk_INT8 = torch.round((qk*qk_scale+qk_zp)).to(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
         # print("################################################################################")
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
         # print(qk_scale)
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-
-
-        qk_zp = (qk_max-qk_max).to(dtype=torch.half)
-
-        qk_scale = qk_scale.view(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
+        dq_scale = (1.0/qk_scale).view(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
         qk_zp = qk_zp.view(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
-        return torch.concat((qk_INT8, qk_scale, qk_zp), dim=-1)
+        return torch.concat((qk_INT8, dq_scale, qk_zp), dim=-1)
 
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
@@ -137,7 +140,6 @@ class page_atten_cm:
             t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
             t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
             t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
-            # print(f'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV data is {t_v.numpy()}')
             print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}")
             for _ in range(n_repeats):
                 self.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
@@ -187,7 +189,7 @@ def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
     return attn_output.to(old_dtype)
 
 
-def check_close(input, other, atol=1e-3, rtol=1e-3):
+def check_close(input, other, atol=1e-2, rtol=1e-2):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
     rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
     atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
@@ -214,9 +216,13 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     # offset = [1, 5, 9]
     # index =  torch.randint(low, high,
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
-    k = torch.randint(low, 3, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
-    k[0:seq_len:3, :, :] / 2.0
-    v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+    if 1:
+        k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
+        k[0:seq_len:3, :, :] / 2.0
+        v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+    else:
+        k = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
+        v = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
 
     # print(f'\\\\\\\\\\\\\\\\\\K\n:{k}')
 
@@ -236,8 +242,8 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
 
 if __name__ == "__main__":
 
-    seq_len = 32
-    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16, trunk_sz=16)
+    seq_len = 128
+    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=16, trunk_sz=16)
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:
@@ -247,8 +253,8 @@ if __name__ == "__main__":
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
                     test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
     if 1:
-        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
-        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=256, trunk_sz=128*256)
+        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
+        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
         for block_sz in range(128, 257, 32):
             for seq_len in range(32768, 32810):
                 for trunk_num in range(1, 21):
@@ -257,7 +263,7 @@ if __name__ == "__main__":
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
                     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
 
 
 

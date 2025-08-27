@@ -473,13 +473,16 @@ void sdpa_kernel_lsc_prefetch(
         auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
         uint32_t dqscale_offset = cur_block_id*quna_blk_stride + CMPA_BLOCK_SZ * head_size * sizeof(int8_t) + kv_pos%CMPA_BLOCK_SZ*sizeof(half);
 
-
         vector<half, kv_step> dq_scale;
+        vector<half, kv_step> dq_zp;
         cm_svm_block_read(reinterpret_cast<svmptr_t>( k_base + dqscale_offset), dq_scale);
+        cm_svm_block_read(reinterpret_cast<svmptr_t>( k_base + dqscale_offset + CMPA_BLOCK_SZ*sizeof(half)), dq_zp);
+
         // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
         //    show(dq_scale.format<half, 16, 1>());
         // }
         //# St = k @ Qt
+
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
             constexpr int num_K = kv_step/REG_M;
@@ -502,8 +505,8 @@ void sdpa_kernel_lsc_prefetch(
             }
             #pragma unroll
             for(int r = 0; r < kv_step; r++)  {
-                dq_Kmat[r] = cm_mul<half>(quan_Kmat[r], dq_scale[r]);
-            }
+                dq_Kmat[r] =  quan_Kmat[r] - dq_zp[r];
+                dq_Kmat[r] = cm_mul<half>(dq_Kmat[r], dq_scale[r]);            }
             if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
                 //show(dq_Kmat.format<half, 16, 16>(), true);
             }
@@ -521,7 +524,8 @@ void sdpa_kernel_lsc_prefetch(
                 cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dK.set_block_x(ri*REG_K));
                 #pragma unroll
                 for(int r = 0; r < kv_step; r++)  {
-                    dq_Kmat[r] = cm_mul<half>(quan_Kmat[r], dq_scale[r]);
+                    dq_Kmat[r] =  quan_Kmat[r] - dq_zp[r];
+                    dq_Kmat[r] = cm_mul<half>(dq_Kmat[r], dq_scale[r]);
                 }
                 #pragma unroll
                 for(int k = 0; k < num_K; k++) {
@@ -552,28 +556,20 @@ void sdpa_kernel_lsc_prefetch(
         matrix<half, REG_N, REG_K> P;
         Transpose2DMatrix(St, P);
 
+        prefetch_K.set_base_ptr(reinterpret_cast<int8_t*>(v_base+prefetch_block_id*quna_blk_stride));
+        prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
 
-
-        lsc::block_2d_desc<int8_t, 1, REG_K, REG_N> b2dV(v_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
-        lsc::block_2d_desc<int8_t, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
-
-        prefetch_V.set_base_ptr(reinterpret_cast<int8_t*>(v_base+prefetch_block_id*quna_blk_stride));
-        prefetch_V.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
-
-        b2dV.set_base_ptr(reinterpret_cast<int8_t*>(v_base+cur_block_id*quna_blk_stride));
-        b2dV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
+        b2dK.set_base_ptr(reinterpret_cast<int8_t*>(v_base+cur_block_id*quna_blk_stride));
+        b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
 
 
         cm_svm_block_read(reinterpret_cast<svmptr_t>(v_base+dqscale_offset), dq_scale);
+        cm_svm_block_read(reinterpret_cast<svmptr_t>(v_base+dqscale_offset+CMPA_BLOCK_SZ*sizeof(half)), dq_zp);
 
-        // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-        //     show(dq_scale.format<half, 1, 16>(), true);
-        // }
-        vector<half, 32> bak;
         {
-
+            vector<half, 32> copyQuanVmatRow;
             matrix<half, REG_K/2, REG_N*2> Vmat;
-            auto tempVmat = Vmat.format<half, 2, 128>().row(1).format<int8_t, 8, 32>();
+            auto quanVmatVNNI = Vmat.format<half, 2, 128>().row(1).format<int8_t, 8, 32>();
             auto quanVmat = Vmat.format<half, 2, 128>().row(0).format<int8_t, 16, 16>();
 
             if (kv_pos == 0) {
@@ -581,22 +577,23 @@ void sdpa_kernel_lsc_prefetch(
                 auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
                 #pragma unroll
                 for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
-                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dV.set_block_x(k));
-                    prepackINT8(quanVmat, tempVmat);
-                    bak = tempVmat[7];
-                    // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-                    //     show(quanVmat.format<int8_t, 16, 16>(), false);
-                    //     show(tempVmat.format<int8_t, 8, 32>(), false);
-
-                    // }
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(k));
+                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dK.set_block_x(k));
+                    prepackINT8(quanVmat, quanVmatVNNI);
+                    copyQuanVmatRow = quanVmatVNNI[7];
                     #pragma unroll
                     for (int r = 0; r < 7; r++) {
-                            Vmat[r].select<16, 2>(0) = cm_mul<half>(tempVmat[r].select<16, 2>(0), dq_scale[r*2]);
-                            Vmat[r].select<16, 2>(1) = cm_mul<half>(tempVmat[r].select<16, 2>(1),  dq_scale[r*2+1]);
+                            Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - dq_zp[r*2];
+                            Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - dq_zp[r*2+1];
                     }
-                    Vmat[7].select<16, 2>(0) = cm_mul<half>(bak.select<16, 2>(0), dq_scale[14]);
-                    Vmat[7].select<16, 2>(1) = cm_mul<half>(bak.select<16, 2>(1),  dq_scale[15]);
+                    Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  dq_zp[14];
+                    Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - dq_zp[15];
+
+                    #pragma unroll
+                    for (int r = 0; r < 8; r++) {
+                            Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dq_scale[r*2]);
+                            Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dq_scale[r*2+1]);
+                    }
 
                     #pragma unroll
                     for(int p = 0; p < num_P_tiles; p++) {
@@ -612,17 +609,17 @@ void sdpa_kernel_lsc_prefetch(
                 auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
                 #pragma unroll
                 for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
-                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dV.set_block_x(k));
-                    prepackINT8(quanVmat, tempVmat);
-                    bak = tempVmat[7];
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(k));
+                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dK.set_block_x(k));
+                    prepackINT8(quanVmat, quanVmatVNNI);
+                    copyQuanVmatRow = quanVmatVNNI[7];
                     #pragma unroll
                     for (int r = 0; r < 7; r++) {
-                            Vmat[r].select<16, 2>(0) = cm_mul<half>(tempVmat[r].select<16, 2>(0), dq_scale[r*2]);
-                            Vmat[r].select<16, 2>(1) = cm_mul<half>(tempVmat[r].select<16, 2>(1),  dq_scale[r*2+1]);
+                            Vmat[r].select<16, 2>(0) = cm_mul<half>(quanVmatVNNI[r].select<16, 2>(0), dq_scale[r*2]);
+                            Vmat[r].select<16, 2>(1) = cm_mul<half>(quanVmatVNNI[r].select<16, 2>(1),  dq_scale[r*2+1]);
                     }
-                    Vmat[7].select<16, 2>(0) = cm_mul<half>(bak.select<16, 2>(0), dq_scale[14]);
-                    Vmat[7].select<16, 2>(1) = cm_mul<half>(bak.select<16, 2>(1),  dq_scale[15]);
+                    Vmat[7].select<16, 2>(0) = cm_mul<half>(copyQuanVmatRow.select<16, 2>(0), dq_scale[14]);
+                    Vmat[7].select<16, 2>(1) = cm_mul<half>(copyQuanVmatRow.select<16, 2>(1),  dq_scale[15]);
                     //# compensate cur_O
                     //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
                     #pragma unroll
