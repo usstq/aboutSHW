@@ -105,45 +105,45 @@ class page_atten_cm:
         # K/V: [blk_num, H, blk_sz, S]
         trunk_num = (aligned_seqlen+ self.trunk_sz - 1) // self.trunk_sz
         max_blks = aligned_seqlen // self.block_sz
+        cl.finish()
+        for _ in range(n_repeats):
+            for trunk_idx in range(trunk_num):
+                blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
+                #block_indices =  torch.randperm(blk_num).to(torch.uint32)
+                block_indices =  torch.arange(blk_num)
+                sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
+                sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
+                for i in  range(len(block_indices)):
+                    sub_k[block_indices[i],:] = k_quan[i,:]
+                    sub_v[block_indices[i],:] = v_quan[i,:]
+                q_start = trunk_idx*self.trunk_sz
+                q_end =  min(q_start + self.trunk_sz, seq_len)
+                q_len = q_end - q_start
+                sub_q = q[q_start:q_end, :]
 
-        for trunk_idx in range(trunk_num):
-            blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
-            #block_indices =  torch.randperm(blk_num).to(torch.uint32)
-            block_indices =  torch.arange(blk_num)
-            sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
-            sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
-            for i in  range(len(block_indices)):
-                sub_k[block_indices[i],:] = k_quan[i,:]
-                sub_v[block_indices[i],:] = v_quan[i,:]
-            q_start = trunk_idx*self.trunk_sz
-            q_end =  min(q_start + self.trunk_sz, seq_len)
-            q_len = q_end - q_start
-            sub_q = q[q_start:q_end, :]
+                t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
+                t_k= cl.tensor(sub_k.to(torch.int8).detach().numpy())
+                t_v = cl.tensor(sub_v.to(torch.int8).detach().numpy())
+                t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
+                wg_size = 16
+                q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
+                wg_seq_len = wg_size * q_step
+                wg_count = (q_len + wg_seq_len - 1) // wg_seq_len
 
-            t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
-            t_k= cl.tensor(sub_k.to(torch.int8).detach().numpy())
-            t_v = cl.tensor(sub_v.to(torch.int8).detach().numpy())
-            t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
-            wg_size = 16
-            q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
-            wg_seq_len = wg_size * q_step
-            wg_count = (q_len + wg_seq_len - 1) // wg_seq_len
+                GWS = [1, self.num_heads, int(wg_count * wg_size)]
+                LWS = [1, 1, wg_size]
+                # block_indices = int[blk_num], past_lens = 0, block_indices_begins = 0,
+                past_lens=torch.tensor([trunk_idx*self.trunk_sz]).to(torch.int32)
+                block_indices_begins=torch.tensor([0, blk_num]).to(torch.int32)
+                subsequence_begins=torch.tensor([0,q_len]).to(torch.int32)
 
-            GWS = [1, self.num_heads, int(wg_count * wg_size)]
-            LWS = [1, 1, wg_size]
-            # block_indices = int[blk_num], past_lens = 0, block_indices_begins = 0,
-            past_lens=torch.tensor([trunk_idx*self.trunk_sz]).to(torch.int32)
-            block_indices_begins=torch.tensor([0, blk_num]).to(torch.int32)
-            subsequence_begins=torch.tensor([0,q_len]).to(torch.int32)
-
-            t_block_indices=cl.tensor(block_indices.to(torch.int32).detach().numpy())
-            t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
-            t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
-            t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
-            print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}")
-            for _ in range(n_repeats):
+                t_block_indices=cl.tensor(block_indices.to(torch.int32).detach().numpy())
+                t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
+                t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
+                t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
+                print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}")
                 self.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
-            output[q_start:q_end] = torch.from_numpy(t_out.numpy())
+                output[q_start:q_end] = torch.from_numpy(t_out.numpy())
 
         return output
 
@@ -203,7 +203,7 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512):
+def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, rep = 20):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024)
@@ -230,20 +230,26 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
 
-    out = pa_cm(q, k, v)
+    out = pa_cm(q, k, v, rep)
     # out = func(q, k, v, n_repeats=20)
     latency = cl.finish()
-    # # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
-    # print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
-    # print(ref)
-    # print(out)
+    trunks = len(latency) // rep
+    trunk_lat = []
+    print(f'====================================================================================')
+    for trunk_idx in range(trunks):
+        lat = latency[trunk_idx:-1:trunks]
+        avg = sum(lat[10:])/len(lat[10:])*1e-6
+        trunk_lat.append(avg)
+        print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
+    print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
+    print(f'====================================================================================')
     check_close(ref, out)
     #assert 0
 
 if __name__ == "__main__":
 
-    seq_len = 128
-    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=16, trunk_sz=16)
+    seq_len = 8192
+    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=128, trunk_sz=seq_len)
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:
@@ -252,7 +258,7 @@ if __name__ == "__main__":
                     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
                     print("-----------------------------------------------------------------------------------------------------------------------------------------")
                     test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
-    if 1:
+    if 0:
         test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
         test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
         for block_sz in range(128, 257, 32):

@@ -455,10 +455,10 @@ void sdpa_kernel_lsc_prefetch(
         }
     }
 
-    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dK(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dKV(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
 
     static_assert(wg_local_size == 16);
-    lsc::block_2d_desc<int8_t, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step/wg_local_size, REG_K> b2dKV_prefetch(k_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
     // constexpr int blk_stride = CMFLA_NUM_KV_HEADS * CMFLA_HEAD_SIZE * CMPA_BLOCK_SZ;
     constexpr int quna_blk_stride = CMFLA_NUM_KV_HEADS * (CMFLA_HEAD_SIZE+4) * CMPA_BLOCK_SZ * sizeof(int8_t);
 
@@ -492,24 +492,23 @@ void sdpa_kernel_lsc_prefetch(
             auto dq_Kmat =  Kmat.format<half, REG_M*num_K, REG_K>();
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
 
-            prefetch_K.set_base_ptr(reinterpret_cast<int8_t*>(k_base+prefetch_block_id*quna_blk_stride));
-            prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
-            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
+            b2dKV_prefetch.set_base_ptr(reinterpret_cast<int8_t*>(k_base+prefetch_block_id*quna_blk_stride));
+            b2dKV_prefetch.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(b2dKV_prefetch.set_block_x(0));
 
-            b2dK.set_base_ptr(reinterpret_cast<int8_t*>(k_base+cur_block_id*quna_blk_stride));
-            b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
+            b2dKV.set_base_ptr(reinterpret_cast<int8_t*>(k_base+cur_block_id*quna_blk_stride));
+            b2dKV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
 
-            cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dK.set_block_x(0));
+            cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dKV.set_block_x(0));
             if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
                 //show(quan_Kmat.format<int8_t, 16, 16>(), false);
             }
             #pragma unroll
             for(int r = 0; r < kv_step; r++)  {
                 dq_Kmat[r] =  quan_Kmat[r] - dq_zp[r];
-                dq_Kmat[r] = cm_mul<half>(dq_Kmat[r], dq_scale[r]);            }
-            if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-                //show(dq_Kmat.format<half, 16, 16>(), true);
-            }
+                dq_Kmat[r] = cm_mul<half>(dq_Kmat[r], dq_scale[r]);
+                }
+
             #pragma unroll
             for(int k = 0; k < num_K; k++)
                 St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -519,9 +518,9 @@ void sdpa_kernel_lsc_prefetch(
 
             #pragma unroll
             for(int ri = 1; ri < head_size/REG_K; ri++) {
-                cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(ri*REG_K));
-                //cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(ri*REG_K));
-                cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dK.set_block_x(ri*REG_K));
+                cm_prefetch<CacheHint::Cached, CacheHint::Cached>(b2dKV_prefetch.set_block_x(ri*REG_K));
+                //cm_load<lsc::Normal>(Kmat.format<half>(), b2dKV.set_block_x(ri*REG_K));
+                cm_load<lsc::Normal>(quan_Kmat.format<int8_t>(), b2dKV.set_block_x(ri*REG_K));
                 #pragma unroll
                 for(int r = 0; r < kv_step; r++)  {
                     dq_Kmat[r] =  quan_Kmat[r] - dq_zp[r];
@@ -556,11 +555,11 @@ void sdpa_kernel_lsc_prefetch(
         matrix<half, REG_N, REG_K> P;
         Transpose2DMatrix(St, P);
 
-        prefetch_K.set_base_ptr(reinterpret_cast<int8_t*>(v_base+prefetch_block_id*quna_blk_stride));
-        prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
+        b2dKV_prefetch.set_base_ptr(reinterpret_cast<int8_t*>(v_base+prefetch_block_id*quna_blk_stride));
+        b2dKV_prefetch.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
 
-        b2dK.set_base_ptr(reinterpret_cast<int8_t*>(v_base+cur_block_id*quna_blk_stride));
-        b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
+        b2dKV.set_base_ptr(reinterpret_cast<int8_t*>(v_base+cur_block_id*quna_blk_stride));
+        b2dKV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
 
 
         cm_svm_block_read(reinterpret_cast<svmptr_t>(v_base+dqscale_offset), dq_scale);
@@ -577,8 +576,8 @@ void sdpa_kernel_lsc_prefetch(
                 auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
                 #pragma unroll
                 for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(k));
-                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dK.set_block_x(k));
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(b2dKV_prefetch.set_block_x(k));
+                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dKV.set_block_x(k));
                     prepackINT8(quanVmat, quanVmatVNNI);
                     copyQuanVmatRow = quanVmatVNNI[7];
                     #pragma unroll
@@ -609,17 +608,23 @@ void sdpa_kernel_lsc_prefetch(
                 auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
                 #pragma unroll
                 for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(k));
-                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dK.set_block_x(k));
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(b2dKV_prefetch.set_block_x(k));
+                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dKV.set_block_x(k));
                     prepackINT8(quanVmat, quanVmatVNNI);
                     copyQuanVmatRow = quanVmatVNNI[7];
                     #pragma unroll
                     for (int r = 0; r < 7; r++) {
-                            Vmat[r].select<16, 2>(0) = cm_mul<half>(quanVmatVNNI[r].select<16, 2>(0), dq_scale[r*2]);
-                            Vmat[r].select<16, 2>(1) = cm_mul<half>(quanVmatVNNI[r].select<16, 2>(1),  dq_scale[r*2+1]);
+                            Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - dq_zp[r*2];
+                            Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - dq_zp[r*2+1];
                     }
-                    Vmat[7].select<16, 2>(0) = cm_mul<half>(copyQuanVmatRow.select<16, 2>(0), dq_scale[14]);
-                    Vmat[7].select<16, 2>(1) = cm_mul<half>(copyQuanVmatRow.select<16, 2>(1),  dq_scale[15]);
+                    Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  dq_zp[14];
+                    Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - dq_zp[15];
+
+                    #pragma unroll
+                    for (int r = 0; r < 8; r++) {
+                            Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dq_scale[r*2]);
+                            Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dq_scale[r*2+1]);
+                    }
                     //# compensate cur_O
                     //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
                     #pragma unroll
