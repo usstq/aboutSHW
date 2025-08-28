@@ -112,13 +112,14 @@ in(half) = reinterpret_cast<half>(in(word)) * 32768;
 out(half) = in(half) * scale_up(half) - temp(half)
 ```
 
-## TRY2.3: use uint8 instead of int8, zp&scale keep unchanged()
+## TRY2.3: use uint8 instead of int8, zp&scale keep unchanged(98146fc05)
 `55T/s`, `69T/s if remove 'no-schedule'`
 ### Test data:
 |metric|cur|TRY2.2|comment|
 |---|---:|---:|---|
 |XVE_INST_EXECUTED_ALU0_ALL|92,786,634,752|79,548,362,752|increased |
 |XVE_INST_EXECUTED_ALU1_ALL|90,885,882,624|77,854,458,624|increased |
+
 Asm code:
 ```c++
 // Line 1276:  d0.format<ushort>() = A0_i8[m];
@@ -139,21 +140,29 @@ Asm code:
 (W)     mov (16|M0)              r51.16<1>:uw  r6.16<1;1,0>:uw                                       //  ALU pipe: int; $557
 ```
 
-## TRY3: reuse decompression result: increase B tile(TODO)
-32x32 tile #reg(cur):
+## TRY3: reuse decompression result: increase B tile from 32->64()
+32x32 tile #reg(try2.3):
 ```
 C: 32*32*4/64=64
 A: i8data: 32*32/64=16, i8->f16: 32*16*2/64=16
 B: 16*16*2(half)*2(32tile)*2(copy)/64=32
 all: 128+
 ```
-32x64 tile #reg(<span style="color:red;">NA</span>):
+32x64 tile #reg(cur):
 ```
 C: 32*64*4/64=128
-A: i8data: 32*32/64=16, i8->f16: 32*16*2/64=16, another copy: 16+16
+A: i8data: 32*32/64=16, i8->f16: 32*16*2/64=16
 B: 16*16*2(half)*4(64tile)*2(copy)/64=64
-all: >256
+all: 224+
 ```
+`78T/s`, `83T/s if remove 'no-schedule'`
+### Test data:
+|metric|cur|TRY2.3|comment|
+|---|---:|---:|---|
+|GPU_MEMORY_BYTE_READ|54,130,486,784|54,158,295,040|no change|
+|XVE_INST_EXECUTED_ALU0_ALL|49,701,618,432|92,786,634,752|decreased |
+|XVE_INST_EXECUTED_ALU1_ALL|48,216,760,064|90,885,882,624|decreased |
+|XVE_INST_EXECUTED_ALU2_ALL|106,753,425,408|105,906,176,000|no change|
 
 ## perf tools
 ### intel-gpu-tools

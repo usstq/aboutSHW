@@ -333,7 +333,7 @@ src = '\n'.join(src)
 
 kernel_name = 'gemm_qk'
 BLOCK_SG_M = 32 #32
-BLOCK_SG_N = 32
+BLOCK_SG_N = 64
 SG_M = 4
 SG_N = 4
 BLOCK_WG_M = BLOCK_SG_M * SG_M
@@ -630,8 +630,8 @@ def test_func():
         assert q_len // STRIDE >= 1, "there should be at least 1 row for gemm"
         print(f'{Colors.BLUE}test gemm("{prompt}") query: [{q_len}, {dim}*{stride}] key:[{k_len}, {dim}*{stride}]...{Colors.END}')
 
-        q = torch.randint(-2, 3, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
-        k = torch.randint(-2, 3, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        q = torch.randint(-2, 4, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        k = torch.randint(-2, 4, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
         q_start_strided = k_len // stride - q_len // stride
         assert q_start_strided >= 0, "length of key cache must be greater or equal than query"
@@ -664,8 +664,8 @@ def test_perf():
 
     assert (q_len // stride) >= 128 and (k_len // stride) >= 128, "minimum block size should be 128*128"
 
-    q = torch.randint(-2, 3, size=[bsz, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
-    k = torch.randint(-2, 3, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+    q = torch.randint(-2, 4, size=[bsz, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+    k = torch.randint(-2, 4, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
     test_gemm(q, k, block_size=block_size, q_start_strided=k_len // stride - q_len // stride, threshold=THRESH, stride=stride, causal=True)
     test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=True)
