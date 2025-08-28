@@ -53,7 +53,7 @@ EU tile is small, so there are enough free registers for extending.
 Instructions number for ALU0/1 are still bigger than XMX, reduce them should be the right way.
 
 ## TRY2.1: decompression mul+add->mad(be8c1b3af2)
-`47T/s`, `75T/s if remove 'no-schedule'`
+`47T/s`, `66T/s if remove 'no-schedule'`
 ### Test data:
 |metric|cur|TRY2.0|comment|
 |---|---:|---:|---|
@@ -72,8 +72,8 @@ in(half) = in(int8)
 out(half) = in(int8) * scale(half) - temp(half) // aka mad
 ```
 
-## TRY2.2: use uint8 instead of int8, use denormal * 32768 * 512 to convert uw to half()
-`59T/s`, `66T/s if remove 'no-schedule'`
+## TRY2.2: use uint8 instead of int8, use denormal * 32768 * 512 to convert uw to half(ded89bf85)
+`59T/s`, `75T/s if remove 'no-schedule'`
 ### Test data:
 |metric|cur|TRY2.1|comment|
 |---|---:|---:|---|
@@ -110,6 +110,33 @@ scale_up(half) = scale(half) * 512              // <-- acc lost here
 in(word) = in(uint8)
 in(half) = reinterpret_cast<half>(in(word)) * 32768;
 out(half) = in(half) * scale_up(half) - temp(half)
+```
+
+## TRY2.3: use uint8 instead of int8, zp&scale keep unchanged()
+`55T/s`, `69T/s if remove 'no-schedule'`
+### Test data:
+|metric|cur|TRY2.2|comment|
+|---|---:|---:|---|
+|XVE_INST_EXECUTED_ALU0_ALL|92,786,634,752|79,548,362,752|increased |
+|XVE_INST_EXECUTED_ALU1_ALL|90,885,882,624|77,854,458,624|increased |
+Asm code:
+```c++
+// Line 1276:  d0.format<ushort>() = A0_i8[m];
+(W)     mov (32|M0)              r6.0<1>:w     r30.32<1;1,0>:ub                                      //  ALU pipe: int; $548
+
+// Line 1277:  d0 *= half{32768.0};
+(W)     mul (32|M0)              acc0.0<1>:hf  r6.0<1;1,0>:hf    32768.0:hf              {I@1}       //  ALU pipe: float; $550
+
+//             r2.0 = 512.0
+(W)     mad (32|M0)              acc0.0<1>:hf  -r7.1<0;0>:hf     acc0.0<1;0>:hf    r2.0<0>:hf        //  ALU pipe: float; $552
+// Line 1279:  d0 = (d0 - zps[0][m]) * scales[0][m];
+(W)     mul (32|M0)              r6.0<1>:hf    r10.1<0;1,0>:hf   acc0.0<1;1,0>:hf                    //  ALU pipe: float; $553
+
+// Line 1280:  A0[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(0);
+(W)     mov (16|M0)              r47.16<1>:uw  r6.0<1;1,0>:uw                   {F@1}                //  ALU pipe: int; $555
+
+// Line 1281:  A0[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(16);
+(W)     mov (16|M0)              r51.16<1>:uw  r6.16<1;1,0>:uw                                       //  ALU pipe: int; $557
 ```
 
 ## TRY3: reuse decompression result: increase B tile(TODO)

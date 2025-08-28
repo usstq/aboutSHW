@@ -1030,13 +1030,15 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             vector<half, 32> d0;
             d0.format<ushort>() = A0_i8[m];
             d0 *= half{32768.0};
-            d0 = d0 * scales[0][m] - zps[0][m];
+            d0 *= half{512.0};
+            d0 = (d0 - zps[0][m]) * scales[0][m];
             A0[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(0);
             A0[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(16);
             vector<half, 32> d1;
             d1.format<ushort>() = A1_i8[m];
             d1 *= half{32768.0};
-            d1 = d1 * scales[1][m] - zps[1][m];
+            d1 *= half{512.0};
+            d1 = (d1 - zps[1][m]) * scales[1][m];
             A1[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d1.select<16, 1>(0);
             A1[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d1.select<16, 1>(16);
         }
@@ -1066,8 +1068,6 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
         zps.row(1) = cm_ptr_load<half>((half*)key_cache, scale_offset1 + KV_BLOCK_SIZE * (uint)sizeof(half) + seq_scales * (uint)sizeof(half));
         scale_offset0 += sizeof(half);
         scale_offset1 += sizeof(half);
-        zps *= scales;
-        scales *= half{512.0};
 #endif
         #pragma unroll
         for (uint hs = 0; hs < HEAD_SIZE / BLOCK_WG_K; hs++) {
