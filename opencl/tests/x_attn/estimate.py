@@ -367,19 +367,19 @@ def quant_i8(k:torch.Tensor):
     k_pad[:, :, :Lk,:] = k
 
     B, Hk, Lk, S = k_pad.shape
-    k_i8 = torch.zeros([B, Hk, Lk, HEAD_SIZE_KEY], dtype=torch.int8)
+    k_i8 = torch.zeros([B, Hk, Lk, HEAD_SIZE_KEY], dtype=torch.uint8)
     k_i8_4d = k_i8.reshape([B, Hk, -1, KV_BLOCK_SIZE * HEAD_SIZE_KEY])
     max = torch.max(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
     min = torch.min(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
     diff_value = torch.masked_fill(max - min, max == min, 0.001)
     scale = 255/ diff_value
-    zp = -min * scale + (-128)
+    zp = -min * scale
     quanted = k_pad * scale + zp
-    quanted = quanted.clamp(-128, 127)
+    quanted = quanted.clamp(0, 255)
     # weights
     k_i8_4d[:, :, :, :KV_BLOCK_SIZE * HEAD_SIZE] = torch.reshape(quanted, [B, Hk, Lk // KV_BLOCK_SIZE, -1])
     # scale
-    k_i8_4d[:, :, :, KV_BLOCK_SIZE * HEAD_SIZE : (KV_BLOCK_SIZE * (HEAD_SIZE + 2))] = (1.0 / scale).to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.int8)
+    k_i8_4d[:, :, :, KV_BLOCK_SIZE * HEAD_SIZE : (KV_BLOCK_SIZE * (HEAD_SIZE + 2))] = (1.0 / scale).to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.uint8)
     # zp
     k_i8_4d[:, :, :, (KV_BLOCK_SIZE * (HEAD_SIZE + 2)) : ] = zp.to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.int8)
 

@@ -39,7 +39,7 @@ EU tile is small, so there are enough free registers for extending.
 |XVE_INST_EXECUTED_ALU1_ALL|13,776,432,528|178,796,282,624|There are too many instructions in ALU1(INT)|
 |XVE_INST_EXECUTED_ALU2_ALL|104,674,538,883|105,906,176,000|almost same in ALU2(XMX)|
 
-## TRY2: ~~use pin-pong for A matrix~~, decompression concurrency from 16->32(4da5a594e)
+## TRY2.0: ~~use pin-pong for A matrix~~, decompression concurrency from 16->32(4da5a594e)
 `44T/s`, `63T/s if remove 'no-schedule'`
 ### Test data:
 |metric|cur|i8(base)|comment|
@@ -52,17 +52,67 @@ EU tile is small, so there are enough free registers for extending.
 ### reason for delay pin-pong:
 Instructions number for ALU0/1 are still bigger than XMX, reduce them should be the right way.
 
-## TRY3: decompression mul+add->mad()
-`47T/s`, `66T/s if remove 'no-schedule'`
+## TRY2.1: decompression mul+add->mad(be8c1b3af2)
+`47T/s`, `75T/s if remove 'no-schedule'`
 ### Test data:
-|metric|cur|TRY2|comment|
+|metric|cur|TRY2.0|comment|
 |---|---:|---:|---|
 |GPU_MEMORY_BYTE_READ|54,130,486,784|54,054,478,848|no change|
 |XVE_INST_EXECUTED_ALU0_ALL|110,782,410,752|136,892,360,472|reduced ~26G, theoretical=128* 1024* 128/32* 32(heads)* 16(repeat)* 100(test)=26.8G |
 |XVE_INST_EXECUTED_ALU1_ALL|125,843,194,624|125,696,550,983|no change|
 |XVE_INST_EXECUTED_ALU2_ALL|105,906,176,000|105,782,711,890|no change|
+NOTE: there may be **accuarcy** impact due to per-calc zp*scale:
+```c++
+origin:
+in(half) = in(int8)
+out(half) = (in(half) - zp(half)) * scale(half)
+new:
+temp(half) = zp(half) * scale(half)             // <-- acc lost here
+in(half) = in(int8)
+out(half) = in(int8) * scale(half) - temp(half) // aka mad
+```
 
-## TRY4: reuse decompression result: increase B tile(TODO)
+## TRY2.2: use uint8 instead of int8, use denormal * 32768 * 512 to convert uw to half()
+`59T/s`, `66T/s if remove 'no-schedule'`
+### Test data:
+|metric|cur|TRY2.1|comment|
+|---|---:|---:|---|
+|XVE_INST_EXECUTED_ALU0_ALL|79,548,362,752|110,782,410,752|reduced |
+|XVE_INST_EXECUTED_ALU1_ALL|77,854,458,624|125,843,194,624|reduced |
+
+New decompression asm code:
+```c++
+// Line 1276:  d0.format<ushort>() = A0_i8[m];
+(W)     mov (32|M0)              r5.0<1>:w     r19.0<1;1,0>:ub                  {$6.dst}             //  ALU pipe: int; $943
+
+// Line 1277:  d0 *= half{32768.0};
+(W)     mul (32|M0)              acc0.0<1>:hf  r5.0<1;1,0>:hf    32768.0:hf              {I@1}       //  ALU pipe: float; $945
+
+// Line 1278:  d0 = d0 * scales[0][m] - zps[0][m];
+(W)     mad (32|M0)              r5.0<1>:hf    -r7.0<0;0>:hf     acc0.0<1;0>:hf    r10.0<0>:hf       //  ALU pipe: float; $947
+
+// Line 1279:  A0[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(0);
+(W)     mov (16|M0)              r63.0<1>:hf   r5.0<1;1,0>:hf                   {F@1}                //  ALU pipe: float; $949
+
+// Line 1280:  A0[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(16);
+(W)     mov (16|M0)              r59.0<1>:uw   r5.16<1;1,0>:uw                                       //  ALU pipe: int; $951
+```
+
+NOTE: there may be **accuarcy** impact due to per-upscale zp:
+```c++
+based on try 2.1:
+temp(half) = zp(half) * scale(half)
+in(half) = in(int8)
+out(half) = in(half) * scale(half) - temp(half)
+new:
+temp(half) = zp(half) * scale(half)             // <-- acc lost here
+scale_up(half) = scale(half) * 512              // <-- acc lost here
+in(word) = in(uint8)
+in(half) = reinterpret_cast<half>(in(word)) * 32768;
+out(half) = in(half) * scale_up(half) - temp(half)
+```
+
+## TRY3: reuse decompression result: increase B tile(TODO)
 32x32 tile #reg(cur):
 ```
 C: 32*32*4/64=64

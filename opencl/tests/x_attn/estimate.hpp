@@ -965,23 +965,23 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     vector<unsigned, KEY_LINES_PER_LOAD> seq_scales;
     cmtl::cm_vector_assign(seq_scales.select_all(), 0, STRIDE);
     uint offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
-    lsc::block_2d_desc<char, 1, KEY_LINES_PER_LOAD, 32> desc_a0{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
+    lsc::block_2d_desc<uchar, 1, KEY_LINES_PER_LOAD, 32> desc_a0{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
         0, 0 };
     uint scale_offset0 = offset + KV_BLOCK_SIZE * HEAD_SIZE;
     // M[16:32]xK[0:32]
     offset = block_indices_p[block_idx + 1] * (HK * KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
-    lsc::block_2d_desc<char, 1, KEY_LINES_PER_LOAD, 32> desc_a1{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
+    lsc::block_2d_desc<uchar, 1, KEY_LINES_PER_LOAD, 32> desc_a1{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
         0, 0 };
     uint scale_offset1 = offset + KV_BLOCK_SIZE * HEAD_SIZE;
     // prefetch A
     block_idx = (uint)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) * STRIDE / KV_BLOCK_SIZE;
     offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
     static_assert(BLOCK_WG_M / SG_MN <= KEY_LINES_PER_LOAD, "prefetch lines should be inside one block");
-    lsc::block_2d_desc<char, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ key_cache + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
+    lsc::block_2d_desc<uchar, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{ key_cache + offset, BLOCK_WG_M / SG_MN - 1, (uint)(K * sizeof(char) - 1), (uint)(K * sizeof(char) - 1),
         0, 0 };
 
     // 0~2 M[:]xK[0:16] 2~4 K[16:32]                                                     --> 16 * 1 regs
-    matrix<char, KEY_LINES_PER_LOAD, 32> a0_up_s8, a0_down_s8, a1_up_s8, a1_down_s8;
+    matrix<uchar, KEY_LINES_PER_LOAD, 32> a0_up_s8, a0_down_s8, a1_up_s8, a1_down_s8;
     matrix<half, 4, BLOCK_REG_A> a0, a1;                      // --> 16 regs
     matrix<half, 2, KEY_LINES_PER_LOAD> scales, zps;
 #else
@@ -1024,14 +1024,18 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     cm_sbarrier(1);
 
 #if USE_INT8
-    auto dec = [&](matrix_ref<char, KEY_LINES_PER_LOAD, 32> A0_i8, matrix_ref<char, KEY_LINES_PER_LOAD, 32> A1_i8, matrix_ref<half, 4, BLOCK_REG_A> A0, matrix_ref<half, 4, BLOCK_REG_A> A1) {
+    auto dec = [&](matrix_ref<uchar, KEY_LINES_PER_LOAD, 32> A0_i8, matrix_ref<uchar, KEY_LINES_PER_LOAD, 32> A1_i8, matrix_ref<half, 4, BLOCK_REG_A> A0, matrix_ref<half, 4, BLOCK_REG_A> A1) {
 #pragma unroll
         for (int m = 0; m < KEY_LINES_PER_LOAD; m++) {
-            vector<half, 32> d0 = A0_i8[m];
-            d0 = d0 * scales[0][m]- zps[0][m];
+            vector<half, 32> d0;
+            d0.format<ushort>() = A0_i8[m];
+            d0 *= half{32768.0};
+            d0 = d0 * scales[0][m] - zps[0][m];
             A0[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(0);
             A0[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d0.select<16, 1>(16);
-            vector<half, 32> d1 = A1_i8[m];
+            vector<half, 32> d1;
+            d1.format<ushort>() = A1_i8[m];
+            d1 *= half{32768.0};
             d1 = d1 * scales[1][m] - zps[1][m];
             A1[0 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d1.select<16, 1>(0);
             A1[2 + m / 8].select<BLOCK_REG_K, 1>(m % 8 * BLOCK_REG_K) = d1.select<16, 1>(16);
@@ -1063,6 +1067,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
         scale_offset0 += sizeof(half);
         scale_offset1 += sizeof(half);
         zps *= scales;
+        scales *= half{512.0};
 #endif
         #pragma unroll
         for (uint hs = 0; hs < HEAD_SIZE / BLOCK_WG_K; hs++) {
@@ -1082,8 +1087,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
             // load a: M[0:16*4]xK[0:32]
 #if USE_INT8
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_up_s8.format<char>(), desc_a0);
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_down_s8.format<char>(), desc_a1);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_up_s8.format<uchar>(), desc_a0);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_down_s8.format<uchar>(), desc_a1);
             dec(a0_up_s8, a0_down_s8, a0, a1);
             dot(a0.select<2, 1, BLOCK_REG_A, 1>(), a1.select<2, 1, BLOCK_REG_A, 1>(), b0);
 #else
@@ -1117,8 +1122,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
                 desc_b0.set_block_x(desc_b0.get_block_x() + 8);
             // load a: M[0:32]xK[32:64]
 #if USE_INT8
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_up_s8.format<char>(), desc_a0);
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_down_s8.format<char>(), desc_a1);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_up_s8.format<uchar>(), desc_a0);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(a0_down_s8.format<uchar>(), desc_a1);
             dec(a0_up_s8, a0_down_s8, a0, a1);
             dot(a0.select<2, 1, BLOCK_REG_A, 1>(), a1.select<2, 1, BLOCK_REG_A, 1>(), b0);
 #else
