@@ -140,7 +140,7 @@ Asm code:
 (W)     mov (16|M0)              r51.16<1>:uw  r6.16<1;1,0>:uw                                       //  ALU pipe: int; $557
 ```
 
-## TRY3: reuse decompression result: increase B tile from 32->64()
+## TRY3.0: reuse decompression result: increase B tile from 32->64(553b73d36dc)
 32x32 tile #reg(try2.3):
 ```
 C: 32*32*4/64=64
@@ -163,6 +163,17 @@ all: 224+
 |XVE_INST_EXECUTED_ALU0_ALL|49,701,618,432|92,786,634,752|decreased |
 |XVE_INST_EXECUTED_ALU1_ALL|48,216,760,064|90,885,882,624|decreased |
 |XVE_INST_EXECUTED_ALU2_ALL|106,753,425,408|105,906,176,000|no change|
+
+## TRY3.1: ~~use pin-pong for A matrix~~
+32x64 tile #reg(based on try3.0):
+```
+C: 32*64*4/64=128
+A: i8data: 32*32/64=16, i8->f16: 32*16*2/64=16, another copy +16
+B: 16*16*2(half)*4(64tile)*2(copy)/64=64
+other: 5(desc), 2(scale/zp)+1(aux), 2(temp for dec)
+all: 250+
+```
+The free registers are not enough, only free some registers for i8->f16 then the compilation could pass but this will make decompression cost increased. NA.
 
 ## perf tools
 ### intel-gpu-tools
