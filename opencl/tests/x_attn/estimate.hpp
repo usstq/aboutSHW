@@ -221,6 +221,42 @@ CM_INLINE void Transpose_32x32(matrix_ref<T1, 32, 32> in, matrix_ref<T2, 32, 32>
     out.row(31) = temp.template select<4, 1, 8, 4>(28, 3);
 }
 
+// group_count: M = group_count * group_size, group_size is the element count of current reduction
+// op: 0-max, 1-sum
+// M: before reduce element count, N: row count, stop: element count M must be larger than
+template <int group_count, int op, int stop, typename T, int N, int M>
+CM_INLINE constexpr auto reduce2d(matrix_ref<T, N, M> src) {
+    constexpr int group_size = M / group_count;
+    if constexpr (N > stop) {
+        matrix<T, N / 2, M> result;
+        // half of group will be reduced
+        constexpr int new_group_size = group_size / 2;
+        constexpr int new_group_count = group_count * 2;
+#pragma unroll
+        for (int i = 0; i < N / 2; i++) {
+            matrix<T, group_count * 2, new_group_size> new_top, new_bot;
+            auto top = src.row(2 * i + 0).format<T, new_group_count, new_group_size>();
+            auto bot = src.row(2 * i + 1).format<T, new_group_count, new_group_size>();
+            constexpr int v_stride = new_group_count == 2 ? 1 : 2;
+
+            new_top.select<new_group_count / 2, 1, new_group_size, 1>(0) = top.select<new_group_count / 2, v_stride, new_group_size, 1>(0);
+            new_top.select<new_group_count / 2, 1, new_group_size, 1>(new_group_count / 2) = bot.select<new_group_count / 2, v_stride, new_group_size, 1>(0);
+            new_bot.select<new_group_count / 2, 1, new_group_size, 1>(0) = top.select<new_group_count / 2, v_stride, new_group_size, 1>(1);
+            new_bot.select<new_group_count / 2, 1, new_group_size, 1>(new_group_count / 2) = bot.select<new_group_count / 2, v_stride, new_group_size, 1>(1);
+            if constexpr (op == 0) {
+                result[i] = cm_max<T>(new_top.format<T>(), new_bot.format<T>());
+            } else {
+                result[i] = (new_top.format<T>() + new_bot.format<T>());
+            }
+        }
+
+        return reduce2d<group_count * 2, op, stop>(result);
+    } else {
+        matrix<T, N, M> dst = src;
+        return dst;
+    }
+}
+
 template <typename T, int N>
 CM_INLINE void read_1d(vector_ref<T, N> out, svmptr_t base) {
     cm_ptr_block_read((T*)base, out);
@@ -1439,6 +1475,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 #endif
 
 #if 1 || (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
+// const static int channels_reduce_32[] = { 0, 16,  8, 24,  4, 20, 12, 28,  2, 18, 10, 26,  6, 22, 14, 30,  
+// 		                                  1, 17,  9, 25,  5, 21, 13, 29,  3, 19, 11, 27,  7, 23, 15, 31};
 // src_a is query, src_b is key
 CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR,
 uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
@@ -1791,19 +1829,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             acc_half.row(reg_m).merge(half{-60000}, n_pos >= N);
         }
     }
-    matrix<half, 32, 64> acc_t;
-    Transpose_32x32(acc_half.select<32, 1, 32, 1>( 0), acc_t.select<32, 1, 32, 1>(0, 0));
-    Transpose_32x32(acc_half.select<32, 1, 32, 1>(32), acc_t.select<32, 1, 32, 1>(0, 32));
-    max_m = acc_t[0];
-#pragma unroll
-    for (uint reg_m = 1; reg_m < 32; reg_m++) {
-        max_m = cm_max<half>(max_m, acc_t[reg_m]);
-    }
-// #pragma unroll
-//     for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-//         // TODO
-//         max_m[reg_m] = cm_reduced_max<half>(acc_half.row(reg_m));
-//     }
+    max_m.select<32, 1>() = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>()).format<half>();
+    max_m.select<32, 1>(32) = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>(32)).format<half>();
 
     {
         uint slm_offset = (id_sg_n * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(half);
@@ -1833,28 +1860,12 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     {
         // kq_exp_partial_sum: [b, hq, M_aligned, N/(BLOCK_SIZE/STRIDE)]
         if (valid_n == BLOCK_SG_N && skip_mask) {
-            matrix<half, 4, 64> sum;
-    #pragma unroll
-            for (uint m = 0; m < BLOCK_SG_N / block_size_div_stride; m++) {
-                sum.row(m) = cm_exp((acc_t.row(m * block_size_div_stride) - max_m) * log2e);
-    #pragma unroll
-                for (uint sub_m = 1; sub_m < block_size_div_stride; sub_m++) {
-                    uint real_m = m * block_size_div_stride + sub_m;
-                    sum.row(m) += cm_exp((acc_t.row(real_m) - max_m) * log2e);
-                }
+#pragma unroll
+            for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
+                acc_half.row(reg_m) = cm_exp((acc_half.row(reg_m) - max_m[reg_m]) * log2e);
             }
-            Transpose_4x32(sum.select<4, 1, 32, 1>(0,  0), sum_t.select<32, 1, 4, 1>());
-            Transpose_4x32(sum.select<4, 1, 32, 1>(0, 32), sum_t.select<32, 1, 4, 1>(32));
-// #pragma unroll
-//             for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-//                 acc_half.row(reg_m) = cm_exp((acc_half.row(reg_m) - max_m[reg_m]) * log2e);
-// #pragma unroll
-//                 for (uint i = 0; i < BLOCK_SG_N / 8; i++) {
-//                     auto data = acc_half.row(reg_m).select<8, 1>(i * 8);
-//                     // TODO
-//                     sum_t[reg_m][i] = cm_sum<half>(data);
-//                 }
-//             }
+            sum_t.select<32, 1, 4, 1>( 0).format<half>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>( 0)).format<half>();
+            sum_t.select<32, 1, 4, 1>(32).format<half>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>(32)).format<half>();
         } else {
 #pragma unroll
             for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {

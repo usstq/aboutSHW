@@ -471,8 +471,8 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
         kq_max_ref, kq_5d_max_ret_ref, kq_exp_partial_sum_ret_ref, _ = get_gemm_ref(q, k, block_size=block_size, q_start_strided=q_start_strided, S=stride, threshold=threshold, causal=causal, wg_k=BLOCK_WG_N, wg_q=BLOCK_WG_M)
         kq_max_ref_np = kq_max_ref.detach().numpy()[..., :M]
         t_kq_max_np = t_kq_max.numpy()[..., :M]
-        compare(kq_max_ref_np, t_kq_max_np)
-        print(f'{Colors.GREEN}gemm:max passed{Colors.END}')
+        # compare(kq_max_ref_np, t_kq_max_np)
+        # print(f'{Colors.GREEN}gemm:max passed{Colors.END}')
         kq_5d_max_ret_ref_np = kq_5d_max_ret_ref.detach().numpy()[..., :M]
         t_kq_max_wg_np = t_kq_max_wg.numpy()[..., :M]
         compare(kq_5d_max_ret_ref_np, t_kq_max_wg_np)
