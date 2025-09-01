@@ -19,7 +19,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     SurfaceIndex query [[type("buffer_t")]],
     SurfaceIndex key [[type("buffer_t")]],
     SurfaceIndex value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -137,11 +137,17 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
-    half* query_key_value [[type("svmptr_t")]],
+    half* query [[type("svmptr_t")]],
+    half* key [[type("svmptr_t")]],
+    half* value [[type("svmptr_t")]],
+    half* k_dscale [[type("svmptr_t")]],
+    half* k_zp [[type("svmptr_t")]],
+    half* v_dscale [[type("svmptr_t")]],
+    half* v_zp [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]
 #else
     SurfaceIndex query_key_value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -152,7 +158,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
-#if USE_LSC != 1
+// #if USE_LSC != 1
     constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
     constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
     constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
@@ -161,7 +167,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
 
     auto slm_K = cm_slm_alloc(K_SLM_SIZE);
     auto slm_V = cm_slm_alloc(V_SLM_SIZE);
-#endif
+// #endif
 
     auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
@@ -184,48 +190,50 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     }
     //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start, q_len, kv_start, kv_seq_len);
 
-    // qkv is fused 
+    // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
         kv_stop = (wg_id + 1) * wg_seq_len;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
 
-    // qkv fused
-    constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    uint q_offset = (q_start*num_total_heads + h)*head_size;
-    uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // [L,H,S]
+    // constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
+    uint q_offset = (q_start*num_heads + h)*head_size;
+    uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
+    uint v_offset = k_offset;
     uint o_offset = (q_start*num_heads + h)*head_size;
-
 #if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
-                                wg_local_id,
-                                q_start, //q_start,
-                                kv_stop,
-                                q_len, //q_len,
-                                kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query_key_value + q_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + k_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + v_offset),
-                                reinterpret_cast<svmptr_t>(output + o_offset));
-#else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(
+     sdpa_kernel_lsc<is_causal, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
                                 local_size,
-                                q_start,
+                                q_start, //q_start,
                                 kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
-                                query_key_value,
-                                query_key_value,
-                                query_key_value,
-                                output,
-                                q_offset * sizeof(half),
-                                k_offset * sizeof(half),
-                                v_offset * sizeof(half),
-                                o_offset * sizeof(half));
+                                reinterpret_cast<svmptr_t>(query + q_offset),
+                                reinterpret_cast<svmptr_t>(key + k_offset),
+                                reinterpret_cast<svmptr_t>(value + v_offset),
+                                reinterpret_cast<svmptr_t>(output + o_offset));
+#else
+    // sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(
+    //                             slm_K,
+    //                             slm_V,
+    //                             wg_local_id,
+    //                             local_size,
+    //                             q_start,
+    //                             kv_stop,
+    //                             q_len, //q_len,
+    //                             kv_seq_len, //kv_len,
+    //                             query_key_value,
+    //                             query_key_value,
+    //                             query_key_value,
+    //                             output,
+    //                             q_offset * sizeof(half),
+    //                             k_offset * sizeof(half),
+    //                             v_offset * sizeof(half),
+    //                             o_offset * sizeof(half));
 #endif
 }
