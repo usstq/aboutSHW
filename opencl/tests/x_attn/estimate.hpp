@@ -109,6 +109,118 @@ CM_INLINE void Transpose_8x32(matrix_ref<T1, 8, 32> in, matrix_ref<T2, 32, 8> ou
     Transpose_8x8(in.template select<8, 1, 8, 1>(0, 24), out.template select<8, 1, 8, 1>(24, 0));
 }
 
+template <typename T1, typename T2>
+CM_INLINE void Transpose_4x32(matrix_ref<T1, 4, 32> in, matrix_ref<T2, 32, 4> out) {
+    matrix<T2, 4, 32> temp;
+    temp.row(0) = in.template select<4, 1, 8, 4>(0, 0);
+    temp.row(1) = in.template select<4, 1, 8, 4>(0, 1);
+    temp.row(2) = in.template select<4, 1, 8, 4>(0, 2);
+    temp.row(3) = in.template select<4, 1, 8, 4>(0, 3);
+
+    out.row( 0) = temp.template select<1, 1, 4, 8>(0, 0);
+    out.row( 1) = temp.template select<1, 1, 4, 8>(1, 0);
+    out.row( 2) = temp.template select<1, 1, 4, 8>(2, 0);
+    out.row( 3) = temp.template select<1, 1, 4, 8>(3, 0);
+    out.row( 4) = temp.template select<1, 1, 4, 8>(0, 1);
+    out.row( 5) = temp.template select<1, 1, 4, 8>(1, 1);
+    out.row( 6) = temp.template select<1, 1, 4, 8>(2, 1);
+    out.row( 7) = temp.template select<1, 1, 4, 8>(3, 1);
+    out.row( 8) = temp.template select<1, 1, 4, 8>(0, 2);
+    out.row( 9) = temp.template select<1, 1, 4, 8>(1, 2);
+    out.row(10) = temp.template select<1, 1, 4, 8>(2, 2);
+    out.row(11) = temp.template select<1, 1, 4, 8>(3, 2);
+    out.row(12) = temp.template select<1, 1, 4, 8>(0, 3);
+    out.row(13) = temp.template select<1, 1, 4, 8>(1, 3);
+    out.row(14) = temp.template select<1, 1, 4, 8>(2, 3);
+    out.row(15) = temp.template select<1, 1, 4, 8>(3, 3);
+    out.row(16) = temp.template select<1, 1, 4, 8>(0, 4);
+    out.row(17) = temp.template select<1, 1, 4, 8>(1, 4);
+    out.row(18) = temp.template select<1, 1, 4, 8>(2, 4);
+    out.row(19) = temp.template select<1, 1, 4, 8>(3, 4);
+    out.row(20) = temp.template select<1, 1, 4, 8>(0, 5);
+    out.row(21) = temp.template select<1, 1, 4, 8>(1, 5);
+    out.row(22) = temp.template select<1, 1, 4, 8>(2, 5);
+    out.row(23) = temp.template select<1, 1, 4, 8>(3, 5);
+    out.row(24) = temp.template select<1, 1, 4, 8>(0, 6);
+    out.row(25) = temp.template select<1, 1, 4, 8>(1, 6);
+    out.row(26) = temp.template select<1, 1, 4, 8>(2, 6);
+    out.row(27) = temp.template select<1, 1, 4, 8>(3, 6);
+    out.row(28) = temp.template select<1, 1, 4, 8>(0, 7);
+    out.row(29) = temp.template select<1, 1, 4, 8>(1, 7);
+    out.row(30) = temp.template select<1, 1, 4, 8>(2, 7);
+    out.row(31) = temp.template select<1, 1, 4, 8>(3, 7);
+}
+
+template <typename T1, typename T2>
+CM_INLINE void Transpose_32x32(matrix_ref<T1, 32, 32> in, matrix_ref<T2, 32, 32> out) {
+    matrix<T2, 32, 32> temp;
+    temp.row( 0) = in.template select<8, 1, 4, 8>( 0, 0);
+    temp.row( 1) = in.template select<8, 1, 4, 8>( 8, 0);
+    temp.row( 2) = in.template select<8, 1, 4, 8>(16, 0);
+    temp.row( 3) = in.template select<8, 1, 4, 8>(24, 0);
+    temp.row( 4) = in.template select<8, 1, 4, 8>( 0, 1);
+    temp.row( 5) = in.template select<8, 1, 4, 8>( 8, 1);
+    temp.row( 6) = in.template select<8, 1, 4, 8>(16, 1);
+    temp.row( 7) = in.template select<8, 1, 4, 8>(24, 1);
+    temp.row( 8) = in.template select<8, 1, 4, 8>( 0, 2);
+    temp.row( 9) = in.template select<8, 1, 4, 8>( 8, 2);
+    temp.row(10) = in.template select<8, 1, 4, 8>(16, 2);
+    temp.row(11) = in.template select<8, 1, 4, 8>(24, 2);
+    temp.row(12) = in.template select<8, 1, 4, 8>( 0, 3);
+    temp.row(13) = in.template select<8, 1, 4, 8>( 8, 3);
+    temp.row(14) = in.template select<8, 1, 4, 8>(16, 3);
+    temp.row(15) = in.template select<8, 1, 4, 8>(24, 3);
+    temp.row(16) = in.template select<8, 1, 4, 8>( 0, 4);
+    temp.row(17) = in.template select<8, 1, 4, 8>( 8, 4);
+    temp.row(18) = in.template select<8, 1, 4, 8>(16, 4);
+    temp.row(19) = in.template select<8, 1, 4, 8>(24, 4);
+    temp.row(20) = in.template select<8, 1, 4, 8>( 0, 5);
+    temp.row(21) = in.template select<8, 1, 4, 8>( 8, 5);
+    temp.row(22) = in.template select<8, 1, 4, 8>(16, 5);
+    temp.row(23) = in.template select<8, 1, 4, 8>(24, 5);
+    temp.row(24) = in.template select<8, 1, 4, 8>( 0, 6);
+    temp.row(25) = in.template select<8, 1, 4, 8>( 8, 6);
+    temp.row(26) = in.template select<8, 1, 4, 8>(16, 6);
+    temp.row(27) = in.template select<8, 1, 4, 8>(24, 6);
+    temp.row(28) = in.template select<8, 1, 4, 8>( 0, 7);
+    temp.row(29) = in.template select<8, 1, 4, 8>( 8, 7);
+    temp.row(30) = in.template select<8, 1, 4, 8>(16, 7);
+    temp.row(31) = in.template select<8, 1, 4, 8>(24, 7);
+
+    out.row( 0) = temp.template select<4, 1, 8, 4>( 0, 0);
+    out.row( 1) = temp.template select<4, 1, 8, 4>( 4, 0);
+    out.row( 2) = temp.template select<4, 1, 8, 4>( 8, 0);
+    out.row( 3) = temp.template select<4, 1, 8, 4>(12, 0);
+    out.row( 4) = temp.template select<4, 1, 8, 4>(16, 0);
+    out.row( 5) = temp.template select<4, 1, 8, 4>(20, 0);
+    out.row( 6) = temp.template select<4, 1, 8, 4>(24, 0);
+    out.row( 7) = temp.template select<4, 1, 8, 4>(28, 0);
+    out.row( 8) = temp.template select<4, 1, 8, 4>( 0, 1);
+    out.row( 9) = temp.template select<4, 1, 8, 4>( 4, 1);
+    out.row(10) = temp.template select<4, 1, 8, 4>( 8, 1);
+    out.row(11) = temp.template select<4, 1, 8, 4>(12, 1);
+    out.row(12) = temp.template select<4, 1, 8, 4>(16, 1);
+    out.row(13) = temp.template select<4, 1, 8, 4>(20, 1);
+    out.row(14) = temp.template select<4, 1, 8, 4>(24, 1);
+    out.row(15) = temp.template select<4, 1, 8, 4>(28, 1);
+    out.row(16) = temp.template select<4, 1, 8, 4>( 0, 2);
+    out.row(17) = temp.template select<4, 1, 8, 4>( 4, 2);
+    out.row(18) = temp.template select<4, 1, 8, 4>( 8, 2);
+    out.row(19) = temp.template select<4, 1, 8, 4>(12, 2);
+    out.row(20) = temp.template select<4, 1, 8, 4>(16, 2);
+    out.row(21) = temp.template select<4, 1, 8, 4>(20, 2);
+    out.row(22) = temp.template select<4, 1, 8, 4>(24, 2);
+    out.row(23) = temp.template select<4, 1, 8, 4>(28, 2);
+    out.row(24) = temp.template select<4, 1, 8, 4>( 0, 3);
+    out.row(25) = temp.template select<4, 1, 8, 4>( 4, 3);
+    out.row(26) = temp.template select<4, 1, 8, 4>( 8, 3);
+    out.row(27) = temp.template select<4, 1, 8, 4>(12, 3);
+    out.row(28) = temp.template select<4, 1, 8, 4>(16, 3);
+    out.row(29) = temp.template select<4, 1, 8, 4>(20, 3);
+    out.row(30) = temp.template select<4, 1, 8, 4>(24, 3);
+    out.row(31) = temp.template select<4, 1, 8, 4>(28, 3);
+}
+
 template <typename T, int N>
 CM_INLINE void read_1d(vector_ref<T, N> out, svmptr_t base) {
     cm_ptr_block_read((T*)base, out);
@@ -1441,6 +1553,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     matrix<int, KEY_LINES_PER_LOAD, 8> b0_up_s8, b0_down_s8, b1_up_s8, b1_down_s8;
     matrix<half, 2, BLOCK_REG_B> b0;                      // --> 16 regs
     matrix<half, 2, KEY_LINES_PER_LOAD * 2> scales, zps;
+    matrix<half, 2, KV_BLOCK_SIZE> scales_block, zps_block;
 #else
     uint offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
     lsc::block_2d_desc<int, 1, KEY_LINES_PER_LOAD, BLOCK_REG_K> desc_b0{ key_cache + offset, KEY_LINES_PER_LOAD - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
@@ -1467,6 +1580,11 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     // load b: N[0:16]xK[0:16]
 #if USE_INT8
+    scales_block[0].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset0);    
+    zps_block[0].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset0 + KV_BLOCK_SIZE * (uint)sizeof(half));
+    scales_block[1].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset1);
+    zps_block[1].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset1 + KV_BLOCK_SIZE * (uint)sizeof(half));
+
     constexpr uint desc_b_step = 8;
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_up_s8.format<int>(), desc_b0);
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_down_s8.format<int>(), desc_b1);
@@ -1514,20 +1632,18 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     for (uint s = 0; s < STRIDE; s++) {
 #if USE_INT8
-        auto tmp = cm_ptr_load<half>((half*)key_cache, scale_offset0 + seq_scales * (uint)sizeof(half));
+        auto tmp = scales_block[0].select<16, 16>(s);
         scales[0].select<16, 2>(0) = tmp;
         scales[0].select<16, 2>(1) = tmp;
-        tmp = cm_ptr_load<half>((half*)key_cache, scale_offset1 + seq_scales * (uint)sizeof(half));
+        tmp = scales_block[1].select<16, 16>(s);
         scales[1].select<16, 2>(0) = tmp;
         scales[1].select<16, 2>(1) = tmp;
-        tmp = cm_ptr_load<half>((half*)key_cache, scale_offset0 + KV_BLOCK_SIZE * (uint)sizeof(half) + seq_scales * (uint)sizeof(half));
+        tmp = zps_block[0].select<16, 16>(s);
         zps[0].select<16, 2>(0) = tmp;
         zps[0].select<16, 2>(1) = tmp;
-        tmp = cm_ptr_load<half>((half*)key_cache, scale_offset1 + KV_BLOCK_SIZE * (uint)sizeof(half) + seq_scales * (uint)sizeof(half));
+        tmp = zps_block[1].select<16, 16>(s);
         zps[1].select<16, 2>(0) = tmp;
         zps[1].select<16, 2>(1) = tmp;
-        scale_offset0 += sizeof(half);
-        scale_offset1 += sizeof(half);
 #endif
         #pragma unroll
         for (uint hs = 0; hs < HEAD_SIZE / BLOCK_WG_K; hs++) {
@@ -1540,6 +1656,9 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             else
                 desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
 
+            // load a: M[0:16*4]xK[0:16]
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
             // load b: N[0:16*2]xK[16:32]
 #if USE_INT8
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1_up_s8.format<int>(), desc_b0);
@@ -1548,9 +1667,6 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.select<2, 1, BLOCK_REG_B, 1>(0).format<int>(), desc_b0);
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1.select<2, 1, BLOCK_REG_B, 1>(2).format<int>(), desc_b1);
 #endif
-            // load a: M[0:16*4]xK[0:16]
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
 
 #if USE_INT8
             dec(b0_up_s8.format<int>().select<64, 1>(), b0_down_s8.format<int>().select<64, 1>(), b0);
@@ -1581,6 +1697,10 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
             desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
 
+            // load a: M[0:16*4]xK[32:48]
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
+            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
+
             // load b: N[0:16*2]xK[32:64]
 #if USE_INT8
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_up_s8.format<int>(), desc_b0);
@@ -1589,10 +1709,6 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.select<2, 1, BLOCK_REG_B, 1>(0).format<int>(), desc_b0);
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0.select<2, 1, BLOCK_REG_B, 1>(2).format<int>(), desc_b1);
 #endif
-
-            // load a: M[0:16*4]xK[32:48]
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
-            cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
 
 #if USE_INT8
             dec(b1_up_s8.format<int>().select<64, 1>(), b1_down_s8.format<int>().select<64, 1>(), b0);
@@ -1646,8 +1762,9 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     int n_end = MYMIN(n_start + BLOCK_SG_N, N);
     int valid_n = n_end - n_start;
     matrix<half, 64, 4> sum_t;
-    vector<int, BLOCK_SG_N> seq;
-    cmtl::cm_vector_assign(seq.select_all(), 0, 1);
+    vector<int, BLOCK_SG_M> seq_m;
+    cmtl::cm_vector_assign(seq_m.select_all(), 0, 1);
+    vector_ref<int, BLOCK_SG_N> seq = seq_m.select<BLOCK_SG_N, 1>();
     vector<uint, BLOCK_SG_N> n_pos = (uint)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) + seq;
 #if IS_CAUSAL == 1
     bool skip_mask = false;
@@ -1674,10 +1791,19 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             acc_half.row(reg_m).merge(half{-60000}, n_pos >= N);
         }
     }
+    matrix<half, 32, 64> acc_t;
+    Transpose_32x32(acc_half.select<32, 1, 32, 1>( 0), acc_t.select<32, 1, 32, 1>(0, 0));
+    Transpose_32x32(acc_half.select<32, 1, 32, 1>(32), acc_t.select<32, 1, 32, 1>(0, 32));
+    max_m = acc_t[0];
 #pragma unroll
-    for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-        max_m[reg_m] = cm_reduced_max<half>(acc_half.row(reg_m));
+    for (uint reg_m = 1; reg_m < 32; reg_m++) {
+        max_m = cm_max<half>(max_m, acc_t[reg_m]);
     }
+// #pragma unroll
+//     for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
+//         // TODO
+//         max_m[reg_m] = cm_reduced_max<half>(acc_half.row(reg_m));
+//     }
 
     {
         uint slm_offset = (id_sg_n * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(half);
@@ -1696,10 +1822,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
         }
         // max across wg
         // kq_max: [b, hq, M_aligned]
-        vector<uint, 32> max_offsets = (id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M + seq) * (uint)sizeof(half);
-        cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_m.select<32, 1>());
-        max_offsets += 32 * (uint)sizeof(half);
-        cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_m.select<32, 1>(32));
+        //auto max_offsets = (id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M + seq_m) * (uint)sizeof(half);
+        //cm_ptr_atomic<AtomicOp::FMAX, half>((half*)kq_max, max_offsets, max_m);
 
         // current max -> mem
         // kq_max_wg: [b, hq, N/BLOCK_WG_N, M_aligned]
@@ -1709,15 +1833,28 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     {
         // kq_exp_partial_sum: [b, hq, M_aligned, N/(BLOCK_SIZE/STRIDE)]
         if (valid_n == BLOCK_SG_N && skip_mask) {
-#pragma unroll
-            for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-                acc_half.row(reg_m) = cm_exp((acc_half.row(reg_m) - max_m[reg_m]) * log2e);
-#pragma unroll
-                for (uint i = 0; i < BLOCK_SG_N / 8; i++) {
-                    auto data = acc_half.row(reg_m).select<8, 1>(i * 8);
-                    sum_t[reg_m][i] = cm_sum<half>(data);
+            matrix<half, 4, 64> sum;
+    #pragma unroll
+            for (uint m = 0; m < BLOCK_SG_N / block_size_div_stride; m++) {
+                sum.row(m) = cm_exp((acc_t.row(m * block_size_div_stride) - max_m) * log2e);
+    #pragma unroll
+                for (uint sub_m = 1; sub_m < block_size_div_stride; sub_m++) {
+                    uint real_m = m * block_size_div_stride + sub_m;
+                    sum.row(m) += cm_exp((acc_t.row(real_m) - max_m) * log2e);
                 }
             }
+            Transpose_4x32(sum.select<4, 1, 32, 1>(0,  0), sum_t.select<32, 1, 4, 1>());
+            Transpose_4x32(sum.select<4, 1, 32, 1>(0, 32), sum_t.select<32, 1, 4, 1>(32));
+// #pragma unroll
+//             for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
+//                 acc_half.row(reg_m) = cm_exp((acc_half.row(reg_m) - max_m[reg_m]) * log2e);
+// #pragma unroll
+//                 for (uint i = 0; i < BLOCK_SG_N / 8; i++) {
+//                     auto data = acc_half.row(reg_m).select<8, 1>(i * 8);
+//                     // TODO
+//                     sum_t[reg_m][i] = cm_sum<half>(data);
+//                 }
+//             }
         } else {
 #pragma unroll
             for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
