@@ -175,6 +175,22 @@ all: 250+
 ```
 The free registers are not enough, only free some registers for i8->f16 then the compilation could pass but this will make decompression cost increased. NA.
 
+## TRY3.2: use q*k' + pin-pong for B matrix(54e0af3a91)
+u8: `101T/s`, `102T/s if remove 'no-schedule'`
+f16: `105T/s`, `104T/s if remove 'no-schedule'`
+### major changes:
+- use q * k'(tile: 64x32) instead of k * q':
+  - prons:
+    - pin-pong can be better to hide latency of loading B
+    - decoding B and load A can be parallel
+    - save regs comparing to TRY3.1
+  - cons:
+    - need transpose or reduce to compute softmax+sum, both are inefficent
+- ues block load for scale and zp, scatter load will cost more
+- remove atomic to get max
+### headroom for next:
+hardware roofline: `2.9G*20eu*8*32*4*2=118T/s`, current hits about 85%/89%, the headroom is small. Current hotsopt should be `reduce2d` in softmax stage which may get `108T/s` if remove them. But, there is no good way to optimize them now.
+
 ## perf tools
 ### intel-gpu-tools
 - record: `xe-perf-recorder --metric ComputeBasic`
