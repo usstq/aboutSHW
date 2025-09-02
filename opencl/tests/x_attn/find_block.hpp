@@ -24,12 +24,14 @@
 #include <cm/cmtl.h>
 
 
-// kq_max:             [b, hq, q_stride_pad]
-// kq_max_wg:          [b, hq, m_groups, q_stride_pad]
+// kq_max_wg:          [b, hq, n_groups, q_stride_pad]
 // kq_exp_partial_sum: [b, hq, q_stride_pad, k_block_pad]
 // kq_sum:             [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
-CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, svmptr_t kq_exp_partial_sum, svmptr_t kq_sum, svmptr_t block_mask, uint q_stride, uint q_stride_pad, uint k_block_pad, float thresh,
-    uint causal_start_index) {
+CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max_wg, svmptr_t kq_exp_partial_sum, svmptr_t block_mask, uint q_stride, uint q_stride_pad, uint k_block_pad, float thresh, uint causal_start_index
+#if DEBUG_ACC == 1
+    , svmptr_t kq_sum
+#endif
+) {
     constexpr int SG_SIZE = 16;
 #ifndef BLOCK_SG_M
     #define BLOCK_SG_M  64
@@ -46,19 +48,30 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, 
     const int TOKEN_IN_BLOCK = (BLOCK_SIZE / STRIDE);
     int m = m_block * TOKEN_IN_BLOCK;
     vector<half, TOKEN_IN_BLOCK> max_m;
-    max_m.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)kq_max, m * (int)sizeof(half));
+
     const int TOKEN_SHARE_MAX = BLOCK_SHARE_MAX / TOKEN_IN_BLOCK;
     kq_exp_partial_sum += m * k_block_pad * (int)sizeof(half);
     kq_max_wg += m * (int)sizeof(half);
     constexpr half log2e = 1.4426950408889634f;
-    lsc::block_2d_desc<half, 1, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> desc_sum{ kq_exp_partial_sum, TOKEN_IN_BLOCK - 1, (uint)(k_block_pad * sizeof(half) - 1), (uint)(k_block_pad * sizeof(half) - 1),
-        0, 0 };
     matrix<float, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> sum_m = 0;
     matrix<half, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> data;
     int m_start = MYMIN(m, q_stride);
     int m_end = MYMIN(m_start + TOKEN_SHARE_MAX, q_stride);
     int valid_m = m_end - m_start;
+    lsc::block_2d_desc<half, 1, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> desc_sum{ kq_exp_partial_sum, (uint)valid_m - 1, (uint)(k_block_pad * sizeof(half) - 1), (uint)(k_block_pad * sizeof(half) - 1),
+        0, 0 };
+    {
+        // find max: (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad
+        max_m = half{-60000};
+
+        for (int idx = 0; idx < k_block_pad / TOKEN_SHARE_MAX; idx++) {
+            vector<half, TOKEN_IN_BLOCK> max_m_in_group;
+            max_m_in_group.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)kq_max_wg, q_stride_pad * idx * (int)sizeof(half));
+            max_m = cm_max<half>(max_m, max_m_in_group);
+        }
+    }
     // compensation: val*exp(local - global)
+    desc_sum.set_block_x(0);
     for (int j = 0, idx = 0; j < k_block_pad; j += TOKEN_SHARE_MAX, idx++) {
         vector<half, TOKEN_IN_BLOCK> max_m_in_group;
         max_m_in_group.format<int>() = cm_ptr_load<int, TOKEN_IN_BLOCK / 2>((int*)kq_max_wg, q_stride_pad * idx * (int)sizeof(half));
@@ -84,7 +97,9 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max, svmptr_t kq_max_wg, 
     // compensation: sum(val*inv_sum_v)
     vector<float, TOKEN_SHARE_MAX> sum_m_after_add = 0;
     desc_sum.set_block_x(0);
+#if DEBUG_ACC == 1
     kq_sum += m_block * k_block_pad * (int)sizeof(half);
+#endif
     for (int j = 0; j < k_block_pad; j += TOKEN_SHARE_MAX) {
         cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached>(data.format<half>(), desc_sum);
         data.row(0) *= inv_sum_v[0];

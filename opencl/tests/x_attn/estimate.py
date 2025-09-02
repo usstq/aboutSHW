@@ -257,14 +257,14 @@ CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no
     }
 }
 
-_GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, 
+_GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, 
     uint M, uint N, uint K, uint query_stride, int slice_no, int slice, uint q_start_strided) {
     const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
     const uint size_slm_b = 0;
     uint hq = cm_group_id(2);
     uint hk = hq / (HQ / HK);
-    const uint slm_size = SG_M * BLOCK_WG_N * sizeof(half);
+    const uint slm_size = SG_N * BLOCK_WG_M * sizeof(half);
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
@@ -273,31 +273,39 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     uint id_wg_m, id_wg_n;
     get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
 
-    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE]
-    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
+    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE_KEY]
+#if USE_INT8
+    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
+#else
+    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(half));
+#endif
     // query: [l_q, HQ * HEAD_SIZE]
     query += hq * HEAD_SIZE * (uint)sizeof(half);
 
-    // kq_max: [hq, n_pad]
-    // kq_max_wg: [hq, m_groups, n_pad]
-    // kq_exp_partial_sum: [hq, n_pad, m_groups*BLOCK_WG_M/(BLOCK_SIZE/STRIDE)]
-    uint n_pad = (N + BLOCK_WG_N - 1) / BLOCK_WG_N * BLOCK_WG_N;
-    kq_max += hq * n_pad * (uint)sizeof(half);
-    uint m_groups = (M + BLOCK_WG_M - 1) / BLOCK_WG_M;
-    kq_max_wg += hq * m_groups * n_pad * (uint)sizeof(half);
+    // kq_max: [hq, m_pad]
+    // kq_max_wg: [hq, n_groups, m_pad]
+    // kq_exp_partial_sum: [hq, m_pad, n_groups*BLOCK_WG_M/(BLOCK_SIZE/STRIDE)]
+    uint m_pad = (M + BLOCK_WG_M - 1) / BLOCK_WG_M * BLOCK_WG_M;
+    uint n_groups = (N + BLOCK_WG_N - 1) / BLOCK_WG_N;
+    kq_max_wg += hq * n_groups * m_pad * (uint)sizeof(half);
 
     const uint sum_per_n_token_in_block = BLOCK_SIZE / STRIDE;
-    const uint m_after_sum_in_group = BLOCK_WG_M / sum_per_n_token_in_block;
-    const uint m_after_sum_pad = m_after_sum_in_group * m_groups;
-    kq_exp_partial_sum += hq * m_after_sum_pad * n_pad * (uint)sizeof(half);
+    const uint n_after_sum_in_group = BLOCK_WG_N / sum_per_n_token_in_block;
+    const uint n_after_sum_pad = n_after_sum_in_group * n_groups;
+    kq_exp_partial_sum += hq * n_after_sum_pad * m_pad * (uint)sizeof(half);
 
-    gemm_kq_8x2_xe2(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
+#define CONCAT_IMPL(a, b) gemm_qk_ ##a ##x ##b ##_xe2
+#define CONCAT(x, y) CONCAT_IMPL(x, y)
+#define FUNC CONCAT(BLOCK_SG_M, BLOCK_SG_N)
+    FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
 }
 
-_GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t kq_sum ATTR, svmptr_t block_mask ATTR, uint q_stride, uint q_stride_pad, uint k_block_pad,
-    float thresh, uint causal_start_index) {
-    // kq_max:             [b, hq, q_stride_pad]
-    // kq_max_wg:          [b, hq, m_groups, q_stride_pad]
+_GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t block_mask ATTR, uint q_stride, uint q_stride_pad, uint k_block_pad, float thresh, uint causal_start_index
+#if DEBUG_ACC == 1
+    , svmptr_t kq_sum ATTR
+#endif
+) {
+    // kq_max_wg:          [b, hq, n_groups, q_stride_pad]
     // kq_exp_partial_sum: [b, hq, q_stride_pad, k_block_pad]
     // kq_sum:             [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
     // block_mask:         [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
@@ -308,17 +316,22 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max ATTR, svmptr_t kq_max_wg ATTR, svmpt
     uint m = cm_group_id(0);
     uint hq = cm_group_id(1);
     uint b = cm_group_id(2);
-    kq_max += (b * HQ + hq) * q_stride_pad * (uint)sizeof(half);
     kq_max_wg += (b * HQ + hq) * (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad * (uint)sizeof(half);
     kq_exp_partial_sum += (b * HQ + hq) * q_stride_pad * k_block_pad * (uint)sizeof(half);
+#if DEBUG_ACC == 1
     kq_sum += (b * HQ + hq) * q_stride_pad / TOKEN_IN_BLOCK * k_block_pad * (uint)sizeof(half);
+#endif
     block_mask += (b * HQ + hq) * q_stride_pad / TOKEN_IN_BLOCK * k_block_pad;
 
     const uint slm_size = 32 * 16 * sizeof(ushort);
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
-    find(slm, m, kq_max, kq_max_wg, kq_exp_partial_sum, kq_sum, block_mask, q_stride, q_stride_pad, k_block_pad, thresh, causal_start_index);
+    find(slm, m, kq_max_wg, kq_exp_partial_sum, block_mask, q_stride, q_stride_pad, k_block_pad, thresh, causal_start_index
+#if DEBUG_ACC == 1
+    , kq_sum
+#endif
+    );
 }
 
 ''')
@@ -340,14 +353,52 @@ STRIDE = 16
 BLOCK_SIZE = 128
 THRESH = 0.9
 IS_CAUSAL = 1
+USE_INT8 = 1
+if USE_INT8:
+    HEAD_SIZE_KEY = HEAD_SIZE + 2 * 2
+else:
+    HEAD_SIZE_KEY = HEAD_SIZE
 
 FIND_DEBUG_ACC = 0 # only acc test needed
 
 jit_option = '-abortonspill -noschedule '
 kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                     -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                    -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_M} -DUSE_KQ=1
-                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL}''')
+                    -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DUSE_KQ=1
+                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY}''')
+
+def quant_i8(k:torch.Tensor):
+    B, Hk, Lk, S = k.shape
+    k_pad = torch.zeros([B, Hk, rnd_up(Lk, KV_BLOCK_SIZE), HEAD_SIZE], dtype=k.dtype)
+    k_pad[:, :, :Lk,:] = k
+
+    B, Hk, Lk, S = k_pad.shape
+    k_i8 = torch.zeros([B, Hk, Lk, HEAD_SIZE_KEY], dtype=torch.uint8)
+    k_i8_4d = k_i8.reshape([B, Hk, -1, KV_BLOCK_SIZE * HEAD_SIZE_KEY])
+    if 0:
+        max = torch.max(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
+        min = torch.min(k_pad, dim=-1, keepdim=True)[0].to(torch.float32)
+        diff_value = torch.masked_fill(max - min, max == min, 0.001)
+        scale = 255/ diff_value
+        zp = -min * scale
+        quanted = k_pad * scale + zp
+        quanted = quanted.clamp(0, 255)
+        scale = 1.0 / scale
+    else:
+        scale = torch.randint(-1, 3, [B, Hk, Lk, 1], dtype=torch.float16)
+        zp = torch.randint(0, 3, [B, Hk, Lk, 1], dtype=torch.float16)
+        quanted = torch.randint(0, 3, [B, Hk, Lk, S], dtype=torch.float16)
+        k_pad = (quanted - zp) * scale
+        k = k_pad[:, :, :k.shape[2], :]
+        k_pad[:,:,k.shape[2]:,:] = 0
+    # weights
+    k_i8_4d[:, :, :, :KV_BLOCK_SIZE * HEAD_SIZE] = torch.reshape(quanted, [B, Hk, Lk // KV_BLOCK_SIZE, -1])
+    # scale
+    k_i8_4d[:, :, :, KV_BLOCK_SIZE * HEAD_SIZE : (KV_BLOCK_SIZE * (HEAD_SIZE + 2))] = (scale).to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.uint8)
+    # zp
+    k_i8_4d[:, :, :, (KV_BLOCK_SIZE * (HEAD_SIZE + 2)) : ] = zp.to(torch.float16).reshape([B, Hk, Lk // KV_BLOCK_SIZE, -1]).view(dtype=torch.int8)
+
+    return k_i8, k
 
 # q: [B, Hq, L_q, S]
 # k: [B, Hk, L_k, S]
@@ -358,8 +409,6 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     M = Lq // stride                  # will slient drop the tails which is less than `stride`
     N = Lk // stride
     K = stride * S
-    M_kq = N
-    N_kq = M
 
     k = k[:,:,:Lk,:]                  # will slient drop the tails which is less than `stride`
 
@@ -376,9 +425,13 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     t_block_indices_begins = cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
     # t_subsequence_begins = cl.tensor(subsequence_begins.to(torch.int32).detach().numpy()) # N_kq has already been calculated
 
-    k_pad = torch.zeros([B, Hk, (Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE * KV_BLOCK_SIZE, HEAD_SIZE], dtype=k.dtype)
-    k_pad[:, :, :Lk,:] = k
-    key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(0, 2, 1, 3, 4)
+    if USE_INT8:
+        k_pad, k = quant_i8(k)
+        key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE_KEY]).permute(0, 2, 1, 3, 4)
+    else:
+        k_pad = torch.zeros([B, Hk, (Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE * KV_BLOCK_SIZE, HEAD_SIZE], dtype=k.dtype)
+        k_pad[:, :, :Lk,:] = k
+        key_cache = k_pad.reshape([B, Hk, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(0, 2, 1, 3, 4)
     key_cache = key_cache[:,perm_idx,:,:,:].contiguous()
     t_key_cache = cl.tensor(key_cache.detach().numpy())
 
@@ -389,80 +442,53 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     q_3d_with_padding[:, :, : Hq * S] = q_3d
     t_query = cl.tensor(q_3d_with_padding.detach().numpy())
 
-    # [1, 32, 256]
-    q_stride_pad = (N_kq + BLOCK_WG_N - 1) // BLOCK_WG_N * BLOCK_WG_N
-    max_init = np.ones([B, Hq, q_stride_pad], np.float16) * -60000.0
-    t_kq_max = cl.tensor(max_init)  # [b, hq, M], init must be -inf
+    q_stride_pad = rnd_up(M, BLOCK_WG_M)
     # [1, 32, 64, 256]
-    M_kq_groups = (M_kq + BLOCK_WG_M - 1) // BLOCK_WG_M
-    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, M_kq_groups, q_stride_pad], np.float16))
+    N_kq_groups = div_up(N, BLOCK_WG_N)
+    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, N_kq_groups, q_stride_pad], np.float16))
     # [1, 32, 256, 64 * 16]
     sum_per_token_in_block = block_size // stride
-    M_kq_after_sum_in_group = BLOCK_WG_M // sum_per_token_in_block
-    k_block_pad = M_kq_after_sum_in_group * M_kq_groups
+    k_block_in_group = BLOCK_WG_N // sum_per_token_in_block
+    k_block_pad = k_block_in_group * N_kq_groups
     t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, q_stride_pad, k_block_pad], np.float16))
 
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
-    slice = N_kq < M_kq
-    if 1:
-        block_m = M_kq // BLOCK_WG_M
-        block_n = N_kq // BLOCK_WG_N
-        bias = BLOCK_WG_M / BLOCK_WG_N
-        devinfo = cl.dev_info()
-        eu_xecore = 8
-        xecores = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"] // eu_xecore
-        sm = math.sqrt(xecores * 2 / bias)
-        sn = math.sqrt(xecores * 2 * bias)
-        if 1 or N < M:
-            s0 = math.ceil(sn)
-            if block_n % s0 == 0:
-                slice = -s0
-                slice_no = block_n // slice
-            else:
-                if s0 * 1.5 < block_n:
-                    rem = block_n % s0
-                    expect_slice_no = (block_n + s0 - 1) // s0 - (s0 - rem)
-                    if expect_slice_no > 0:
-                        assert expect_slice_no >= 0, f'{block_n=} {expect_slice_no=} {s0=}'
-                        slice = -s0
-                        slice_no = -expect_slice_no
-        else:
-            # TODO: big weight matrix?
-            pass
+    block_m = M // BLOCK_WG_M
+    block_n = N // BLOCK_WG_N
+    devinfo = cl.dev_info()
+    eu_xecore = 8
+    xecores = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"] // eu_xecore
     slice_no = 0
-    slice = 1
+    slice = 0
     print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
 
     # gemm
     for i in range(1):
-        kernels.enqueue(kernel_name, [M_kq_groups * (q_stride_pad // BLOCK_WG_N) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice, q_start_strided)
+        kernels.enqueue(kernel_name, [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
     cl.finish()
 
-    # [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
-    kq_max_ref, kq_5d_max_ret_ref, kq_exp_partial_sum_ret_ref, _ = get_gemm_ref(q, k, block_size=block_size, q_start_strided=q_start_strided, S=stride, threshold=threshold, causal=causal, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N)
-    kq_max_ref_np = kq_max_ref.detach().numpy()[..., :N_kq]
-    t_kq_max_np = t_kq_max.numpy()[..., :N_kq]
-    compare(kq_max_ref_np, t_kq_max_np)
-    print(f'{Colors.GREEN}gemm:max passed{Colors.END}')
-    kq_5d_max_ret_ref_np = kq_5d_max_ret_ref.detach().numpy()[..., :N_kq]
-    t_kq_max_wg_np = t_kq_max_wg.numpy()[..., :N_kq]
-    compare(kq_5d_max_ret_ref_np, t_kq_max_wg_np)
-    print(f'{Colors.GREEN}gemm:max_wg passed{Colors.END}')
-    kq_exp_partial_sum_ret_ref_np = kq_exp_partial_sum_ret_ref.detach().numpy()[:,:,:N_kq,:]
-    t_kq_exp_partial_sum_np = t_kq_exp_partial_sum.numpy()[:,:,:N_kq,:]
-    compare(kq_exp_partial_sum_ret_ref_np, t_kq_exp_partial_sum_np)
-    print(f'{Colors.GREEN}gemm:exp_partial passed{Colors.END}')
-    if perf:
+    if not perf:
+        # [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
+        kq_max_ref, kq_5d_max_ret_ref, kq_exp_partial_sum_ret_ref, _ = get_gemm_ref(q, k, block_size=block_size, q_start_strided=q_start_strided, S=stride, threshold=threshold, causal=causal, wg_k=BLOCK_WG_N, wg_q=BLOCK_WG_M)
+        kq_5d_max_ret_ref_np = kq_5d_max_ret_ref.detach().numpy()[..., :M]
+        t_kq_max_wg_np = t_kq_max_wg.numpy()[..., :M]
+        compare(kq_5d_max_ret_ref_np, t_kq_max_wg_np)
+        print(f'{Colors.GREEN}gemm:max_wg passed{Colors.END}')
+        kq_exp_partial_sum_ret_ref_np = kq_exp_partial_sum_ret_ref.detach().numpy()[:,:,:M,:]
+        t_kq_exp_partial_sum_np = t_kq_exp_partial_sum.numpy()[:,:,:M,:]
+        compare(kq_exp_partial_sum_ret_ref_np, t_kq_exp_partial_sum_np)
+        print(f'{Colors.GREEN}gemm:exp_partial passed{Colors.END}')
+    else:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
-            kernels.enqueue(kernel_name, [M_kq // BLOCK_WG_M * q_stride_pad // BLOCK_WG_N * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, M_kq, N_kq, K, K * HQ * 2, slice_no, slice, q_start_strided)
+            kernels.enqueue(kernel_name, [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
 
-    return t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum
+    return t_kq_max_wg, t_kq_exp_partial_sum
 
 
 # q_stride = q_len // stride
@@ -472,7 +498,6 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     assert wg_k % block_size == 0, "wg_k should be multiple of block_size then there is no tails from block_size"
     assert wg_q % block_size == 0, "wg_q should be multiple of block_size then there is no tails from block_size"
     qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, wg_q, valid_q=q_stride)
-    t_kq_max = cl.tensor(qk_max.detach().numpy())
     t_kq_max_wg = cl.tensor(kq_5d_max.detach().numpy())
     t_kq_exp_partial_sum = cl.tensor(qk_exp_partial_sum.detach().numpy())
 
@@ -490,10 +515,12 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     # [1, 32, 32, 64 * 16]
     t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.float16))
     t_mask = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8))
+    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH, k_block-q_block]
+    if FIND_DEBUG_ACC:
+        params += [t_kq_sum]
     # find
     for i in range(1):
-        kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH,
-                        k_block-q_block)
+        kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], *params)
     cl.finish()
     if FIND_DEBUG_ACC == 1:
         compare(qk_sum.detach().numpy(), t_kq_sum.numpy())
@@ -553,8 +580,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
 
     if perf:
         for i in range(0, 100):
-            kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], t_kq_max, t_kq_max_wg, t_kq_exp_partial_sum, t_kq_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH,
-                            k_block-q_block)
+            kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], *params)
         ns = cl.finish()
         for i, time_opt in enumerate(ns):
             print(f'(FIND)TPUT_{i}: {time_opt*1e-3:,.0f} us')
@@ -590,13 +616,16 @@ def test_func():
         assert q_len // STRIDE >= 1, "there should be at least 1 row for gemm"
         print(f'{Colors.BLUE}test gemm("{prompt}") query: [{q_len}, {dim}*{stride}] key:[{k_len}, {dim}*{stride}]...{Colors.END}')
 
-        q = torch.randint(-2, 3, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
-        k = torch.randint(-2, 3, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        q = torch.randint(-2, 4, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        k = torch.randint(-2, 4, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
-        q_start_strided = k_len // stride - q_len // stride
-        assert q_start_strided >= 0, "length of key cache must be greater or equal than query"
-        test_gemm(q, k, block_size=block_size, q_start_strided=q_start_strided, threshold=THRESH, stride=stride, causal=True, perf=False)
-        test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=False, causal=True)
+        if IS_CAUSAL:
+            q_start_strided = k_len // stride - q_len // stride
+            assert q_start_strided >= 0, "length of key cache must be greater or equal than query"
+        else:
+            q_start_strided = 0
+        test_gemm(q, k, block_size=block_size, q_start_strided=q_start_strided, threshold=THRESH, stride=stride, causal=IS_CAUSAL, perf=False)
+        test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=False, causal=IS_CAUSAL)
 
 def test_perf():
     # 106 T/s:
@@ -624,11 +653,11 @@ def test_perf():
 
     assert (q_len // stride) >= 128 and (k_len // stride) >= 128, "minimum block size should be 128*128"
 
-    q = torch.randint(-2, 3, size=[bsz, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
-    k = torch.randint(-2, 3, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+    q = torch.randint(-2, 4, size=[bsz, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+    k = torch.randint(-2, 4, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
-    test_gemm(q, k, block_size=block_size, q_start_strided=k_len // stride - q_len // stride, threshold=THRESH, stride=stride, causal=True)
-    test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=True)
+    test_gemm(q, k, block_size=block_size, q_start_strided=k_len // stride - q_len // stride, threshold=THRESH, stride=stride, causal=IS_CAUSAL)
+    test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=IS_CAUSAL)
 
 
 def main():
