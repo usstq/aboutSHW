@@ -138,8 +138,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
     half* query [[type("svmptr_t")]],
-    int8_t* key [[type("svmptr_t")]],
-    int8_t* value [[type("svmptr_t")]],
+    uint8_t* key [[type("svmptr_t")]],
+    uint8_t* value [[type("svmptr_t")]],
     half* k_dscale [[type("svmptr_t")]],
     half* k_zp [[type("svmptr_t")]],
     half* v_dscale [[type("svmptr_t")]],

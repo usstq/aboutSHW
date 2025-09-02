@@ -26,13 +26,13 @@ def quan_per_token(kv):
         kv_min = kv.amin(dim=-1, keepdim = True)
         qrange = kv_max - kv_min
 
-        INTMAX = 127.0
-        INTMIN = -128.0
+        INTMAX = 0
+        INTMIN = 255
         INTRAGNE = INTMAX - INTMIN
         kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
         kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
 
-        kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.int8)
+        kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8)
         # print("################################################################################")
         # print(kv)
         # print(f'kv_INT8\n:{kv_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
@@ -76,8 +76,8 @@ class flash_attn_cm:
         # t_k = cl.tensor(k.to(torch.float16).detach().numpy())
         # t_v = cl.tensor(v.to(torch.float16).detach().numpy())
 
-        t_k = cl.tensor(k_INT8.to(torch.int8).detach().numpy())
-        t_v = cl.tensor(v_INT8.to(torch.int8).detach().numpy())
+        t_k = cl.tensor(k_INT8.to(torch.uint8).detach().numpy())
+        t_v = cl.tensor(v_INT8.to(torch.uint8).detach().numpy())
 
         t_k_dscale = cl.tensor(k_dscale.to(torch.float16).detach().numpy())
         t_k_zp = cl.tensor(k_zp.to(torch.float16).detach().numpy())
