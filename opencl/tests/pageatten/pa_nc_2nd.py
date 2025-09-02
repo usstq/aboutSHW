@@ -12,9 +12,9 @@ parser = argparse.ArgumentParser('')
 parser.add_argument('-i', "--impl", type=int, default=0)
 parser.add_argument('-b', "--batch", type=int, default=1)
 parser.add_argument('-nh', "--num-heads", type=int, default=28)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=7)
+parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=4)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
-parser.add_argument('-kvl', "--kv-len", type=int, default=16384)
+parser.add_argument('-kvl', "--kv-len", type=int, default=32767)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
@@ -41,6 +41,7 @@ kv_block_size = 16
 k_partition_block_num = kv_len//8192
 if k_partition_block_num < 1:
     k_partition_block_num = 1
+k_partition_block_num = 16
 kv_partition_size = kv_block_size * k_partition_block_num
 print("k_partition_block_num:", k_partition_block_num)
 
@@ -56,8 +57,10 @@ else:
 # split_subblock_num = kv_partition_size // kv_step
 
 # reduce step size
-reduce_split_step = 16
-kv_partition_num = kv_len // kv_partition_size
+reduce_split_step = 8
+
+new_kv_len = (kv_len + kv_block_size - 1) // kv_block_size * kv_block_size
+kv_partition_num = (new_kv_len + kv_partition_size - 1) // kv_partition_size
 total_partition_num = kv_partition_num * num_heads
 # lse_num = batch * kv_partition_num
 
@@ -71,6 +74,11 @@ act_dtype = torch.float16
 q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
 k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+
+# # test code
+# q = torch.arange(0, q_len* num_heads * head_size, dtype=act_dtype).reshape(batch, q_len, num_heads, head_size)/10000.0
+# k = torch.arange(0, kv_len* num_kv_heads * head_size, dtype=act_dtype).reshape(batch, kv_len, num_kv_heads, head_size)/10000.0
+# v = torch.arange(0, kv_len* num_kv_heads * head_size, dtype=act_dtype).reshape(batch, kv_len, num_kv_heads, head_size)/10000.0
 
 # print("v.shape:", v.shape, v.dtype)
 # for i in range(batch):
@@ -88,7 +96,7 @@ att = torch.from_numpy(attention_mask.numpy())
 
 # support single sequence
 seq_num = 1
-total_blk_num = kv_len//kv_block_size
+total_blk_num = new_kv_len//kv_block_size
 
 past_lens=torch.tensor([kv_len-1]).to(torch.int32)
 
@@ -136,8 +144,8 @@ org = get_org(q,k,v,attention_mask)
 
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
-    #print("input = ", input)
-    #print("other = ", other)
+    #print("ref = ", input)
+    #print("res = ", other)
     rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
     atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
     print(f"[check_close] rtol_max: {rtol_max}")
@@ -146,8 +154,8 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
         print(f"Not close indices: {not_close_indices}")
-        print(f"    input_tensor: {input[not_close_indices]}")
-        print(f"    other_tensor: {other[not_close_indices]}")
+        print(f"    ref_tensor: {input[not_close_indices]}")
+        print(f"    res_tensor: {other[not_close_indices]}")
         assert 0
 
 check_close(ref, org, atol=1e-3, rtol=1e-2)
@@ -487,15 +495,15 @@ def get_flash3(query, key, value, attention_mask):
                 lse[i//kv_partition_size] = cur_lse
                 cur_O[i//kv_partition_size,:,:] = cur_O[i//kv_partition_size,:,:] / cur_sum
                 vprint("cur_sum=", cur_sum.shape)
-                vprint("cur_O=",  cur_O[i//kv_partition_size,:,:])
+                vprint("Omat=",  cur_O[i//kv_partition_size,:,:])
 
             # reduce
             # for i in range(0, kv_len//kv_partition_size, 1):
             #     for j in range(0, hs, kv_step):
             #         stop = min(j + kv_step, hs)
             #         print("i=", i, ", j = ", j, ": cur_O[i,:,:]=", cur_O[i,0,j:stop])
-            # print("lse=", lse)
-            # print("lse=", lse.shape) # [4]
+            vprint("lse=", torch.log(lse))
+            vprint("lse=", lse.shape) # [4]
             sum_lse = lse.sum(0)
             # print("cur_O=", cur_O.shape) # 
             # print("cur_O_f32=", cur_O_f32.shape) #
@@ -510,6 +518,32 @@ def get_flash3(query, key, value, attention_mask):
     #print("out = ", out[0,0,0,:])
     #print("out = ", out)
     return out
+
+
+# transpose back to orginal shape: [batch, q_len, num_heads, head_size] for padding
+q = q.transpose(1,2)
+k = k.transpose(1,2)
+v = v.transpose(1,2)
+
+if kv_len % kv_block_size != 0:
+    # pad k,v to multiple of kv_block_size
+    pad_len = ((kv_len + kv_block_size - 1)//kv_block_size)*kv_block_size - kv_len
+    k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+    v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+    attention_mask = F.pad(attention_mask, (0,pad_len,0,0), "constant", torch.finfo(act_dtype).min)
+    print(f"pad k,v from {kv_len} to {k.shape[1]}")
+    new_kv_len = k.shape[1]
+    total_blk_num = new_kv_len//kv_block_size
+    assert(new_kv_len % kv_block_size == 0)
+
+print("k.shape:", k.shape, k.dtype)
+print("v.shape:", v.shape, v.dtype)
+print("new_kv_len = ",new_kv_len)
+
+# transpose shape: [batch, num_heads, q_len, head_size] for get_flash3
+q = q.transpose(1,2)
+k = k.transpose(1,2)
+v = v.transpose(1,2)
 
 if args.impl == 0:
     f0 = get_flash3(q,k,v,attention_mask)
@@ -540,11 +574,23 @@ print("v:", v.shape, v.dtype)
 
 #print("original k:", k)
 
+# if kv_len % kv_block_size != 0:
+#     # pad k,v to multiple of kv_block_size
+#     pad_len = ((kv_len + kv_block_size - 1)//kv_block_size)*kv_block_size - kv_len
+#     k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+#     v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+#     attention_mask = F.pad(attention_mask, (0,pad_len,0,0), "constant", torch.finfo(act_dtype).min)
+#     print(f"pad k,v from {kv_len} to {k.shape[1]}")
+#     new_kv_len = k.shape[1]
+#     total_blk_num = new_kv_len//kv_block_size
+#     assert(new_kv_len % kv_block_size == 0)
+
 # change from [batch, kv_len, num_kv_heads, head_size] to [batch * num_kv_heads / kv_block_size, num_kv_heads, head_size, kv_block_size]
 k = k.reshape(total_blk_num, kv_block_size, num_kv_heads, head_size).transpose(1,2).contiguous()
 v = v.reshape(total_blk_num, kv_block_size, num_kv_heads, head_size).transpose(1,2).contiguous()
 
-#print("reshape k:", k)
+print("reshape k:", k.shape)
+# print("k[8,1,:,:]=", k[8,1,:,:])
 
 blocked_k = k.clone()
 blocked_v = v.clone()
@@ -583,7 +629,7 @@ ugemm_pv: [q_step, kv_step] x [kv_step, head_size]
 scale_factor = 1.0/(head_size**0.5)
 
 # each WG processes a partition
-GWS=[seq_num, num_heads, kv_len // kv_partition_size] 
+GWS=[seq_num, num_heads, (new_kv_len + kv_partition_size - 1) // kv_partition_size]
 WG_SIZE = 1;#max(kv_len // kv_partition_size//2, 1)
 LWS=[1, 1, WG_SIZE]
 
@@ -730,7 +776,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     int* block_indices [[type("svmptr_t")]],
     int* block_indices_begins [[type("svmptr_t")]],
     int* subsequence_begins [[type("svmptr_t")]],
-    half* output [[type("svmptr_t")]],
+    float* output [[type("svmptr_t")]],
     half* mask [[type("svmptr_t")]],
     float* lse [[type("svmptr_t")]],
     int* gws_subseq_mapping [[type("svmptr_t")]],
@@ -768,10 +814,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     const uint start_block_idx = block_indices_begins[subsequence_idx] + partition_idx * (KV_PARTITION_SIZE / KV_BLOCK_SIZE);
 
     if(partition_idx * KV_PARTITION_SIZE > kv_len) {
+        // printf("WG exit: partition_idx=%d, KV_PARTITION_SIZE=%d, kv_len=%d\n", partition_idx, KV_PARTITION_SIZE, kv_len);
         return;
     }
     const uint total_blocks_num = (kv_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
-    
+
     //#TODO: int8 compression data
     uint kv_pitch = HEAD_SIZE * sizeof(half);
     //# fp16 data
@@ -792,11 +839,14 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     const uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(half)); // 4: scale/zp
     uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
 
+    uint leftover_aligned_size = 0;
     uint leftover_size = 0;
+    if(partition_idx == kv_partition_num - 1) {
+        leftover_size = (kv_len - KV_PARTITION_SIZE * partition_idx) % KV_PARTITION_SIZE;
+        leftover_aligned_size = KV_STEP * ((leftover_size + KV_STEP - 1) / KV_STEP); // round up to KV_STEP
+    }
     if(block_num > total_blocks_num - start_block_idx) {
         block_num = total_blocks_num - start_block_idx;
-        leftover_size = kv_len - KV_PARTITION_SIZE * partition_idx;
-        leftover_size = KV_STEP * ((leftover_size + KV_STEP - 1) / KV_STEP); // round up to KV_STEP
     }
 
     //# rS = Q @ Kt
@@ -827,9 +877,15 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     #endif
 
         uint kv_pos_end = KV_BLOCK_SIZE;
-        if(block_idx == block_num - 1 && leftover_size > 0) {
+        if(block_idx == block_num - 1 && leftover_aligned_size > 0) {
+            kv_pos_end = leftover_aligned_size;
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
         }
+
+        //if(partition_idx==1 && head_num_idx == 27) {
+        //    printf("block_idx=%d, blk_indices=%d, kv_base_offset=%d, kv_scale_zp_offset=%d, kv_pos_end=%d, leftover_size=%d, leftover_aligned_size=%d\n",
+        //           block_idx, blk_indices, kv_base_offset, kv_scale_zp_offset, kv_pos_end, leftover_size, leftover_aligned_size);
+        //}
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             auto rSvec = rS[ki].format<float>();
             uint kv_offset_y = kv_pos;
@@ -864,8 +920,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         }
     }
 
-    // printf("rS:\n");
-    // show(rS);
+    //if(partition_idx==kv_partition_num - 1 && head_num_idx == 27) {
+    //    printf("rS:\n");
+    //    show(rS);
+    //}
 
     // online softmax
     float cur_sum = 0.0f;
@@ -876,18 +934,28 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     matrix<half, PARTITION_SUBBLOCK_NUM * REG_M, REG_K> Pmat = 0;
     #endif
     {
-        //# Load Mask into register
-        // matrix<half, REG_M * PARTITION_SUBBLOCK_NUM, REG_N> MaskMat;
-        // uint mask_offset = seq_idx * q_len * kv_len + wg_thread_id * KV_PARTITION_SIZE;
-        // cm_svm_block_read<half, REG_M * PARTITION_SUBBLOCK_NUM * REG_N>((svmptr_t)(mask + mask_offset), MaskMat.format<half>());
-
         rS = cm_mul<float>(rS, (float)SCALE_FACTOR);  // convert scale_factor into (float), or it will be promoted to double
-        //rS = cm_add<float>(rS, MaskMat);
+
+        // printf("leftover_size = %d, leftover_aligned_size = %d, XE_ARCH = %d, PARTITION_SUBBLOCK_NUM * REG_N = %d\n", leftover_size, leftover_aligned_size, XE_ARCH, PARTITION_SUBBLOCK_NUM * REG_N);
+        if(leftover_size > 0) {
+            auto Svec = rS.format<float>();
+            for(int i = leftover_size; i < PARTITION_SUBBLOCK_NUM * REG_N; i++){
+                Svec[i] = -3e38f;
+            }
+        }
 
         // compute lse
         constexpr float log2e = 1.4426950408889634f;
+        constexpr float loge2 = 0.6931471805599453f;
         vector<float, PARTITION_SUBBLOCK_NUM * REG_N> rS_exp = cm_exp(rS.format<float>()*log2e);
-        cur_lse += cm_sum<float>(rS_exp);
+        float cur_lse_0 = cm_sum<float>(rS_exp);
+
+        //if(head_num_idx==0 && partition_idx==1) {
+        //    uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + head_num_idx * kv_partition_num + wg_thread_id;
+        //    printf("LSE[%d]: %f\n", lse_offset, cur_lse);
+        //    printf("rS_exp:\n");
+        //    show(rS_exp.format<float, PARTITION_SUBBLOCK_NUM, REG_N>());
+        //}
 
         // compute row_max
         auto rSv = rS.format<float>();
@@ -902,12 +970,19 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         Pmat= cm_exp((rS - row_max)*log2e);
         #endif
 
+        vector<float, PARTITION_SUBBLOCK_NUM * REG_N> rS_exp_temp = cm_exp((rS.format<float>() - row_max)*log2e);
+        cur_lse = cm_sum<float>(rS_exp_temp.format<float>());
+        cur_lse = cm_log<float>(cur_lse) * loge2 + row_max; // log2(sum(exp(x))) = log2e * log(sum(exp(x)))
+        //float cur_lse_1 = cm_exp<float>(cur_lse * log2e);
+        //printf("row_max= %f, cur_lse =%f, cur_lse_0 = %f, cur_lse_1 = %f\n", row_max, cur_lse, cur_lse_0, cur_lse_1);
+        // cur_lse = cm_exp<float>(cur_lse * log2e);
+
         // compute row sum of P
         auto rPv = Pmat.format<half, 1, PARTITION_SUBBLOCK_NUM * REG_N>();
         cur_sum = cm_sum<float>(rPv[0]);
     }
 
-    //if(wg_thread_id==0) {
+    //if(partition_idx==kv_partition_num - 1 && head_num_idx == 27) {
     //    printf("Pmat:\n");
     //    show(Pmat);
     //}
@@ -931,8 +1006,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         uint kv_y1 = KV_BLOCK_SIZE;
     #endif
     
+        //if(partition_idx==kv_partition_num - 1 && head_num_idx == HEADS_NUM - 1) {
+        //    printf("leftover_size = %d, leftover_aligned_size = %d, XE_ARCH = %d, KV_BLOCK_SIZE = %d\n", leftover_size, leftover_aligned_size, XE_ARCH, KV_BLOCK_SIZE);
+        //} 
         uint kv_pos_end = KV_BLOCK_SIZE;
-        if(block_idx == block_num - 1 && leftover_size > 0) {
+        if(block_idx == block_num - 1 && leftover_aligned_size > 0) {
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
         }
         for(int kv_pos =0; kv_pos < kv_pos_end; kv_pos += REG_K, ki++) {
@@ -959,17 +1037,21 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                             Omat[ri],
                             Vmat[0].format<int32_t>(),
                             Pmat[ki].format<int32_t>());
+                //if(partition_idx==kv_partition_num - 1 && head_num_idx == 27) {
+                //    printf("Omat[%d][%d]:\n",kv_pos, k);
+                //    show(Omat);
+                //}
             }
         }
     }
-    
-    //if(wg_thread_id==0) {
+
+    //if(partition_idx==kv_partition_num - 1 && head_num_idx == HEADS_NUM - 1) {
     //    printf("Omat:\n");
     //    show(Omat);
     //}
 
     //# save Output
-    matrix<half, REG_M, REG_N> cur_O_f16;
+    matrix<float, REG_M, REG_N> cur_O_f16;
     uint o_offset = seq_idx * kv_partition_num * HEADS_NUM * HEAD_SIZE + kv_partition_num * head_num_idx * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
     float div_cur_sum = 1.0/cur_sum;
     #pragma unroll
@@ -980,14 +1062,14 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         #else
         cur_O_f16= cm_div_ieee(cO, cur_sum);
         #endif
-        cm_svm_block_write<half, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f16.format<half>());
+        cm_svm_block_write<float, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f16.format<float>());
     }
     uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + head_num_idx * kv_partition_num + wg_thread_id;
     lse[lse_offset] = cur_lse;
 }
 
 extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
-    half* input [[type("svmptr_t")]], // 
+    float* input [[type("svmptr_t")]], //
     half* output [[type("svmptr_t")]],
     float* lse [[type("svmptr_t")]],
     int kv_partition_num
@@ -998,33 +1080,40 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
         const int total_partition_num = (kv_partition_num * HEADS_NUM);
 
         // load lse
-        
-        #if 0
+    #if 0
         uint lse_offset = batch * total_partition_num + head * kv_partition_num;
         vector<float, kv_partition_num> lse_vec;
         cm_svm_block_read<float, kv_partition_num>((svmptr_t)(lse + lse_offset), lse_vec.format<float>());
         float total_lse = cm_sum<float>(lse_vec);
-        #else
+    #else
         float total_lse = 0.0;
         uint lse_offset = batch * total_partition_num + head * kv_partition_num;
+        constexpr float log2e = 1.4426950408889634f;
         float* lse_vec = lse + lse_offset;
+        float lse_max = lse_vec[0];
+        for(int k = 1; k < kv_partition_num; k ++) {
+            lse_max = cm_max<float>(lse_vec[k], lse_max);
+        }
         #pragma unroll
         for(int k = 0; k < kv_partition_num; k ++) {
-            total_lse += lse_vec[k];
+            float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
+            total_lse += lse_value;
         }
-        #endif
+    #endif
 
         // load input, total_partition_num = head_nums * kv_partition_num;
         matrix<half, 1, REDUCE_SPLIT_SIZE> out_mat = 0;
-        matrix<half, 1, REDUCE_SPLIT_SIZE> data_mat;
+        matrix<float, 1, REDUCE_SPLIT_SIZE> out_mat_f32 = 0;
+        matrix<float, 1, REDUCE_SPLIT_SIZE> data_mat;
         uint input_offset = batch * total_partition_num * HEAD_SIZE + head * kv_partition_num * HEAD_SIZE + offset;
         #pragma unroll
         for(int k = 0; k < kv_partition_num; k ++) {
-            cm_svm_block_read<half, REDUCE_SPLIT_SIZE>((svmptr_t)(input + input_offset), data_mat.format<half>());
+            cm_svm_block_read<float, REDUCE_SPLIT_SIZE>((svmptr_t)(input + input_offset), data_mat.format<float>());
             input_offset += HEAD_SIZE;
-            out_mat += cm_mul<half>(data_mat, (float)(lse_vec[k]/total_lse));
+            float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
+            out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
         }
-
+        out_mat = cm_mul<half>(out_mat_f32, (float)1.0f);
         // write output
         uint output_offset = batch * HEADS_NUM * HEAD_SIZE + head * HEAD_SIZE + offset;
         cm_svm_block_write<half, REDUCE_SPLIT_SIZE>((svmptr_t)(output + output_offset),out_mat.format<half>());
@@ -1041,14 +1130,14 @@ t_block_indices = cl.tensor(block_indices.detach().numpy())
 t_block_indices_begins = cl.tensor(block_indices_begins.detach().numpy())
 t_subsequence_begins = cl.tensor(subsequence_begins.detach().numpy())
 t_gws_subseq_mapping = cl.tensor(gws_subseq_mapping.detach().numpy())
-t_out = cl.tensor([batch, num_heads, kv_partition_num, head_size], np.dtype(np.float16))
+t_out = cl.tensor([batch, num_heads, kv_partition_num, head_size], np.dtype(np.float32))
 t_out_final = cl.tensor([batch, 1, num_heads, head_size], np.dtype(np.float16))
 t_mask = cl.tensor(attention_mask.detach().numpy())
 t_lse = cl.tensor([batch, num_heads, kv_partition_num], np.dtype(np.float32))
 
 
-intermedia_mem_size=batch*num_heads*kv_partition_num*(head_size+1)*2/1024/1024
-print("intermediate memory size = ", intermedia_mem_size, "MB")
+intermedia_mem_size=batch*num_heads*kv_partition_num*(head_size+1)*4
+print("intermediate memory size = ", intermedia_mem_size/1024/1024, "MB")
 
 
 # f"-cmc -mdump_asm -g2 "
@@ -1080,11 +1169,17 @@ print("LWS_2=", LWS_2)
 cm_kernels.enqueue("cm_sdpa_2nd_reduce", GWS_2, LWS_2, t_out, t_out_final, t_lse, kv_partition_num)
 f1 = torch.from_numpy(t_out_final.numpy())
 
-#print("f1 = ", f1[0,0,0,:])
-#print("f1 = ", f1)
+# lse_final = torch.from_numpy(t_lse.numpy())
+# print("lse_final = ", lse_final.shape, lse_final.dtype)
+# print("lse_final sum = ", lse_final)
+
+
+# print("ref = ", org.transpose(1,2)[0,0,-1,:])
+# print("res = ", f1[0,0,-1,:])
+check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
 #sys.exit(0)
 
-loop_cnt = 3
+loop_cnt = 100
 all_layers = []
 mem_size = 0
 while len(all_layers) < loop_cnt and mem_size < 8e9:
@@ -1092,7 +1187,7 @@ while len(all_layers) < loop_cnt and mem_size < 8e9:
         cl.tensor(q.detach().numpy()),
         cl.tensor(k.detach().numpy()),
         cl.tensor(v.detach().numpy()),
-        cl.tensor([batch, num_heads, kv_partition_num, head_size], np.dtype(np.float16)),
+        cl.tensor([batch, num_heads, kv_partition_num, head_size], np.dtype(np.float32)),
         cl.tensor([batch, 1, num_heads, head_size], np.dtype(np.float16)),
     ])
     mem_size += q.numel() * q.element_size()
@@ -1113,12 +1208,19 @@ for i in range(loop_cnt):
     cm_kernels.enqueue("cm_sdpa_2nd_reduce", GWS_2, LWS_2, all_layers[j][3],all_layers[j][4], t_lse, kv_partition_num)
 
 latency = cl.finish()
+first_kernel = 1
+kvcache_size = new_kv_len * num_kv_heads * head_size * 2 * 2
+intermedia_size = batch * num_heads * kv_partition_num * (head_size + 1) * 4
 for ns in latency:
-    print(f"  {ns*1e-6:.3f} ms")
+    if first_kernel:
+        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s, kvcache_size = {kvcache_size*1e-6:.1f} MB")
+    else:
+        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
+    first_kernel =  1 - first_kernel
 
 f1 = torch.from_numpy(all_layers[0][4].numpy())
 
 check_close(org.transpose(1,2), f1, atol=1e-2, rtol=1e-3)
-print(f"=========== cm_sdpa_2nd PASS GWS={GWS} LWS={LWS}  ===========")
+print(f"=========== cm_sdpa_2nd PASS GWS={GWS} LWS={LWS} GWS_2={GWS_2} LWS_2={LWS_2} ===========")
 
 sys.exit(0)
