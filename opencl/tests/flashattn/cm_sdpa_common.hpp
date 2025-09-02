@@ -390,11 +390,19 @@ void sdpa_kernel_lsc(
     svmptr_t q_base [[type("svmptr_t")]],
     svmptr_t k_base [[type("svmptr_t")]],
     svmptr_t v_base [[type("svmptr_t")]],
+
+    svmptr_t k_dscale [[type("svmptr_t")]],
+    svmptr_t k_zp [[type("svmptr_t")]],
+    svmptr_t v_dscale [[type("svmptr_t")]],
+    svmptr_t v_zp [[type("svmptr_t")]],
     svmptr_t o_base [[type("svmptr_t")]]) {
 
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
     constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
     constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+
+    constexpr uint quan_k_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(int8_t));
+
 
     //uint qo_pitch = num_heads * head_size * sizeof(half);
     //uint kv_pitch = num_kv_heads * head_size * sizeof(half);
@@ -424,7 +432,7 @@ void sdpa_kernel_lsc(
         }
     }
 
-    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(int8_t) - 1, quan_k_pitch - 1, 0, 0);
     lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
 
     int causal_left = q_start;
@@ -433,26 +441,30 @@ void sdpa_kernel_lsc(
     int slm_buff_id_write = 0;
     int slm_buff_id_read = 0;
 
-#define TEST_DQ 0
+#define TEST_DQ 1
 
     auto load_slm_KV = [&](int kv_pos) {
         if (kv_pos < kv_stop) {
             uint slm_offset = (slm_buff_id_write & 3) * slm_buff_size;
-            vector<half, kv_step> scale = 2.5;
-            vector<half, kv_step> zp = 2.5;
+            vector<half, kv_step> dscale;
+            vector<half, kv_step> zp;
+
             slm_buff_id_write ++;
             if (wg_local_id < local_size/2) {
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(k_dscale + kv_pos*sizeof(half)), dscale);
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(k_zp + kv_pos*sizeof(half)), zp);
+
                 vector<half, kv_step * REG_K> temp0;
                 auto dqtemp = temp0.format<half, kv_step, REG_K>();
                 auto quantemp = temp0.format<half, 2, kv_step * REG_K/2>()[1].format<int8_t, kv_step, REG_K>();
                 b2dK.set_block_y(kv_pos);
                 for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                    cm_load<lsc::Normal>(temp0, b2dK.set_block_x(k));
+                    cm_load<lsc::Normal>(quantemp.format<int8_t>(), b2dK.set_block_x(k));
                     #if TEST_DQ
                         #pragma unroll
                         for(int r = 0; r < kv_step; r++)  {
                             dqtemp[r] =  quantemp[r]-zp[r];
-                            dqtemp[r] = cm_mul<half>(dqtemp[r], scale[r]);
+                            dqtemp[r] = cm_mul<half>(dqtemp[r], dscale[r]);
                         }
                     #endif
                     cm_slm_block_write(slm_K, slm_offset + k * kv_step * sizeof(half), temp0);
@@ -465,13 +477,13 @@ void sdpa_kernel_lsc(
                 #pragma unroll
                 for(int k = REG_N*(wg_local_id-(local_size/2)); k < head_size; k += REG_N*(local_size/2)) {
                     cm_load<lsc::VNNI>(temp2, b2dV.set_block_x(k));
-                    #if TEST_DQ
-                        #pragma unroll
-                        for(int r = 0; r < kv_step; r++)  {
-                            dqtemp[r] =  quantemp[r]-zp[r];
-                            dqtemp[r] = cm_mul<half>(dqtemp[r], scale[r]);
-                        }
-                    #endif
+                    // #if TEST_DQ
+                    //     #pragma unroll
+                    //     for(int r = 0; r < kv_step; r++)  {
+                    //         dqtemp[r] =  quantemp[r]-zp[r];
+                    //         dqtemp[r] = cm_mul<half>(dqtemp[r], scale[r]);
+                    //     }
+                    // #endif
                     cm_slm_block_write(slm_V, slm_offset + k * REG_K * sizeof(half), temp2);
                 }
             }

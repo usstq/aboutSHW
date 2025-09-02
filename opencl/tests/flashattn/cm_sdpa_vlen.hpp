@@ -95,40 +95,40 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     uint qo_offset = (q_start*num_heads + h)*head_size;
     uint kv_offset = (kv_start*num_kv_heads + hkv)*head_size;
 
-#if USE_LSC == 1
-    sdpa_kernel_lsc<false, num_heads, num_kv_heads, head_size>(
-                                slm_K,
-                                slm_V,
-                                wg_local_id,
-                                local_size,
-                                0, //q_start,
-                                kv_seq_len, //kv_stop,
-                                q_len, //q_len,
-                                kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query + qo_offset),
-                                reinterpret_cast<svmptr_t>(key + kv_offset),
-                                reinterpret_cast<svmptr_t>(value + kv_offset),
-                                reinterpret_cast<svmptr_t>(output + qo_offset));
-#else
-    sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
-                                slm_K,
-                                slm_V,
-                                wg_local_id,
-                                local_size,
-                                0, //q_start,
-                                kv_seq_len, //kv_stop,
-                                q_len, //q_len,
-                                kv_seq_len, //kv_len,
-                                query,
-                                key,
-                                value,
-                                output,
-                                qo_offset * sizeof(half),
-                                kv_offset * sizeof(half),
-                                kv_offset * sizeof(half),
-                                qo_offset * sizeof(half)
-                                );
-#endif
+// #if USE_LSC == 1
+//     sdpa_kernel_lsc<false, num_heads, num_kv_heads, head_size>(
+//                                 slm_K,
+//                                 slm_V,
+//                                 wg_local_id,
+//                                 local_size,
+//                                 0, //q_start,
+//                                 kv_seq_len, //kv_stop,
+//                                 q_len, //q_len,
+//                                 kv_seq_len, //kv_len,
+//                                 reinterpret_cast<svmptr_t>(query + qo_offset),
+//                                 reinterpret_cast<svmptr_t>(key + kv_offset),
+//                                 reinterpret_cast<svmptr_t>(value + kv_offset),
+//                                 reinterpret_cast<svmptr_t>(output + qo_offset));
+// #else
+//     sdpa_kernel<false, num_heads, num_kv_heads, head_size, 0>(
+//                                 slm_K,
+//                                 slm_V,
+//                                 wg_local_id,
+//                                 local_size,
+//                                 0, //q_start,
+//                                 kv_seq_len, //kv_stop,
+//                                 q_len, //q_len,
+//                                 kv_seq_len, //kv_len,
+//                                 query,
+//                                 key,
+//                                 value,
+//                                 output,
+//                                 qo_offset * sizeof(half),
+//                                 kv_offset * sizeof(half),
+//                                 kv_offset * sizeof(half),
+//                                 qo_offset * sizeof(half)
+//                                 );
+// #endif
 }
 
 
@@ -138,7 +138,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
     half* query [[type("svmptr_t")]],
-    half* key [[type("svmptr_t")]],
+    int8_t* key [[type("svmptr_t")]],
     half* value [[type("svmptr_t")]],
     half* k_dscale [[type("svmptr_t")]],
     half* k_zp [[type("svmptr_t")]],
@@ -203,6 +203,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     uint k_offset = (kv_start*num_kv_heads + hkv)*head_size;
     uint v_offset = k_offset;
     uint o_offset = (q_start*num_heads + h)*head_size;
+
+    uint kv_dq_offset = hkv*kv_seq_len + kv_start;
+
 #if USE_LSC == 1
      sdpa_kernel_lsc<is_causal, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
@@ -216,6 +219,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(query + q_offset),
                                 reinterpret_cast<svmptr_t>(key + k_offset),
                                 reinterpret_cast<svmptr_t>(value + v_offset),
+                                reinterpret_cast<svmptr_t>(k_dscale + kv_dq_offset),
+                                reinterpret_cast<svmptr_t>(k_zp + kv_dq_offset),
+                                reinterpret_cast<svmptr_t>(v_dscale + kv_dq_offset),
+                                reinterpret_cast<svmptr_t>(v_zp + kv_dq_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
     // sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(

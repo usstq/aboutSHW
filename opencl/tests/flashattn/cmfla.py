@@ -20,7 +20,7 @@ def get_cm_grf_width():
 
 CM_GRF_WIDTH = get_cm_grf_width()
 
-def quan_per_toke(kv):
+def quan_per_token(kv):
         blk_num, kv_heads, blksz, *_ = kv.shape
         kv_max = kv.amax(dim=-1, keepdim = True)
         kv_min = kv.amin(dim=-1, keepdim = True)
@@ -39,8 +39,8 @@ def quan_per_toke(kv):
         # print(kv_scale)
         # print(kv)
         # print(f'kv_INT8\n:{kv_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-        dq_scale = (1.0/kv_scale).to(dtype=torch.half)
-        kv_zp = kv_zp.to(dtype=torch.half)
+        dq_scale = (1.0/kv_scale).to(dtype=torch.half).transpose(0, 1).contiguous()
+        kv_zp = kv_zp.to(dtype=torch.half).transpose(0,1).contiguous()
         return [kv_INT8, dq_scale, kv_zp]
 
 class flash_attn_cm:
@@ -69,24 +69,20 @@ class flash_attn_cm:
         old_dtype = q.dtype
         assert head_size == self.head_size
 
-        k_INT8, k_dscale, k_zp = quan_per_toke(k)
-        v_INT8, v_dscale, v_zp = quan_per_toke(v)
+        k_INT8, k_dscale, k_zp = quan_per_token(k)
+        v_INT8, v_dscale, v_zp = quan_per_token(v)
 
         t_q = cl.tensor(q.to(torch.float16).detach().numpy())
-        t_k = cl.tensor(k.to(torch.float16).detach().numpy())
-        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
-
-
-        # t_k = cl.tensor(k_INT8.to(torch.int8).detach().numpy())
+        # t_k = cl.tensor(k.to(torch.float16).detach().numpy())
+        t_k = cl.tensor(k_INT8.to(torch.int8).detach().numpy())
         # t_v = cl.tensor(v_INT8.to(torch.int8).detach().numpy())
+        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
 
         t_k_dscale = cl.tensor(k_dscale.to(torch.float16).detach().numpy())
         t_k_zp = cl.tensor(k_zp.to(torch.float16).detach().numpy())
 
         t_v_dscale = cl.tensor(v_dscale.to(torch.float16).detach().numpy())
         t_v_zp = cl.tensor(v_zp.to(torch.float16).detach().numpy())
-
-
 
         t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
         wg_size = 16
@@ -217,7 +213,7 @@ def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, 
     high = 2
     act_dtype = torch.float16
     q = torch.randint(low, high, [q_len, num_heads, head_size]).to(dtype=act_dtype)
-    k = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)
+    k = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
     v = torch.randint(low, high, [kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
     ref = flash_attn_vlen_ref(q, k, v, cu_seqlens)
@@ -245,7 +241,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     high = 2
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
-    k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)
+    k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)  / 4.0
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
