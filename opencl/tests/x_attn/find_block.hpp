@@ -58,6 +58,7 @@ CM_INLINE void find(uint slm, int m_block, svmptr_t kq_max_wg, svmptr_t kq_exp_p
     int m_start = MYMIN(m, q_stride);
     int m_end = MYMIN(m_start + TOKEN_SHARE_MAX, q_stride);
     int valid_m = m_end - m_start;
+    if (valid_m == 0) return;
     lsc::block_2d_desc<half, 1, TOKEN_IN_BLOCK, TOKEN_SHARE_MAX> desc_sum{ kq_exp_partial_sum, (uint)valid_m - 1, (uint)(k_block_pad * sizeof(half) - 1), (uint)(k_block_pad * sizeof(half) - 1),
         0, 0 };
     {
