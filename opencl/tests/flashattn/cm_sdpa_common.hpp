@@ -377,7 +377,38 @@ constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
     }
 }
 
-template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused = 0>
+
+inline void prepackINT8(matrix_ref<int8_t, 16, 16> input, matrix_ref<int8_t, 8, 32> out) {
+    out.row(0).select<16, 2>(0) = input.row(0);
+    out.row(0).select<16, 2>(1) = input.row(1);
+
+    out.row(1).select<16, 2>(0) = input.row(2);
+    out.row(1).select<16, 2>(1) = input.row(3);
+
+    out.row(2).select<16, 2>(0) = input.row(4);
+
+    out.row(2).select<16, 2>(1) = input.row(5);
+
+    out.row(3).select<16, 2>(0) = input.row(6);
+    out.row(3).select<16, 2>(1) = input.row(7);
+
+    out.row(4).select<16, 2>(0) = input.row(8);
+    out.row(4).select<16, 2>(1) = input.row(9);
+
+
+    out.row(5).select<16, 2>(0) = input.row(10);
+    out.row(5).select<16, 2>(1) = input.row(11);
+
+
+    out.row(6).select<16, 2>(0) = input.row(12);
+    out.row(6).select<16, 2>(1) = input.row(13);
+
+
+    out.row(7).select<16, 2>(0) = input.row(14);
+    out.row(7).select<16, 2>(1) = input.row(15);
+}
+
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_q_fused = 0>
 void sdpa_kernel_lsc(
     uint slm_K,
     uint slm_V,
@@ -398,10 +429,8 @@ void sdpa_kernel_lsc(
     svmptr_t o_base [[type("svmptr_t")]]) {
 
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-    constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
-    constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
-
-    constexpr uint quan_k_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(int8_t));
+    constexpr uint q_pitch = is_q_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
+    constexpr uint kv_pitch =  (num_kv_heads * head_size * sizeof(int8_t));
 
 
     //uint qo_pitch = num_heads * head_size * sizeof(half);
@@ -432,8 +461,8 @@ void sdpa_kernel_lsc(
         }
     }
 
-    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(int8_t) - 1, quan_k_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<int8_t, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(int8_t) - 1, kv_pitch - 1, 0, 0);
 
     int causal_left = q_start;
 
@@ -441,7 +470,6 @@ void sdpa_kernel_lsc(
     int slm_buff_id_write = 0;
     int slm_buff_id_read = 0;
 
-#define TEST_DQ 1
 
     auto load_slm_KV = [&](int kv_pos) {
         if (kv_pos < kv_stop) {
@@ -460,30 +488,43 @@ void sdpa_kernel_lsc(
                 b2dK.set_block_y(kv_pos);
                 for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
                     cm_load<lsc::Normal>(quantemp.format<int8_t>(), b2dK.set_block_x(k));
-                    #if TEST_DQ
-                        #pragma unroll
-                        for(int r = 0; r < kv_step; r++)  {
-                            dqtemp[r] =  quantemp[r]-zp[r];
-                            dqtemp[r] = cm_mul<half>(dqtemp[r], dscale[r]);
-                        }
-                    #endif
+                    #pragma unroll
+                    for(int r = 0; r < kv_step; r++)  {
+                        dqtemp[r] =  quantemp[r]-zp[r];
+                        dqtemp[r] = cm_mul<half>(dqtemp[r], dscale[r]);
+                    }
                     cm_slm_block_write(slm_K, slm_offset + k * kv_step * sizeof(half), temp0);
                 }
             } else {
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(v_dscale + kv_pos*sizeof(half)), dscale);
+                cm_svm_block_read(reinterpret_cast<svmptr_t>(v_zp + kv_pos*sizeof(half)), zp);
                 vector<half, REG_K*REG_N> temp2;
-                auto dqtemp = temp2.format<half, kv_step, REG_K>();
-                auto quantemp = temp2.format<half, 2, kv_step * REG_K/2>()[1].format<int8_t, kv_step, REG_K>();
+                auto Vmat = temp2.format<half, REG_K / 2, REG_N*2>();
+                auto quanVmatVNNI = temp2.format<half, 2, 128>().row(1).format<int8_t, 8, 32>();
+                auto quanVmat = temp2.format<half, 2, 128>().row(0).format<int8_t, 16, 16>();
+
+                vector<int8_t, 32> copyQuanVmatRow;
+
                 b2dV.set_block_y(kv_pos);
                 #pragma unroll
                 for(int k = REG_N*(wg_local_id-(local_size/2)); k < head_size; k += REG_N*(local_size/2)) {
-                    cm_load<lsc::VNNI>(temp2, b2dV.set_block_x(k));
-                    // #if TEST_DQ
-                    //     #pragma unroll
-                    //     for(int r = 0; r < kv_step; r++)  {
-                    //         dqtemp[r] =  quantemp[r]-zp[r];
-                    //         dqtemp[r] = cm_mul<half>(dqtemp[r], scale[r]);
-                    //     }
-                    // #endif
+                    cm_load<lsc::Normal>(quanVmat.format<int8_t>(), b2dV.set_block_x(k));
+                    prepackINT8(quanVmat, quanVmatVNNI);
+                    copyQuanVmatRow = quanVmatVNNI[7];
+                    #pragma unroll
+                    for (int r = 0; r < 7; r++) {
+                            Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - zp[r*2];
+                            Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - zp[r*2+1];
+
+                            Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dscale[r*2]);
+                            Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dscale[r*2+1]);
+                    }
+
+                    Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  zp[14];
+                    Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - zp[15];
+                    Vmat[7].select<16, 2>(0) = cm_mul<half>(Vmat[7].select<16, 2>(0), dscale[14]);
+                    Vmat[7].select<16, 2>(1) = cm_mul<half>(Vmat[7].select<16, 2>(1),  dscale[15]);
+
                     cm_slm_block_write(slm_V, slm_offset + k * REG_K * sizeof(half), temp2);
                 }
             }

@@ -566,7 +566,7 @@ void sdpa_kernel_lsc_prefetch(
         cm_svm_block_read(reinterpret_cast<svmptr_t>(v_base+dqscale_offset+CMPA_BLOCK_SZ*sizeof(half)), dq_zp);
 
         {
-            vector<half, 32> copyQuanVmatRow;
+            vector<int8_t, 32> copyQuanVmatRow;
             matrix<half, REG_K/2, REG_N*2> Vmat;
             auto quanVmatVNNI = Vmat.format<half, 2, 128>().row(1).format<int8_t, 8, 32>();
             auto quanVmat = Vmat.format<half, 2, 128>().row(0).format<int8_t, 16, 16>();

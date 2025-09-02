@@ -74,9 +74,10 @@ class flash_attn_cm:
 
         t_q = cl.tensor(q.to(torch.float16).detach().numpy())
         # t_k = cl.tensor(k.to(torch.float16).detach().numpy())
+        # t_v = cl.tensor(v.to(torch.float16).detach().numpy())
+
         t_k = cl.tensor(k_INT8.to(torch.int8).detach().numpy())
-        # t_v = cl.tensor(v_INT8.to(torch.int8).detach().numpy())
-        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
+        t_v = cl.tensor(v_INT8.to(torch.int8).detach().numpy())
 
         t_k_dscale = cl.tensor(k_dscale.to(torch.float16).detach().numpy())
         t_k_zp = cl.tensor(k_zp.to(torch.float16).detach().numpy())
@@ -91,7 +92,7 @@ class flash_attn_cm:
         wg_count = (seq_len + wg_seq_len - 1) // wg_seq_len
         GWS = [1, self.num_heads, wg_count * wg_size]
         LWS = [1, 1, wg_size]
-        print(f"calling kvv_fused {GWS=} {LWS=} x {n_repeats} times")
+        print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
         for _ in range(n_repeats):
             self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_q, t_k, t_v, t_k_dscale, t_k_zp, t_v_dscale, t_v_zp, t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
@@ -242,7 +243,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)  / 4.0
-    v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+    v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / high
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
 
@@ -253,8 +254,8 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     out = func.qkv_fused(q, k, v, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
-    print(f" kvv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
-    check_close(ref, out)
+    print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
+    check_close(ref, out, atol=1e-2, rtol=1e-2)
     #assert 0
 
 if __name__ == "__main__":
