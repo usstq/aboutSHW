@@ -27,21 +27,21 @@ def quan_per_toke(qk):
         qk_min = qk.amin(dim=-1, keepdim = True)
         qrange = qk_max - qk_min
 
-        INTMAX = 127.0
-        INTMIN = -128.0
+        INTMAX = 255.0
+        INTMIN = 0.0
         INTRAGNE = INTMAX - INTMIN
         qk_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
         qk_zp = ((0.0-qk_min)*qk_scale+INTMIN).to(dtype=torch.half)
 
-        qk_INT8 = torch.round((qk*qk_scale+qk_zp)).to(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
+        qk_INT8 = torch.round((qk*qk_scale+qk_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         # print("################################################################################")
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
         # print(qk_scale)
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-        dq_scale = (1.0/qk_scale).view(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
-        qk_zp = qk_zp.view(dtype=torch.int8).reshape(blk_num,kv_heads,-1)
+        dq_scale = (1.0/qk_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        qk_zp = qk_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         return torch.concat((qk_INT8, dq_scale, qk_zp), dim=-1)
 
 class page_atten_cm:
@@ -111,8 +111,8 @@ class page_atten_cm:
                 blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
                 #block_indices =  torch.randperm(blk_num).to(torch.uint32)
                 block_indices =  torch.arange(blk_num)
-                sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
-                sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.int8)
+                sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
+                sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
                 for i in  range(len(block_indices)):
                     sub_k[block_indices[i],:] = k_quan[i,:]
                     sub_v[block_indices[i],:] = v_quan[i,:]
@@ -122,8 +122,8 @@ class page_atten_cm:
                 sub_q = q[q_start:q_end, :]
 
                 t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
-                t_k= cl.tensor(sub_k.to(torch.int8).detach().numpy())
-                t_v = cl.tensor(sub_v.to(torch.int8).detach().numpy())
+                t_k= cl.tensor(sub_k.to(torch.uint8).detach().numpy())
+                t_v = cl.tensor(sub_v.to(torch.uint8).detach().numpy())
                 t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
                 wg_size = 16
                 q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
