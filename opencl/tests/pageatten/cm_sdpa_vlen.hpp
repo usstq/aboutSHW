@@ -9,6 +9,8 @@
 
 
 
+#define USE_SLM 1
+
 extern "C" _GENX_MAIN_ void cm_page_attention(
     int q_len,
     half* query [[type("svmptr_t")]],
@@ -27,7 +29,17 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
+#if USE_SLM
+    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
 
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
+
+    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
+    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
+
+#endif
     auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
     auto hkv = h / (num_heads/num_kv_heads);
@@ -92,7 +104,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     //K/V[block_num, kv_heads, block_sz*head_sz+block_sz*4]
     uint kv_offset = hkv*(head_size+4)*pa_block_sz;
 
-#if USE_LSC == 1
+#if !USE_SLM
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
                                 wg_local_id,
                                 q_start_sg, //q_start for SG,
@@ -106,7 +118,21 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
                                 past_q_lens,
                                 block_indices);
 #else
-    static_assert(0);
+    sdpa_kernel_lsc<is_causal, num_heads, num_kv_heads, head_size, 0>(
+                                slm_K,
+                                slm_V,
+                                wg_local_id,
+                                local_size,
+                                q_start_sg, //q_start for SG,
+                                kv_stop,
+                                q_len_sg, //q_step,
+                                kv_seq_len, //kv_len,
+                                reinterpret_cast<svmptr_t>(query + q_offset),
+                                reinterpret_cast<svmptr_t>(key + kv_offset),
+                                reinterpret_cast<svmptr_t>(value + kv_offset),
+                                reinterpret_cast<svmptr_t>(output + q_offset),
+                                past_q_lens,
+                                block_indices);
 
 #endif
 }

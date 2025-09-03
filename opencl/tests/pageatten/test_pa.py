@@ -21,7 +21,7 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 # print(f'CM_GRF_WIDTH is {CM_GRF_WIDTH}')
 
-def quan_per_toke(qk):
+def quan_per_token(qk):
         blk_num, kv_heads, blksz, *_ = qk.shape
         qk_max = qk.amax(dim=-1, keepdim = True)
         qk_min = qk.amin(dim=-1, keepdim = True)
@@ -40,9 +40,13 @@ def quan_per_toke(qk):
         # print(qk_scale)
         # print(qk)
         # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
+        # print(f'dscale:{1.0 / qk_scale}')
+        # print(f'zp:{qk_zp}')
+
         dq_scale = (1.0/qk_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         qk_zp = qk_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         return torch.concat((qk_INT8, dq_scale, qk_zp), dim=-1)
+
 
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
@@ -94,8 +98,9 @@ class page_atten_cm:
         padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
         padded_v = padded_v.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
 
-        k_quan = quan_per_toke(padded_k)
-        v_quan = quan_per_toke(padded_v)
+        k_quan = quan_per_token(padded_k)
+        v_quan = quan_per_token(padded_v)
+        # print(f'###quantize v:{v_quan}')
 
         #output memory for the whole SDPA
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
@@ -223,7 +228,8 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
     else:
         k = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
         v = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
-
+    # print(f'###K:{k}')
+    # print(f'###V:{v}')
     # print(f'\\\\\\\\\\\\\\\\\\K\n:{k}')
 
     is_causal = True
@@ -235,21 +241,25 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
     latency = cl.finish()
     trunks = len(latency) // rep
     trunk_lat = []
-    print(f'====================================================================================')
-    for trunk_idx in range(trunks):
-        lat = latency[trunk_idx:-1:trunks]
-        avg = sum(lat[10:])/len(lat[10:])*1e-6
-        trunk_lat.append(avg)
-        print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
-    print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
-    print(f'====================================================================================')
+    if rep >= 15:
+        print(f'====================================================================================')
+        for trunk_idx in range(trunks):
+            lat = latency[trunk_idx:-1:trunks]
+            avg = sum(lat[10:])/len(lat[10:])*1e-6
+            trunk_lat.append(avg)
+            print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
+        print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
+        print(f'====================================================================================')
+    # print(ref)
+    # print(out)
+
     check_close(ref, out)
     #assert 0
 
 if __name__ == "__main__":
 
-    seq_len = 8192
-    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=128, trunk_sz=seq_len)
+    seq_len =  32
+    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=16, trunk_sz=seq_len, rep=1)
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:

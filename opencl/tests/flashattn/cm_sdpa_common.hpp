@@ -206,9 +206,13 @@ inline matrix<float, _kv_step, _q_step> ugemm_KQ(uint slm_K, matrix_ref<half, nu
 
     matrix<half, num_K, REG_M * REG_K> Kmat;
     cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
+    if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+        show(Kmat.format<half, 16, 16>());
+    }
     #pragma unroll
-    for(int k = 0; k < num_K; k++)
+    for(int k = 0; k < num_K; k++) {
         St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, Qt[0].format<int32_t>(), Kmat[k].format<int32_t>());
+    }
 
     #pragma unroll
     for(int ri = 1; ri < num_Qt; ri++) {
@@ -230,7 +234,9 @@ inline void ugemm_PV0(uint slm_V, matrix_ref<half, REG_N, REG_K> P, matrix_ref<f
     for(int k = 0, ri = 0; k < _head_size; k += REG_N, ri += num_P_tiles) {
         matrix<half, REG_K/2, REG_N*2> Vmat;
         cm_slm_block_read(slm_V, GENX_NONE, slm_offset + REG_K*k*sizeof(half), Vmat.format<half>());
-
+        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+            show(Vmat.format<half, 16, 16>());
+        }
         #pragma unroll
         for(int p = 0; p < num_P_tiles; p++) {
             rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -251,7 +257,9 @@ inline void ugemm_PV1(uint slm_V, matrix_ref<half, REG_N, REG_K> P, vector_ref<f
     for(int k = 0, ri=0; k < _head_size; k += REG_N, ri += num_P_tiles) {
         matrix<half, REG_K/2, REG_N*2> Vmat;
         cm_slm_block_read(slm_V, GENX_NONE, slm_offset + REG_K*k*sizeof(half), Vmat.format<half>());
-
+        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+            show(Vmat.format<half, 16, 16>());
+        }
         //# compensate cur_O
         //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
         #pragma unroll
@@ -495,6 +503,7 @@ void sdpa_kernel_lsc(
                         dqtemp[r] =  quantemp[r]-zp[r];
                         dqtemp[r] = cm_mul<half>(dqtemp[r], dscale[r]);
                     }
+
                     cm_slm_block_write(slm_K, slm_offset + k * kv_step * sizeof(half), temp0);
                 }
             } else {
@@ -502,8 +511,7 @@ void sdpa_kernel_lsc(
                 cm_svm_block_read(reinterpret_cast<svmptr_t>(v_zp + kv_pos*sizeof(half)), zp);
                 vector<half, REG_K*REG_N> temp2;
                 auto Vmat = temp2.format<half, REG_K / 2, REG_N*2>();
-                auto quanVmatVNNI = temp2.format<half, 2, 128>().row(1).format<uint8_t, 8, 32>();
-                auto quanVmat = temp2.format<half, 2, 128>().row(0).format<uint8_t, 16, 16>();
+                auto quanVmat = temp2.format<half, 2, 128>().row(1).format<uint8_t, 16, 16>();
 
                 vector<uint8_t, 32> copyQuanVmatRow;
 
@@ -512,22 +520,22 @@ void sdpa_kernel_lsc(
                 for(int k = REG_N*(wg_local_id-(local_size/2)); k < head_size; k += REG_N*(local_size/2)) {
                     cm_load<lsc::Normal>(quanVmat.format<uint8_t>(), b2dV.set_block_x(k));
 
-                    #if 1
-                        prepackAsVNNIWidth2(quanVmat, quanVmatVNNI);
-                        copyQuanVmatRow = quanVmatVNNI[7];
-                        #pragma unroll
-                        for (int r = 0; r < 7; r++) {
-                                Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - zp[r*2];
-                                Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - zp[r*2+1];
+                    #if 0
+                        // prepackAsVNNIWidth2(quanVmat, quanVmatVNNI);
+                        // copyQuanVmatRow = quanVmatVNNI[7];
+                        // #pragma unroll
+                        // for (int r = 0; r < 7; r++) {
+                        //         Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - zp[r*2];
+                        //         Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - zp[r*2+1];
 
-                                Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dscale[r*2]);
-                                Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dscale[r*2+1]);
-                        }
+                        //         Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dscale[r*2]);
+                        //         Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dscale[r*2+1]);
+                        // }
 
-                        Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  zp[14];
-                        Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - zp[15];
-                        Vmat[7].select<16, 2>(0) = cm_mul<half>(Vmat[7].select<16, 2>(0), dscale[14]);
-                        Vmat[7].select<16, 2>(1) = cm_mul<half>(Vmat[7].select<16, 2>(1),  dscale[15]);
+                        // Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  zp[14];
+                        // Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - zp[15];
+                        // Vmat[7].select<16, 2>(0) = cm_mul<half>(Vmat[7].select<16, 2>(0), dscale[14]);
+                        // Vmat[7].select<16, 2>(1) = cm_mul<half>(Vmat[7].select<16, 2>(1),  dscale[15]);
                     #else
                         matrix<half, 16, 16> tmptmp;
                         #pragma unroll
@@ -535,7 +543,13 @@ void sdpa_kernel_lsc(
                             tmptmp[r] =  quanVmat[r]-zp[r];
                             tmptmp[r] = cm_mul<half>(tmptmp[r], dscale[r]);
                         }
+                        // if (cm_group_id(2) == 0) {
+                            show(tmptmp.format<half, 16, 16>());
+                        // }
                         prepackAsVNNIWidth2(tmptmp, temp2.format<half, 8, 32>());
+
+                            show(temp2.format<half, 8, 32>());
+
 
                     #endif
 
@@ -555,12 +569,12 @@ void sdpa_kernel_lsc(
             slm_buff_id_read ++) {
 
         //  load0, load1, signal1,
-        //  [wait2, signal2, load2, read0]
-        //  [wait3, signal3, load3, read1]
-        //  [wait4, signal4, load4, read2]
-        //  [wait5, signal5, load5, read3]
+        //  [wait1, signal2, load2, read0, compute0]
+        //  [wait2, signal3, load3, read1, compute1]
+        //  [wait3, signal4, load4, read2, compute2]
+        //  [wait4, signal5, load5, read3, compute3]
         //
-        //  after wait4, all workers have reached signal3, so:
+        //  after wait3, all workers have reached signal3, so:
         //     - all workers have finished load2 & read0.
         //     - we can start to load 4 into SLM slot 0 (i & 3) safely
         //     - we can start to read 2 ((i-2) & 3) safely
@@ -974,6 +988,10 @@ void sdpa_kernel(
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
+
+        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+           show(St.format<float, 16, 16>());
+        }
 
         if constexpr (use_causal_mask) {
             if (causal_left < kv_step) {

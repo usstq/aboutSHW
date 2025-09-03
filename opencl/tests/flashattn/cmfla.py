@@ -72,6 +72,15 @@ class flash_attn_cm:
         k_INT8, k_dscale, k_zp = quan_per_token(k)
         v_INT8, v_dscale, v_zp = quan_per_token(v)
 
+        print(f'-----------------------------------------------------------------')
+        print(f'[KINT8]={k_INT8}')
+        print(f'[VINT8]={v_INT8}')
+        print(f'[K]={k}')
+        print(f'[V]={v}')
+        print(f'-----------------------------------------------------------------')
+
+
+
         t_q = cl.tensor(q.to(torch.float16).detach().numpy())
         # t_k = cl.tensor(k.to(torch.float16).detach().numpy())
         # t_v = cl.tensor(v.to(torch.float16).detach().numpy())
@@ -251,15 +260,15 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
 
 
     out = func.qkv_fused(q, k, v)
-    out = func.qkv_fused(q, k, v, n_repeats=20)
+    # out = func.qkv_fused(q, k, v, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
-    print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
+    # print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
     check_close(ref, out, atol=1e-2, rtol=1e-2)
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
+    test_flash_attn_causal_batch1(seq_len=1, num_heads = 1, num_kv_heads = 1, head_size = 16)
     # test_flash_attn_cm(8192, 8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_cm(8192, 8192)
     # test_flash_attn_cm(8192, 1024)
