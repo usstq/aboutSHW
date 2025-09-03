@@ -218,7 +218,7 @@ r'''
 #define ABS(x) (x) < 0 ? -(x) : (x)
 
 CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no, int slice, const int BLOCK_WG_M, const int BLOCK_WG_N) {
-    uint id_wg_mn = cm_group_id(0);
+    uint id_wg_mn = cm_group_id(0) / WALK_HQ;
     if (slice_no == 0) {
         if (slice == 0) {
             // loop M first, N is shared, total = N/256*M+N
@@ -262,7 +262,8 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
     const uint size_slm_b = 0;
-    uint hq = cm_group_id(2);
+    uint hq = cm_group_id(2) * WALK_HQ;
+    hq += cm_group_id(0) & (WALK_HQ - 1);
     uint hk = hq / (HQ / HK);
     const uint slm_size = SG_N * BLOCK_WG_M * sizeof(half);
     cm_slm_init(slm_size);
@@ -359,12 +360,15 @@ if USE_INT8:
 else:
     HEAD_SIZE_KEY = HEAD_SIZE
 
+# loop order walks HQ first and the step is WALK_HQ, 1 means not walk HQ, 2 means walks 2 heads first. Valid value: 1, 2, 4...
+WALK_HQ = 2
+
 FIND_DEBUG_ACC = 0 # only acc test needed
 
 jit_option = '-abortonspill -noschedule '
 kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                     -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                    -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DUSE_KQ=1
+                    -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
                     -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY}''')
 
 def quant_i8(k:torch.Tensor):
@@ -464,9 +468,11 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     slice = 0
     print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
 
+    global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
+
     # gemm
     for i in range(1):
-        kernels.enqueue(kernel_name, [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+        kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
     cl.finish()
 
     if not perf:
@@ -483,7 +489,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     else:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
-            kernels.enqueue(kernel_name, [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N, SG_M, Hq], [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+            kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
@@ -514,6 +520,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
 
     # [1, 32, 32, 64 * 16]
     t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.float16))
+    # mask shape: [rnd_up(q_stride, WG_M) / 8, rnd_up(k_stride, WG_N) / 8]
     t_mask = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8))
     params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH, k_block-q_block]
     if FIND_DEBUG_ACC:
@@ -646,7 +653,7 @@ def test_perf():
     block_size = BLOCK_SIZE
     stride = STRIDE
 
-    Q_LEN = 1024*4*2  # if q_len=1024*4*2 ==> 95 T/s
+    Q_LEN = 1024*4*1  # if q_len=1024*4*2 ==> 95 T/s
     K_LEN = 1024*128
     q_len = Q_LEN
     k_len = K_LEN

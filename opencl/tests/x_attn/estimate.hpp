@@ -823,10 +823,24 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     // load b: N[0:16]xK[0:16]
 #if USE_INT8
-    scales_block[0].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset0);    
-    zps_block[0].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset0 + KV_BLOCK_SIZE * (uint)sizeof(half));
-    scales_block[1].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset1);
-    zps_block[1].format<uint64_t>() = cm_ptr_load<uint64_t, 64>((uint64_t*)key_cache, scale_offset1 + KV_BLOCK_SIZE * (uint)sizeof(half));
+    {
+        lsc::block_2d_desc<int, 1, 16, 16 / 2> desc_scale{ key_cache + scale_offset0, 16 * 2 - 1, (uint)(16 * sizeof(half) - 1), (uint)(16 * sizeof(half) - 1),
+            0, 0 };
+        matrix<half, 16, 16> tmp_scale, tmp_zp;
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 0>(tmp_scale.format<int>(), desc_scale);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(tmp_zp.format<int>(), desc_scale);
+        scales_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
+        scales_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+        zps_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
+        zps_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+        desc_scale.set_base(key_cache + scale_offset1);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 0>(tmp_scale.format<int>(), desc_scale);
+        cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(tmp_zp.format<int>(), desc_scale);
+        scales_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
+        scales_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+        zps_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
+        zps_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+    }
 
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_up_s8.format<int>(), desc_b0);
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_down_s8.format<int>(), desc_b1);
@@ -873,16 +887,16 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     for (uint s = 0; s < STRIDE; s++) {
 #if USE_INT8
-        auto tmp = scales_block[0].select<16, 16>(s);
+        auto tmp = scales_block[0].select<16, 1>(s * 16);
         scales[0].select<16, 2>(0) = tmp;
         scales[0].select<16, 2>(1) = scales[0].select<16, 2>(0);
-        tmp = scales_block[1].select<16, 16>(s);
+        tmp = scales_block[1].select<16, 1>(s * 16);
         scales[1].select<16, 2>(0) = tmp;
         scales[1].select<16, 2>(1) = scales[1].select<16, 2>(0);
-        tmp = zps_block[0].select<16, 16>(s);
+        tmp = zps_block[0].select<16, 1>(s * 16);
         zps[0].select<16, 2>(0) = tmp;
         zps[0].select<16, 2>(1) = zps[0].select<16, 2>(0);
-        tmp = zps_block[1].select<16, 16>(s);
+        tmp = zps_block[1].select<16, 1>(s * 16);
         zps[1].select<16, 2>(0) = tmp;
         zps[1].select<16, 2>(1) = zps[1].select<16, 2>(0);
 #endif
