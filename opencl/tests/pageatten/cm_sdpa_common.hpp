@@ -216,9 +216,9 @@ inline matrix<float, _kv_step, _q_step> ugemm_KQ(uint slm_K, matrix_ref<half, nu
 
     matrix<half, num_K, REG_M * REG_K> Kmat;
     cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
-    if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-        show(Kmat.format<half, 16, 16>());
-    }
+    // if (cm_local_id(2) == 3 && cm_group_id(2) == 0) {
+    //     show(Kmat.format<half, 16, 16>());
+    // }
     #pragma unroll
     for(int k = 0; k < num_K; k++)
         St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(0, Qt[0].format<int32_t>(), Kmat[k].format<int32_t>());
@@ -243,9 +243,9 @@ inline void ugemm_PV0(uint slm_V, matrix_ref<half, REG_N, REG_K> P, matrix_ref<f
     for(int k = 0, ri = 0; k < _head_size; k += REG_N, ri += num_P_tiles) {
         matrix<half, REG_K/2, REG_N*2> Vmat;
         cm_slm_block_read(slm_V, GENX_NONE, slm_offset + REG_K*k*sizeof(half), Vmat.format<half>());
-        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-            show(Vmat.format<half, 16, 16>());
-        }
+        // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+        //     show(Vmat.format<half, 16, 16>());
+        // }
         #pragma unroll
         for(int p = 0; p < num_P_tiles; p++) {
             rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -267,11 +267,9 @@ inline void ugemm_PV1(uint slm_V, matrix_ref<half, REG_N, REG_K> P, vector_ref<f
         matrix<half, REG_K/2, REG_N*2> Vmat;
 
         cm_slm_block_read(slm_V, GENX_NONE, slm_offset + REG_K*k*sizeof(half), Vmat.format<half>());
-        if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-            show(Vmat.format<half, 16, 16>());
-        }
-        //# compensate cur_O
-        //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
+        // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+        //     show(Vmat.format<half, 16, 16>());
+        // }
         #pragma unroll
         for(int p = 0; p < num_P_tiles; p++) {
             auto cO = rO[ri + p].format<float, REG_M, REG_N>();
@@ -516,9 +514,9 @@ void sdpa_kernel_lsc_prefetch(
             b2dKV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
 
             cm_load<lsc::Normal>(quan_Kmat.format<uint8_t>(), b2dKV.set_block_x(0));
-            if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
-                //show(quan_Kmat.format<uint8_t, 16, 16>(), false);
-            }
+            // if (cm_local_id(2) == 0 && cm_group_id(2) == 0) {
+            //     show(quan_Kmat.format<uint8_t, 16, 16>(), false);
+            // }
             #pragma unroll
             for(int r = 0; r < kv_step; r++)  {
                 dq_Kmat[r] =  quan_Kmat[r] - dq_zp[r];
@@ -770,6 +768,9 @@ void sdpa_kernel_lsc(
 
                 for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
                     cm_load<lsc::Normal>(quantemp.format<uint8_t>(), b2dK.set_block_x(k));
+                    // if (wg_local_id == 0) {
+                    //     show(quantemp.format<uint8_t, 16, 16>(), false);
+                    // }
                     #pragma unroll
                     for(int r = 0; r < kv_step; r++)  {
                         dqtemp[r] =  quantemp[r]-zp[r];
@@ -777,6 +778,10 @@ void sdpa_kernel_lsc(
                     }
                     for(int r = kv_step-1; r >= kv_left; r--)
                         dqtemp[r] = 0;
+                    // if (wg_local_id == 0) {
+                    //     show(dqtemp.format<half, 16, 16>());
+                    // }
+
                     cm_slm_block_write(slm_K, slm_offset + k * kv_step * sizeof(half), temp0);
                 }
             } else {
@@ -848,10 +853,7 @@ void sdpa_kernel_lsc(
     cm_slm_fence(CM_LOCAL_BARRIER);
     cm_sbarrier(1);
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base += kv_step * kv_pitch,
-            v_base += kv_step * kv_pitch,
-            slm_buff_id_read ++) {
+    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,slm_buff_id_read ++) {
 
         //  load0, load1, signal1,
         //  [wait1, signal2, load2, read0, compute0]
@@ -876,7 +878,10 @@ void sdpa_kernel_lsc(
             uint slm_offset = (slm_buff_id_read & 3) * slm_buff_size;
             //# St = k @ Qt
             matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
-
+            if (cm_group_id(2) == 0 && wg_local_id == 3 && kv_pos == 48) {
+                // printf("-----------------------[kv_pos]:d%\n", kv_pos);
+                // show(St);
+            }
             if constexpr (use_causal_mask) {
                 // since kv_step == q_step == 16, causal_left is n*kv_step
                 if (causal_left == 0) {
@@ -908,8 +913,10 @@ void sdpa_kernel_lsc(
                 // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
                 for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
             }
-
-            //show(St);
+            // if (cm_group_id(2) == 0 && wg_local_id == 3 && kv_pos == 48) {
+            //     // printf("-----------------------[kv_pos]:d\n", kv_pos);
+            //     show(St);
+            // }
             auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
             matrix<half, REG_N, REG_K> P;

@@ -21,32 +21,38 @@ def get_cm_grf_width():
 CM_GRF_WIDTH = get_cm_grf_width()
 # print(f'CM_GRF_WIDTH is {CM_GRF_WIDTH}')
 
-def quan_per_token(qk):
-        blk_num, kv_heads, blksz, *_ = qk.shape
-        qk_max = qk.amax(dim=-1, keepdim = True)
-        qk_min = qk.amin(dim=-1, keepdim = True)
-        qrange = qk_max - qk_min
+def quan_per_token(kv):
+        blk_num, kv_heads, blksz, *_ = kv.shape
+        kv_max = kv.amax(dim=-1, keepdim = True)
+        kv_min = kv.amin(dim=-1, keepdim = True)
+        qrange = kv_max - kv_min
 
         INTMAX = 255.0
         INTMIN = 0.0
         INTRAGNE = INTMAX - INTMIN
-        qk_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
-        qk_zp = ((0.0-qk_min)*qk_scale+INTMIN).to(dtype=torch.half)
+        kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
+        kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
 
-        qk_INT8 = torch.round((qk*qk_scale+qk_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         # print("################################################################################")
-        # print(qk)
-        # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-        # print(qk_scale)
-        # print(qk)
-        # print(f'qk_INT8\n:{qk_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-        # print(f'dscale:{1.0 / qk_scale}')
-        # print(f'zp:{qk_zp}')
+        # print(f'KV\n:{kv.reshape(64, 16)}')
+        # print(f'kv_INT8\n:{kv_INT8.reshape(64, 16)}')
+        # print(f'kv_scale\n:{kv_scale.reshape( 1, 64)}')
+        # print(f'kv_zp\n:{kv_zp.reshape( 1, 64)}')
+        # print("################################################################################")
 
-        dq_scale = (1.0/qk_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        qk_zp = qk_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        dq_scale = (1.0/kv_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
+
+
+
+def dummy_quan_per_token(qk):
+        blk_num, kv_heads, blksz, *_ = qk.shape
+        qk_INT8 = qk.to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+        dq_scale = torch.ones(blk_num, kv_heads, blksz).to(dtype=torch.half).view(dtype=torch.uint8)
+        qk_zp = torch.zeros(blk_num, kv_heads, blksz).to(dtype=torch.half).view(dtype=torch.uint8)
         return torch.concat((qk_INT8, dq_scale, qk_zp), dim=-1)
-
 
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
@@ -91,8 +97,8 @@ class page_atten_cm:
             assert len(k.shape) == 3
             kv_padding_dims = (0,0,0,0,0,padding_tokens)
             aligned_seqlen = seq_len + padding_tokens
-            padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 1)
-            padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
+            padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 0)
+            padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 0)
 
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
         padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
@@ -100,7 +106,14 @@ class page_atten_cm:
 
         k_quan = quan_per_token(padded_k)
         v_quan = quan_per_token(padded_v)
-        # print(f'###quantize v:{v_quan}')
+
+        # print(f'-----------------------------------------------------------------')
+        # print(f'[KINT8]={k_quan}')
+        # print(f'[VINT8]={v_quan}')
+        # print(f'[K]={k}')
+        # print(f'[V]={v}')
+        # print(f'-----------------------------------------------------------------')
+
 
         #output memory for the whole SDPA
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
@@ -114,8 +127,8 @@ class page_atten_cm:
         for _ in range(n_repeats):
             for trunk_idx in range(trunk_num):
                 blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
-                #block_indices =  torch.randperm(blk_num).to(torch.uint32)
-                block_indices =  torch.arange(blk_num)
+                block_indices =  torch.randperm(blk_num).to(torch.uint32)
+                # block_indices =  torch.arange(blk_num)
                 sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
                 sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
                 for i in  range(len(block_indices)):
@@ -211,7 +224,7 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
 def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, rep = 20):
     cl.profiling(True)
     torch.manual_seed(0)
-    torch.set_printoptions(linewidth=1024)
+    torch.set_printoptions(linewidth=1024, threshold=10_000)
 
     import numpy as np
 
@@ -221,6 +234,8 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
     # offset = [1, 5, 9]
     # index =  torch.randint(low, high,
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
+    # print(f'Qtensor:{q}')
+
     if 1:
         k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
         k[0:seq_len:3, :, :] / 2.0
@@ -252,14 +267,13 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
         print(f'====================================================================================')
     # print(ref)
     # print(out)
-
     check_close(ref, out)
     #assert 0
 
 if __name__ == "__main__":
 
-    seq_len =  32
-    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=16, trunk_sz=seq_len, rep=1)
+    seq_len =  8192
+    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=64, trunk_sz=8192, rep=20)
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:

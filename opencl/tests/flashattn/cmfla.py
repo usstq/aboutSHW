@@ -26,19 +26,19 @@ def quan_per_token(kv):
         kv_min = kv.amin(dim=-1, keepdim = True)
         qrange = kv_max - kv_min
 
-        INTMAX = 0
-        INTMIN = 255
+        INTMAX = 255
+        INTMIN = 0
         INTRAGNE = INTMAX - INTMIN
         kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
         kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
 
         kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8)
         # print("################################################################################")
-        # print(kv)
-        # print(f'kv_INT8\n:{kv_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
-        # print(kv_scale)
-        # print(kv)
-        # print(f'kv_INT8\n:{kv_INT8.reshape( blk_num, kv_heads, blksz,-1)}')
+        # print(f'KV\n:{kv.reshape(64, 16)}')
+        # print(f'kv_INT8\n:{kv_INT8.reshape(64, 16)}')
+        # print(f'kv_scale\n:{kv_scale.reshape( 1, 64)}')
+        # print(f'kv_zp\n:{kv_zp.reshape( 1, 64)}')
+        # print("################################################################################")
         dq_scale = (1.0/kv_scale).to(dtype=torch.half).transpose(0, 1).contiguous()
         kv_zp = kv_zp.to(dtype=torch.half).transpose(0,1).contiguous()
         return [kv_INT8, dq_scale, kv_zp]
@@ -72,12 +72,12 @@ class flash_attn_cm:
         k_INT8, k_dscale, k_zp = quan_per_token(k)
         v_INT8, v_dscale, v_zp = quan_per_token(v)
 
-        print(f'-----------------------------------------------------------------')
-        print(f'[KINT8]={k_INT8}')
-        print(f'[VINT8]={v_INT8}')
-        print(f'[K]={k}')
-        print(f'[V]={v}')
-        print(f'-----------------------------------------------------------------')
+        # print(f'-----------------------------------------------------------------')
+        # print(f'[KINT8]={k_INT8}')
+        # print(f'[VINT8]={v_INT8}')
+        # print(f'[K]={k}')
+        # print(f'[V]={v}')
+        # print(f'-----------------------------------------------------------------')
 
 
 
@@ -212,7 +212,7 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
 def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
     cl.profiling(True)
     torch.manual_seed(0)
-    torch.set_printoptions(linewidth=1024)
+    torch.set_printoptions(linewidth=1024, threshold=np.inf)
 
     import numpy as np
     q_len = kv_len = seq_len
@@ -243,7 +243,7 @@ def test_flash_attn_cm(seq_len, sub_seq_len, num_heads = 16, num_kv_heads = 16, 
 def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80):
     cl.profiling(True)
     torch.manual_seed(0)
-    torch.set_printoptions(linewidth=1024)
+    torch.set_printoptions(linewidth=1024, threshold=10_000)
 
     import numpy as np
 
@@ -251,6 +251,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     high = 2
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
+    # print(f'Qtensor:{q}')
     k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)  / 4.0
     v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / high
     is_causal = True
@@ -264,11 +265,13 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     # print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
+    # print(ref)
+    # print(out)
     check_close(ref, out, atol=1e-2, rtol=1e-2)
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=1, num_heads = 1, num_kv_heads = 1, head_size = 16)
+    test_flash_attn_causal_batch1(seq_len=64, num_heads = 1, num_kv_heads = 1, head_size = 16)
     # test_flash_attn_cm(8192, 8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_cm(8192, 8192)
     # test_flash_attn_cm(8192, 1024)

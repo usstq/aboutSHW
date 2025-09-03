@@ -60,7 +60,6 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     if (q_start_sg + q_len_sg > q_len) {
         q_len_sg = q_len - q_start_sg;
     }
-    //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start_wg, q_len_wg, kv_start, kv_seq_len);
 
     // qkv is fused
     int kv_stop = kv_seq_len;
@@ -91,12 +90,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
         kv_stop = (wg_id + 1) * wg_seq_len + past_q_lens;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
-
-    // qkv fused
-    //constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    // uint q_offset = (q_start*num_total_heads + h)*head_size;
-    // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // printf("###########wg:%d.%d  q: %d, +%d   kv: %d, +%d, kvstop:%d\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop);
 
     //Q/O[B, L, H, S]
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
