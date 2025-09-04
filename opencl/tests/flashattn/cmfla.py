@@ -271,7 +271,7 @@ def test_flash_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, he
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(seq_len=64, num_heads = 1, num_kv_heads = 1, head_size = 16)
+    test_flash_attn_causal_batch1(seq_len=1, num_heads = 1, num_kv_heads = 1, head_size = 16)
     # test_flash_attn_cm(8192, 8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
     # test_flash_attn_cm(8192, 8192)
     # test_flash_attn_cm(8192, 1024)

@@ -430,7 +430,6 @@ inline void prepackAsVNNIWidth2(matrix_ref<T1, 16, 16> input, matrix_ref<T2, 8, 
 }
 
 
-
 template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_q_fused = 0>
 void sdpa_kernel_lsc(
     uint slm_K,
@@ -508,10 +507,18 @@ void sdpa_kernel_lsc(
 
                 vector<half, kv_step * REG_K> temp0;
                 auto dqtemp = temp0.format<half, kv_step, REG_K>();
-                auto quantemp = temp0.format<half, 2, kv_step * REG_K/2>()[1].format<uint8_t, kv_step, REG_K>();
+                // auto quantemp = temp0.format<half, 2, kv_step * REG_K/2>()[1].format<uint8_t, kv_step, REG_K>();
+                matrix<uint8_t, kv_step, REG_K>quantemp;
                 b2dK.set_block_y(kv_pos);
                 for(int k = REG_K*wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
                     cm_load<lsc::Normal>(quantemp.format<uint8_t>(), b2dK.set_block_x(k));
+
+                    // if (wg_local_id == 0) {
+                    //     show(quantemp.format<uint8_t, 16, 16>(), false);
+                    //     show(dscale.format<half, 1, 16>());
+                    //     show(zp.format<half, 1, 16>());
+                    // }
+
                     #pragma unroll
                     for(int r = 0; r < kv_step; r++)  {
                         dqtemp[r] =  quantemp[r]-zp[r];
@@ -519,9 +526,10 @@ void sdpa_kernel_lsc(
                     }
                     for(int r = kv_step-1; r >= kv_left; r--)
                         dqtemp[r] = 0;
-                    if (wg_local_id == 0) {
-                        show(dqtemp.format<half, 16, 16>());
-                    }
+
+                    // if (wg_local_id == 0) {
+                    //     show(dqtemp.format<half, 16, 16>());
+                    // }
 
                     cm_slm_block_write(slm_K, slm_offset + k * kv_step * sizeof(half), temp0);
                 }
@@ -532,48 +540,36 @@ void sdpa_kernel_lsc(
                 auto Vmat = temp2.format<half, REG_K / 2, REG_N*2>();
                 auto quanVmat = temp2.format<half, 2, 128>().row(1).format<uint8_t, 16, 16>();
 
-                vector<uint8_t, 32> copyQuanVmatRow;
-
                 b2dV.set_block_y(kv_pos);
                 #pragma unroll
                 for(int k = REG_N*(wg_local_id-(local_size/2)); k < head_size; k += REG_N*(local_size/2)) {
                     cm_load<lsc::Normal>(quanVmat.format<uint8_t>(), b2dV.set_block_x(k));
 
-                    #if 0
-                        // prepackAsVNNIWidth2(quanVmat, quanVmatVNNI);
-                        // copyQuanVmatRow = quanVmatVNNI[7];
-                        // #pragma unroll
-                        // for (int r = 0; r < 7; r++) {
-                        //         Vmat[r].select<16, 2>(0) = quanVmatVNNI[r].select<16, 2>(0) - zp[r*2];
-                        //         Vmat[r].select<16, 2>(1) = quanVmatVNNI[r].select<16, 2>(1) - zp[r*2+1];
-
-                        //         Vmat[r].select<16, 2>(0) = cm_mul<half>(Vmat[r].select<16, 2>(0), dscale[r*2]);
-                        //         Vmat[r].select<16, 2>(1) = cm_mul<half>(Vmat[r].select<16, 2>(1),  dscale[r*2+1]);
-                        // }
-
-                        // Vmat[7].select<16, 2>(0) = copyQuanVmatRow.select<16, 2>(0) -  zp[14];
-                        // Vmat[7].select<16, 2>(1) = copyQuanVmatRow.select<16, 2>(1) - zp[15];
-                        // Vmat[7].select<16, 2>(0) = cm_mul<half>(Vmat[7].select<16, 2>(0), dscale[14]);
-                        // Vmat[7].select<16, 2>(1) = cm_mul<half>(Vmat[7].select<16, 2>(1),  dscale[15]);
-                    #else
                         matrix<half, 16, 16> tmptmp;
-                        #pragma unroll
-                        for(int r = 0; r < kv_step; r++)  {
-                            tmptmp[r] =  quanVmat[r]-zp[r];
-                            tmptmp[r] = cm_mul<half>(tmptmp[r], dscale[r]);
-                        }
-                        for(int r = kv_step-1; r>=kv_left;r--)  {
-                            tmptmp[r] = 0;
-                        }
+                        #if 1
+                            #pragma unroll
+                            for(int r = 0; r < kv_step; r++)  {
+                                tmptmp[r] =  quanVmat[r]-zp[r];
+                                tmptmp[r] = cm_mul<half>(tmptmp[r], dscale[r]);
+                            }
+                            for(int r = kv_step-1; r>=kv_left;r--)  {
+                                tmptmp[r] = 0;
+                            }
+                        #else
+
+                            for(int r = 0; r < kv_left; r++)  {
+                                tmptmp[r] =  quanVmat[r]-zp[r];
+                                tmptmp[r] = cm_mul<half>(tmptmp[r], dscale[r]);
+                            }
+                        #endif
+
                         // if (cm_group_id(2) == 0) {
                             // show(tmptmp.format<half, 16, 16>());
                         // }
                         prepackAsVNNIWidth2(tmptmp, temp2.format<half, 8, 32>());
 
-                            // show(temp2.format<half, 8, 32>());
+                        // show(temp2.format<half, 8, 32>());
 
-
-                    #endif
 
                     cm_slm_block_write(slm_V, slm_offset + k * REG_K * sizeof(half), temp2);
                 }
@@ -585,10 +581,7 @@ void sdpa_kernel_lsc(
     cm_slm_fence(CM_LOCAL_BARRIER);
     cm_sbarrier(1);
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base += kv_step * kv_pitch,
-            v_base += kv_step * kv_pitch,
-            slm_buff_id_read ++) {
+    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step, slm_buff_id_read ++) {
 
         //  load0, load1, signal1,
         //  [wait1, signal2, load2, read0, compute0]

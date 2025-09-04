@@ -45,15 +45,6 @@ def quan_per_token(kv):
         kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
 
-
-
-def dummy_quan_per_token(qk):
-        blk_num, kv_heads, blksz, *_ = qk.shape
-        qk_INT8 = qk.to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        dq_scale = torch.ones(blk_num, kv_heads, blksz).to(dtype=torch.half).view(dtype=torch.uint8)
-        qk_zp = torch.zeros(blk_num, kv_heads, blksz).to(dtype=torch.half).view(dtype=torch.uint8)
-        return torch.concat((qk_INT8, dq_scale, qk_zp), dim=-1)
-
 class page_atten_cm:
     def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
         self.num_heads = num_heads
@@ -97,8 +88,8 @@ class page_atten_cm:
             assert len(k.shape) == 3
             kv_padding_dims = (0,0,0,0,0,padding_tokens)
             aligned_seqlen = seq_len + padding_tokens
-            padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 0)
-            padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 0)
+            padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 1)
+            padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
 
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
         padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
@@ -113,8 +104,6 @@ class page_atten_cm:
         # print(f'[K]={k}')
         # print(f'[V]={v}')
         # print(f'-----------------------------------------------------------------')
-
-
         #output memory for the whole SDPA
         output = torch.zeros(seq_len, self.num_heads, self.head_size).to(torch.float16)
         blks_per_trunk = self.trunk_sz // self.block_sz
@@ -231,21 +220,16 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
     low = -1
     high = 2
     act_dtype = torch.float16
-    # offset = [1, 5, 9]
-    # index =  torch.randint(low, high,
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
-    # print(f'Qtensor:{q}')
 
     if 1:
         k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
-        k[0:seq_len:3, :, :] / 2.0
+        k[0:seq_len:3, :, :] = (k[0:seq_len:3, :, :] + 0.25)/ 2.0
         v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+        k[0:seq_len:3, :, :] = (k[0:seq_len:3, :, :] + 0.25)/ 2.0
     else:
         k = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
         v = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
-    # print(f'###K:{k}')
-    # print(f'###V:{v}')
-    # print(f'\\\\\\\\\\\\\\\\\\K\n:{k}')
 
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
@@ -265,12 +249,12 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
             print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
         print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
         print(f'====================================================================================')
-    # print(ref)
-    # print(out)
+
     check_close(ref, out)
-    #assert 0
 
 if __name__ == "__main__":
+
+    # test_page_attn_causal_batch1(16, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16, trunk_sz=16, rep=1)
 
     seq_len =  8192
     test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=64, trunk_sz=8192, rep=20)
