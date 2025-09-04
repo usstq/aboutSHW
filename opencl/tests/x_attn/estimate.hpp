@@ -729,7 +729,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     uint M_aligned = (M + BLOCK_WG_M - 1) / BLOCK_WG_M * BLOCK_WG_M;
     uint K_block_pad = N_block * (BLOCK_WG_N / (BLOCK_SIZE / STRIDE));
     const uint block_size_div_stride = BLOCK_SIZE / STRIDE;
-    constexpr half log2e = 1.4426950408889634f;
+    constexpr SOFTMAX_TYPE log2e = 1.4426950408889634f;
     //static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
 
 #if IS_CAUSAL == 1
@@ -737,24 +737,24 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
         // fill -inf -> max in group, 0 -> exp_sum to make compensation work
         {
             // current max -> mem
-            vector<half, BLOCK_SG_N> max_m = -60000;
+            vector<SOFTMAX_TYPE, BLOCK_SG_N> max_m = -60000;
             // kq_max_wg: [b, hq, N/BLOCK_WG_N, M_aligned]
-            uint offset = (id_wg_n * M_aligned + id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * sizeof(half);
+            uint offset = (id_wg_n * M_aligned + id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * sizeof(SOFTMAX_TYPE);
             cm_ptr_store<int>((int*)kq_max_wg, offset, max_m.format<int>());
         }
         {
             // store
-            matrix<half, 8, 4> sum_t = 0;
-            lsc::block_2d_desc<half, 1, 8, 4> desc_c{ kq_exp_partial_sum, M - 1, (uint)(K_block_pad * sizeof(half) - 1), (uint)(K_block_pad * sizeof(half) - 1),
+            matrix<SOFTMAX_TYPE, 8, 4> sum_t = 0;
+            lsc::block_2d_desc<SOFTMAX_TYPE, 1, 8, 4> desc_c{ kq_exp_partial_sum, M - 1, (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1), (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1),
                 (int)((id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / block_size_div_stride), (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 4>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, sum_t.format<half>());
-            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, sum_t.format<half>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 4>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, sum_t.format<SOFTMAX_TYPE>());
+            cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, sum_t.format<SOFTMAX_TYPE>());
         }
 
         return;
@@ -999,7 +999,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     cm_sbarrier(0);
 
-    matrix<half, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> acc_half;
+    matrix<SOFTMAX_TYPE, REG_M * BLOCK_REG_M, REG_N * BLOCK_REG_N> acc_half;
 #pragma unroll
     for (uint reg_m = 0; reg_m < REG_M; reg_m++) {
 #pragma unroll
@@ -1017,7 +1017,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     n_start = MYMIN(n_start, N);
     int n_end = MYMIN(n_start + BLOCK_SG_N, N);
     int valid_n = n_end - n_start;
-    matrix<half, 64, 4> sum_t;
+    matrix<SOFTMAX_TYPE, 64, 4> sum_t;
     vector<int, BLOCK_SG_M> seq_m;
     cmtl::cm_vector_assign(seq_m.select_all(), 0, 1);
     vector_ref<int, BLOCK_SG_N> seq = seq_m.select<BLOCK_SG_N, 1>();
@@ -1033,37 +1033,37 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     #pragma unroll
         for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
             SIMD_IF_BEGIN (n_pos > m_start + reg_m) {
-                acc_half.row(reg_m) = half{-60000};
+                acc_half.row(reg_m) = SOFTMAX_TYPE{-60000};
             } SIMD_IF_END;
         }
     }
 #else
     bool skip_mask = true;
 #endif
-    vector<half, BLOCK_SG_M> max_m;
+    vector<SOFTMAX_TYPE, BLOCK_SG_M> max_m;
     if (valid_n != BLOCK_SG_N) {
 #pragma unroll
         for (uint reg_m = 0; reg_m < REG_M * BLOCK_REG_M; reg_m++) {
-            acc_half.row(reg_m).merge(half{-60000}, n_pos >= N);
+            acc_half.row(reg_m).merge(SOFTMAX_TYPE{-60000}, n_pos >= N);
         }
     }
-    max_m.select<32, 1>() = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>()).format<half>();
-    max_m.select<32, 1>(32) = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>(32)).format<half>();
+    max_m.select<32, 1>() = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>()).format<SOFTMAX_TYPE>();
+    max_m.select<32, 1>(32) = reduce2d<1, 0, 1>(acc_half.select<32, 1, 32, 1>(32)).format<SOFTMAX_TYPE>();
 
     {
-        uint slm_offset = (id_sg_n * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(half);
+        uint slm_offset = (id_sg_n * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(SOFTMAX_TYPE);
         // current max -> slm
         cm_slm_block_write(slm, slm_offset, max_m.format<int>());
         cm_slm_fence(CM_LOCAL_BARRIER);
         cm_barrier();
         // max inside wg
-        cm_slm_block_read(slm, id_sg_m * BLOCK_SG_M * (uint)sizeof(half), max_m.format<int>());
-        vector<half, BLOCK_SG_M> tmp;
+        cm_slm_block_read(slm, id_sg_m * BLOCK_SG_M * (uint)sizeof(SOFTMAX_TYPE), max_m.format<int>());
+        vector<SOFTMAX_TYPE, BLOCK_SG_M> tmp;
 #pragma unroll
         for (uint i = 1; i < SG_N; i++) {
-            slm_offset = (i * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(half);
+            slm_offset = (i * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * (uint)sizeof(SOFTMAX_TYPE);
             cm_slm_block_read(slm, slm_offset, tmp.format<int>());
-            max_m = cm_max<half>(max_m, tmp);
+            max_m = cm_max<SOFTMAX_TYPE>(max_m, tmp);
         }
         // max across wg
         // kq_max: [b, hq, M_aligned]
@@ -1072,7 +1072,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
         // current max -> mem
         // kq_max_wg: [b, hq, N/BLOCK_WG_N, M_aligned]
-        uint offset = (id_wg_n * M_aligned + id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * sizeof(half);
+        uint offset = (id_wg_n * M_aligned + id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) * sizeof(SOFTMAX_TYPE);
         cm_ptr_store<int>((int*)kq_max_wg, offset, max_m.format<int>());
     }
     {
@@ -1103,19 +1103,19 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
                 } SIMD_IF_END;
             }
         }
-        sum_t.select<32, 1, 4, 1>( 0).format<half>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>( 0)).format<half>();
-        sum_t.select<32, 1, 4, 1>(32).format<half>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>(32)).format<half>();
+        sum_t.select<32, 1, 4, 1>( 0).format<SOFTMAX_TYPE>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>( 0)).format<SOFTMAX_TYPE>();
+        sum_t.select<32, 1, 4, 1>(32).format<SOFTMAX_TYPE>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>(32)).format<SOFTMAX_TYPE>();
     }
     // store
-    lsc::block_2d_desc<half, 1, 8, 4> desc_c{ kq_exp_partial_sum, M - 1, (uint)(K_block_pad * sizeof(half) - 1), (uint)(K_block_pad * sizeof(half) - 1),
+    lsc::block_2d_desc<SOFTMAX_TYPE, 1, 8, 4> desc_c{ kq_exp_partial_sum, M - 1, (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1), (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1),
         (int)((id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / block_size_div_stride), (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 4, 1>( 0).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.select<8, 1, 4, 1>( 8).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.select<8, 1, 4, 1>(16).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.select<8, 1, 4, 1>(24).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 4>(desc_c, sum_t.select<8, 1, 4, 1>(32).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, sum_t.select<8, 1, 4, 1>(40).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, sum_t.select<8, 1, 4, 1>(48).format<half>());
-    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, sum_t.select<8, 1, 4, 1>(56).format<half>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 4, 1>( 0).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 1>(desc_c, sum_t.select<8, 1, 4, 1>( 8).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 2>(desc_c, sum_t.select<8, 1, 4, 1>(16).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 3>(desc_c, sum_t.select<8, 1, 4, 1>(24).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 4>(desc_c, sum_t.select<8, 1, 4, 1>(32).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, sum_t.select<8, 1, 4, 1>(40).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, sum_t.select<8, 1, 4, 1>(48).format<SOFTMAX_TYPE>());
+    cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, sum_t.select<8, 1, 4, 1>(56).format<SOFTMAX_TYPE>());
 }
 #endif

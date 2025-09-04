@@ -265,7 +265,7 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     uint hq = cm_group_id(2) * WALK_HQ;
     hq += cm_group_id(0) & (WALK_HQ - 1);
     uint hk = hq / (HQ / HK);
-    const uint slm_size = SG_N * BLOCK_WG_M * sizeof(half);
+    const uint slm_size = SG_N * BLOCK_WG_M * sizeof(SOFTMAX_TYPE);
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
@@ -288,12 +288,12 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     // kq_exp_partial_sum: [hq, m_pad, n_groups*BLOCK_WG_M/(BLOCK_SIZE/STRIDE)]
     uint m_pad = (M + BLOCK_WG_M - 1) / BLOCK_WG_M * BLOCK_WG_M;
     uint n_groups = (N + BLOCK_WG_N - 1) / BLOCK_WG_N;
-    kq_max_wg += hq * n_groups * m_pad * (uint)sizeof(half);
+    kq_max_wg += hq * n_groups * m_pad * (uint)sizeof(SOFTMAX_TYPE);
 
     const uint sum_per_n_token_in_block = BLOCK_SIZE / STRIDE;
     const uint n_after_sum_in_group = BLOCK_WG_N / sum_per_n_token_in_block;
     const uint n_after_sum_pad = n_after_sum_in_group * n_groups;
-    kq_exp_partial_sum += hq * n_after_sum_pad * m_pad * (uint)sizeof(half);
+    kq_exp_partial_sum += hq * n_after_sum_pad * m_pad * (uint)sizeof(SOFTMAX_TYPE);
 
 #define CONCAT_IMPL(a, b) gemm_qk_ ##a ##x ##b ##_xe2
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
@@ -317,8 +317,8 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum
     uint m = cm_group_id(0);
     uint hq = cm_group_id(1);
     uint b = cm_group_id(2);
-    kq_max_wg += (b * HQ + hq) * (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad * (uint)sizeof(half);
-    kq_exp_partial_sum += (b * HQ + hq) * q_stride_pad * k_block_pad * (uint)sizeof(half);
+    kq_max_wg += (b * HQ + hq) * (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad * (uint)sizeof(SOFTMAX_TYPE);
+    kq_exp_partial_sum += (b * HQ + hq) * q_stride_pad * k_block_pad * (uint)sizeof(SOFTMAX_TYPE);
 #if DEBUG_ACC == 1
     kq_sum += (b * HQ + hq) * q_stride_pad / TOKEN_IN_BLOCK * k_block_pad * (uint)sizeof(half);
 #endif
@@ -362,6 +362,7 @@ else:
 
 # loop order walks HQ first and the step is WALK_HQ, 1 means not walk HQ, 2 means walks 2 heads first. Valid value: 1, 2, 4...
 WALK_HQ = 2
+SOFTMAX_TYPE = 'float' # 'half'
 
 FIND_DEBUG_ACC = 0 # only acc test needed
 
@@ -369,7 +370,7 @@ jit_option = '-abortonspill -noschedule '
 kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                     -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
                     -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
-                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY}''')
+                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}''')
 
 def quant_i8(k:torch.Tensor):
     B, Hk, Lk, S = k.shape
@@ -448,13 +449,14 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
 
     q_stride_pad = rnd_up(M, BLOCK_WG_M)
     # [1, 32, 64, 256]
+    softmax_type = np.float16 if SOFTMAX_TYPE == 'half' else np.float32
     N_kq_groups = div_up(N, BLOCK_WG_N)
-    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, N_kq_groups, q_stride_pad], np.float16))
+    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, N_kq_groups, q_stride_pad], softmax_type))
     # [1, 32, 256, 64 * 16]
     sum_per_token_in_block = block_size // stride
     k_block_in_group = BLOCK_WG_N // sum_per_token_in_block
     k_block_pad = k_block_in_group * N_kq_groups
-    t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, q_stride_pad, k_block_pad], np.float16))
+    t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, q_stride_pad, k_block_pad], softmax_type))
 
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
@@ -504,8 +506,9 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     assert wg_k % block_size == 0, "wg_k should be multiple of block_size then there is no tails from block_size"
     assert wg_q % block_size == 0, "wg_q should be multiple of block_size then there is no tails from block_size"
     qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, wg_q, valid_q=q_stride)
-    t_kq_max_wg = cl.tensor(kq_5d_max.detach().numpy())
-    t_kq_exp_partial_sum = cl.tensor(qk_exp_partial_sum.detach().numpy())
+    softmax_type = np.float16 if SOFTMAX_TYPE == 'half' else np.float32
+    t_kq_max_wg = cl.tensor(kq_5d_max.detach().numpy().astype(softmax_type))
+    t_kq_exp_partial_sum = cl.tensor(qk_exp_partial_sum.detach().numpy().astype(softmax_type))
 
     sum_per_n_token_in_block = BLOCK_SIZE // STRIDE
     q_block = div_up(q_stride, sum_per_n_token_in_block)
@@ -519,7 +522,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     assert q_stride_pad == (q_stride + wg_q - 1) // wg_q * wg_q, "q_stride_pad padded to wg_q / stride"
 
     # [1, 32, 32, 64 * 16]
-    t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.float16))
+    t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], dtype=np.float16))
     # mask shape: [rnd_up(q_stride, WG_M) / 8, rnd_up(k_stride, WG_N) / 8]
     t_mask = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8))
     params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH, k_block-q_block]
@@ -534,9 +537,9 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
         print(f'{Colors.GREEN}find:sum passed{Colors.END}')
 
     kq_exp_partial_sum_np = t_kq_exp_partial_sum.numpy()
-    cur_sorted_value = kq_exp_partial_sum_np[:, :, 1::sum_per_n_token_in_block, :]
+    cur_sorted_value = kq_exp_partial_sum_np[:, :, 1::sum_per_n_token_in_block, :].view(dtype=np.float16)
     cur_sorted_index = kq_exp_partial_sum_np[:, :, 3::sum_per_n_token_in_block, :].view(dtype=np.ushort)
-    cur_accum_value  = kq_exp_partial_sum_np[:, :, 6::sum_per_n_token_in_block, :]
+    cur_accum_value  = kq_exp_partial_sum_np[:, :, 6::sum_per_n_token_in_block, :].view(dtype=np.float16)
     sorted_value_ref = sorted_value_ref.detach().numpy()
     cur_sorted_value = cur_sorted_value[...,:q_block,:k_block]
     compare(sorted_value_ref, cur_sorted_value)
