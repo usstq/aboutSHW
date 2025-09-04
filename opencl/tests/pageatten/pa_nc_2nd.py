@@ -14,7 +14,7 @@ parser.add_argument('-b', "--batch", type=int, default=1)
 parser.add_argument('-nh', "--num-heads", type=int, default=28)
 parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=4)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
-parser.add_argument('-kvl', "--kv-len", type=int, default=32767)
+parser.add_argument('-kvl', "--kv-len", type=int, default=32768)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
@@ -551,7 +551,7 @@ if args.impl == 0:
     print("=========== PASS ===========")
     sys.exit(0)
 
-org = get_flash3(q,k,v,attention_mask)
+#org = get_flash3(q,k,v,attention_mask)
 
 print()
 print("GPU cm kernels for flash attn2:")
@@ -631,7 +631,13 @@ scale_factor = 1.0/(head_size**0.5)
 # each WG processes a partition
 GWS=[seq_num, num_heads, (new_kv_len + kv_partition_size - 1) // kv_partition_size]
 WG_SIZE = 1;#max(kv_len // kv_partition_size//2, 1)
+LWS=[1, num_heads//num_kv_heads, WG_SIZE]
 LWS=[1, 1, WG_SIZE]
+
+# GWS=[seq_num, (new_kv_len + kv_partition_size - 1) // kv_partition_size, num_heads]
+# WG_SIZE = 1;#max(kv_len // kv_partition_size//2, 1)
+# LWS=[1, WG_SIZE, num_heads//num_kv_heads]
+# #LWS=[1, 1, WG_SIZE]
 
 print("GWS=", GWS)
 print("LWS=", LWS)
@@ -839,11 +845,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     const uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(half)); // 4: scale/zp
     uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
 
-    uint leftover_aligned_size = 0;
+    // uint leftover_aligned_size = 0;
     uint leftover_size = 0;
     if(partition_idx == kv_partition_num - 1) {
         leftover_size = (kv_len - KV_PARTITION_SIZE * partition_idx) % KV_PARTITION_SIZE;
-        leftover_aligned_size = KV_STEP * ((leftover_size + KV_STEP - 1) / KV_STEP); // round up to KV_STEP
+        // leftover_aligned_size = KV_STEP * ((leftover_size + KV_STEP - 1) / KV_STEP); // round up to KV_STEP
     }
     if(block_num > total_blocks_num - start_block_idx) {
         block_num = total_blocks_num - start_block_idx;
@@ -877,8 +883,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     #endif
 
         uint kv_pos_end = KV_BLOCK_SIZE;
-        if(block_idx == block_num - 1 && leftover_aligned_size > 0) {
-            kv_pos_end = leftover_aligned_size;
+        if(block_idx == block_num - 1 && leftover_size > 0) {
+            // kv_pos_end = leftover_aligned_size;
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
         }
 
@@ -948,7 +954,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         constexpr float log2e = 1.4426950408889634f;
         constexpr float loge2 = 0.6931471805599453f;
         vector<float, PARTITION_SUBBLOCK_NUM * REG_N> rS_exp = cm_exp(rS.format<float>()*log2e);
-        float cur_lse_0 = cm_sum<float>(rS_exp);
+        // float cur_lse_0 = cm_sum<float>(rS_exp);
 
         //if(head_num_idx==0 && partition_idx==1) {
         //    uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + head_num_idx * kv_partition_num + wg_thread_id;
@@ -1010,7 +1016,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         //    printf("leftover_size = %d, leftover_aligned_size = %d, XE_ARCH = %d, KV_BLOCK_SIZE = %d\n", leftover_size, leftover_aligned_size, XE_ARCH, KV_BLOCK_SIZE);
         //} 
         uint kv_pos_end = KV_BLOCK_SIZE;
-        if(block_idx == block_num - 1 && leftover_aligned_size > 0) {
+        if(block_idx == block_num - 1 && leftover_size > 0) {
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
         }
         for(int kv_pos =0; kv_pos < kv_pos_end; kv_pos += REG_K, ki++) {
@@ -1051,18 +1057,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //}
 
     //# save Output
-    matrix<float, REG_M, REG_N> cur_O_f16;
+    matrix<float, REG_M, REG_N> cur_O_f32;
     uint o_offset = seq_idx * kv_partition_num * HEADS_NUM * HEAD_SIZE + kv_partition_num * head_num_idx * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
     float div_cur_sum = 1.0/cur_sum;
     #pragma unroll
     for(int k = 0, ri=0; k < HEAD_SIZE; k += REG_N, ri++) {
         auto cO = Omat[ri].format<float, REG_M, REG_N>();
         #if XE_ARCH==1
-        cur_O_f16= cm_mul<float>(cO, div_cur_sum);
+        cur_O_f32= cm_mul<float>(cO, div_cur_sum);
         #else
-        cur_O_f16= cm_div_ieee(cO, cur_sum);
+        cur_O_f32= cm_div_ieee(cO, cur_sum);
         #endif
-        cm_svm_block_write<float, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f16.format<float>());
+        cm_svm_block_write<float, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f32.format<float>());
     }
     uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + head_num_idx * kv_partition_num + wg_thread_id;
     lse[lse_offset] = cur_lse;
@@ -1144,6 +1150,8 @@ print("intermediate memory size = ", intermedia_mem_size/1024/1024, "MB")
 cwd = os.path.dirname(os.path.realpath(__file__))
 print("compiling ...")
 cm_kernels = cl.kernels(pyeval(src1), f"-cmc -Qxcm_register_file_size=256 -mCM_printregusage -I{cwd}")
+
+#cm_kernels = cl.kernels(pyeval(src1), f"-cmc -mCM_printregusage -I{cwd}")
 print("first call ...")
 # cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS, q_len, kv_len, t_q, t_k, t_v, t_out, t_mask, t_lse)
 cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS, t_q, t_k, t_v,
@@ -1193,7 +1201,7 @@ while len(all_layers) < loop_cnt and mem_size < 8e9:
     mem_size += q.numel() * q.element_size()
     mem_size += k.numel() * k.element_size()
     mem_size += v.numel() * v.element_size()
-    print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
+    # print(f"nlayers={len(all_layers)} mem_size={mem_size*1e-9:.3f} GB")
 
 for i in range(loop_cnt):
     j  = i % len(all_layers)
@@ -1211,12 +1219,28 @@ latency = cl.finish()
 first_kernel = 1
 kvcache_size = new_kv_len * num_kv_heads * head_size * 2 * 2
 intermedia_size = batch * num_heads * kv_partition_num * (head_size + 1) * 4
+
+kvcache_total_time=0
+intermedia_total_time=0
+num_runs = 0
 for ns in latency:
     if first_kernel:
-        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s, kvcache_size = {kvcache_size*1e-6:.1f} MB")
+        kvcache_total_time += ns
+        num_runs += 1
+        #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s, kvcache_size = {kvcache_size*1e-6:.1f} MB")
+        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s")
     else:
-        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
+        intermedia_total_time += ns
+        #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
     first_kernel =  1 - first_kernel
+
+
+print()
+# print("intermedia_total_time = ", intermedia_total_time*1e-6, "ms")
+# print("kvcache_total_time = ", kvcache_total_time*1e-6, "ms")
+
+print(f"num_runs = {num_runs}, avg kvcache = {kvcache_size*num_runs/kvcache_total_time:.3f} GB/s, avg intermedia = {intermedia_size*num_runs/(intermedia_total_time):.3f} GB/s")
+print()
 
 f1 = torch.from_numpy(all_layers[0][4].numpy())
 
