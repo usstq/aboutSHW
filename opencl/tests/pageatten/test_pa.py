@@ -46,7 +46,7 @@ def quan_per_token(kv):
         return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
 
 class page_atten_cm:
-    def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal = False):
+    def __init__(self, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal = True):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
@@ -54,23 +54,27 @@ class page_atten_cm:
         assert trunk_sz % block_sz == 0, f'Error: trunk_sz{trunk_sz} must be multiple of block_sz{trunk_sz}'
         self.block_sz = block_sz
         self.trunk_sz = trunk_sz
+        self.compressed_kvcache = compressed_kvcache
 
 
-        src1 = r'''#include "cm_sdpa_vlen.hpp"'''
+
+        src1 = r'''#include "cm_pa_kernel.hpp"'''
         cwd = os.path.dirname(os.path.realpath(__file__))
         print(f"compiling {cwd} {num_heads=} {head_size=} ...")
 
         scale_factor = 1.0/(head_size**0.5)
         self.kernels = cl.kernels(src1,
-                     (f'-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}'
-                      f" -DCMFLA_NUM_HEADS={num_heads}"
-                      f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
-                      f" -DCMFLA_HEAD_SIZE={head_size}"
-                      f" -DCMFLA_SCALE_FACTOR={scale_factor}"
-                      f" -DCMFLA_IS_CAUSAL={int(is_causal)}"
-                      f" -DCMPA_BLOCK_SZ={self.block_sz}"
-                      f" -mdump_asm -g2")
-                     )
+                    (f'-cmc -Qxcm_jit_option="-abortonspill" -Qxcm_register_file_size=256  -mCM_printregusage -I{cwd}'
+                    f" -DCMFLA_NUM_HEADS={num_heads}"
+                    f" -DCMFLA_NUM_KV_HEADS={num_kv_heads}"
+                    f" -DCMFLA_HEAD_SIZE={head_size}"
+                    f" -DCMFLA_SCALE_FACTOR={scale_factor}"
+                    f" -DCMFLA_IS_CAUSAL={int(is_causal)}"
+                    f" -DCMPA_BLOCK_SZ={self.block_sz}"
+                    f" -DCMPA_KVCACHE_U8={int(compressed_kvcache)}"
+                    f" -mdump_asm -g2")
+                    )
+
 
     def __call__(self, q, k, v, n_repeats = 1):
         seq_len, _, head_size = q.shape
@@ -92,12 +96,14 @@ class page_atten_cm:
             padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
 
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
-        padded_k = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
-        padded_v = padded_v.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
-
-        k_quan = quan_per_token(padded_k)
-        v_quan = quan_per_token(padded_v)
-
+        k_cache = padded_k.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        v_cache = padded_v.reshape(aligned_seqlen//self.block_sz, self.block_sz, self.num_kv_heads, self.head_size).transpose(1,2).contiguous()
+        if self.compressed_kvcache:
+            k_cache = quan_per_token(k_cache)
+            v_cache = quan_per_token(v_cache)
+        else:
+            k_cache = k_cache.reshape(aligned_seqlen//self.block_sz, self.num_kv_heads, -1)
+            v_cache = v_cache.reshape(aligned_seqlen//self.block_sz, self.num_kv_heads, -1)
         # print(f'-----------------------------------------------------------------')
         # print(f'[KINT8]={k_quan}')
         # print(f'[VINT8]={v_quan}')
@@ -112,25 +118,30 @@ class page_atten_cm:
         # K/V: [blk_num, H, blk_sz, S]
         trunk_num = (aligned_seqlen+ self.trunk_sz - 1) // self.trunk_sz
         max_blks = aligned_seqlen // self.block_sz
+
+        kv_dtype = torch.uint8 if self.compressed_kvcache else torch.half
+        #extra half zp and half scale per token. totally 4 bytes.
+        token_sz = (head_size+4) if self.compressed_kvcache else (head_size)
+
         cl.finish()
         for _ in range(n_repeats):
             for trunk_idx in range(trunk_num):
                 blk_num = max_blks if blks_per_trunk*(trunk_idx + 1) > max_blks else blks_per_trunk*(trunk_idx + 1)
                 block_indices =  torch.randperm(blk_num).to(torch.uint32)
                 # block_indices =  torch.arange(blk_num)
-                sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
-                sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*(head_size+4)).to(torch.uint8)
+                sub_k = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*token_sz).to(kv_dtype)
+                sub_v = torch.zeros(blk_num, self.num_kv_heads, self.block_sz*token_sz).to(kv_dtype)
                 for i in  range(len(block_indices)):
-                    sub_k[block_indices[i],:] = k_quan[i,:]
-                    sub_v[block_indices[i],:] = v_quan[i,:]
+                    sub_k[block_indices[i],:] = k_cache[i,:]
+                    sub_v[block_indices[i],:] = v_cache[i,:]
                 q_start = trunk_idx*self.trunk_sz
                 q_end =  min(q_start + self.trunk_sz, seq_len)
                 q_len = q_end - q_start
                 sub_q = q[q_start:q_end, :]
 
                 t_q = cl.tensor(sub_q.to(torch.float16).detach().numpy())
-                t_k= cl.tensor(sub_k.to(torch.uint8).detach().numpy())
-                t_v = cl.tensor(sub_v.to(torch.uint8).detach().numpy())
+                t_k= cl.tensor(sub_k.to(kv_dtype).detach().numpy())
+                t_v = cl.tensor(sub_v.to(kv_dtype).detach().numpy())
                 t_out = cl.tensor([q_len, self.num_heads, self.head_size], np.dtype(np.float16))
                 wg_size = 16
                 q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
@@ -156,10 +167,10 @@ class page_atten_cm:
 
     @staticmethod
     @functools.cache
-    def create_instance(num_heads, num_kv_heads, head_size,block_sz, trunk_sz, is_causal):
-        return page_atten_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
+    def create_instance(num_heads, num_kv_heads, head_size,block_sz, trunk_sz, compressed_kvcache, is_causal):
+        return page_atten_cm(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal)
 
-def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = False):
+def flash_attn_vlen_ref(q, k, v, cu_seqlens, is_causal = True):
     seq_length, num_heads, head_size = q.shape
     kv_seq_length, num_kv_heads, head_size = k.shape
     old_dtype = q.dtype
@@ -210,7 +221,7 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
         print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, rep = 20):
+def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache = True, rep = 20):
     cl.profiling(True)
     torch.manual_seed(0)
     torch.set_printoptions(linewidth=1024, threshold=10_000)
@@ -222,18 +233,18 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
 
-    if 1:
+    if compressed_kvcache:
         k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
         k[0:seq_len:3, :, :] = (k[0:seq_len:3, :, :] + 0.25)/ 2.0
         v = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-        k[0:seq_len:3, :, :] = (k[0:seq_len:3, :, :] + 0.25)/ 2.0
+        v[0:seq_len:3, :, :] = (v[0:seq_len:3, :, :] + 0.25)/ 2.0
     else:
         k = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
-        v = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)
+        v = torch.rand(seq_len, num_kv_heads, head_size).to(dtype=act_dtype)/high
 
     is_causal = True
     ref = flash_attn_vlen_ref(q, k, v, [], is_causal=is_causal)
-    pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal)
+    pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal)
 
     out = pa_cm(q, k, v, rep)
     # out = func(q, k, v, n_repeats=20)
@@ -254,30 +265,34 @@ def test_page_attn_causal_batch1(seq_len, num_heads, num_kv_heads, head_size, bl
 
 if __name__ == "__main__":
 
-    # test_page_attn_causal_batch1(16, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=16, trunk_sz=16, rep=1)
 
     seq_len =  8192
-    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=64, trunk_sz=8192, rep=20)
+    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=64, trunk_sz=8192, compressed_kvcache=True, rep=20)
+    test_page_attn_causal_batch1(seq_len, num_heads = 28, num_kv_heads = 4, head_size = 128, block_sz=64, trunk_sz=8192, compressed_kvcache=False, rep=20)
+
     if 0:
         for block_sz in range(16, 32, 16):
             for blocks_per_trunk in [1,]:
                 for seq_len in range(1024*32, 1024*32+4):
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
-    if 0:
-        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
-        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256)
+                    for compressed_kvcache in [True,False,]:
+                        print("\n##################################################################################################################################################################")
+                        print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} kv_cache={"U8" if compressed_kvcache else "F16"}')
+                        print("##################################################################################################################################################################")
+                        test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 64, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache)
+    if 1:
+        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256, compressed_kvcache=True)
+        test_page_attn_causal_batch1(32771, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=256, trunk_sz=128*256, compressed_kvcache=False)
         for block_sz in range(128, 257, 32):
             for seq_len in range(32768, 32810):
                 for trunk_num in range(1, 21):
-                    seq_in_blks = (seq_len + block_sz -1 ) // block_sz
-                    blocks_per_trunk = seq_in_blks // trunk_num if seq_in_blks % trunk_num == 0 else seq_in_blks // (trunk_num - 1)
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk}')
-                    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz)
+                    for compressed_kvcache in [True,False,]:
+
+                        seq_in_blks = (seq_len + block_sz -1 ) // block_sz
+                        blocks_per_trunk = seq_in_blks // trunk_num if seq_in_blks % trunk_num == 0 else seq_in_blks // (trunk_num - 1)
+                        print("\n##################################################################################################################################################################")
+                        print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} kv_cache={"U8" if compressed_kvcache else "F16"}')
+                        print("##################################################################################################################################################################")
+                        test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache)
 
 
 

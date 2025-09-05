@@ -1,5 +1,5 @@
 
-#include "cm_sdpa_common.hpp"
+#include "cm_pa_common.hpp"
 
 #ifdef CM_HAS_LSC_UNTYPED_2D
 #define USE_LSC 1
@@ -7,15 +7,16 @@
 #define USE_LSC 0
 #endif
 
-
-
-#define USE_SLM 1
-
 extern "C" _GENX_MAIN_ void cm_page_attention(
     int q_len,
     half* query [[type("svmptr_t")]],
+#if CMPA_KVCACHE_U8
     int8_t* key [[type("svmptr_t")]],
     int8_t* value [[type("svmptr_t")]],
+#else
+    half* key [[type("svmptr_t")]],
+    half* value [[type("svmptr_t")]],
+#endif
     int32_t* past_lens [[type("svmptr_t")]],
     int32_t* block_indices [[type("svmptr_t")]],
     int32_t* block_indices_begins [[type("svmptr_t")]],
@@ -29,7 +30,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     //# query [q_len, num_heads, S]
     //#   key [kv_len, num_heads, S]
     //# value [kv_len, num_heads, S]
-#if USE_SLM
+#if CMPA_KVCACHE_U8
     constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
     constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
     constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
@@ -94,39 +95,36 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
 
     //Q/O[B, L, H, S]
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
-
-    //K/V[block_num, kv_heads, block_sz*head_sz+block_sz*4]
+#if CMPA_KVCACHE_U8
     uint kv_offset = hkv*(head_size+4)*pa_block_sz;
-
-#if !USE_SLM
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
-                                wg_local_id,
-                                q_start_sg, //q_start for SG,
-                                kv_stop,
-                                q_len_sg, //q_step,
-                                kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query + q_offset),
-                                reinterpret_cast<svmptr_t>(key + kv_offset),
-                                reinterpret_cast<svmptr_t>(value + kv_offset),
-                                reinterpret_cast<svmptr_t>(output + q_offset),
-                                past_q_lens,
-                                block_indices);
+    pa_lsc_u8<is_causal, num_heads, num_kv_heads, head_size, 0>(
+                            slm_K,
+                            slm_V,
+                            wg_local_id,
+                            local_size,
+                            q_start_sg, //q_start for SG,
+                            kv_stop,
+                            q_len_sg, //q_step,
+                            kv_seq_len, //kv_len,
+                            reinterpret_cast<svmptr_t>(query + q_offset),
+                            reinterpret_cast<svmptr_t>(key + kv_offset),
+                            reinterpret_cast<svmptr_t>(value + kv_offset),
+                            reinterpret_cast<svmptr_t>(output + q_offset),
+                            past_q_lens,
+                            block_indices);
 #else
-    sdpa_kernel_lsc<is_causal, num_heads, num_kv_heads, head_size, 0>(
-                                slm_K,
-                                slm_V,
-                                wg_local_id,
-                                local_size,
-                                q_start_sg, //q_start for SG,
-                                kv_stop,
-                                q_len_sg, //q_step,
-                                kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query + q_offset),
-                                reinterpret_cast<svmptr_t>(key + kv_offset),
-                                reinterpret_cast<svmptr_t>(value + kv_offset),
-                                reinterpret_cast<svmptr_t>(output + q_offset),
-                                past_q_lens,
-                                block_indices);
-
+    uint kv_offset = hkv*head_size*pa_block_sz;
+    pa_kernel_lsc_prefetch_f16<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
+                            wg_local_id,
+                            q_start_sg, //q_start for SG,
+                            kv_stop,
+                            q_len_sg, //q_step,
+                            kv_seq_len, //kv_len,
+                            reinterpret_cast<svmptr_t>(query + q_offset),
+                            reinterpret_cast<svmptr_t>(key + kv_offset),
+                            reinterpret_cast<svmptr_t>(value + kv_offset),
+                            reinterpret_cast<svmptr_t>(output + q_offset),
+                            past_q_lens,
+                            block_indices);
 #endif
 }
