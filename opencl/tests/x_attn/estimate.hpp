@@ -776,7 +776,7 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
 
     // M[0:16]xK[0:32]
     uint block_idx = (uint)(id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) * STRIDE / KV_BLOCK_SIZE;
-    uint max_block_idx = (uint)(N * STRIDE + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
+    uint max_block_idx = (uint)(N * STRIDE + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE - 1;
     block_idx = MYMIN(block_idx, max_block_idx);
 #if USE_INT8
     uint offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
