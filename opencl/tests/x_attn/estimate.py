@@ -264,6 +264,7 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     const uint size_slm_b = 0;
     uint hq = cm_group_id(2) * WALK_HQ;
     hq += cm_group_id(0) & (WALK_HQ - 1);
+    if (hq >= HQ) return;
     uint hk = hq / (HQ / HK);
     const uint slm_size = SG_N * BLOCK_WG_M * sizeof(SOFTMAX_TYPE);
     cm_slm_init(slm_size);
@@ -361,7 +362,7 @@ else:
     HEAD_SIZE_KEY = HEAD_SIZE
 
 # loop order walks HQ first and the step is WALK_HQ, 1 means not walk HQ, 2 means walks 2 heads first. Valid value: 1, 2, 4...
-WALK_HQ = 2
+WALK_HQ = 2 if HQ != HK else 1
 SOFTMAX_TYPE = 'float' # 'half'
 
 FIND_DEBUG_ACC = 0 # only acc test needed
