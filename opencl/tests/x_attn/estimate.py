@@ -126,6 +126,7 @@ def find_blocks_ref(input_tensor_org, threshold, q_block, k_block, causal, curre
     input_tensor = input_tensor.to(torch.float32)
     total_sum = input_tensor.sum(dim=-1, keepdim=True)
     required_sum = total_sum * threshold
+    input_tensor = input_tensor.to(torch.float16)
     #print(f'{threshold=}, {required_sum=}, {total_sum=}')
     if causal:
         chunk_num = Q_block
@@ -355,7 +356,7 @@ STRIDE = 16
 BLOCK_SIZE = 128
 THRESH = 0.9
 IS_CAUSAL = 1
-USE_INT8 = 1
+USE_INT8 = 0
 if USE_INT8:
     HEAD_SIZE_KEY = HEAD_SIZE + 2 * 2
 else:
@@ -367,11 +368,15 @@ SOFTMAX_TYPE = 'float' # 'half'
 
 FIND_DEBUG_ACC = 0 # only acc test needed
 
-jit_option = '-abortonspill -noschedule '
-kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
-                    -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                    -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
-                    -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}''')
+kernels = None
+def create_kernels(force_create=False):
+    global kernels
+    if kernels and not force_create: return
+    jit_option = '-abortonspill -noschedule '
+    kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
+                        -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
+                        -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
+                        -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}''')
 
 def quant_i8(k:torch.Tensor):
     B, Hk, Lk, S = k.shape
@@ -409,6 +414,8 @@ def quant_i8(k:torch.Tensor):
 # q: [B, Hq, L_q, S]
 # k: [B, Hk, L_k, S]
 def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0, threshold=0.9, stride=16, causal=True, perf=True):
+    create_kernels()
+
     B, Hq, Lq, S = q.shape
     _, Hk, Lk, _ = k.shape
     Lk = Lk // stride * stride
@@ -503,7 +510,9 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
 # q_stride = q_len // stride
 # k_stride = k_len // stride
 def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
-    qk = torch.randint(-2000, 3000, size=[1, HQ, q_stride, k_stride], dtype=torch.int16).to(dtype=torch.float16)
+    create_kernels()
+
+    qk = torch.randint(-2000, 3000, size=[1, HQ, q_stride, k_stride], dtype=torch.int16).to(dtype=torch.float32)
     assert wg_k % block_size == 0, "wg_k should be multiple of block_size then there is no tails from block_size"
     assert wg_q % block_size == 0, "wg_q should be multiple of block_size then there is no tails from block_size"
     qk_max, kq_5d_max, qk_exp_partial_sum, qk_sum = get_partial_softmax_ref(qk, block_size, S, wg_k, wg_q, valid_q=q_stride)
@@ -525,7 +534,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     # [1, 32, 32, 64 * 16]
     t_kq_sum = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], dtype=np.float16))
     # mask shape: [rnd_up(q_stride, WG_M) / 8, rnd_up(k_stride, WG_N) / 8]
-    t_mask = cl.tensor(np.zeros([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8))
+    t_mask = cl.tensor(np.ones([B, HQ, q_stride_pad // sum_per_n_token_in_block, k_block_pad], np.int8) * 100)
     params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH, k_block-q_block]
     if FIND_DEBUG_ACC:
         params += [t_kq_sum]
@@ -577,8 +586,9 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
 
     cur_mask = t_mask.numpy()
     cur_mask = cur_mask[...,:q_block,:k_block]
-    if (mask_ref & cur_mask).sum() / mask_ref.sum() < 0.95:
-        raise Exception(f'mask intersection less than 95%')
+    if not np.all(cur_mask == mask_ref.to(torch.int8).detach().numpy()):
+        if (mask_ref & cur_mask).sum() / mask_ref.sum() < 0.95:
+            raise Exception(f'mask intersection less than 95%')
     # minor error may get different mask index
     # mask_ref_np =  mask_ref.detach().numpy()
     # cur_mask = tMask.numpy()
@@ -670,8 +680,117 @@ def test_perf():
     test_gemm(q, k, block_size=block_size, q_start_strided=k_len // stride - q_len // stride, threshold=THRESH, stride=stride, causal=IS_CAUSAL)
     test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=IS_CAUSAL)
 
+def test_ov():
+    # change global configs here
+    global FIND_DEBUG_ACC
+    FIND_DEBUG_ACC = 1
+    create_kernels()
+
+    def get_tensor(name, dtype=np.float16):
+        with open(name, 'rb') as f:
+            data = f.read()
+            np_data = np.frombuffer(data, dtype=dtype).copy()
+            return torch.from_numpy(np_data)
+    
+    query = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__4096_4096_1_1__bfyx.bin').reshape([1, 4096, 4096])
+    key = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__17_8_256_128__bfyx.bin').reshape([17, 8, 256, 128])
+    mask = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 32, 32])
+    M = query.shape[1] // STRIDE
+    N = 256
+    Lk = N * STRIDE
+    K = HEAD_SIZE * STRIDE
+    q_start_strided = 0
+    q_stride_pad = rnd_up(M, BLOCK_WG_M)
+    Hq = 32
+    slice_no = 0
+    slice = 0
+    N_kq_groups = div_up(N, BLOCK_WG_N)
+    global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
+    # start block 0
+    block_indices_begins = torch.zeros(1).to(torch.int32)
+    block_indices = torch.arange((Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE)
+    t_query = cl.tensor(query.detach().numpy())
+    t_key_cache = cl.tensor(key.detach().numpy())
+    t_block_indices = cl.tensor(block_indices.to(torch.int32).detach().numpy())
+    t_block_indices_begins = cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
+    softmax_type = np.float16 if SOFTMAX_TYPE == 'half' else np.float32
+    t_kq_max_wg = cl.tensor(np.zeros([1, Hq, N_kq_groups, q_stride_pad], softmax_type))
+    # [1, 32, 256, 64 * 16]
+    sum_per_token_in_block = BLOCK_SIZE // STRIDE
+    k_block_in_group = BLOCK_WG_N // sum_per_token_in_block
+    k_block_pad = k_block_in_group * N_kq_groups
+    t_kq_exp_partial_sum = cl.tensor(np.zeros([1, Hq, q_stride_pad, k_block_pad], softmax_type))
+
+    kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ, slice_no, slice, q_start_strided)
+
+    q_stride = M
+    k_stride = N
+    t_mask = cl.tensor(np.ones([1, HQ, q_stride_pad // sum_per_token_in_block, k_block_pad], np.int8) * 100)
+    q_block = div_up(q_stride, sum_per_token_in_block)
+    k_block = div_up(k_stride, sum_per_token_in_block)
+    t_kq_sum = cl.tensor(np.zeros([1, HQ, q_stride_pad // sum_per_token_in_block, k_block_pad], dtype=np.float16))
+    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, k_block_pad, THRESH, k_block-q_block]
+    if FIND_DEBUG_ACC:
+        params += [t_kq_sum]
+    kernels.enqueue("find_block", [q_stride_pad // sum_per_token_in_block, HQ, 1], [1, 1, 1], *params)
+    cl.finish()
+
+    from test_xattn import xattn_estimate
+    query_states = query.reshape([1, 4096, 32, 128]).permute(0, 2, 1, 3)
+    key_states = key[:16].permute(1, 0, 2, 3).reshape([1, HK, 4096, 128]).repeat_interleave(HQ // HK, 1)
+    attn_sums, approx_simple_mask, reshaped_querry, reshaped_key = xattn_estimate(query_states=query_states,
+                   key_states=key_states,
+                   block_size=BLOCK_SIZE,
+                   stride=STRIDE,
+                   norm=1,
+                   threshold=THRESH,
+                   select_mode="inverse",
+                   use_triton=False,
+                   causal=IS_CAUSAL,
+                   chunk_size=query.shape[1])
+
+    if FIND_DEBUG_ACC == 1:
+        compare(attn_sums.detach().numpy(), t_kq_sum.numpy())
+        print(f'{Colors.GREEN}find:sum passed{Colors.END}')
+
+    t_mask_np = t_mask.numpy()
+    if not np.all(t_mask_np == mask.detach().numpy()):
+        error_idx = np.where(t_mask_np != mask.detach().numpy())
+        print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
+    diff_idx = np.where(approx_simple_mask.to(torch.int8).detach().numpy() != t_mask_np)
+    if diff_idx[0].shape[0]:
+        ref_err_rows = torch.from_numpy(attn_sums.detach().numpy()[diff_idx[:3]])
+        cur_err_rows = torch.from_numpy(t_kq_sum.numpy()[diff_idx[:3]])
+        ref_thresh = ref_err_rows.sum(dim=-1) * THRESH
+        cur_thresh = cur_err_rows.sum(dim=-1) * THRESH
+
+        kq_exp_partial_sum_np = t_kq_exp_partial_sum.numpy()
+        cur_sorted_value = kq_exp_partial_sum_np[:, :, 1::sum_per_token_in_block, :].view(dtype=np.float16)
+        cur_sorted_index = kq_exp_partial_sum_np[:, :, 3::sum_per_token_in_block, :].view(dtype=np.ushort)
+        cur_accum_value  = kq_exp_partial_sum_np[:, :, 6::sum_per_token_in_block, :].view(dtype=np.float16)
+        if softmax_type == np.float32:
+            # results only uses 2 bytes
+            cur_sorted_index = cur_sorted_index[...,:k_block_pad].copy()
+            cur_accum_value = cur_accum_value[...,:k_block_pad].copy()
+        # first 2 elements are reserved for first and diag position
+        cur_sorted_index[...,:2] = 65535
+        # index(X) of different k_blocks 
+        error_last_pos_np = np.array(diff_idx[3]).reshape([-1, 1])
+        # the index(Y) of X in sorted list
+        error_last_idx_np = np.where(cur_sorted_index[diff_idx[:3]] == error_last_pos_np)
+        error_idx_np = (*diff_idx[:3], error_last_idx_np[-1])
+        # lookup accum value using index Y in cumsum list
+        error_accum = cur_accum_value[error_idx_np]
+        # if accum is very close to thresh, it should be a minor float error
+        if np.allclose(error_accum, cur_thresh, rtol=0.01, atol=0.01):
+            print(f'{Colors.YELLOW}minor float error detected:{Colors.END} idx={diff_idx}, accum={error_accum}, thresh={cur_thresh}')
+        else:
+            print(f'{Colors.RED}mask is not same:{Colors.END} idx={diff_idx}, accum={error_accum}, thresh={cur_thresh}')
+            raise Exception('mask in not same')
 
 def main():
+    if 0:
+        test_ov()
     if 1:
         test_func()
     if 1:

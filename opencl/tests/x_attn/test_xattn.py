@@ -91,7 +91,7 @@ def find_blocks_chunked(
             )
         else:
             return mask
-    input_tensor = input_tensor.to(float)
+    input_tensor = input_tensor.to(torch.float32)
     
     if threshold is not None:
         total_sum = input_tensor.sum(dim=-1, keepdim=True)
@@ -104,13 +104,13 @@ def find_blocks_chunked(
             required_sum = total_sum * threshold
         if causal:
             mask = torch.zeros_like(input_tensor, dtype=torch.bool)
-            mask[:, :, :, 0] = 1
             mask[:, :, :, current_index : current_index + chunk_num] = (
                 torch.eye(chunk_num, device=mask.device)
                 .unsqueeze(0)
                 .unsqueeze(0)
                 .expand(1, head_num, chunk_num, chunk_num)
             )
+            mask[:, :, :, 0] = 1
             other_values = input_tensor.masked_fill(
                 mask, 0
             )
@@ -375,7 +375,8 @@ def xattn_estimate(
                     ),
                     device=key_states.device,
                 )
-                causal_mask[:, :, :, (-k_reshaped_num_to_pad):] = float("-inf")
+                if k_reshaped_num_to_pad:
+                    causal_mask[:, :, :, (-k_reshaped_num_to_pad):] = float("-inf")
                 chunk_start = (chunk_idx + offset_token_chunk_num) * reshaped_chunk_size
                 chunk_end = chunk_start + reshaped_chunk_size
                 causal_mask[:, :, :, chunk_start:chunk_end] = torch.triu(
