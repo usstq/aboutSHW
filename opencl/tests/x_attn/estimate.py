@@ -459,12 +459,12 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     # [1, 32, 64, 256]
     softmax_type = np.float16 if SOFTMAX_TYPE == 'half' else np.float32
     N_kq_groups = div_up(N, BLOCK_WG_N)
-    t_kq_max_wg = cl.tensor(np.zeros([B, Hq, N_kq_groups, q_stride_pad], softmax_type))
+    t_kq_max_wg = cl.tensor(np.ones([B, Hq, N_kq_groups, q_stride_pad], softmax_type))
     # [1, 32, 256, 64 * 16]
     sum_per_token_in_block = block_size // stride
     k_block_in_group = BLOCK_WG_N // sum_per_token_in_block
     k_block_pad = k_block_in_group * N_kq_groups
-    t_kq_exp_partial_sum = cl.tensor(np.zeros([B, Hq, q_stride_pad, k_block_pad], softmax_type))
+    t_kq_exp_partial_sum = cl.tensor(np.ones([B, Hq, q_stride_pad, k_block_pad], softmax_type))
 
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
@@ -614,6 +614,7 @@ def test_func():
     stride = STRIDE
     sizes = [
         # normal case
+        (512 * STRIDE, 512 * STRIDE, '8k'),
         (256 * STRIDE, 256 * STRIDE, 'normal+causal start == 0'),           # normal case:causal start == 0
         (4 * 1024, 128 * 1024, 'normal'),                                   # normal case:4k * 128k
         (128 * STRIDE, 256 * STRIDE, 'normal+smallest block'),              # smallest block just suitable for one workgroup
@@ -692,11 +693,12 @@ def test_ov():
             np_data = np.frombuffer(data, dtype=dtype).copy()
             return torch.from_numpy(np_data)
     
-    query = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__4096_4096_1_1__bfyx.bin').reshape([1, 4096, 4096])
-    key = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__17_8_256_128__bfyx.bin').reshape([17, 8, 256, 128])
-    mask = get_tensor('/mnt/luocheng/aboutSHW/opencl/tests/x_attn/bin/program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 32, 32])
+    base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
+    query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8192_4096_1_1__bfyx.bin').reshape([1, 8192, 4096])
+    key = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin').reshape([33, 8, 256, 128])
+    mask = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__131072_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 64, 64])
     M = query.shape[1] // STRIDE
-    N = 256
+    N = (key.shape[0] - 1) * key.shape[2] // STRIDE
     Lk = N * STRIDE
     K = HEAD_SIZE * STRIDE
     q_start_strided = 0
@@ -736,8 +738,8 @@ def test_ov():
     cl.finish()
 
     from test_xattn import xattn_estimate
-    query_states = query.reshape([1, 4096, 32, 128]).permute(0, 2, 1, 3)
-    key_states = key[:16].permute(1, 0, 2, 3).reshape([1, HK, 4096, 128]).repeat_interleave(HQ // HK, 1)
+    query_states = query.reshape([1, -1, HQ, HEAD_SIZE]).permute(0, 2, 1, 3)
+    key_states = key[:-1].permute(1, 0, 2, 3).reshape([1, HK, -1, HEAD_SIZE]).repeat_interleave(HQ // HK, 1)
     attn_sums, approx_simple_mask, reshaped_querry, reshaped_key = xattn_estimate(query_states=query_states,
                    key_states=key_states,
                    block_size=BLOCK_SIZE,
