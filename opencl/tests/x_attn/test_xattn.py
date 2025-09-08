@@ -4,6 +4,7 @@ import math
 import torch.nn.functional as F
 
 import numpy as np
+import os
 
 ###################################################################################################
 ## from xattn/src/utils.py
@@ -659,25 +660,66 @@ def Xattention_prefill(
         print("FAIL!")
     else:
         print("PASS!")
+        
+    return approx_simple_mask, approx_simple_mask_ov
 
-def main():
-    bsz = 1
-    heads = 1
-    seq_len = 1024*2
-    dim = 4
+def main(load_from_ov_dump: bool = False):
+    seq_len = 1024*8
+    
+    num_heads = 32
+    num_kv_heads = 8
+    head_size = 128
+    kv_block_sz = 256
+    sparse_block_sz = 128
+    
+    if load_from_ov_dump:
+        TENSORS_DIR='/home/ceciliapeng/openvino/tensors_bin_pr/'
+        with open(os.path.join(TENSORS_DIR, 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8192_4096_1_1__bfyx.bin'), 'rb') as f:
+            buffer = f.read()
+            q = torch.frombuffer(buffer, dtype=torch.float16)
+        with open(os.path.join(TENSORS_DIR, 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin'), 'rb') as f:
+            buffer = f.read()
+            kcache = torch.frombuffer(buffer, dtype=torch.float16)
+        with open(os.path.join(TENSORS_DIR, 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_4__f16__33_8_256_128__bfyx.bin'), 'rb') as f:
+            buffer = f.read()
+            vcache = torch.frombuffer(buffer, dtype=torch.float16)
+            
+        q = q.reshape(seq_len, num_heads, head_size)
+        print(f'=========================={q.shape =}')
+        
+        # It looks GENAI generates one more block than required, and blocks are in order starting from 0. (at least for 1 chunck case...) 
+        valid_blk_num = (seq_len + kv_block_sz - 1) // kv_block_sz
+        blk_num = valid_blk_num + 1
+        kcache = kcache.reshape(blk_num, num_kv_heads, kv_block_sz, head_size)
+        vcache = vcache.reshape(blk_num, num_kv_heads, kv_block_sz, head_size)
+        print(f'=========================={kcache.shape =},{blk_num = }')
+        
+        k = kcache[:valid_blk_num, :].transpose(1, 2).reshape(valid_blk_num * kv_block_sz, num_kv_heads, head_size)
+        v = vcache[:valid_blk_num, :].transpose(1, 2).reshape(valid_blk_num * kv_block_sz, num_kv_heads, head_size)
+        print(f'=========================={k.shape =}')
+        
+        q = q.transpose(0, 1).unsqueeze(0)
+        k = k.transpose(0, 1).unsqueeze(0)
+        v = v.transpose(0, 1).unsqueeze(0)
+        
+        k = k.repeat_interleave(num_heads//num_kv_heads, dim=1)
+        v = v.repeat_interleave(num_heads//num_kv_heads, dim=1)
+        print(f'================================================ {q.shape =} {k.shape =} {v.shape =}')
 
-    if True:
-        q = torch.randn((bsz,heads,seq_len,dim),dtype=torch.float32)
-        k = torch.randn((bsz,heads,seq_len,dim),dtype=torch.float32)
-        v = torch.randn((bsz,heads,seq_len,dim),dtype=torch.float32)
-
-        np.save("q.npy", q.numpy())
-        np.save("k.npy", k.numpy())
-        np.save("v.npy", v.numpy())
     else:
-        q = torch.from_numpy(np.load("q.npy"))
-        k = torch.from_numpy(np.load("k.npy"))
-        v = torch.from_numpy(np.load("v.npy"))
+        bsz = 1
+        if True:
+            q = torch.randn((bsz,num_heads,seq_len,head_size),dtype=torch.float32)
+            k = torch.randn((bsz,num_heads,seq_len,head_size),dtype=torch.float32)
+            v = torch.randn((bsz,num_heads,seq_len,head_size),dtype=torch.float32)
+
+            np.save("q.npy", q.numpy())
+            np.save("k.npy", k.numpy())
+            np.save("v.npy", v.numpy())
+        else:
+            q = torch.from_numpy(np.load("q.npy"))
+            k = torch.from_numpy(np.load("k.npy"))
+            v = torch.from_numpy(np.load("v.npy"))
 
     q = q.to(torch.bfloat16).to(device)
     k = k.to(torch.bfloat16).to(device)
@@ -686,7 +728,17 @@ def main():
     # q = torch.arange(0, bsz*heads*seq_len*dim,dtype=torch.bfloat16).view(bsz,heads,seq_len,dim).to(device)
     # k = torch.randn((bsz,heads,seq_len,dim),dtype=torch.bfloat16).to(device)
 
-    attention_output = Xattention_prefill(query_states=q,key_states=k,value_states=v,stride=16,block_size=128,use_triton=False,causal=True,chunk_size=1024)
+    approx_simple_mask_ref, approx_simple_mask_ov = Xattention_prefill(query_states=q,key_states=k,value_states=v,stride=16,block_size=128,use_triton=False,causal=True,chunk_size=4096)
+    
+    if load_from_ov_dump:
+        # compare
+        with open(os.path.join(TENSORS_DIR, 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__131072_1_1_1__bfyx.bin'), 'rb') as f:
+            buffer = f.read()
+            approx_simple_mask = torch.frombuffer(buffer, dtype=torch.bool)
+            approx_simple_mask = approx_simple_mask.reshape(1, num_heads, seq_len//sparse_block_sz, seq_len//sparse_block_sz)
+            print(f'=========================={approx_simple_mask.shape =}')
+        
+        print(f'FINAL CHECK {torch.equal(approx_simple_mask_ref, approx_simple_mask)} , {torch.equal(approx_simple_mask_ov, approx_simple_mask)}')
 
 if __name__ == "__main__":
     torch.manual_seed(3)
@@ -696,4 +748,4 @@ if __name__ == "__main__":
     # num_q_head == num_kv_head
     # chunk size alignment
     # causal_mask
-    main()
+    main(load_from_ov_dump = True)
