@@ -704,8 +704,6 @@ def test_ov():
     q_start_strided = 0
     q_stride_pad = rnd_up(M, BLOCK_WG_M)
     Hq = 32
-    slice_no = 0
-    slice = 0
     N_kq_groups = div_up(N, BLOCK_WG_N)
     global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
     # start block 0
@@ -723,7 +721,7 @@ def test_ov():
     k_block_pad = k_block_in_group * N_kq_groups
     t_kq_exp_partial_sum = cl.tensor(np.zeros([1, Hq, q_stride_pad, k_block_pad], softmax_type))
 
-    kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ, slice_no, slice, q_start_strided)
+    kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ, 0, 0, q_start_strided)
 
     q_stride = M
     k_stride = N
@@ -761,6 +759,31 @@ def test_ov():
         print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
     diff_idx = np.where(approx_simple_mask.to(torch.int8).detach().numpy() != t_mask_np)
     if diff_idx[0].shape[0]:
+        # case 1: if 2+ values are very close, anyone selected is valid although its index is different
+        diff_idx_t = torch.tensor(np.array(diff_idx)).transpose(0, 1)
+        unique_rows, counts_rows = torch.unique(diff_idx_t[:,:-1], dim=0, return_counts=True)
+        idxes = []
+        repeated_rows = unique_rows[counts_rows > 1]
+        for repeated_row in repeated_rows:
+            vals = []
+            full_pos = []
+            for idx in range(diff_idx_t.shape[0]):
+                if torch.all(diff_idx_t[idx][:-1] == repeated_row):
+                    pos = diff_idx_t[idx].tolist()
+                    vals.append(attn_sums[*pos])
+                    full_pos.append(pos)
+                    idxes.append(idx)
+            if torch.allclose(torch.tensor(vals, dtype=vals[0].dtype), vals[0], atol=0.01):
+                print(f'{Colors.YELLOW}similar float detected:{Colors.END} idx={full_pos}, vals={vals}')
+            else:
+                print(f'{Colors.RED}not close float detected:{Colors.END} idx={full_pos}, vals={vals}')
+                raise Exception('failed')
+        if len(idxes):
+            indices_to_remove = torch.tensor(idxes)
+            mask_one = np.ones_like(diff_idx[0], dtype=np.bool)
+            mask_one[indices_to_remove] = False
+            diff_idx = (diff_idx[0][mask_one], diff_idx[1][mask_one], diff_idx[2][mask_one], diff_idx[3][mask_one])
+
         ref_err_rows = torch.from_numpy(attn_sums.detach().numpy()[diff_idx[:3]])
         cur_err_rows = torch.from_numpy(t_kq_sum.numpy()[diff_idx[:3]])
         ref_thresh = ref_err_rows.sum(dim=-1) * THRESH
@@ -783,12 +806,12 @@ def test_ov():
         error_idx_np = (*diff_idx[:3], error_last_idx_np[-1])
         # lookup accum value using index Y in cumsum list
         error_accum = cur_accum_value[error_idx_np]
-        # if accum is very close to thresh, it should be a minor float error
+        # case 2: if accum is very close to thresh, it should be a minor float error
         if np.allclose(error_accum, cur_thresh, rtol=0.01, atol=0.01):
             print(f'{Colors.YELLOW}minor float error detected:{Colors.END} idx={diff_idx}, accum={error_accum}, thresh={cur_thresh}')
         else:
             print(f'{Colors.RED}mask is not same:{Colors.END} idx={diff_idx}, accum={error_accum}, thresh={cur_thresh}')
-            raise Exception('mask in not same')
+            raise Exception('mask is not same')
 
 def main():
     if 0:
