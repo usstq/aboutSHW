@@ -981,6 +981,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         uint kv_pos_end = KV_BLOCK_SIZE;
         if(block_idx == block_num - 1 && leftover_size > 0) {
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
+            if(kv_pos_end == 0) kv_pos_end = KV_BLOCK_SIZE;
         }
 
         #if KV_CACHE_COMPRESSION
@@ -1181,6 +1182,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         uint kv_pos_end = KV_BLOCK_SIZE;
         if(block_idx == block_num - 1 && leftover_size > 0) {
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
+            if(kv_pos_end == 0) kv_pos_end = KV_BLOCK_SIZE;
         }
         
         #if KV_CACHE_COMPRESSION
