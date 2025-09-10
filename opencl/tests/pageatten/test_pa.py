@@ -259,6 +259,21 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
         # print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
+def count_false_percentage(mask):
+    B, H, NQ, NL = mask.shape
+    tril_mask = torch.tril(torch.ones((NQ, NL), dtype=torch.bool, device=mask.device))
+    expanded_tril = tril_mask.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
+    # Count elements in the tril region
+    tril_elements = torch.sum(expanded_tril).item()
+    # Count False elements in the tril region
+    false_in_tril = torch.sum(~mask & expanded_tril).item()
+    # Calculate percentage
+    if tril_elements > 0:
+        false_percentage = (false_in_tril / tril_elements) * 100
+    else:
+        false_percentage = 0.0
+    return false_percentage
+
 def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512, sparse_block_sz=128, sparse_ratio=0.5, check_acc = True):
     cl.profiling(True)
     torch.manual_seed(0)
@@ -314,6 +329,8 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     approx_simple_mask = None
     if sparse_block_sz > 1:
         approx_simple_mask = generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, 1.0 - sparse_ratio)
+        percentage = count_false_percentage(approx_simple_mask)
+        print(f"Percentage of False elements: {percentage:.2f}%")
 
     is_causal = True  # PageAttention implictly means causal_mask
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, is_causal, sparse_block_sz)
@@ -364,12 +381,12 @@ if __name__ == "__main__":
     # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 16, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
 
     # failure cases of PA
-    seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 3+16*512, 16, 1, 1
-    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 32771, 16, 1, 1
-    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
-    print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
+    # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 3+16*512, 16, 1, 1
+    # # seq_len, block_sz, blocks_per_trunk, sparse_block_sz = 32771, 16, 1, 1
+    # print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    # print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
+    # print("-----------------------------------------------------------------------------------------------------------------------------------------")
+    # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz)
 
     # QWen3 8K case
     for sparse_block_sz in [1, 128]:
@@ -378,4 +395,4 @@ if __name__ == "__main__":
         print("-----------------------------------------------------------------------------------------------------------------------------------------")
         print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
         print("-----------------------------------------------------------------------------------------------------------------------------------------")
-        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
+        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.9, check_acc=False)
