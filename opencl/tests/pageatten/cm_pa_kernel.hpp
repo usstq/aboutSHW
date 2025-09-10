@@ -1,5 +1,5 @@
 
-#include "cm_sdpa_common.hpp"
+#include "cm_pa_common.hpp"
 
 #ifdef CM_HAS_LSC_UNTYPED_2D
 #define USE_LSC 1
@@ -7,19 +7,25 @@
 #define USE_LSC 0
 #endif
 
-
-
 extern "C" _GENX_MAIN_ void cm_page_attention(
     int q_len,
+    //query [q_len, num_heads, S]
     half* query [[type("svmptr_t")]],
-    half* key [[type("svmptr_t")]],
-    half* value [[type("svmptr_t")]],
+#if CMPA_KVCACHE_U8
+    int8_t* k_cache [[type("svmptr_t")]],
+    int8_t* v_cache [[type("svmptr_t")]],
+#else
+    half* k_cache [[type("svmptr_t")]],
+    half* v_cache [[type("svmptr_t")]],
+#endif
     int32_t* past_lens [[type("svmptr_t")]],
     int32_t* block_indices [[type("svmptr_t")]],
     int32_t* block_indices_begins [[type("svmptr_t")]],
     int32_t* subsequence_begins [[type("svmptr_t")]],
 #if SPARSE_BLOCK_SIZE > 1
     bool* sparse_block_mask [[type("svmptr_t")]],
+    bool* sparse_block_mask_wg [[type("svmptr_t")]],
+
 #endif
     half* output [[type("svmptr_t")]]) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -28,10 +34,19 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     constexpr int num_kv_heads = CMFLA_NUM_KV_HEADS;
     constexpr int pa_block_sz = CMPA_BLOCK_SZ;
     //# query [q_len, num_heads, S]
-    //#   key [kv_len, num_heads, S]
-    //# value [kv_len, num_heads, S]
-    //# sparse_block_mask [num_heads, q_blocks, kv_blocks]
+    //# k_cache [kv_len, num_heads, S]
+    //# v_cache [kv_len, num_heads, S]
+#if CMPA_KVCACHE_U8
+    constexpr uint K_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint V_SLM_SIZE = (4*kv_step * head_size * sizeof(half));
+    constexpr uint Q_SLM_SIZE = 0;//(q_step * head_size * sizeof(half)) * local_size;
 
+    cm_slm_init(K_SLM_SIZE + V_SLM_SIZE + Q_SLM_SIZE);
+
+    auto slm_K = cm_slm_alloc(K_SLM_SIZE);
+    auto slm_V = cm_slm_alloc(V_SLM_SIZE);
+
+#endif
     auto batch = cm_group_id(0);
     auto h = cm_group_id(1);
     auto hkv = h / (num_heads/num_kv_heads);
@@ -78,53 +93,68 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
         For each trunk, [q_len_per_trunk, past_q_lens] must be calculated. Such as: `20`,`21`. but for the 22,
         casual mask optimization can be applied. differnt wgs would has different kv stop.
         //todo:kv_stop is wg level, should we change to sg level?
+               sglevel would cause sgs in one wg diverge. so leave for now. also one wg has same kvstop makes eaiser for kv copying/loading into SLM/cache.
     */
         kv_stop = (wg_id + 1) * wg_seq_len + past_q_lens;
         if (kv_stop > kv_seq_len) kv_stop = kv_seq_len;
     }
-
-    // printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d, %d\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop);
-    // qkv fused
-    //constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    // uint q_offset = (q_start*num_total_heads + h)*head_size;
-    // uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    // uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // printf("###########wg:%d.%d  q: %d, +%d   kv: %d, +%d, kvstop:%d\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop);
 
     //Q/O[B, L, H, S]
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
-    uint o_offset = (q_start_sg*num_heads + h)*head_size;
-
-    //K/V[block_num, kv_heads, block_sz, head_sz]
-    uint k_offset = hkv*head_size*pa_block_sz;
-    uint v_offset = hkv*head_size*pa_block_sz;
 
 #if SPARSE_BLOCK_SIZE > 1
     //# sparse_block_mask [num_heads, q_blocks, kv_blocks]
     auto q_start_block = q_start_sg/ SPARSE_BLOCK_SIZE;
     int q_blocks = (q_len + SPARSE_BLOCK_SIZE - 1) / SPARSE_BLOCK_SIZE;
     int kv_blocks = (kv_seq_len + SPARSE_BLOCK_SIZE - 1) / SPARSE_BLOCK_SIZE;
+    //[self.num_heads, q_block_num, kv_block_num]
     bool* block_mask_base = sparse_block_mask + (h * q_blocks + q_start_block)*kv_blocks;
+    //[self.num_heads, wg_count_along_query, kv_block_num)]
+    bool* wg_block_mask_base = sparse_block_mask_wg + (h * cm_group_count(2) + wg_id)*kv_blocks;
     // printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d, %d, x-attn: %d, %dx%d, %p, %p\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop, q_start_block, q_blocks, kv_blocks, sparse_block_mask, block_mask_base);
 #endif
 
-#if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
-                                wg_local_id,
-                                q_start_sg, //q_start for SG,
-                                kv_stop,
-                                q_len_sg, //q_step,
-                                kv_seq_len, //kv_len, not used for now
-                                reinterpret_cast<svmptr_t>(query + q_offset),
-                                reinterpret_cast<svmptr_t>(key + k_offset),
-                                reinterpret_cast<svmptr_t>(value + v_offset),
+#if CMPA_KVCACHE_U8
+    uint kv_offset = hkv*(head_size+4)*pa_block_sz;
+    pa_lsc_u8<is_causal, num_heads, num_kv_heads, head_size, 0>(
+                            slm_K,
+                            slm_V,
+                            wg_local_id,
+                            local_size,
+                            q_start_sg, //q_start for SG,
+                            kv_stop,
+                            q_len_sg, //q_step,
+                            kv_seq_len, //kv_len,
+                            reinterpret_cast<svmptr_t>(query + q_offset),
+                            reinterpret_cast<svmptr_t>(k_cache + kv_offset),
+                            reinterpret_cast<svmptr_t>(v_cache + kv_offset),
 #if SPARSE_BLOCK_SIZE > 1
-                                reinterpret_cast<svmptr_t>(block_mask_base),
-#endif
-                                reinterpret_cast<svmptr_t>(output + o_offset),
-                                past_q_lens,
-                                block_indices);
-#else
-    static_assert(0);
+                            reinterpret_cast<svmptr_t>(block_mask_base),
+                            reinterpret_cast<svmptr_t>(wg_block_mask_base),
 
+#endif
+                            reinterpret_cast<svmptr_t>(output + q_offset),
+                            past_q_lens,
+                            block_indices);
+#else
+    uint kv_offset = hkv*head_size*pa_block_sz;
+    pa_kernel_lsc_prefetch_f16<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
+                            wg_local_id,
+                            q_start_sg, //q_start for SG,
+                            kv_stop,
+                            q_len_sg, //q_step,
+                            kv_seq_len, //kv_len,
+                            reinterpret_cast<svmptr_t>(query + q_offset),
+                            reinterpret_cast<svmptr_t>(k_cache + kv_offset),
+                            reinterpret_cast<svmptr_t>(v_cache + kv_offset),
+#if SPARSE_BLOCK_SIZE > 1
+                            reinterpret_cast<svmptr_t>(block_mask_base),
+                            reinterpret_cast<svmptr_t>(wg_block_mask_base),
+
+#endif
+                            reinterpret_cast<svmptr_t>(output + q_offset),
+                            past_q_lens,
+                            block_indices);
 #endif
 }
