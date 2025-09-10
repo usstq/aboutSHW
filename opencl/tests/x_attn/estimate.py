@@ -179,6 +179,18 @@ def find_blocks_ref(input_tensor_org, threshold, q_block, k_block, causal, curre
         index = index.view(B,HQ*chunk_num,block_num)
         mask[:,torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),index] = True
         mask = mask.view(B,HQ,chunk_num,block_num)
+        # copy from tail of xattn_estimate
+        q_block_num = q_block
+        mask[:, :, -q_block_num:, -q_block_num:] = torch.where(
+            torch.tril(
+                torch.ones(
+                    q_block_num, q_block_num, dtype=bool
+                ),
+                diagonal=0,
+            ),
+            mask[:, :, -q_block_num:, -q_block_num:],
+            False,
+        )
     else:
         mask = torch.zeros_like(input_tensor, dtype=torch.int8)
         sorted_values, org_index = torch.sort(
@@ -369,13 +381,16 @@ SOFTMAX_TYPE = 'float' # 'half'
 FIND_DEBUG_ACC = 0 # only acc test needed
 
 kernels = None
+INV_S = 1 / torch.sqrt(torch.tensor([HEAD_SIZE], dtype=torch.float32)) / STRIDE
+INV_S = int(INV_S.view(dtype=torch.uint32))
+print(f'INV_S=0x{INV_S:x}')
 def create_kernels(force_create=False):
     global kernels
     if kernels and not force_create: return
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}" -Qxcm_register_file_size=256 -mCM_printregusage -mdump_asm -g2
                         -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
-                        -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={1 / math.sqrt(HEAD_SIZE) / STRIDE} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
+                        -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={INV_S} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
                         -DDEBUG_ACC={FIND_DEBUG_ACC} -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}''')
 
 def quant_i8(k:torch.Tensor):
@@ -694,6 +709,7 @@ def test_ov():
             return torch.from_numpy(np_data)
     
     base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
+    base = '/mnt/luocheng/openvino_gpu/xattention/tensors_bin_pr1/'
     query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8192_4096_1_1__bfyx.bin').reshape([1, 8192, 4096])
     key = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin').reshape([33, 8, 256, 128])
     mask = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__131072_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 64, 64])
