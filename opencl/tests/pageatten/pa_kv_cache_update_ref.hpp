@@ -29,8 +29,6 @@
 #define ATTR_BUF [[type("buffer_t")]]
 #endif
 
-#define KV_CACHE_COMPRESSION_PER_TOKEN 1
-
 constexpr uint wg_size = WG_SIZE;
 
 extern "C" _GENX_MAIN_ void pa_kv_cache_update(
@@ -40,8 +38,13 @@ extern "C" _GENX_MAIN_ void pa_kv_cache_update(
     const int32_t* block_indices [[type("svmptr_t")]],
     const int32_t* block_indices_begins [[type("svmptr_t")]],
     const int32_t* subsequence_begins [[type("svmptr_t")]],
+#if KV_CACHE_COMPRESSION_PER_TOKEN
+    uint8_t* key_cache [[type("svmptr_t")]],
+    uint8_t* value_cache [[type("svmptr_t")]],
+#else
     half* key_cache [[type("svmptr_t")]],
-    half* value_cache [[type("svmptr_t")]],    
+    half* value_cache [[type("svmptr_t")]],
+#endif
     uint32_t key_pitch,
     uint32_t value_pitch,
     uint32_t batch_size_in_sequences) {
@@ -61,8 +64,8 @@ extern "C" _GENX_MAIN_ void pa_kv_cache_update(
 
     const auto head_idx = cm_group_id(1);
     const auto wg_id = cm_group_id(2);
-    const auto wg_local_id = cm_local_id(2);
-    const auto local_size = cm_local_size(2);
+    //const auto wg_local_id = cm_local_id(2);
+    //const auto local_size = cm_local_size(2);
 
     // static_assert(local_size == wg_size);
 
@@ -90,28 +93,26 @@ extern "C" _GENX_MAIN_ void pa_kv_cache_update(
     const uint block_offset = block_indices_begins[subsequence_idx] + current_block_idx;
 
     #if KV_CACHE_COMPRESSION_PER_TOKEN
+    // Assume: K_HEAD_SIZE == K_HEAD_SIZE
     auto quantize_and_store = [&](vector<half, K_HEAD_SIZE> data, uchar* out, uint out_offset, uint token_pos) {
             uint scale_offset = out_offset + K_HEAD_SIZE * PAGED_ATTENTION_BLOCK_SIZE + token_pos * sizeof(half);
-            uint zp_offset = scale_offset + PAGED_ATTENTION_BLOCK_SIZE * 2;  // scale/zp is fp16 type
-            float max_val = cm_reduced_max<half>(data);
-            float min_val = cm_reduced_min<half>(data);
-            // TODO: handle the case when max == min ?
-            float scale_val = 255.0 / (max_val - min_val);
-            half zp_val = (0.0 - min_val) * scale_val;
-            vector<half, K_HEAD_SIZE>  dequant_data = cm_mul<float>(data, scale_val) + zp_val;
+            half max_val = cm_reduced_max<half>(data);
+            half min_val = cm_reduced_min<half>(data);
+            half scale_val = half(0.0);
+            half zp_val = half(0.0);
+            if(max_val == min_val) {
+                scale_val = half(0.0);
+                zp_val = max_val;
+            } else {
+                scale_val = 255.0 / (max_val - min_val);
+                zp_val = (0.0 - min_val) * scale_val;
+            }
+            vector<half, K_HEAD_SIZE>  dequant_data = cm_mul<half>(data, scale_val) + zp_val;
             vector<uchar, K_HEAD_SIZE> data_u8 = cm_rnde<uchar, K_HEAD_SIZE>(dequant_data);
             cm_ptr_store<uint32_t, K_HEAD_SIZE / 4>((uint32_t*)(out + out_offset + token_pos * K_HEAD_SIZE), 0, data_u8.format<uint32_t>());
             half *out_scale_zp = (half*)(out + scale_offset);
             out_scale_zp[0] = (max_val - min_val) / 255.0;
             out_scale_zp[PAGED_ATTENTION_BLOCK_SIZE] = zp_val;
-            // if(token_idx==4) {
-            //     half scale_val_div = (max_val - min_val) / 255.0;
-            //     printf("max_val = %f, min_val = %f, scale_val = %f,  scale_val_div = %f, zp_val = %f\n", max_val, min_val, scale_val, scale_val_div, zp_val);
-            //     printf("out = %p, out_offset = %d, scale_offset = %d, zp_offset = %d\n", out, out_offset, scale_offset, zp_offset);
-            //     for(int i = 0; i < K_HEAD_SIZE; i++) {
-            //         printf("data[%d] = %f - %f -> %d\n", i, (float)data[i], (float)dequant_data[i], data_u8[i]);
-            //     }
-            // }
     };
     #endif
     {

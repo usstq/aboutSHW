@@ -91,6 +91,12 @@ class pa_kvcache_update_cm:
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(pa_kv_cache_update)TPUT_{i}:[{key.numel()=}]+[{value.numel()=}] {time_opt*1e-3:,.0f} us')
+                if kv_cache_compression_enabled:
+                    total_bytes = batch_size_in_tokens * self.num_kv_heads * (3 * self.k_head_size + 3 * self.v_head_size + 8)
+                else:
+                    total_bytes = batch_size_in_tokens * self.num_kv_heads * (4 * self.k_head_size + 4 * self.v_head_size)
+                tput = total_bytes / time_opt
+                print(f'(pa_kv_cache_update)TPUT_{i}:[{total_bytes*1e-6:,} MB] {tput/1e3:,.2f} GB/s')
 
         return t_key_cache.numpy(), t_value_cache.numpy()
                     
@@ -184,11 +190,6 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
         # print("kv_scale_div:\n", kv_scale_div.reshape(blk_num, kv_heads, -1))
         # print("kv_zp:\n", kv_zp.reshape(blk_num, kv_heads, -1))
         # print("kv_quant_fp16:\n", (kv*kv_scale+kv_zp).reshape(blk_num, kv_heads, blksz, k_head_size))
-
-        # # print(f'KV:\n{kv}')
-        # print(f'kv_u8:\n{kv_u8.reshape(blksz, -1)}')
-        # # print(f'kv_scale:{kv_scale.reshape(blksz)}')
-        # # print(f'kv_zp:{kv_zp.reshape(blksz)}')
 
         # print("quant_scale =", (1.0/kv_scale).reshape(blk_num,kv_heads,-1))
         # print("quant_zp    =", kv_zp.reshape(blk_num,kv_heads,-1))
@@ -320,21 +321,8 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
 
     # print(f"key_cache_ref = \n{key_cache_ref.reshape(num_blocks, num_kv_heads, block_size, k_head_size + 4)}")
     # print(f"out_key_cache = \n{out_key_cache.reshape(num_blocks, num_kv_heads, block_size, k_head_size + 4)}")
-    
-    # diff = torch.tensor(out_key_cache).to(dtype = torch.float) - key_cache_ref.detach().numpy()
-    # # print(f"diff = \n{diff.reshape(num_blocks, num_kv_heads, block_size, v_head_size + 4)}")
-    # print("max diff =", diff.abs().max().item())
 
     if kv_cache_compression_enabled:
-        # out_key_cache=torch.tensor(out_key_cache).to(dtype=torch.int)
-        # out_value_cache=torch.tensor(out_value_cache).to(dtype=torch.int)
-        # key_diff = out_key_cache - key_cache_ref.to(dtype=torch.int)
-        # print("max diff (dequant) =", abs(key_diff).max().item())
-        # value_diff = out_value_cache - value_cache_ref.to(dtype=torch.int)
-        # print("max diff (dequant) =", abs(value_diff).max().item())
-        # print("key_cache_ref[14][6][8545] = ", value_cache_ref[14][6][8545])
-        # print("out_key_cache[14][6][8545] = ", out_value_cache[14][6][8545])
-
         out_key_cache=torch.tensor(out_key_cache).to(dtype=torch.uint8)
         out_value_cache=torch.tensor(out_value_cache).to(dtype=torch.uint8)
         compare(key_cache_ref[:,:,:block_size * k_head_size].to(dtype=torch.int).detach().numpy(), out_key_cache[:,:,:block_size * k_head_size].to(dtype=torch.int).detach().numpy(),1)
@@ -353,13 +341,14 @@ if __name__ == "__main__":
     
     cl.profiling(True)
     
-    test_pa_kv_cache_update([1024, 16, 17], [16, 0, 1])
+    # test_pa_kv_cache_update([1024, 16, 17], [16, 0, 1])
     test_pa_kv_cache_update([32*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     test_pa_kv_cache_update([64*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     test_pa_kv_cache_update([128*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     test_pa_kv_cache_update([32*1024], [4*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     test_pa_kv_cache_update([128*1024], [1*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     
-    test_pa_kv_cache_update([32*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
-    #test_pa_kv_cache_update([1024], [0], num_kv_heads=2, k_head_size=16, v_head_size=16, block_size=32, check_perf=False)
+    test_pa_kv_cache_update([1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
+    # test_pa_kv_cache_update([1], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
+    # test_pa_kv_cache_update([1024], [0], num_kv_heads=2, k_head_size=16, v_head_size=16, block_size=32, check_perf=False)
     # test_pa_kv_cache_update([129], [0], num_kv_heads=2, k_head_size=64, v_head_size=64, block_size=16, check_perf=True)
