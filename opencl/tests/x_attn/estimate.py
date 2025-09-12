@@ -315,7 +315,7 @@ _GENX_MAIN_ void gemm_qk(svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t 
     FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
 }
 
-_GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t block_mask ATTR, uint q_stride, uint q_stride_pad, uint q_block_pad, uint k_block_pad, float thresh, uint causal_start_index
+_GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR, svmptr_t block_mask ATTR, uint q_len, uint q_stride, uint q_stride_pad, uint q_block_pad, uint k_block_pad, float thresh, uint causal_start_index
 #if DEBUG_ACC == 1
     , svmptr_t kq_sum ATTR
 #endif
@@ -325,7 +325,7 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum
     // kq_sum:             [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
     // block_mask:         [b, hq, q_stride_pad/TOKEN_IN_BLOCK, k_block_pad]
     // [1, 32, 256], [1, 32, 64, 256], [1, 32, 256, 64 * 16], A_sum:[1, 32, 32, 64 * 16]
-    // global:            [q_stride_pad/TOKEN_IN_BLOCK, hq, b]
+    // global:            [q_block_pad, hq, b]
     const int TOKEN_IN_BLOCK = BLOCK_SIZE / STRIDE;
     const int TOKEN_SHARE_MAX = BLOCK_SHARE_MAX / TOKEN_IN_BLOCK;
     uint m = cm_group_id(0);
@@ -334,7 +334,7 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum
     kq_max_wg += (b * HQ + hq) * (k_block_pad / TOKEN_SHARE_MAX) * q_stride_pad * (uint)sizeof(SOFTMAX_TYPE);
     kq_exp_partial_sum += (b * HQ + hq) * q_stride_pad * k_block_pad * (uint)sizeof(SOFTMAX_TYPE);
 #if DEBUG_ACC == 1
-    kq_sum += (b * HQ + hq) * q_block_pad * k_block_pad * (uint)sizeof(half);
+    kq_sum += (b * HQ + hq) * (q_stride_pad / TOKEN_IN_BLOCK) * k_block_pad * (uint)sizeof(half);
 #endif
     block_mask += (b * HQ + hq) * q_block_pad * k_block_pad;
 
@@ -342,7 +342,7 @@ _GENX_MAIN_ void find_block(svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum
     cm_slm_init(slm_size);
     auto slm = cm_slm_alloc(slm_size);
 
-    find(slm, m, kq_max_wg, kq_exp_partial_sum, block_mask, q_stride, q_stride_pad, k_block_pad, thresh, causal_start_index
+    find(slm, m, kq_max_wg, kq_exp_partial_sum, block_mask, q_len, q_stride, q_stride_pad, k_block_pad, thresh, causal_start_index
 #if DEBUG_ACC == 1
     , kq_sum
 #endif
@@ -369,14 +369,14 @@ _GENX_MAIN_ void post_proc_mask(svmptr_t block_mask ATTR, svmptr_t merged_block_
     block_mask += m_mereged * MERGED_Q_NUM * k_block_pad;
     vector<uchar, 32> one = 1;
     // q is not inside mask, aka q=1~15 which is less than param `stride`
-    for (int i = 0; i < MERGED_Q_NUM; i++) {
-        auto q_stride_cur = m_mereged * MERGED_Q_NUM + i;
-        if (q_stride_cur >= q_stride_pad / TOKEN_IN_BLOCK && q_stride_cur < q_block_pad) {
-            for (int j = 0; j < k_block_pad; j += 32) {
-                cm_ptr_store<int, 32 / 4>((int*)block_mask, j + i * k_block_pad, one.format<int>());
-            }
-        }
-    }
+    //for (int i = 0; i < MERGED_Q_NUM; i++) {
+    //    auto q_stride_cur = m_mereged * MERGED_Q_NUM + i;
+    //    if (q_stride_cur >= q_stride_pad / TOKEN_IN_BLOCK && q_stride_cur < q_block_pad) {
+    //        for (int j = 0; j < k_block_pad; j += 32) {
+    //            cm_ptr_store<int, 32 / 4>((int*)block_mask, j + i * k_block_pad, one.format<int>());
+    //        }
+    //    }
+    //}
     for (int j = 0; j < k_block_pad; j += 32) {
         vector<uchar, 32> new_mask = cm_ptr_load<int, 8>((int*)block_mask, j).format<uchar>();
         for (int i = 1; i < MERGED_Q_NUM; i++) {
@@ -628,7 +628,7 @@ def cmp_mask(ref_mask_np, cur_mask_np, ref_sum, cur_exp_partial_sum_np):
 
 # q_stride = q_len // stride
 # k_stride = k_len // stride
-def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
+def test_find(q_len, q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     create_kernels()
 
     qk = torch.randint(-2000, 3000, size=[1, HQ, q_stride, k_stride], dtype=torch.int16).to(dtype=torch.float32)
@@ -649,18 +649,19 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
     B, _, q_stride_pad, k_block_pad = t_kq_exp_partial_sum.shape
     assert k_block_pad == (k_stride + wg_k - 1) // wg_k * wg_k // sum_per_n_token_in_block, "k_block padded to wg_k / block_size"
     assert q_stride_pad == (q_stride + wg_q - 1) // wg_q * wg_q, "q_stride_pad padded to wg_q / stride"
-    q_block_pad = q_stride_pad // sum_per_n_token_in_block
+    q_block_input = q_stride_pad // sum_per_n_token_in_block
+    q_block_pad = div_up(q_len, BLOCK_SIZE)
 
     # [1, 32, 32, 64 * 16]
-    t_kq_sum = cl.tensor(np.zeros([B, HQ, q_block_pad, k_block_pad], dtype=np.float16))
+    t_kq_sum = cl.tensor(np.zeros([B, HQ, q_block_input, k_block_pad], dtype=np.float16))
     # mask shape: [rnd_up(q_stride, WG_M) / 8, rnd_up(k_stride, WG_N) / 8]
     t_mask = cl.tensor(np.ones([B, HQ, q_block_pad, k_block_pad], np.int8) * 100)
-    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, q_block_pad, k_block_pad, THRESH, k_block-q_block]
+    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_len, q_stride, q_stride_pad, q_block_pad, k_block_pad, THRESH, k_block-q_block]
     if FIND_DEBUG_ACC:
         params += [t_kq_sum]
     # find
     for i in range(1):
-        kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], *params)
+        kernels.enqueue("find_block", [q_block_pad, HQ, B], [1, 1, 1], *params)
     cl.finish()
     if not perf:
         if FIND_DEBUG_ACC == 1:
@@ -706,6 +707,8 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
             print(f'{Colors.GREEN}find:accum passed{Colors.END}')
 
         cur_mask = t_mask.numpy()
+        if q_block != q_block_pad:
+            assert np.all(cur_mask[:,:,-(q_block_pad - q_block):,:] == 1), f"new pad value must be one"
         cur_mask = cur_mask[...,:q_block,:k_block]
         if not np.all(cur_mask == mask_ref.to(torch.int8).detach().numpy()):
             cmp_mask(mask_ref.to(torch.int8).detach().numpy(), cur_mask, qk_sum, kq_exp_partial_sum_np)
@@ -721,7 +724,7 @@ def test_find(q_stride, k_stride, block_size, S, wg_k, wg_q, perf, causal):
 
     else:
         for i in range(0, 100):
-            kernels.enqueue("find_block", [q_stride_pad // sum_per_n_token_in_block, HQ, B], [1, 1, 1], *params)
+            kernels.enqueue("find_block", [q_block_pad, HQ, B], [1, 1, 1], *params)
         ns = cl.finish()
         for i, time_opt in enumerate(ns):
             print(f'(FIND)TPUT_{i}: {time_opt*1e-3:,.0f} us')
@@ -771,7 +774,7 @@ def test_func():
         else:
             q_start_strided = 0
         test_gemm(q, k, block_size=block_size, q_start_strided=q_start_strided, threshold=THRESH, stride=stride, causal=IS_CAUSAL, perf=False)
-        test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=False, causal=IS_CAUSAL)
+        test_find(q_len, q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=False, causal=IS_CAUSAL)
 
 def test_perf():
     # 106 T/s:
@@ -806,7 +809,7 @@ def test_perf():
     k = torch.randint(-2, 4, size=[bsz, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
     test_gemm(q, k, block_size=block_size, q_start_strided=k_len // stride - q_len // stride, threshold=THRESH, stride=stride, causal=IS_CAUSAL)
-    test_find(q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=IS_CAUSAL)
+    test_find(q_len, q_len // stride, k_len // stride, block_size, stride, wg_k=BLOCK_WG_M, wg_q=BLOCK_WG_N, perf=True, causal=IS_CAUSAL)
 
 def test_ov():
     # change global configs here
@@ -825,7 +828,8 @@ def test_ov():
     query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8192_4096_1_1__bfyx.bin').reshape([1, 8192, 4096])
     key = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin').reshape([33, 8, 256, 128])
     mask = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__131072_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 64, 64])
-    M = query.shape[1] // STRIDE
+    q_len = query.shape[1]
+    M = q_len // STRIDE
     N = (key.shape[0] - 1) * key.shape[2] // STRIDE
     Lk = N * STRIDE
     K = HEAD_SIZE * STRIDE
@@ -853,16 +857,16 @@ def test_ov():
 
     q_stride = M
     k_stride = N
-    q_block_valid = q_stride_pad // sum_per_token_in_block
-    q_block_pad = div_up(query.shape[1], BLOCK_SIZE)
+    q_block_input = q_stride_pad // sum_per_token_in_block
+    q_block_pad = div_up(q_len, BLOCK_SIZE)
     t_mask = cl.tensor(np.ones([1, HQ, q_block_pad, k_block_pad], np.int8) * 100)
     q_block = div_up(q_stride, sum_per_token_in_block)
     k_block = div_up(k_stride, sum_per_token_in_block)
-    t_kq_sum = cl.tensor(np.zeros([1, HQ, q_block_pad, k_block_pad], dtype=np.float16))
-    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_stride, q_stride_pad, q_block_pad, k_block_pad, THRESH, k_block-q_block]
+    t_kq_sum = cl.tensor(np.zeros([1, HQ, q_block_input, k_block_pad], dtype=np.float16))
+    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_len, q_stride, q_stride_pad, q_block_pad, k_block_pad, THRESH, k_block-q_block]
     if FIND_DEBUG_ACC:
         params += [t_kq_sum]
-    kernels.enqueue("find_block", [q_stride_pad // sum_per_token_in_block, HQ, 1], [1, 1, 1], *params)
+    kernels.enqueue("find_block", [q_block_pad, HQ, 1], [1, 1, 1], *params)
     cl.finish()
 
     from test_xattn import xattn_estimate
@@ -884,9 +888,9 @@ def test_ov():
         print(f'{Colors.GREEN}find:sum passed{Colors.END}')
 
     t_mask_np_all = t_mask.numpy()
-    t_mask_np = t_mask_np_all[:,:,:q_block_valid,:]
-    if q_block_valid != q_block_pad:
-        assert np.all(t_mask_np_all[:,:,-(q_block_pad - q_block_valid):,:] == 1), f"new pad value must be one"
+    t_mask_np = t_mask_np_all[:,:,:q_block,:]
+    if q_block != q_block_pad:
+        assert np.all(t_mask_np_all[:,:,-(q_block_pad - q_block):,:] == 1), f"new pad value must be one for ov"
 
     if not np.all(t_mask_np == mask.detach().numpy()):
         error_idx = np.where(t_mask_np != mask.detach().numpy())
@@ -901,12 +905,15 @@ def test_post_proc():
         (4096, 4096),
         (4096+1, 4096)
     ]
-    for q, k in qk: 
+    for q, k in qk:
         q_stride_pad = q // STRIDE
         q_block_valid = q_stride_pad // sum_per_token_in_block
         q_block_pad = div_up(q, BLOCK_SIZE)
         k_block_pad = div_up(k, BLOCK_SIZE)
         org = np.random.randint(low=0, high=2, size=[1, HQ, q_block_pad, k_block_pad], dtype=np.int8)
+        if q_block_valid != q_block_pad:
+            org[:,:,-1,:] = 1
+
         t_mask = cl.tensor(org)
         t_merged_mask = cl.tensor(np.ones([1, HQ, div_up(q_block_pad, MERGED_Q_NUM), k_block_pad], dtype=np.int8) * 100)
         # block_mask, merged_block_mask, q_stride_pad, q_block_pad, k_block_pad
@@ -916,9 +923,9 @@ def test_post_proc():
         t_merged_mask_np = t_merged_mask.numpy()
         t_mask_np = t_mask.numpy()
         if q_block_valid != q_block_pad:
-            assert np.all(t_mask_np[:,:,-(q_block_pad - q_block_valid):,:] == 1), f"pad must be one, {q=}, {k=}"
+            assert np.all(t_mask_np[:,:,-(q_block_pad - q_block_valid):,:] == 1), f"new pad value must be one, {q=}, {k=}"
             org_pad = np.ones([1, HQ, q_block_pad + 1, k_block_pad], dtype=np.int8)
-            org_pad[:,:,:-1,:] = t_mask_np
+            org_pad[:,:,:-1,:] = org
             org = org_pad
         t_merged_mask_ref = org[:,:,0::2,:] & org[:,:,1::2,:]
         assert np.all(t_merged_mask_ref == t_merged_mask_np), f"merged mask not equal to ref, {q=} {k=}"
