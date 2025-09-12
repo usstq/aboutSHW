@@ -959,33 +959,57 @@ void pa_kernel_lsc_prefetch_f16(
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
-        //For the last step, duplicate prefetch here.
-        uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
-        auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
+        int prefetch_kv_pos = kv_pos;
+        int32_t prefetch_block_id;
+
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St;
         {
             constexpr int num_K = kv_step/REG_M;
             auto St2 = St.format<float, num_K, REG_M*REG_N>();
-
             matrix<half, num_K, REG_M * REG_K> Kmat;
 
-            prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+prefetch_block_id*blk_stride));
-            prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
-            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
 #if SPARSE_BLOCK_SIZE > 1
             {
-                auto kv_start_block = kv_pos/ SPARSE_BLOCK_SIZE;
-                bool sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_start_block);
+                bool sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_pos/ SPARSE_BLOCK_SIZE);
                 if (!sparse_mask) {
                     if constexpr (use_causal_mask) {
                         causal_left -= kv_step;
                     }
                     continue;
                 }
-            }
+#if 0
+                //Find the prefetch kv block in the next 4 kv steps.
+                //this search would be a little slower than just prefetch next trunk.
+                prefetch_kv_pos = kv_pos + kv_step;
+                #pragma unroll
+                for (int i = 0; i < 4; i++, prefetch_kv_pos += kv_step) {
+                    // No data needs to be prefetch when computing. Just set the prefetch to be kv_pos.
+                    if (prefetch_kv_pos >= kv_stop) {
+                        prefetch_kv_pos = kv_pos;
+                        break;
+                    }
+                    bool prefetch_sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + prefetch_kv_pos / SPARSE_BLOCK_SIZE);
+                    if (prefetch_sparse_mask)
+                        break;
+                }
+#else
+                //prefetch next kv_step no matter whether sparse_mask is set or not.
+                prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
 #endif
+            }
+
+#else
+            //For the last step, duplicate prefetch here.
+            prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
+#endif
+            prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
+
+            prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+prefetch_block_id*blk_stride));
+            prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
+
             b2dK.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+cur_block_id*blk_stride));
             b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
             cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
