@@ -825,9 +825,9 @@ def test_ov():
     
     base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
     base = '/mnt/luocheng/openvino_gpu/xattention/tensors_bin_pr1/'
-    query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8192_4096_1_1__bfyx.bin').reshape([1, 8192, 4096])
-    key = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin').reshape([33, 8, 256, 128])
-    mask = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__131072_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, 64, 64])
+    query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_src0__f16__8204_4096_1_1__bfyx.bin').reshape([1, 8204, 4096])
+    key   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_updated_src_3__f16__33_8_256_128__bfyx.bin').reshape([33, 8, 256, 128])
+    mask  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_25973_intermediates_4__boolean__133120_1_1_1__bfyx.bin', dtype=np.int8).reshape([1, 32, -1, 64])
     q_len = query.shape[1]
     M = q_len // STRIDE
     N = (key.shape[0] - 1) * key.shape[2] // STRIDE
@@ -872,6 +872,7 @@ def test_ov():
     from test_xattn import xattn_estimate
     query_states = query.reshape([1, -1, HQ, HEAD_SIZE]).permute(0, 2, 1, 3)
     key_states = key[:-1].permute(1, 0, 2, 3).reshape([1, HK, -1, HEAD_SIZE]).repeat_interleave(HQ // HK, 1)
+    query_states = query_states[:,:,:q_len // STRIDE * STRIDE, :]
     attn_sums, approx_simple_mask, reshaped_querry, reshaped_key = xattn_estimate(query_states=query_states,
                    key_states=key_states,
                    block_size=BLOCK_SIZE,
@@ -881,7 +882,7 @@ def test_ov():
                    select_mode="inverse",
                    use_triton=False,
                    causal=IS_CAUSAL,
-                   chunk_size=query.shape[1])
+                   chunk_size=query_states.shape[2])
 
     if FIND_DEBUG_ACC == 1:
         compare(attn_sums.detach().numpy(), t_kq_sum.numpy())
@@ -892,8 +893,99 @@ def test_ov():
     if q_block != q_block_pad:
         assert np.all(t_mask_np_all[:,:,-(q_block_pad - q_block):,:] == 1), f"new pad value must be one for ov"
 
-    if not np.all(t_mask_np == mask.detach().numpy()):
-        error_idx = np.where(t_mask_np != mask.detach().numpy())
+    if not np.all(t_mask_np_all == mask.detach().numpy()):
+        error_idx = np.where(t_mask_np_all != mask.detach().numpy())
+        print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
+    cmp_mask(approx_simple_mask.to(torch.int8).detach().numpy(), t_mask_np, attn_sums, t_kq_exp_partial_sum.numpy())
+    print(f'{Colors.GREEN}test_ov done.{Colors.END}')
+
+def test_cuda_input():
+    # change global configs here
+    global FIND_DEBUG_ACC, HK, THRESH
+    FIND_DEBUG_ACC = 1
+    THRESH = 0.6
+    HK = 32
+
+    create_kernels(True)
+
+    def get_tensor(name, dtype=torch.float16):
+        data = np.load(name)
+        data = torch.from_numpy(data)
+        return data.to(dtype=dtype)
+    
+    base = '/mnt/llm_irs/cuda_data/mnt/data_sda/ruonan/x-attention-fork/Qwen3-8B-demo-prompt-32k-16-0.6-dump/'
+    query = get_tensor(base + 'query_0.bin.npy')
+    key   = get_tensor(base + 'key_0.bin.npy')
+    mask  = get_tensor(base + 'Qwen3-8B-demo-prompt-32k-16-0.6-int4lowbit.npy', dtype=torch.int8)
+    q_len = query.shape[2]
+    M = q_len // STRIDE
+    Lk = key.shape[2]
+    N = Lk // STRIDE
+    K = HEAD_SIZE * STRIDE
+    q_start_strided = 0
+    q_stride_pad = rnd_up(M, BLOCK_WG_M)
+    Hq = 32
+    N_kq_groups = div_up(N, BLOCK_WG_N)
+    global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
+    query = query.permute(0, 2, 1, 3).reshape([1, -1, HQ * HEAD_SIZE]).contiguous()
+    key = key.reshape([HK, -1, KV_BLOCK_SIZE, HEAD_SIZE]).permute(1, 0, 2, 3).contiguous()
+    # start block 0
+    block_indices_begins = torch.zeros(1).to(torch.int32)
+    block_indices = torch.arange((Lk + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE)
+    t_query = cl.tensor(query.detach().numpy())
+    t_key_cache = cl.tensor(key.detach().numpy())
+    t_block_indices = cl.tensor(block_indices.to(torch.int32).detach().numpy())
+    t_block_indices_begins = cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
+    softmax_type = np.float16 if SOFTMAX_TYPE == 'half' else np.float32
+    t_kq_max_wg = cl.tensor(np.zeros([1, Hq, N_kq_groups, q_stride_pad], softmax_type))
+    # [1, 32, 256, 64 * 16]
+    sum_per_token_in_block = BLOCK_SIZE // STRIDE
+    k_block_in_group = BLOCK_WG_N // sum_per_token_in_block
+    k_block_pad = k_block_in_group * N_kq_groups
+    t_kq_exp_partial_sum = cl.tensor(np.zeros([1, Hq, q_stride_pad, k_block_pad], softmax_type))
+
+    kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ, 0, 0, q_start_strided)
+
+    q_stride = M
+    k_stride = N
+    q_block_input = q_stride_pad // sum_per_token_in_block
+    q_block_pad = div_up(q_len, BLOCK_SIZE)
+    t_mask = cl.tensor(np.ones([1, HQ, q_block_pad, k_block_pad], np.int8) * 100)
+    q_block = div_up(q_stride, sum_per_token_in_block)
+    k_block = div_up(k_stride, sum_per_token_in_block)
+    t_kq_sum = cl.tensor(np.zeros([1, HQ, q_block_input, k_block_pad], dtype=np.float16))
+    params = [t_kq_max_wg, t_kq_exp_partial_sum, t_mask, q_len, q_stride, q_stride_pad, q_block_pad, k_block_pad, THRESH, k_block-q_block]
+    if FIND_DEBUG_ACC:
+        params += [t_kq_sum]
+    kernels.enqueue("find_block", [q_block_pad, HQ, 1], [1, 1, 1], *params)
+    cl.finish()
+
+    from test_xattn import xattn_estimate
+    query_states = query.reshape([1, -1, HQ, HEAD_SIZE]).permute(0, 2, 1, 3)
+    key_states = key.permute(1, 0, 2, 3).reshape([1, HK, -1, HEAD_SIZE]).repeat_interleave(HQ // HK, 1)
+    query_states = query_states[:,:,:q_len // STRIDE * STRIDE, :]
+    attn_sums, approx_simple_mask, reshaped_querry, reshaped_key = xattn_estimate(query_states=query_states,
+                   key_states=key_states,
+                   block_size=BLOCK_SIZE,
+                   stride=STRIDE,
+                   norm=1,
+                   threshold=THRESH,
+                   select_mode="inverse",
+                   use_triton=False,
+                   causal=IS_CAUSAL,
+                   chunk_size=query_states.shape[2])
+
+    if FIND_DEBUG_ACC == 1:
+        compare(attn_sums.detach().numpy(), t_kq_sum.numpy())
+        print(f'{Colors.GREEN}find:sum passed{Colors.END}')
+
+    t_mask_np_all = t_mask.numpy()
+    t_mask_np = t_mask_np_all[:,:,:q_block,:]
+    if q_block != q_block_pad:
+        assert np.all(t_mask_np_all[:,:,-(q_block_pad - q_block):,:] == 1), f"new pad value must be one for ov"
+
+    if not np.all(t_mask_np_all == mask[0].detach().numpy()):
+        error_idx = np.where(t_mask_np_all != mask[0].detach().numpy())
         print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
     cmp_mask(approx_simple_mask.to(torch.int8).detach().numpy(), t_mask_np, attn_sums, t_kq_exp_partial_sum.numpy())
     print(f'{Colors.GREEN}test_ov done.{Colors.END}')
@@ -941,6 +1033,8 @@ def main():
         test_func()
     if 1:
         test_perf()
+    if 0:
+        test_cuda_input()
 
 if __name__ == "__main__":
     torch.manual_seed(3)
