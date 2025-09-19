@@ -20,7 +20,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
     SurfaceIndex query [[type("buffer_t")]],
     SurfaceIndex key [[type("buffer_t")]],
     SurfaceIndex value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -155,7 +155,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     half* output [[type("svmptr_t")]]
 #else
     SurfaceIndex query_key_value [[type("buffer_t")]],
-    SurfaceIndex output [[type("buffer_t")]]    
+    SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
     constexpr int is_causal = CMFLA_IS_CAUSAL;
@@ -198,7 +198,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     }
     //printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d\n", wg_id, wg_local_id, q_start, q_len, kv_start, kv_seq_len);
 
-    // qkv is fused 
+    // qkv is fused
     int kv_stop = kv_seq_len;
     if (is_causal) {
         kv_stop = (wg_id + 1) * wg_seq_len;
@@ -207,10 +207,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
 
     // qkv fused
     constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    uint q_offset = (q_start*num_total_heads + h)*head_size;
-    uint k_offset = (kv_start*num_total_heads + num_heads + hkv)*head_size;
-    uint v_offset = (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
-    uint o_offset = (q_start*num_heads + h)*head_size;
+    const uint batch_offset = batch*seqlen*num_total_heads*head_size;
+
+    uint q_offset = batch_offset + (q_start*num_total_heads + h)*head_size;
+    uint k_offset = batch_offset +(kv_start*num_total_heads + num_heads + hkv)*head_size;
+    uint v_offset = batch_offset + (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    uint o_offset = batch*seqlen*num_heads*head_size +(q_start*num_heads + h)*head_size;
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
