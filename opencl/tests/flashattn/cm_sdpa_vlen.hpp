@@ -151,7 +151,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
 extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     int seqlen,
 #if USE_LSC == 1
-    half* query_key_value [[type("svmptr_t")]],
+    half* query [[type("svmptr_t")]],
+    half* key [[type("svmptr_t")]],
+    half* value [[type("svmptr_t")]],
+
     half* output [[type("svmptr_t")]]
 #else
     SurfaceIndex query [[type("buffer_t")]],
@@ -222,15 +225,15 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     uint o_offset = (batch*seqlen*num_heads + q_start*num_heads + h)*head_size;
 
 #if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
+    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
                                 wg_local_id,
                                 q_start, //q_start,
                                 kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
-                                reinterpret_cast<svmptr_t>(query_key_value + q_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + k_offset),
-                                reinterpret_cast<svmptr_t>(query_key_value + v_offset),
+                                reinterpret_cast<svmptr_t>(query + q_offset),
+                                reinterpret_cast<svmptr_t>(key + k_offset),
+                                reinterpret_cast<svmptr_t>(value + v_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
     sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
