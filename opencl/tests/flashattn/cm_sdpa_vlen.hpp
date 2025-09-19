@@ -154,7 +154,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     half* query_key_value [[type("svmptr_t")]],
     half* output [[type("svmptr_t")]]
 #else
-    SurfaceIndex query_key_value [[type("buffer_t")]],
+    SurfaceIndex query [[type("buffer_t")]],
+    SurfaceIndex key [[type("buffer_t")]],
+    SurfaceIndex val [[type("buffer_t")]],
     SurfaceIndex output [[type("buffer_t")]]
 #endif
     ) {
@@ -206,13 +208,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     }
 
     // qkv fused
-    constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
-    const uint batch_offset = batch*seqlen*num_total_heads*head_size;
+    // constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
+    // const uint batch_offset = batch*seqlen*num_total_heads*head_size;
 
-    uint q_offset = batch_offset + (q_start*num_total_heads + h)*head_size;
-    uint k_offset = batch_offset +(kv_start*num_total_heads + num_heads + hkv)*head_size;
-    uint v_offset = batch_offset + (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
-    uint o_offset = batch*seqlen*num_heads*head_size +(q_start*num_heads + h)*head_size;
+    // uint q_offset = batch_offset + (q_start*num_total_heads + h)*head_size;
+    // uint k_offset = batch_offset +(kv_start*num_total_heads + num_heads + hkv)*head_size;
+    // uint v_offset = batch_offset + (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+    // uint o_offset = batch*seqlen*num_heads*head_size +(q_start*num_heads + h)*head_size;
+
+    uint q_offset = (batch*seqlen*num_heads + q_start*num_heads + h)*head_size;
+    uint k_offset = (batch*seqlen*num_kv_heads + kv_start*num_kv_heads + hkv)*head_size;
+    uint v_offset = (batch*seqlen*num_kv_heads + kv_start*num_kv_heads + hkv)*head_size;
+    uint o_offset = (batch*seqlen*num_heads + q_start*num_heads + h)*head_size;
 
 #if USE_LSC == 1
     sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 1, 16>(
@@ -226,7 +233,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(query_key_value + v_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 1>(
+    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
@@ -235,9 +242,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 kv_stop,
                                 q_len, //q_len,
                                 kv_seq_len, //kv_len,
-                                query_key_value,
-                                query_key_value,
-                                query_key_value,
+                                query,
+                                key,
+                                val,
                                 output,
                                 q_offset * sizeof(half),
                                 k_offset * sizeof(half),

@@ -42,12 +42,15 @@ class flash_attn_cm:
                       f" -mdump_asm -g2")
                      )
 
-    def qkv_fused(self, qkv, n_repeats = 1):
-        batch, seq_len, total_heads, head_size = qkv.shape
-        old_dtype = qkv.dtype
-        assert total_heads == (self.num_heads + self.num_kv_heads * 2)
+    def qkv_fused(self, q, k, v, n_repeats = 1):
+        batch, seq_len, head_num, head_size = q.shape
+
+        old_dtype = q.dtype
         assert head_size == self.head_size
-        t_qkv = cl.tensor(qkv.to(torch.float16).detach().numpy())
+        t_q = cl.tensor(q.to(torch.float16).detach().numpy())
+        t_k = cl.tensor(k.to(torch.float16).detach().numpy())
+        t_v = cl.tensor(v.to(torch.float16).detach().numpy())
+
         t_out = cl.tensor([batch, seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
         wg_size = 16
         q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
@@ -57,29 +60,9 @@ class flash_attn_cm:
         LWS = [1, 1, wg_size]
         print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
         for _ in range(n_repeats):
-            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_qkv, t_out)
+            self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_q, t_k, t_v, t_out)
         attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
         return attn_output
-
-    # def qkv_separate(self, q, k, v, n_repeats = 1):
-    #     seq_len, total_heads, head_size = qkv.shape
-    #     old_dtype = qkv.dtype
-    #     assert total_heads == (self.num_heads + self.num_kv_heads * 2)
-    #     assert head_size == self.head_size
-    #     t_qkv = cl.tensor(qkv.to(torch.float16).detach().numpy())
-    #     t_out = cl.tensor([seq_len, self.num_heads, self.head_size], np.dtype(np.float16))
-    #     wg_size = 16
-    #     q_step = CM_GRF_WIDTH//32 # or 8 on Xe1
-    #     wg_seq_len = wg_size * q_step
-    #     wg_count = (seq_len + wg_seq_len - 1) // wg_seq_len
-    #     GWS = [1, self.num_heads, wg_count * wg_size]
-    #     LWS = [1, 1, wg_size]
-    #     print(f"calling qkv_fused {GWS=} {LWS=} x {n_repeats} times")
-    #     for _ in range(n_repeats):
-    #         self.kernels.enqueue("cm_sdpa_qkv_fused", GWS, LWS, seq_len, t_qkv, t_out)
-    #     attn_output = torch.from_numpy(t_out.numpy()).to(old_dtype)
-        return attn_output
-
     def __call__(self, q, k, v, cu_seqlens, n_repeats = 1):
         q_len = q.shape[0]
         kv_len = k.shape[0]
@@ -231,10 +214,10 @@ def test_flash_attn_causal_batch1(batch, seq_len, num_heads = 16, num_kv_heads =
 
     func = flash_attn_cm.create_instance(batch, num_heads, num_kv_heads, head_size, is_causal)
 
-    qkv = torch.cat((q,k,v), 2)
+    # qkv = torch.cat((q,k,v), 2)
 
-    out = func.qkv_fused(qkv)
-    out = func.qkv_fused(qkv, n_repeats=20)
+    out = func.qkv_fused(q, k, v)
+    out = func.qkv_fused(q, k, v, n_repeats=20)
     latency = cl.finish()
     # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
     print(f" qkv_fused_causal {seq_len=} average latency: {sum(latency[10:])/len(latency[10:])*1e-6:.3f} ms")
@@ -242,17 +225,4 @@ def test_flash_attn_causal_batch1(batch, seq_len, num_heads = 16, num_kv_heads =
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(batch=80, seq_len=16, num_heads = 1, num_kv_heads = 1, head_size = 64)
-    # for seqlen in range(1025, 1055, 1):
-    #     test_flash_attn_causal_batch1(seqlen, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    # test_flash_attn_causal_batch1(113, num_heads = 28, num_kv_heads = 4, head_size = 128)
-
-    # test_flash_attn_cm(8192, 8192, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    # test_flash_attn_cm(8192, 8192)
-    # test_flash_attn_cm(8192, 1024)
-    # test_flash_attn_cm(8192, 64)
-    # test_flash_attn_cm(8190, 64)
-    # test_flash_attn_cm(seq_len=32, sub_seq_len=14, num_heads = 28, num_kv_heads = 4, head_size = 128)
-    # for seqlen in range(1, 1055, 1):
-    #     for sub_seq_len in range(1, 64, 1):
-    #         test_flash_attn_cm(seqlen, sub_seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128)
+    test_flash_attn_causal_batch1(batch=16, seq_len=128, num_heads = 1, num_kv_heads = 1, head_size = 80)
