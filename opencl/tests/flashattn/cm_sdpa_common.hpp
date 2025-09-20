@@ -224,7 +224,7 @@ inline matrix<float, _kv_step, _q_step> ugemm_KQ(uint slm_K, matrix_ref<half, nu
 template<int num_P_tiles = REG_N/REG_M, int num_rO_tiles>
 inline void ugemm_PV0(uint slm_V, matrix_ref<half, REG_N, REG_K> P, matrix_ref<float, num_rO_tiles, REG_M*REG_N> rO, uint slm_offset = 0) {
     constexpr int _head_size = num_rO_tiles*REG_N/num_P_tiles;
-    
+
     auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
     #pragma unroll
     for(int k = 0, ri = 0; k < _head_size; k += REG_N, ri += num_P_tiles) {
@@ -377,7 +377,7 @@ constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
     }
 }
 
-template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused = 0>
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_v_fused = 0>
 void sdpa_kernel_lsc(
     uint slm_K,
     uint slm_V,
@@ -392,12 +392,15 @@ void sdpa_kernel_lsc(
     svmptr_t v_base [[type("svmptr_t")]],
     svmptr_t o_base [[type("svmptr_t")]]) {
 
-    constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-    constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
-    constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+    // constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
+    // constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
+    // constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
 
-    //uint qo_pitch = num_heads * head_size * sizeof(half);
-    //uint kv_pitch = num_kv_heads * head_size * sizeof(half);
+    constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
+    constexpr uint q_pitch =  o_pitch;
+    constexpr uint k_pitch = (num_kv_heads * head_size * sizeof(half));
+
+    constexpr uint v_pitch = is_v_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) :  k_pitch;
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
@@ -424,8 +427,8 @@ void sdpa_kernel_lsc(
         }
     }
 
-    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     int causal_left = q_start;
 
@@ -461,19 +464,19 @@ void sdpa_kernel_lsc(
     cm_sbarrier(1);
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base += kv_step * kv_pitch,
-            v_base += kv_step * kv_pitch,
+            // k_base += kv_step * k_pitch,
+            // v_base += kv_step * v_pitch,
             slm_buff_id_read ++) {
 
-        //  load0, load1, signal1, 
+        //  load0, load1, signal1,
         //  [wait2, signal2, load2, read0]
         //  [wait3, signal3, load3, read1]
-        //  [wait4, signal4, load4, read2]  
-        //  [wait5, signal5, load5, read3]  
+        //  [wait4, signal4, load4, read2]
+        //  [wait5, signal5, load5, read3]
         //
         //  after wait4, all workers have reached signal3, so:
-        //     - all workers have finished load2 & read0. 
-        //     - we can start to load 4 into SLM slot 0 (i & 3) safely 
+        //     - all workers have finished load2 & read0.
+        //     - we can start to load 4 into SLM slot 0 (i & 3) safely
         //     - we can start to read 2 ((i-2) & 3) safely
 
         cm_fence(CM_LOCAL_BARRIER);
@@ -559,7 +562,7 @@ void sdpa_kernel_lsc(
 }
 
 
-template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused, int wg_local_size>
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_v_fused, int wg_local_size>
 void sdpa_kernel_lsc_prefetch(
     int wg_local_id,
     int q_start,
@@ -572,8 +575,10 @@ void sdpa_kernel_lsc_prefetch(
     svmptr_t o_base [[type("svmptr_t")]]) {
 
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-    constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
-    constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+    constexpr uint q_pitch =  o_pitch;
+    constexpr uint k_pitch = (num_kv_heads * head_size * sizeof(half));
+
+    constexpr uint v_pitch = is_v_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) :  k_pitch;
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
@@ -600,18 +605,18 @@ void sdpa_kernel_lsc_prefetch(
         }
     }
 
-    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, kv_step, REG_K> b2dK(k_base, kv_stop - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K, REG_N> b2dV(v_base, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     static_assert(wg_local_size == 16);
-    lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
-    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, kv_stop - 1, head_size*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, kv_step/wg_local_size, REG_K> prefetch_K(k_base, kv_stop - 1, head_size*sizeof(half) - 1, k_pitch - 1, 0, 0);
+    lsc::block_2d_desc<half, 1, REG_K/wg_local_size, REG_N> prefetch_V(v_base, kv_stop - 1, head_size*sizeof(half) - 1, v_pitch - 1, 0, 0);
 
     int causal_left = q_start;
 
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base += kv_step * kv_pitch,
-            v_base += kv_step * kv_pitch) {
+            k_base += kv_step * k_pitch,
+            v_base += kv_step * v_pitch) {
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
         {
@@ -712,7 +717,7 @@ void sdpa_kernel_lsc_prefetch(
                                 Vmat.format<int32_t>(),
                                 P2.row(p).format<int32_t>());
                 }
-            }                
+            }
         }
     }
     if (q_tokens_left == 0) return;
@@ -740,7 +745,7 @@ void sdpa_kernel_lsc_prefetch(
 }
 
 
-template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_qkv_fused = 0>
+template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_v_fused = 0>
 void sdpa_kernel(
     uint slm_K,
     uint slm_V,
@@ -759,9 +764,16 @@ void sdpa_kernel(
     uint v_off,
     uint o_off) {
 
+    // constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
+    // constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
+    // constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+
     constexpr uint o_pitch = (num_heads * head_size * sizeof(half));
-    constexpr uint q_pitch = is_qkv_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) : o_pitch;
-    constexpr uint kv_pitch = is_qkv_fused ? q_pitch : (num_kv_heads * head_size * sizeof(half));
+    constexpr uint q_pitch =  o_pitch;
+    constexpr uint k_pitch = (num_kv_heads * head_size * sizeof(half));
+
+    constexpr uint v_pitch = is_v_fused ? ((num_heads + num_kv_heads*2) * head_size * sizeof(half)) :  k_pitch;
+
 
     vector<float, q_step> cur_max;
     vector<float, q_step> cur_sum;
@@ -818,8 +830,8 @@ void sdpa_kernel(
             //if (kv_pos > 1024000) {
             matrix<half, 2*REG_M, REG_K> temp;
             for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
-                cm_load_2d(temp, key, k_off + k*sizeof(half), kv_pitch);
-                cm_slm_block_write(slm_K, 
+                cm_load_2d(temp, key, k_off + k*sizeof(half), k_pitch);
+                cm_slm_block_write(slm_K,
                                     slm_offset + k * 2 * REG_M * sizeof(half),
                                     temp.format<half>());
             }
@@ -835,7 +847,7 @@ void sdpa_kernel(
             static_assert((head_size % VK_STEP) == 0);
             #pragma unroll
             for(int k = VK_STEP * (wg_local_id-local_size/2); k < head_size; k += VK_STEP * (local_size/2)) {
-                cm_load_2d(temp2, value, v_off + k*sizeof(half), kv_pitch);
+                cm_load_2d(temp2, value, v_off + k*sizeof(half), v_pitch);
 
                 #pragma unroll
                 for(int p = 0; p < VK_STEP/REG_N; p++) {
@@ -846,8 +858,8 @@ void sdpa_kernel(
                 }
             }
         }
-        k_off += kv_step * kv_pitch;
-        v_off += kv_step * kv_pitch;
+        k_off += kv_step * k_pitch;
+        v_off += kv_step * v_pitch;
         // printf(" diff= %lu\n", get_clock() - clk0);
     };
 
@@ -860,15 +872,15 @@ void sdpa_kernel(
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
             slm_buff_id_read ++) {
         //
-        //  load0->0, signal1, 
+        //  load0->0, signal1,
         //  [load1->1, wait2, signal2, read0]
         //  [load2->2, wait3, signal3, read1]
-        //  [load3->3, wait4, signal4, read2]  
-        //  [load4->0, wait5, signal5, read3]  
+        //  [load3->3, wait4, signal4, read2]
+        //  [load4->0, wait5, signal5, read3]
         //
         //  after wait4, all workers have reached signal3, so:
-        //     - all workers have finished load2 & read0. 
-        //     - we can start to load 4 into SLM slot 0 (i & 3) safely 
+        //     - all workers have finished load2 & read0.
+        //     - we can start to load 4 into SLM slot 0 (i & 3) safely
         //     - we can start to read 2 ((i-2) & 3) safely
         //
         cm_fence(CM_LOCAL_BARRIER);
