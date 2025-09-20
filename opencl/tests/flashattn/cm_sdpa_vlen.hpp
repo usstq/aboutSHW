@@ -148,7 +148,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_vlen(
 
 
 
-extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
+extern "C" _GENX_MAIN_ void cm_sdpa(
     int seqlen,
 #if USE_LSC == 1
     half* query [[type("svmptr_t")]],
@@ -219,13 +219,20 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
     // uint v_offset = batch_offset + (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
     // uint o_offset = batch*seqlen*num_heads*head_size +(q_start*num_heads + h)*head_size;
 
+
+#if CMFLA_V_FUSED
+    constexpr uint num_total_heads = num_heads + num_kv_heads * 2;
+    uint v_offset = batch*seqlen*num_total_heads*head_size + (kv_start*num_total_heads + num_heads + num_kv_heads + hkv)*head_size;
+#else
+    uint v_offset = (batch*seqlen*num_kv_heads + kv_start*num_kv_heads + hkv)*head_size;
+#endif
+
     uint q_offset = (batch*seqlen*num_heads + q_start*num_heads + h)*head_size;
     uint k_offset = (batch*seqlen*num_kv_heads + kv_start*num_kv_heads + hkv)*head_size;
-    uint v_offset = (batch*seqlen*num_kv_heads + kv_start*num_kv_heads + hkv)*head_size;
     uint o_offset = (batch*seqlen*num_heads + q_start*num_heads + h)*head_size;
 
 #if USE_LSC == 1
-    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, 0, 16>(
+    sdpa_kernel_lsc_prefetch<is_causal, num_heads, num_kv_heads, head_size, CMFLA_V_FUSED, 16>(
                                 wg_local_id,
                                 q_start, //q_start,
                                 kv_stop,
@@ -236,7 +243,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_qkv_fused(
                                 reinterpret_cast<svmptr_t>(value + v_offset),
                                 reinterpret_cast<svmptr_t>(output + o_offset));
 #else
-    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, 0>(
+    sdpa_kernel<is_causal, num_heads, num_kv_heads, head_size, CMFLA_V_FUSED>(
                                 slm_K,
                                 slm_V,
                                 wg_local_id,
