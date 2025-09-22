@@ -614,21 +614,30 @@ void sdpa_kernel_lsc_prefetch(
 
     int causal_left = q_start;
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
-            k_base += kv_step * k_pitch,
-            v_base += kv_step * v_pitch) {
-        //# St = k @ Qt
-        matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
-        {
-            constexpr int num_K = kv_step/REG_M;
-            auto St2 = St.format<float, num_K, REG_M*REG_N>();
 
+    int k_pos = 0;
+    int v_pos = 0;
+
+    matrix<float, 2,  q_step>  max_comp_buff;
+    matrix<half, 2,  REG_N*REG_K> P_buff;
+    int wr_idx = 0;
+    int rd_idx = 0;
+
+
+    {
+        auto max_comp = max_comp_buff.row(wr_idx).format<float>();
+        auto P = P_buff.row(wr_idx).format<half, REG_N, REG_K>();
+        matrix<float, kv_step, q_step> St; // = ugemm_KQ(slm_K, rQ, slm_offset);
+        constexpr int num_K = kv_step/REG_M;
+        auto St2 = St.format<float, num_K, REG_M*REG_N>();
+
+        //precalculate the GEMM0 and softmax.
+        {
             matrix<half, num_K, REG_M * REG_K> Kmat;
             //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
-            prefetch_K.set_block_y(wg_local_id + kv_pos + kv_step);
+            prefetch_K.set_block_y(wg_local_id + k_pos + kv_step);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
-
-            b2dK.set_block_y(kv_pos);
+            b2dK.set_block_y(k_pos);
             cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
             #pragma unroll
             for(int k = 0; k < num_K; k++)
@@ -650,75 +659,204 @@ void sdpa_kernel_lsc_prefetch(
                         Kmat[k].format<int32_t>());
                 }
             }
-        }
-        if constexpr (use_causal_mask) {
-            // since kv_step == q_step == 16, causal_left is n*kv_step
-            if (causal_left == 0) {
-                apply_causal_mask<1>(St);
-            } else if (causal_left < 0) {
-                St = -3.4e38f;
+
+            if constexpr (use_causal_mask) {
+                // since kv_step == q_step == 16, causal_left is n*kv_step
+                if (causal_left == 0) {
+                    apply_causal_mask<1>(St);
+                } else if (causal_left < 0) {
+                    St = -3.4e38f;
+                }
+                causal_left -= kv_step;
+            } else {
+                int kv_tokens = kv_stop - k_pos;
+                // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+                for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
             }
-            causal_left -= kv_step;
-        } else {
-            int kv_tokens = kv_stop - kv_pos;
-            // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
-            for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+            // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0) {
+            //     show(St);
+            // }
+            max_comp= online_softmax_update(St, cur_max, cur_sum);
+
+            Transpose2DMatrix(St, P);
+
+            // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0) {
+            //     show(P);
+            // }
+
         }
+        wr_idx = (wr_idx + 1) & 1;
+        k_pos += kv_step;
 
-        //show(St);
-        auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
-        matrix<half, REG_N, REG_K> P;
-        Transpose2DMatrix(St, P);
+        for(; k_pos < kv_stop;k_pos += kv_step, v_pos += kv_step) {
+            //# St = k @ Qt
+            {
+                matrix<half, num_K, REG_M * REG_K> Kmat;
+                //cm_slm_block_read(slm_K, GENX_NONE, slm_offset, Kmat.format<half>());
+                prefetch_K.set_block_y(wg_local_id + k_pos + kv_step);
+                cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
-        b2dV.set_block_y(kv_pos);
-        prefetch_V.set_block_y(wg_local_id +kv_pos + kv_step);
-        if (kv_pos == 0) {
-            // ugemm_PV0(slm_V, P, rO, slm_offset);
-            auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
-            #pragma unroll
-            for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                matrix<half, REG_K/2, REG_N*2> Vmat;
-                cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
-                cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+                b2dK.set_block_y(k_pos);
+                cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
                 #pragma unroll
-                for(int p = 0; p < num_P_tiles; p++) {
-                    rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
+                for(int k = 0; k < num_K; k++)
+                    St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
                                     0,
+                                    rQ[0].format<int32_t>(),
+                                    Kmat[k].format<int32_t>());
+
+                #pragma unroll
+                for(int ri = 1; ri < head_size/REG_K; ri++) {
+                    //cm_slm_block_read(slm_K, GENX_NONE, slm_offset + ri * Kmat.n_elems() * sizeof(half), Kmat.format<half>());
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(ri*REG_K));
+                    cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(ri*REG_K));
+                    #pragma unroll
+                    for(int k = 0; k < num_K; k++) {
+                        St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
+                            St2.row(k),
+                            rQ[ri].format<int32_t>(),
+                            Kmat[k].format<int32_t>());
+                    }
+                }
+            }
+            if constexpr (use_causal_mask) {
+                // since kv_step == q_step == 16, causal_left is n*kv_step
+                if (causal_left == 0) {
+                    apply_causal_mask<1>(St);
+                } else if (causal_left < 0) {
+                    St = -3.4e38f;
+                }
+                causal_left -= kv_step;
+            } else {
+                int kv_tokens = kv_stop - k_pos;
+                // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+                for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+            }
+
+
+            //show(St);
+            auto max_comp_wr = max_comp_buff.row(wr_idx).format<float>();
+            auto P_wr = P_buff.row(wr_idx).format<half, REG_N, REG_K>();
+            max_comp_wr= online_softmax_update(St, cur_max, cur_sum);
+            Transpose2DMatrix(St, P_wr);
+
+
+            auto max_comp_rd = max_comp_buff.row(rd_idx).format<float>();
+            auto P2 = P_buff.row(rd_idx).format<half, num_P_tiles, REG_M * REG_K>();
+
+            b2dV.set_block_y(v_pos);
+            prefetch_V.set_block_y(wg_local_id +v_pos + kv_step);
+            if (v_pos == 0) {
+                // ugemm_PV0(slm_V, P, rO, slm_offset);
+                #pragma unroll
+                for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
+                    matrix<half, REG_K/2, REG_N*2> Vmat;
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+                    cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+                    #pragma unroll
+                    for(int p = 0; p < num_P_tiles; p++) {
+                        rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
+                                        0,
+                                        Vmat.format<int32_t>(),
+                                        P2.row(p).format<int32_t>());
+                    }
+                    // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0)
+                    //     show(rO);
+
+                }
+            }
+            else {
+                //ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
+                #pragma unroll
+                for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
+                    matrix<half, REG_K/2, REG_N*2> Vmat;
+
+                    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+                    cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+
+                    //# compensate cur_O
+                    //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
+                    #pragma unroll
+                    for(int p = 0; p < num_P_tiles; p++) {
+                        auto cO = rO[ri + p].format<float, REG_M, REG_N>();
+                        #pragma unroll
+                        for(int r = 0; r < REG_M; r++)
+                            cO.row(r) = cm_mul<float>(cO.row(r), max_comp_rd[r + p*REG_M]);
+                    }
+
+                    #pragma unroll
+                    for(int p = 0; p < num_P_tiles; p++) {
+                        rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                                    rO[ri + p].format<float>(),
                                     Vmat.format<int32_t>(),
                                     P2.row(p).format<int32_t>());
+                    }
                 }
             }
+            wr_idx = (wr_idx + 1) & 1;
+            rd_idx = (rd_idx + 1) & 1;
         }
-        else {
-            //ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
-            auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
-            #pragma unroll
-            for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
-                matrix<half, REG_K/2, REG_N*2> Vmat;
 
-                cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
-                cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+        //calculate the last GEMM1.
+        {
+                b2dV.set_block_y(v_pos);
+                auto max_comp = max_comp_buff.row(rd_idx).format<float>();
+                auto P2 = P_buff.row(rd_idx).format<half, num_P_tiles, REG_M * REG_K>();
 
-                //# compensate cur_O
-                //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
-                #pragma unroll
-                for(int p = 0; p < num_P_tiles; p++) {
-                    auto cO = rO[ri + p].format<float, REG_M, REG_N>();
+                if (v_pos == 0) {
+                    // ugemm_PV0(slm_V, P, rO, slm_offset);
+
                     #pragma unroll
-                    for(int r = 0; r < REG_M; r++)
-                        cO.row(r) = cm_mul<float>(cO.row(r), max_comp[r + p*REG_M]);
-                }
+                    for(int k = 0, ri = 0; k < head_size; k += REG_N, ri += num_P_tiles) {
+                        matrix<half, REG_K/2, REG_N*2> Vmat;
+                        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+                        cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+                        // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0) {
+                        //     show(Vmat);
+                        // }
+                        #pragma unroll
+                        for(int p = 0; p < num_P_tiles; p++) {
+                            rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
+                                            0,
+                                            Vmat.format<int32_t>(),
+                                            P2.row(p).format<int32_t>());
+                        }
+                        // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0)
+                        //     show(rO);
+                    }
 
-                #pragma unroll
-                for(int p = 0; p < num_P_tiles; p++) {
-                    rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
-                                rO[ri + p].format<float>(),
-                                Vmat.format<int32_t>(),
-                                P2.row(p).format<int32_t>());
+                } else {
+                    //ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
+                    #pragma unroll
+                    for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
+                        matrix<half, REG_K/2, REG_N*2> Vmat;
+                        cm_load<lsc::VNNI>(Vmat.format<half>(), b2dV.set_block_x(k));
+                        // if (cm_group_id(2) == 0 &&  cm_local_id(2) == 0) {
+                        //     show(Vmat);
+                        //     show(P2);
+                        //     show(max_comp.format<float, 1, 16>());
+                        // }
+                        //# compensate cur_O
+                        //  matrix <float, head_size/REG_K*2, REG_M*REG_N> rO;
+                        #pragma unroll
+                        for(int p = 0; p < num_P_tiles; p++) {
+                            auto cO = rO[ri + p].format<float, REG_M, REG_N>();
+                            #pragma unroll
+                            for(int r = 0; r < REG_M; r++)
+                                cO.row(r) = cm_mul<float>(cO.row(r), max_comp[r + p*REG_M]);
+                        }
+
+                        #pragma unroll
+                        for(int p = 0; p < num_P_tiles; p++) {
+                            rO[ri + p] = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount>(
+                                        rO[ri + p].format<float>(),
+                                        Vmat.format<int32_t>(),
+                                        P2.row(p).format<int32_t>());
+                        }
+                    }
                 }
             }
-        }
     }
     if (q_tokens_left == 0) return;
 

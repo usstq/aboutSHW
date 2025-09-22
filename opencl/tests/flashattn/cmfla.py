@@ -156,10 +156,10 @@ def flash_attn(q, k, v, cu_seqlens):
 
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
-    rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
-    atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
-    print(f"[check_close] rtol_max: {rtol_max}")
-    print(f"[check_close] atol_max: {atol_max}")
+    # rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
+    # atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
+    # print(f"[check_close] rtol_max: {rtol_max}")
+    # print(f"[check_close] atol_max: {atol_max}")
     if not torch.allclose(input, other, atol=atol, rtol=rtol):
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
@@ -227,6 +227,6 @@ def test_flash_attn_causal_batch1(batch, seq_len, num_heads = 16, num_kv_heads =
     #assert 0
 
 if __name__ == "__main__":
-    test_flash_attn_causal_batch1(batch=16, seq_len=128, num_heads = 1, num_kv_heads = 1, head_size = 80)
-    test_flash_attn_causal_batch1(batch=16, seq_len=128, num_heads = 1, num_kv_heads = 1, head_size = 80, fuse_v=True)
+    test_flash_attn_causal_batch1(batch=1, seq_len=8192, num_heads = 32, num_kv_heads = 8, head_size = 128)
+    # test_flash_attn_causal_batch1(batch=16, seq_len=128, num_heads = 1, num_kv_heads = 1, head_size = 80, fuse_v=True)
 
