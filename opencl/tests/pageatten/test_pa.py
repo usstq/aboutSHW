@@ -462,17 +462,59 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
                 print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
             print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
             print(f'====================================================================================')
-            
+
 def test_ov():
     def get_tensor(name, dtype=np.float16):
         with open(name, 'rb') as f:
             data = f.read()
             np_data = np.frombuffer(data, dtype=dtype).copy()
             return torch.from_numpy(np_data)
-    
+
+    def check_tril(block_mask: torch.Tensor):
+        """
+        Checks if each [H, W] slice in a [B, H, W] boolean tensor is lower triangular.
+        Returns a list of coordinates where the mask is True above the diagonal.
+        """
+        B, H, W = block_mask.shape
+        assert H == W, "Only square matrices can be checked for tril structure."
+
+        # Create a mask for upper triangular part (excluding diagonal)
+        upper_tri_mask = torch.triu(torch.ones(H, W, dtype=torch.bool), diagonal=1)
+
+        violations = []
+        for b in range(B):
+            # Get the upper triangle violations for this batch
+            violation_coords = torch.nonzero(block_mask[b] & upper_tri_mask, as_tuple=False)
+            for coord in violation_coords:
+                h, w = coord.tolist()
+                violations.append((b, h, w))
+
+        if violations:
+            print("Not a tril. Violations found at coordinates:")
+            for v in violations:
+                print(f"Batch {v[0]}, Row {v[1]}, Col {v[2]}")
+        else:
+            print("All slices are lower triangular.")
+
+        return violations
+
+    def check_tril_all(tensor_dir):
+        file_suffix = "_intermediates_4__boolean__32768_1_1_1__bfyx.bin"
+        files_checked = 0
+        for filename in os.listdir(tensor_dir):
+            if filename.endswith(file_suffix):
+                file_path = os.path.join(tensor_dir, filename)
+                block_mask  = get_tensor(file_path, dtype=np.int8).reshape([32, -1, 32])
+                check_tril(block_mask)
+                files_checked += 1
+        print(f'checked {files_checked} files')
+
     compressed_kvcache = True
     sparse_block_sz, block_sz, trunk_sz = 128, 256, 4096 # trunk_sz no use
     base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
+
+    check_tril_all(base)
+
     query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src0__f16__4096_4096_1_1__bfyx.bin').reshape([4096, 4096])
     key_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_updated_src_3__i8__17_8_256_132__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([17, 8, 256, 128+2*2])
     value_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_updated_src_4__i8__17_8_256_132__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([17, 8, 256, 128+2*2])
@@ -484,7 +526,7 @@ def test_ov():
     subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
     block_indices = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src7__i32__16_1_1_1__bfyx.bin', dtype=np.int32).reshape([16])
     block_indices_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src8__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
-
+    
     q_len = query.shape[0]
     kv_block_size = key_cache.shape[2]
     num_heads, num_kv_heads = block_mask.shape[0], key_cache.shape[1]
