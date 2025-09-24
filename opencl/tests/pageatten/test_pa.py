@@ -47,6 +47,25 @@ def quan_per_token(kv):
         kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
         return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
 
+def dequant_per_token(kv, head_size, blk_size):
+        blk_num, kv_head_num, _ = kv.shape
+        kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
+        kv_scale = kv[:,:,head_size * blk_size:head_size * blk_size + blk_size * 2].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
+        kv_zp = kv[:,:,head_size * blk_size + blk_size * 2:head_size * blk_size + blk_size * 4].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
+
+        # print("dequant_kv_u8 = ", kv_u8)
+        # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
+        # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
+
+        kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
+
+        for m in range(blk_num):
+            for n in range(kv_head_num):
+                for i in range(blk_size):
+                    kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
+
+        return kv_dequant
+
 def ALIGN_UP(x, y):
     return (x + y -1) // y * y
 
@@ -513,7 +532,7 @@ def test_ov():
     sparse_block_sz, block_sz, trunk_sz = 128, 256, 4096 # trunk_sz no use
     base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
 
-    check_tril_all(base)
+    # check_tril_all(base)
 
     query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src0__f16__4096_4096_1_1__bfyx.bin').reshape([4096, 4096])
     key_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_updated_src_3__i8__17_8_256_132__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([17, 8, 256, 128+2*2])
@@ -521,6 +540,10 @@ def test_ov():
 
     block_mask  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
     block_mask_in_wg  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_5__boolean__16384_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
+    
+    print(block_mask_in_wg, block_mask_in_wg.shape)
+    block_mask = torch.ones(32, 32, 32, dtype=torch.bool)
+    block_mask_in_wg = torch.ones(32, 16, 32, dtype=torch.bool)
 
     past_lens = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src5__i32__1_1_1_1__bfyx.bin', dtype=np.int32).reshape([1])
     subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
@@ -531,8 +554,12 @@ def test_ov():
     kv_block_size = key_cache.shape[2]
     num_heads, num_kv_heads = block_mask.shape[0], key_cache.shape[1]
     head_size = query.shape[1] // num_heads
+    valid_num_blks = key_cache.shape[0] - 1 # genai usually generates one more blocks than required
     
     ov_out = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_dst0__f16__4096_4096_1_1__bfyx.bin').reshape([q_len, num_heads*head_size])
+
+    # q [q_len, num_heads*head_size], k/v cache [num_blks, num_kv_heads, kv_block_size, head_size]
+    print(f'{query.shape = }, {key_cache.shape = }, {value_cache.shape = },  {ov_out.shape = }')
 
     is_causal = True
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
@@ -545,8 +572,9 @@ def test_ov():
     t_past_lens = cl.tensor(past_lens.to(torch.int32).detach().numpy())
     t_subsequence_begins = cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
 
-    t_out = cl.tensor([q_len, num_heads*head_size], np.dtype(np.float16))
-    
+    output = torch.zeros(q_len, num_heads*head_size).to(torch.float16)
+    t_out = cl.tensor(output.detach().numpy())
+
     wg_size = 16
     q_step = CM_GRF_WIDTH // 32 # or 8 on Xe1
     wg_seq_len = wg_size * q_step
@@ -562,10 +590,37 @@ def test_ov():
     else:
         pa_cm.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_query, t_key_cache, t_value_cache, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
 
+    latency = cl.finish()
+
     t_out_np = t_out.numpy()
     if not np.all(t_out_np == ov_out.detach().numpy()):
         error_idx = np.where(t_out_np != ov_out.detach().numpy())
         print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
+        
+    enable_dequant_check = 1
+    if enable_dequant_check:
+        k_dequan = dequant_per_token(key_cache.reshape(-1, num_kv_heads, kv_block_size*(head_size+2*2)), head_size, kv_block_size)
+        v_dequan = dequant_per_token(value_cache.reshape(-1, num_kv_heads, kv_block_size*(head_size+2*2)), head_size, kv_block_size)
+        print(f'{query.shape = }, {k_dequan.shape = }, {v_dequan.shape = }')
+
+        # => q [q_len, num_heads, head_size], k/v [kv_len, num_kv_heads, head_size]
+        q_3d = query.reshape(q_len, num_heads, head_size).contiguous()
+        k_3d = k_dequan[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
+        v_3d = v_dequan[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
+
+        print(f'{q_3d.shape = }, {k_3d.shape = }, {v_3d.shape = }')
+
+        attention_mask = get_attention_mask(q_3d, k_3d, v_3d, block_mask.unsqueeze(0), sparse_block_sz, trunk_sz)
+        ref = flash_attn_vlen_ref(q_3d, k_3d, v_3d, [], is_causal, attention_mask)
+        print(f'{ref.shape=} {output.shape=}')
+
+        t_out_np = t_out.numpy().reshape(-1, num_heads, head_size)
+        # print(t_out_np)
+        # print(ref)
+        if not np.all(t_out_np == ref.detach().numpy()):
+            error_idx = np.where(t_out_np != ref.detach().numpy())
+            print(f'{Colors.RED}result of unit test is not same with ref{Colors.END}: diff idx={error_idx}')
+        check_close(output.reshape(-1, num_heads, head_size), ref)
 
     print(f'{Colors.GREEN}test_ov done.{Colors.END}')
 
