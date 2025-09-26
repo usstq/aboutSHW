@@ -5,16 +5,19 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+import numpy as np
+
 torch.manual_seed(0)
 torch.set_printoptions(linewidth=1024)
 
 parser = argparse.ArgumentParser('')
 parser.add_argument('-i', "--impl", type=int, default=0)
 parser.add_argument('-b', "--batch", type=int, default=1)
-parser.add_argument('-nh', "--num-heads", type=int, default=28)
-parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=4)
+parser.add_argument('-nh', "--num-heads", type=int, default=32)
+parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=8)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
-parser.add_argument('-kvl', "--kv-len", type=int, default=32768)
+parser.add_argument('-kvl', "--kv-len", type=int, default=2049)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
@@ -37,15 +40,14 @@ enable_gqa = num_heads > num_kv_heads
 # define KV_BLOCK_SIZE = 32,64,128,256
 kv_block_size = 16
 
-# sdpa split size, must be multiple of kv_step and kv_len should be multiple of kv_partition_size
-k_partition_block_num = kv_len//8192
-if k_partition_block_num < 1:
-    k_partition_block_num = 1
-k_partition_block_num = 16
-kv_partition_size = kv_block_size * k_partition_block_num
-print("k_partition_block_num:", k_partition_block_num)
+enable_kvcache_compression = 0
 
-enable_kvcache_compression = 1
+
+def get_tensor(name, dtype=np.float16):
+    with open(name, 'rb') as f:
+        data = f.read()
+        np_data = np.frombuffer(data, dtype=dtype).copy()
+        return torch.from_numpy(np_data)
 
 #xe_arch: 1: xe, 2: xe2
 xe_arch=2
@@ -61,6 +63,35 @@ else:
 # reduce step size
 reduce_split_step = 8
 
+low = -127
+high = 128
+act_dtype = torch.float16
+q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
+k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+
+run_real_data_test=False
+
+if run_real_data_test:
+    q = get_tensor("./qwen3_q_f16_1_4096.bin").reshape([1,1,32,128])
+    k = get_tensor("./qwen3_k_f16_129_8_16_128.bin").reshape([129,8,16,128]).transpose(1,2).reshape([1,129*16,8,128])[:,:128*16+1,:,:]
+    v = get_tensor("./qwen3_v_f16_129_8_16_128.bin").reshape([129,8,16,128]).transpose(1,2).reshape([1,129*16,8,128])[:,:128*16+1,:,:]
+    kv_len = 128*16+1
+    # q = torch.randint(low, high, [1, 1, 32, 128]).to(dtype=act_dtype)/high
+    # k = torch.randint(low, high, [1, kv_len, 8, 128]).to(dtype=act_dtype)/high
+    # v = torch.randint(low, high, [1, kv_len, 8, 128]).to(dtype=act_dtype)/high
+    print("q.shape = ", q.shape)
+    print("k.shape = ", k.shape)
+    print("v.shape = ", v.shape)
+
+# sdpa split size, must be multiple of kv_step and kv_len should be multiple of kv_partition_size
+k_partition_block_num = kv_len//8192
+if k_partition_block_num < 1:
+    k_partition_block_num = 1
+k_partition_block_num = 1
+kv_partition_size = kv_block_size * k_partition_block_num
+print("k_partition_block_num:", k_partition_block_num)
+
 new_kv_len = (kv_len + kv_block_size - 1) // kv_block_size * kv_block_size
 kv_partition_num = (new_kv_len + kv_partition_size - 1) // kv_partition_size
 total_partition_num = kv_partition_num * num_heads
@@ -70,12 +101,6 @@ total_partition_num = kv_partition_num * num_heads
 # assert(kv_len%kv_partition_size == 0)
 assert(kv_partition_size % kv_step == 0)
 
-low = -127
-high = 128
-act_dtype = torch.float16
-q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
-k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
 # # test code
 # q = torch.arange(0, q_len* num_heads * head_size, dtype=act_dtype).reshape(batch, q_len, num_heads, head_size)/10000.0
@@ -1213,10 +1238,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         cur_sum[qi] = cm_sum<float>(rPv[0]);
     }
 
-    //if(kv_partition_idx==kv_partition_num - 1 && kv_head_num_idx == KV_HEADS_NUM - 1) {
-    //    printf("Pmat:\n");
-    //    show(Pmat);
-    //}
+    // if(kv_partition_idx==0 && kv_head_num_idx == 5) {
+    //     printf("Pmat:\n");
+    //     show(Pmat);
+    // }
 
     //# rO = P * V
     #if Q_RepeatCount != 1
@@ -1354,7 +1379,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         }
     }
 
-    //if(kv_partition_idx==kv_partition_num - 1 && kv_head_num_idx == KV_HEADS_NUM - 1) {
+    //if(kv_partition_idx==5 && kv_head_num_idx == 5) {
     //    printf("Omat:\n");
     //    show(Omat);
     //}
@@ -1410,6 +1435,9 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
         for(int k = 0; k < kv_partition_num; k ++) {
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
             total_lse += lse_value;
+            //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
+            //    printf("k = %d, lse_value = %f, total_lse = %f, lse_max = %f\n", k, lse_value, total_lse, lse_max);
+            //}
         }
     #endif
 
@@ -1424,7 +1452,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
             input_offset += HEAD_SIZE;
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
             out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
+            //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
+            //    printf("out_mat_f32: %d, input_offset= %d, lse_value = %f, total_lse=%f\n", k, input_offset, lse_value, total_lse);
+            //    show(data_mat);
+            //    show(out_mat_f32);
+            //}
         }
+        
+        //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
+        //    printf("out_mat_f32:\n");
+        //    show(out_mat_f32);
+        //}
+        
         out_mat = cm_mul<half>(out_mat_f32, (float)1.0f);
         // write output
         uint output_offset = batch * HEADS_NUM * HEAD_SIZE + head * HEAD_SIZE + offset;
@@ -1471,6 +1510,8 @@ print("first call ...")
 cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS, t_q, t_k, t_v,
                    t_past_lens, t_block_indices, t_block_indices_begins,
                    t_subsequence_begins,t_out, t_lse, t_gws_subseq_mapping, q_len)
+
+# np.save("bmg_out", t_out.numpy())
 
 # f0 = torch.from_numpy(t_out.numpy())
 # print("f0 = ", f0.shape, f0.dtype)
