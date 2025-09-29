@@ -17,7 +17,7 @@ MAX_TOPK = 4
 SUBGROUP_SIZE = 16
 SUBGROUP_NUM = 8
 N_BLOCK = 16
-N_EXPERTS = 32
+N_EXPERTS = 4
 SZ_LAYOUT = 0
 
 M = 1
@@ -285,6 +285,7 @@ if not np.allclose(reference, result, rtol=1e-02, atol=1e-01):
     print(f'reference = {reference[:, :32]}')
     print(f'result = {result[:, :32]}')
     # print(f"diff = {reference - result}")shape=}')
+    # exit()
 else:
     print(f'reference = {reference[:, :32]}')
     print(f'result = {result[:, :32]}')
@@ -294,24 +295,12 @@ print()
 print()
 
 
-t_hidden_states = cl.tensor(hidden_states)
-
-t_router_logits = cl.tensor(router_logits)
-t_topk_idx = cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.int32))
-t_topk_weights = cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.float16))
-
-t_fused_weights = cl.tensor(moe_op.fused_weight)
-t_fused_offsets = cl.tensor(moe_op.fused_weight_offset)
-t_gate_up_output = cl.tensor(np.zeros([M*MAX_TOPK, INTERMEDIATE_SIZE], dtype=np.float16))
-t_down_output = cl.tensor(np.zeros([M*MAX_TOPK, HIDDEN_SIZE], dtype=np.float16))
-t_final_hidden_state = cl.tensor(np.zeros([M, HIDDEN_SIZE], dtype=np.float16))
-
 print("Performance test...\n")
 loop_cnt = 100
 all_layers = []
 
-actual_mem = hidden_states.nbytes + router_logits.nbytes + (moe_op.fused_weight.nbytes + moe_op.fused_weight_offset.nbytes) / 8
-actual_mem += MAX_TOPK * INTERMEDIATE_SIZE * 2 * M / 8 + MAX_TOPK * HIDDEN_SIZE * 2 * M / 8 + HIDDEN_SIZE * 2 * M / 8
+actual_mem = hidden_states.nbytes + router_logits.nbytes + (moe_op.fused_weight.nbytes + moe_op.fused_weight_offset.nbytes) / ((N_EXPERTS / MAX_TOPK))
+actual_mem += MAX_TOPK * INTERMEDIATE_SIZE * 2 * M + MAX_TOPK * HIDDEN_SIZE * 2 * M + HIDDEN_SIZE * 2 * M
 
 total_mem_size = 0
 while len(all_layers) < loop_cnt and total_mem_size < 8e9:
