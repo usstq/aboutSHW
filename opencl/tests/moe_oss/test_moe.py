@@ -13,6 +13,9 @@ GROUP_SIZE = 32
 INTERMEDIATE_SIZE = 2880
 HIDDEN_SIZE = 2880
 
+# INTERMEDIATE_SIZE = 2944
+# HIDDEN_SIZE = 2944
+
 MAX_TOPK = 4
 SUBGROUP_SIZE = 16
 SUBGROUP_NUM = 8
@@ -39,9 +42,9 @@ class WeightQ4A:
         self.K_group_size = K_group_size
         assert K % K_group_size == 0
         self.K_groups = K // K_group_size
-        self.raw_weight_q = np.random.randint(0,3,[K, N]).astype(np.int8)
+        self.raw_weight_q = np.random.randint(7,9,[K, N]).astype(np.int8)
         self.raw_weight_s = np.random.randint(-4,5,[self.K_groups, N]).astype(np.float16)/32.0
-        self.raw_weight_z = np.random.randint(0,3,[self.K_groups, N]).astype(np.int8)
+        self.raw_weight_z = np.random.randint(8,9,[self.K_groups, N]).astype(np.int8)
         self.raw_bias = np.random.randint(-1,3,[1, N]).astype(np.float16)/32.0
         self.weight = (self.raw_weight_q.astype(np.float32) - self.raw_weight_z.astype(np.float32).repeat(K_group_size, axis=0)) * self.raw_weight_s.repeat(K_group_size, axis=0)
         # [N, K]
@@ -294,6 +297,7 @@ print(f"INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} HIDDEN_SIZE={HIDDEN_SIZE}")
 print()
 print()
 
+# exit()
 
 print("Performance test...\n")
 loop_cnt = 100
