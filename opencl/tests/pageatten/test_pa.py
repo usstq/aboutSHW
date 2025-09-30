@@ -517,52 +517,60 @@ def test_ov():
 
         return violations
 
-    def check_tril_all(tensor_dir):
-        file_suffix = "_intermediates_4__boolean__32768_1_1_1__bfyx.bin"
+    def check_tril_all(tensor_dir, file_suffix, block_mask_shape):
         files_checked = 0
+        is_tril = True
         for filename in os.listdir(tensor_dir):
             if filename.endswith(file_suffix):
                 file_path = os.path.join(tensor_dir, filename)
-                block_mask  = get_tensor(file_path, dtype=np.int8).reshape([32, -1, 32])
-                check_tril(block_mask)
+                block_mask  = get_tensor(file_path, dtype=np.int8).reshape(block_mask_shape)
+                print(f'{block_mask.shape=}')
+                B, H, W = block_mask.shape
+                violations = check_tril(block_mask[:,:,:H])
+                is_tril &= (len(violations) == 0)
                 files_checked += 1
         print(f'checked {files_checked} files')
+        return is_tril
 
-    compressed_kvcache = True
-    sparse_block_sz, block_sz, trunk_sz = 128, 256, 4096 # trunk_sz no use
+    compressed_kvcache = False
+    xattn_thresh = 100
+    sparse_block_sz, kv_block_size, trunk_sz = 128, 256, 4096 # trunk_sz no use
+    num_heads, num_kv_heads, head_size = 32, 8, 128
     base = '/home/ceciliapeng/openvino/tensors_bin_pr/'
 
-    # check_tril_all(base)
+    query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src0__f16__4096_4096_1_1__bfyx.bin').reshape([4096, num_heads*head_size])
+    key_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_updated_src_3__f16__17_8_256_128__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([-1, num_kv_heads, kv_block_size, head_size])
+    value_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_updated_src_4__f16__17_8_256_128__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([-1, num_kv_heads, kv_block_size, head_size])
 
-    query = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src0__f16__4096_4096_1_1__bfyx.bin').reshape([4096, 4096])
-    key_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_updated_src_3__i8__17_8_256_132__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([17, 8, 256, 128+2*2])
-    value_cache   = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_updated_src_4__i8__17_8_256_132__bfyx.bin', np.int8 if compressed_kvcache else np.float16).reshape([17, 8, 256, 128+2*2])
-
-    block_mask  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
-    block_mask_in_wg  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_5__boolean__16384_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
-    
-    print(block_mask_in_wg, block_mask_in_wg.shape)
-    block_mask = torch.ones(32, 32, 32, dtype=torch.bool)
-    block_mask_in_wg = torch.ones(32, 16, 32, dtype=torch.bool)
-
-    past_lens = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src5__i32__1_1_1_1__bfyx.bin', dtype=np.int32).reshape([1])
-    subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
-    block_indices = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src7__i32__16_1_1_1__bfyx.bin', dtype=np.int32).reshape([16])
-    block_indices_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src8__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
-    
     q_len = query.shape[0]
-    kv_block_size = key_cache.shape[2]
-    num_heads, num_kv_heads = block_mask.shape[0], key_cache.shape[1]
-    head_size = query.shape[1] // num_heads
     valid_num_blks = key_cache.shape[0] - 1 # genai usually generates one more blocks than required
+    q_block_pad = (q_len + sparse_block_sz - 1) // sparse_block_sz
+
+    block_mask  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([num_heads, q_block_pad, -1])
+    block_mask_in_wg  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_intermediates_5__boolean__16384_1_1_1__bfyx.bin', dtype=np.int8).reshape([num_heads, -1, block_mask.shape[-1]])
     
-    ov_out = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_dst0__f16__4096_4096_1_1__bfyx.bin').reshape([q_len, num_heads*head_size])
+    # print(block_mask_in_wg, block_mask_in_wg.shape)
+    # block_mask = torch.ones(block_mask.shape, dtype=torch.bool)
+    # block_mask_in_wg = torch.ones(block_mask_in_wg.shape, dtype=torch.bool)
+
+    past_lens = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src5__i32__1_1_1_1__bfyx.bin', dtype=np.int32).reshape([1])
+    subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
+    block_indices = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src7__i32__16_1_1_1__bfyx.bin', dtype=np.int32).reshape([valid_num_blks])
+    block_indices_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src8__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
+    
+    full_dense = False
+    if xattn_thresh >= 1:
+        full_dense = check_tril_all(base, "_intermediates_4__boolean__8192_1_1_1__bfyx.bin", block_mask.shape)
+        assert(full_dense, "SHOULD be full dense if XAttn thresh larger than 1.0")
+
+    ov_out = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_dst0__f16__4096_4096_1_1__bfyx.bin').reshape([q_len, num_heads*head_size])
 
     # q [q_len, num_heads*head_size], k/v cache [num_blks, num_kv_heads, kv_block_size, head_size]
     print(f'{query.shape = }, {key_cache.shape = }, {value_cache.shape = },  {ov_out.shape = }')
+    print(f'{block_indices=}')
 
     is_causal = True
-    pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
+    pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, kv_block_size, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
    
     t_query = cl.tensor(query.detach().numpy())
     t_key_cache = cl.tensor(key_cache.detach().numpy())
@@ -589,38 +597,36 @@ def test_ov():
         pa_cm.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_query, t_key_cache, t_value_cache, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_block_mask, t_block_mask_in_wg, t_out)
     else:
         pa_cm.kernels.enqueue("cm_page_attention", GWS, LWS, q_len, t_query, t_key_cache, t_value_cache, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out)
-
     latency = cl.finish()
 
-    t_out_np = t_out.numpy()
-    if not np.all(t_out_np == ov_out.detach().numpy()):
-        error_idx = np.where(t_out_np != ov_out.detach().numpy())
-        print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
-        
-    enable_dequant_check = 1
-    if enable_dequant_check:
+    ut_out = torch.from_numpy(t_out.numpy().reshape(-1, num_heads, head_size))
+    ov_out = ov_out.reshape(-1, num_heads, head_size)
+    check_close(ut_out, ov_out)
+
+    enable_dequant_check = True if compressed_kvcache else False
+    if enable_dequant_check: # TODO: there is bug in this check?
         k_dequan = dequant_per_token(key_cache.reshape(-1, num_kv_heads, kv_block_size*(head_size+2*2)), head_size, kv_block_size)
         v_dequan = dequant_per_token(value_cache.reshape(-1, num_kv_heads, kv_block_size*(head_size+2*2)), head_size, kv_block_size)
-        print(f'{query.shape = }, {k_dequan.shape = }, {v_dequan.shape = }')
+        # print(f'{k_dequan.shape = }, {v_dequan.shape = }')
 
         # => q [q_len, num_heads, head_size], k/v [kv_len, num_kv_heads, head_size]
         q_3d = query.reshape(q_len, num_heads, head_size).contiguous()
         k_3d = k_dequan[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
         v_3d = v_dequan[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
+    else:
+        # => q [q_len, num_heads, head_size], k/v [kv_len, num_kv_heads, head_size]
+        q_3d = query.reshape(q_len, num_heads, head_size).contiguous()
+        k_3d = key_cache[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
+        v_3d = value_cache[:valid_num_blks, :].transpose(1,2).reshape(-1, num_kv_heads, head_size).contiguous()
 
-        print(f'{q_3d.shape = }, {k_3d.shape = }, {v_3d.shape = }')
+    print(f'{q_3d.shape = }, {k_3d.shape = }, {v_3d.shape = }')
 
-        attention_mask = get_attention_mask(q_3d, k_3d, v_3d, block_mask.unsqueeze(0), sparse_block_sz, trunk_sz)
-        ref = flash_attn_vlen_ref(q_3d, k_3d, v_3d, [], is_causal, attention_mask)
-        print(f'{ref.shape=} {output.shape=}')
+    attention_mask = None if full_dense else get_attention_mask(q_3d, k_3d, v_3d, block_mask.unsqueeze(0), sparse_block_sz, trunk_sz)
+    ref = flash_attn_vlen_ref(q_3d, k_3d, v_3d, [], is_causal, attention_mask)
+    # print(f'{ref.shape=}')
 
-        t_out_np = t_out.numpy().reshape(-1, num_heads, head_size)
-        # print(t_out_np)
-        # print(ref)
-        if not np.all(t_out_np == ref.detach().numpy()):
-            error_idx = np.where(t_out_np != ref.detach().numpy())
-            print(f'{Colors.RED}result of unit test is not same with ref{Colors.END}: diff idx={error_idx}')
-        check_close(output.reshape(-1, num_heads, head_size), ref)
+    check_close(ref, ov_out)
+    check_close(ref, ut_out)
 
     print(f'{Colors.GREEN}test_ov done.{Colors.END}')
 
