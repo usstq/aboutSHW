@@ -152,14 +152,6 @@ inline void gemv_n4x(const __global uchar* weight,
         __global uchar* Z = zps + n / 2;
         // process 2 groups each iteration
         for(int gk = 0; gk < K / GROUP_SIZE; gk+=2, S += 2 * N, Z += 2 * N / 2) {
-            half s00 = S[0];
-            half s10 = S[1];
-            half s20 = S[2];
-            half s30 = S[3];
-            half s01 = S[N];
-            half s11 = S[N+1];
-            half s21 = S[N+2];
-            half s31 = S[N+3];
             // ushort z0 = Z[0];
             // ushort z2 = Z[1];
             // ushort z1 = Z[N/2];
@@ -175,40 +167,37 @@ inline void gemv_n4x(const __global uchar* weight,
             // half z_hf31 = convert_half(z3 >> 4);
 
 #if SUBGROUP_SIZE == 16
-            half2 sum0;
-            half2 sum1;
-            half2 sum2;
-            half2 sum3;
+            half8 sum;
             half4 a = as_half4(intel_sub_group_block_read_us4((const __local ushort*)x2 + gk*GROUP_SIZE));
             uchar2 b = intel_sub_group_block_read_uc2((const __global uchar*)B + gk*GROUP_SIZE/2);
             uchar2 b2 = intel_sub_group_block_read_uc2((const __global uchar*)B + 1*(K/2) + gk*GROUP_SIZE/2);
             uchar2 b3 = intel_sub_group_block_read_uc2((const __global uchar*)B + 2*(K/2) + gk*GROUP_SIZE/2);
             uchar2 b4 = intel_sub_group_block_read_uc2((const __global uchar*)B + 3*(K/2) + gk*GROUP_SIZE/2);
+            half4 s0 = vload4(0, S);
+            half4 s1 = vload4(0, S + N);
 
-            sum0.s0 = fma(a.s0, (convert_half(b.s0 & 0x0F)), 0);
-            sum0.s1 = fma(a.s1, (convert_half(b.s1 & 0x0F)), 0);
-            sum0.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum0.s0);
-            sum0.s1 = fma(a.s3, (convert_half(b.s1 >> 4)), sum0.s1);
+            sum.s0 = fma(a.s0, (convert_half(b.s0 & 0x0F)), 0);
+            sum.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum.s0);
+            sum.s1 = fma(a.s1, (convert_half(b.s1 & 0x0F)), 0);
+            sum.s1 = fma(a.s3, (convert_half(b.s1 >> 4)), sum.s1);
+            sum.s2 = fma(a.s0, (convert_half(b2.s0 & 0x0F)), 0);
+            sum.s2 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum.s2);
+            sum.s3 = fma(a.s1, (convert_half(b2.s1 & 0x0F)), 0);
+            sum.s3 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum.s3);
 
-            sum1.s0 = fma(a.s0, (convert_half(b2.s0 & 0x0F)), 0);
-            sum1.s1 = fma(a.s1, (convert_half(b2.s1 & 0x0F)), 0);
-            sum1.s0 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum1.s0);
-            sum1.s1 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum1.s1);
+            sum.s4 = fma(a.s0, (convert_half(b3.s0 & 0x0F)), 0);
+            sum.s4 = fma(a.s2, (convert_half(b3.s0 >> 4)), sum.s4);
+            sum.s5 = fma(a.s1, (convert_half(b3.s1 & 0x0F)), 0);
+            sum.s5 = fma(a.s3, (convert_half(b3.s1 >> 4)), sum.s5);
+            sum.s6 = fma(a.s0, (convert_half(b4.s0 & 0x0F)), 0);
+            sum.s6 = fma(a.s2, (convert_half(b4.s0 >> 4)), sum.s6);
+            sum.s7 = fma(a.s1, (convert_half(b4.s1 & 0x0F)), 0);
+            sum.s7 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum.s7);
 
-            sum2.s0 = fma(a.s0, (convert_half(b3.s0 & 0x0F)), 0);
-            sum2.s1 = fma(a.s1, (convert_half(b3.s1 & 0x0F)), 0);
-            sum2.s0 = fma(a.s2, (convert_half(b3.s0 >> 4)), sum2.s0);
-            sum2.s1 = fma(a.s3, (convert_half(b3.s1 >> 4)), sum2.s1);
-
-            sum3.s0 = fma(a.s0, (convert_half(b4.s0 & 0x0F)), 0);
-            sum3.s1 = fma(a.s1, (convert_half(b4.s1 & 0x0F)), 0);
-            sum3.s0 = fma(a.s2, (convert_half(b4.s0 >> 4)), sum3.s0);
-            sum3.s1 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum3.s1);
-
-            sum_all0 += (sum0.s0 - xg_sum[gk] * (half)8.0) * s00 + (sum0.s1 - xg_sum[gk+1] * (half)8.0) * s01;
-            sum_all1 += (sum1.s0 - xg_sum[gk] * (half)8.0) * s10 + (sum1.s1 - xg_sum[gk+1] * (half)8.0) * s11;
-            sum_all2 += (sum2.s0 - xg_sum[gk] * (half)8.0) * s20 + (sum2.s1 - xg_sum[gk+1] * (half)8.0) * s21;
-            sum_all3 += (sum3.s0 - xg_sum[gk] * (half)8.0) * s30 + (sum3.s1 - xg_sum[gk+1] * (half)8.0) * s31;
+            sum_all0 += (sum.s0 - xg_sum[gk] * (half)8.0) * s0.s0 + (sum.s1 - xg_sum[gk+1] * (half)8.0) * s1.s0;
+            sum_all1 += (sum.s2 - xg_sum[gk] * (half)8.0) * s0.s1 + (sum.s3 - xg_sum[gk+1] * (half)8.0) * s1.s1;
+            sum_all2 += (sum.s4 - xg_sum[gk] * (half)8.0) * s0.s2 + (sum.s5 - xg_sum[gk+1] * (half)8.0) * s1.s2;
+            sum_all3 += (sum.s6 - xg_sum[gk] * (half)8.0) * s0.s3 + (sum.s7 - xg_sum[gk+1] * (half)8.0) * s1.s3;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
@@ -451,14 +440,6 @@ __kernel void mlp_down(
         float sum_all3 = 0;
         // process 2 groups each iteration
         for(int gk = 0; gk < K / GROUP_SIZE; gk += 2, S += 2 * N, Z += 2 * N / 2) {
-            half s00 = S[0];
-            half s10 = S[1];
-            half s20 = S[2];
-            half s30 = S[3];
-            half s01 = S[N];
-            half s11 = S[N+1];
-            half s21 = S[N+2];
-            half s31 = S[N+3];
             // ushort z0 = Z[0];
             // ushort z2 = Z[1];
             // ushort z1 = Z[N/2];
@@ -474,40 +455,37 @@ __kernel void mlp_down(
             // half z_hf31 = convert_half(z3 >> 4);
 
 #if SUBGROUP_SIZE == 16
-            half2 sum0;
-            half2 sum1;
-            half2 sum2;
-            half2 sum3;
+            half8 sum;
             half4 a = as_half4(intel_sub_group_block_read_us4((const __local ushort*)x2 + gk*GROUP_SIZE));
             uchar2 b = intel_sub_group_block_read_uc2((const __global uchar*)B + gk*GROUP_SIZE/2);
             uchar2 b2 = intel_sub_group_block_read_uc2((const __global uchar*)B + 1*(K/2) + gk*GROUP_SIZE/2);
             uchar2 b3 = intel_sub_group_block_read_uc2((const __global uchar*)B + 2*(K/2) + gk*GROUP_SIZE/2);
             uchar2 b4 = intel_sub_group_block_read_uc2((const __global uchar*)B + 3*(K/2) + gk*GROUP_SIZE/2);
+            half4 s0 = vload4(0, S);
+            half4 s1 = vload4(0, S + N);
 
-            sum0.s0 = fma(a.s0, (convert_half(b.s0 & 0x0F)), 0);
-            sum0.s1 = fma(a.s1, (convert_half(b.s1 & 0x0F)), 0);
-            sum0.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum0.s0);
-            sum0.s1 = fma(a.s3, (convert_half(b.s1 >> 4)), sum0.s1);
+            sum.s0 = fma(a.s0, (convert_half(b.s0 & 0x0F)), 0);
+            sum.s1 = fma(a.s1, (convert_half(b.s1 & 0x0F)), 0);
+            sum.s2 = fma(a.s0, (convert_half(b2.s0 & 0x0F)), 0);
+            sum.s3 = fma(a.s1, (convert_half(b2.s1 & 0x0F)), 0);
+            sum.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum.s0);
+            sum.s1 = fma(a.s3, (convert_half(b.s1 >> 4)), sum.s1);
+            sum.s2 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum.s2);
+            sum.s3 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum.s3);
 
-            sum1.s0 = fma(a.s0, (convert_half(b2.s0 & 0x0F)), 0);
-            sum1.s1 = fma(a.s1, (convert_half(b2.s1 & 0x0F)), 0);
-            sum1.s0 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum1.s0);
-            sum1.s1 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum1.s1);
+            sum.s4 = fma(a.s0, (convert_half(b3.s0 & 0x0F)), 0);
+            sum.s5 = fma(a.s1, (convert_half(b3.s1 & 0x0F)), 0);
+            sum.s6 = fma(a.s0, (convert_half(b4.s0 & 0x0F)), 0);
+            sum.s7 = fma(a.s1, (convert_half(b4.s1 & 0x0F)), 0);
+            sum.s4 = fma(a.s2, (convert_half(b3.s0 >> 4)), sum.s4);
+            sum.s5 = fma(a.s3, (convert_half(b3.s1 >> 4)), sum.s5);
+            sum.s6 = fma(a.s2, (convert_half(b4.s0 >> 4)), sum.s6);
+            sum.s7 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum.s7);
 
-            sum2.s0 = fma(a.s0, (convert_half(b3.s0 & 0x0F)), 0);
-            sum2.s1 = fma(a.s1, (convert_half(b3.s1 & 0x0F)), 0);
-            sum2.s0 = fma(a.s2, (convert_half(b3.s0 >> 4)), sum2.s0);
-            sum2.s1 = fma(a.s3, (convert_half(b3.s1 >> 4)), sum2.s1);
-
-            sum3.s0 = fma(a.s0, (convert_half(b4.s0 & 0x0F)), 0);
-            sum3.s1 = fma(a.s1, (convert_half(b4.s1 & 0x0F)), 0);
-            sum3.s0 = fma(a.s2, (convert_half(b4.s0 >> 4)), sum3.s0);
-            sum3.s1 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum3.s1);
-
-            sum_all0 += (sum0.s0 - xg_sum[gk] * (half)8.0) * s00 + (sum0.s1 - xg_sum[gk+1] * (half)8.0) * s01;
-            sum_all1 += (sum1.s0 - xg_sum[gk] * (half)8.0) * s10 + (sum1.s1 - xg_sum[gk+1] * (half)8.0) * s11;
-            sum_all2 += (sum2.s0 - xg_sum[gk] * (half)8.0) * s20 + (sum2.s1 - xg_sum[gk+1] * (half)8.0) * s21;
-            sum_all3 += (sum3.s0 - xg_sum[gk] * (half)8.0) * s30 + (sum3.s1 - xg_sum[gk+1] * (half)8.0) * s31;
+            sum_all0 += (sum.s0 - xg_sum[gk] * (half)8.0) * s0.s0 + (sum.s1 - xg_sum[gk+1] * (half)8.0) * s1.s0;
+            sum_all1 += (sum.s2 - xg_sum[gk] * (half)8.0) * s0.s1 + (sum.s3 - xg_sum[gk+1] * (half)8.0) * s1.s1;
+            sum_all2 += (sum.s4 - xg_sum[gk] * (half)8.0) * s0.s2 + (sum.s5 - xg_sum[gk+1] * (half)8.0) * s1.s2;
+            sum_all3 += (sum.s6 - xg_sum[gk] * (half)8.0) * s0.s3 + (sum.s7 - xg_sum[gk+1] * (half)8.0) * s1.s3;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
