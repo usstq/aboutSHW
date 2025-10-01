@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-#gpt-oss moe requires GROUP_SIZE == 32
+#gpt-oss moe requires GROUP_SIZE == 32, and zp=8
 GROUP_SIZE = 32
 INTERMEDIATE_SIZE = 2880
 HIDDEN_SIZE = 2880

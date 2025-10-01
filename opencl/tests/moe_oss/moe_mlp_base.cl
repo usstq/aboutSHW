@@ -36,8 +36,8 @@ inline void gemv_n2x(const __global uchar* weight,
         x_group_sum[0] = sub_group_reduce_add(x_group_sum[0]);
         x_group_sum[1] = sub_group_reduce_add(x_group_sum[1]);
         if (id_local == 0) {
-            xg_sum[2*i] = x_group_sum[0] / (SUBGROUP_SIZE/8);
-            xg_sum[2*i+1] = x_group_sum[1] / (SUBGROUP_SIZE/8);
+            xg_sum[2*i] = x_group_sum[0] / SUBGROUP_SIZE;
+            xg_sum[2*i+1] = x_group_sum[1] / SUBGROUP_SIZE;
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -57,6 +57,13 @@ inline void gemv_n2x(const __global uchar* weight,
             half s10 = S[1];
             half s01 = S[N];
             half s11 = S[N+1];
+            uchar z0 = Z[0];
+            uchar z1 = Z[N/2];
+            half z_hf00 = convert_half(z0 & 0xf);
+            half z_hf10 = convert_half(z0 >> 4);
+            half z_hf01 = convert_half(z1 & 0xf);
+            half z_hf11 = convert_half(z1 >> 4);
+
 #if SUBGROUP_SIZE == 16
             half2 sum0;
             half2 sum1;
@@ -74,8 +81,8 @@ inline void gemv_n2x(const __global uchar* weight,
             sum1.s0 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum1.s0);
             sum1.s1 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum1.s1);
 
-            sum_all0 += (sum0.s0 - xg_sum[gk]) * s00 + (sum0.s1 - xg_sum[gk+1]) * s01;
-            sum_all1 += (sum1.s0 - xg_sum[gk]) * s10 + (sum1.s1 - xg_sum[gk+1]) * s11;
+            sum_all0 += (sum0.s0 - xg_sum[gk] * z_hf00) * s00 + (sum0.s1 - xg_sum[gk+1] * z_hf01) * s01;
+            sum_all1 += (sum1.s0 - xg_sum[gk] * z_hf10) * s10 + (sum1.s1 - xg_sum[gk+1] * z_hf11) * s11;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
@@ -126,8 +133,8 @@ inline void gemv_n4x(const __global uchar* weight,
         x_group_sum[0] = sub_group_reduce_add(x_group_sum[0]);
         x_group_sum[1] = sub_group_reduce_add(x_group_sum[1]);
         if (id_local == 0) {
-            xg_sum[2*i] = x_group_sum[0] / (SUBGROUP_SIZE / 8);
-            xg_sum[2*i+1] = x_group_sum[1] / (SUBGROUP_SIZE / 8);
+            xg_sum[2*i] = x_group_sum[0] / SUBGROUP_SIZE;
+            xg_sum[2*i+1] = x_group_sum[1] / SUBGROUP_SIZE;
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -145,6 +152,17 @@ inline void gemv_n4x(const __global uchar* weight,
         __global uchar* Z = zps + n / 2;
         // process 4 groups each iteration
         for(int gk = 0; gk < K / GROUP_SIZE; gk+=2, S += 2 * N, Z += 2 * N / 2) {
+            uchar2 z0 = vload2(0, Z);
+            uchar2 z1 = vload2(0, Z + N/2);
+
+            half z_hf00 = convert_half(z0.s0 & 0xf);
+            half z_hf10 = convert_half(z0.s0 >> 4);
+            half z_hf01 = convert_half(z1.s0 & 0xf);
+            half z_hf11 = convert_half(z1.s1 >> 4);
+            half z_hf20 = convert_half(z0.s1 & 0xf);
+            half z_hf30 = convert_half(z0.s1 >> 4);
+            half z_hf21 = convert_half(z1.s1 & 0xf);
+            half z_hf31 = convert_half(z1.s1 >> 4);
 #if SUBGROUP_SIZE == 16
             half8 sum;
             half4 a = as_half4(intel_sub_group_block_read_us4((const __local ushort*)x2 + gk*GROUP_SIZE));
@@ -173,10 +191,10 @@ inline void gemv_n4x(const __global uchar* weight,
             sum.s7 = fma(a.s1, (convert_half(b4.s1 & 0x0F)), 0);
             sum.s7 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum.s7);
 
-            sum_all0 += (sum.s0 - xg_sum[gk]) * s0.s0 + (sum.s1 - xg_sum[gk+1]) * s1.s0;
-            sum_all1 += (sum.s2 - xg_sum[gk]) * s0.s1 + (sum.s3 - xg_sum[gk+1]) * s1.s1;
-            sum_all2 += (sum.s4 - xg_sum[gk]) * s0.s2 + (sum.s5 - xg_sum[gk+1]) * s1.s2;
-            sum_all3 += (sum.s6 - xg_sum[gk]) * s0.s3 + (sum.s7 - xg_sum[gk+1]) * s1.s3;
+            sum_all0 += (sum.s0 - xg_sum[gk] * z_hf00) * s0.s0 + (sum.s1 - xg_sum[gk+1] * z_hf01) * s1.s0;
+            sum_all1 += (sum.s2 - xg_sum[gk] * z_hf10) * s0.s1 + (sum.s3 - xg_sum[gk+1] * z_hf11) * s1.s1;
+            sum_all2 += (sum.s4 - xg_sum[gk] * z_hf20) * s0.s2 + (sum.s5 - xg_sum[gk+1] * z_hf21) * s1.s2;
+            sum_all3 += (sum.s6 - xg_sum[gk] * z_hf30) * s0.s3 + (sum.s7 - xg_sum[gk+1] * z_hf31) * s1.s3;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
@@ -267,7 +285,9 @@ __kernel void mlp_down(
 
     #define XG_SIZE (HIDDEN_SIZE/GROUP_SIZE)
     __local half x2[INTERMEDIATE_SIZE];
+    //__local float xg_sum[INTERMEDIATE_SIZE/32];
     __local float xg_sum[XG_SIZE];
+
 
     //# interleaving x into x2
     __global half * px = x + id_sg*2*GROUP_SIZE;
@@ -285,13 +305,14 @@ __kernel void mlp_down(
         x_group_sum[0] = sub_group_reduce_add(x_group_sum[0]);
         x_group_sum[1] = sub_group_reduce_add(x_group_sum[1]);
         if (id_local == 0) {
-            xg_sum[2*i] = x_group_sum[0] / (SUBGROUP_SIZE / 8);
-            xg_sum[2*i+1] = x_group_sum[1] / (SUBGROUP_SIZE / 8);
+            xg_sum[2*i] = x_group_sum[0] / SUBGROUP_SIZE;
+            xg_sum[2*i+1] = x_group_sum[1] / SUBGROUP_SIZE;
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     //# global: [expert, SUBGROUP_SIZE, N//N_BLOCK],[1, SUBGROUP_SIZE, SUBGROUP_NUM]
+
     int n_start = get_global_id(2) * N_BLOCK;
     int n_end = n_start + N_BLOCK;
 
@@ -303,8 +324,17 @@ __kernel void mlp_down(
         float sum_all1 = 0;
         // process 2 groups each iteration
         for(int gk = 0; gk < K / GROUP_SIZE; gk+=2, S += 2 * N, Z += 2 * N / 2) {
-            half2 s0 = vload2(0, S);
-            half2 s1 = vload2(0, S + N);
+            half s00 = S[0];
+            half s10 = S[1];
+            half s01 = S[N];
+            half s11 = S[N+1];
+            uchar z0 = Z[0];
+            uchar z1 = Z[N/2];
+            half z_hf00 = convert_half(z0 & 0xf);
+            half z_hf10 = convert_half(z0 >> 4);
+            half z_hf01 = convert_half(z1 & 0xf);
+            half z_hf11 = convert_half(z1 >> 4);
+
 #if SUBGROUP_SIZE == 16
             half2 sum0;
             half2 sum1;
@@ -313,17 +343,17 @@ __kernel void mlp_down(
             uchar2 b2 = intel_sub_group_block_read_uc2((const __global uchar*)(B + (K/2) + gk*GROUP_SIZE/2));
 
             sum0.s0 = fma(a.s0, (convert_half(b.s0 & 0x0F)), 0);
-            sum0.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum0.s0);
             sum0.s1 = fma(a.s1, (convert_half(b.s1 & 0x0F)), 0);
+            sum0.s0 = fma(a.s2, (convert_half(b.s0 >> 4)), sum0.s0);
             sum0.s1 = fma(a.s3, (convert_half(b.s1 >> 4)), sum0.s1);
-            
+
             sum1.s0 = fma(a.s0, (convert_half(b2.s0 & 0x0F)), 0);
-            sum1.s0 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum1.s0);
             sum1.s1 = fma(a.s1, (convert_half(b2.s1 & 0x0F)), 0);
+            sum1.s0 = fma(a.s2, (convert_half(b2.s0 >> 4)), sum1.s0);
             sum1.s1 = fma(a.s3, (convert_half(b2.s1 >> 4)), sum1.s1);
 
-            sum_all0 += (sum0.s0 - xg_sum[gk]) * s0.s0 + (sum0.s1 - xg_sum[gk+1]) * s1.s0;
-            sum_all1 += (sum1.s0 - xg_sum[gk]) * s0.s1 + (sum1.s1 - xg_sum[gk+1]) * s1.s1;
+            sum_all0 += (sum0.s0 - xg_sum[gk] * z_hf00) * s00 + (sum0.s1 - xg_sum[gk+1] * z_hf01) * s01;
+            sum_all1 += (sum1.s0 - xg_sum[gk] * z_hf10) * s10 + (sum1.s1 - xg_sum[gk+1] * z_hf11) * s11;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
@@ -365,7 +395,9 @@ __kernel void mlp_down(
 
     #define XG_SIZE (HIDDEN_SIZE/GROUP_SIZE)
     __local half x2[INTERMEDIATE_SIZE];
+    //__local float xg_sum[INTERMEDIATE_SIZE/32];
     __local float xg_sum[XG_SIZE];
+
 
     //# interleaving x into x2
     __global half * px = x + id_sg*2*GROUP_SIZE;
@@ -383,13 +415,14 @@ __kernel void mlp_down(
         x_group_sum[0] = sub_group_reduce_add(x_group_sum[0]);
         x_group_sum[1] = sub_group_reduce_add(x_group_sum[1]);
         if (id_local == 0) {
-            xg_sum[2*i] = x_group_sum[0] / (SUBGROUP_SIZE / 8);
-            xg_sum[2*i+1] = x_group_sum[1] / (SUBGROUP_SIZE / 8);
+            xg_sum[2*i] = x_group_sum[0] / SUBGROUP_SIZE;
+            xg_sum[2*i+1] = x_group_sum[1] / SUBGROUP_SIZE;
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     //# global: [expert, SUBGROUP_SIZE, N//N_BLOCK],[1, SUBGROUP_SIZE, SUBGROUP_NUM]
+
     int n_start = get_global_id(2) * N_BLOCK;
     int n_end = n_start + N_BLOCK;
 
@@ -403,6 +436,18 @@ __kernel void mlp_down(
         float sum_all3 = 0;
         // process 2 groups each iteration
         for(int gk = 0; gk < K / GROUP_SIZE; gk += 2, S += 2 * N, Z += 2 * N / 2) {
+            uchar2 z0 = vload2(0, Z);
+            uchar2 z1 = vload2(0, Z + N/2);
+
+            half z_hf00 = convert_half(z0.s0 & 0xf);
+            half z_hf10 = convert_half(z0.s0 >> 4);
+            half z_hf01 = convert_half(z1.s0 & 0xf);
+            half z_hf11 = convert_half(z1.s1 >> 4);
+            half z_hf20 = convert_half(z0.s1 & 0xf);
+            half z_hf30 = convert_half(z0.s1 >> 4);
+            half z_hf21 = convert_half(z1.s1 & 0xf);
+            half z_hf31 = convert_half(z1.s1 >> 4);
+
 #if SUBGROUP_SIZE == 16
             half8 sum;
             half4 a = as_half4(intel_sub_group_block_read_us4((const __local ushort*)x2 + gk*GROUP_SIZE));
@@ -431,10 +476,10 @@ __kernel void mlp_down(
             sum.s6 = fma(a.s2, (convert_half(b4.s0 >> 4)), sum.s6);
             sum.s7 = fma(a.s3, (convert_half(b4.s1 >> 4)), sum.s7);
 
-            sum_all0 += (sum.s0 - xg_sum[gk]) * s0.s0 + (sum.s1 - xg_sum[gk+1]) * s1.s0;
-            sum_all1 += (sum.s2 - xg_sum[gk]) * s0.s1 + (sum.s3 - xg_sum[gk+1]) * s1.s1;
-            sum_all2 += (sum.s4 - xg_sum[gk]) * s0.s2 + (sum.s5 - xg_sum[gk+1]) * s1.s2;
-            sum_all3 += (sum.s6 - xg_sum[gk]) * s0.s3 + (sum.s7 - xg_sum[gk+1]) * s1.s3;
+            sum_all0 += (sum.s0 - xg_sum[gk] * z_hf00) * s0.s0 + (sum.s1 - xg_sum[gk+1] * z_hf01) * s1.s0;
+            sum_all1 += (sum.s2 - xg_sum[gk] * z_hf10) * s0.s1 + (sum.s3 - xg_sum[gk+1] * z_hf11) * s1.s1;
+            sum_all2 += (sum.s4 - xg_sum[gk] * z_hf20) * s0.s2 + (sum.s5 - xg_sum[gk+1] * z_hf21) * s1.s2;
+            sum_all3 += (sum.s6 - xg_sum[gk] * z_hf30) * s0.s3 + (sum.s7 - xg_sum[gk+1] * z_hf31) * s1.s3;
 #else
             printf("WARNING: SUBGROUP_SIZE != 16, please verify the correctness!\n");
 #endif
