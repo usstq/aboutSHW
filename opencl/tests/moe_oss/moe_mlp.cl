@@ -6,6 +6,7 @@
 #define oss_min_none -3e38
 #define oss_negative_limit -7.0
 
+// compute bound kernel for GROUP_SIZE=32, SUBGROUP_SIZE=16
 #define unroll_for __attribute__((opencl_unroll_hint)) for
 inline void gemv_n2x(const __global uchar* weight,
                     __global half* scales,
