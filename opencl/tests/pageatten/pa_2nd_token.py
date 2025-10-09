@@ -12,12 +12,12 @@ torch.manual_seed(0)
 torch.set_printoptions(linewidth=1024)
 
 parser = argparse.ArgumentParser('')
-parser.add_argument('-i', "--impl", type=int, default=0)
+parser.add_argument('-i', "--impl", type=int, default=1)
 parser.add_argument('-b', "--batch", type=int, default=1)
 parser.add_argument('-nh', "--num-heads", type=int, default=32)
 parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=8)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
-parser.add_argument('-kvl', "--kv-len", type=int, default=2049)
+parser.add_argument('-kvl', "--kv-len", type=int, default=32769)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
@@ -38,7 +38,7 @@ head_size = args.head_size
 enable_gqa = num_heads > num_kv_heads
 
 # define KV_BLOCK_SIZE = 32,64,128,256
-kv_block_size = 16
+kv_block_size = 256
 
 enable_kvcache_compression = 0
 
@@ -1417,12 +1417,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
         const int total_partition_num = (kv_partition_num * KV_HEADS_NUM);
 
         // load lse
-    #if 0
-        uint lse_offset = batch * total_partition_num + head * kv_partition_num;
-        vector<float, kv_partition_num> lse_vec;
-        cm_svm_block_read<float, kv_partition_num>((svmptr_t)(lse + lse_offset), lse_vec.format<float>());
-        float total_lse = cm_sum<float>(lse_vec);
-    #else
         float total_lse = 0.0;
         uint lse_offset = batch * total_partition_num + head * kv_partition_num;
         constexpr float log2e = 1.4426950408889634f;
@@ -1431,23 +1425,36 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
         for(int k = 1; k < kv_partition_num; k ++) {
             lse_max = cm_max<float>(lse_vec[k], lse_max);
         }
-        #pragma unroll
-        for(int k = 0; k < kv_partition_num; k ++) {
+
+        int iter = kv_partition_num / 16;
+        for(int k = 0; k < iter * 16; k += 16) {
+            #pragma unroll
+            for(int ki = k; ki < k + 16; ki ++) {
+                float lse_value = cm_exp<float>((lse_vec[ki] - lse_max)*log2e);
+                total_lse += lse_value;
+            }
+        }
+        for(int k = iter * 16; k < kv_partition_num; k += 16) {
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
             total_lse += lse_value;
-            //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
-            //    printf("k = %d, lse_value = %f, total_lse = %f, lse_max = %f\n", k, lse_value, total_lse, lse_max);
-            //}
         }
-    #endif
 
         // load input, total_partition_num = head_nums * kv_partition_num;
         matrix<half, 1, REDUCE_SPLIT_SIZE> out_mat = 0;
         matrix<float, 1, REDUCE_SPLIT_SIZE> out_mat_f32 = 0;
         matrix<float, 1, REDUCE_SPLIT_SIZE> data_mat;
         uint input_offset = batch * total_partition_num * HEAD_SIZE + head * kv_partition_num * HEAD_SIZE + offset;
-        #pragma unroll
-        for(int k = 0; k < kv_partition_num; k ++) {
+
+        for(int k = 0; k < iter * 16; k += 16) {
+            #pragma unroll
+            for(int ki = k; ki < k + 16; ki ++) {
+                cm_svm_block_read<float, REDUCE_SPLIT_SIZE>((svmptr_t)(input + input_offset), data_mat.format<float>());
+                input_offset += HEAD_SIZE;
+                float lse_value = cm_exp<float>((lse_vec[ki] - lse_max)*log2e);
+                out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
+            } 
+        }
+        for(int k = iter * 16; k < kv_partition_num; k ++) {
             cm_svm_block_read<float, REDUCE_SPLIT_SIZE>((svmptr_t)(input + input_offset), data_mat.format<float>());
             input_offset += HEAD_SIZE;
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
@@ -1589,7 +1596,7 @@ for ns in latency:
         #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s")
     else:
         intermedia_total_time += ns
-        #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
+        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
     first_kernel =  1 - first_kernel
 
 
