@@ -117,9 +117,9 @@ def test_mm(M, K, N, K_group_size, w_dtype):
     print(f"{M=} {K=} {N=} {w_dtype} x{len(Layers)} {weight_bytes*1e-9:.2f}GB : [{r}] {dt*1e3:.3f} ms {M*K*N*2*1e-12/dt:.3f} TFLOPS")
 
 def linear_creator_onednn(w_dtype, M, K, N, K_group_size, tB, tBs, tBz):
-    return cl.onednn_linear(cl.onednn_dtype.f16, w_dtype,
+    return cl.onednn_linear(cl.onednn_dtype.f16, w_dtype, cl.onednn_dtype.undef,
                             M, K, N, K_group_size, cl.onednn_matmul_type.none,
-                            w_dtype, tB, tBs, tBz)
+                            w_dtype, tB, tBs, tBz, cl.tensor())
 
 linear_creator = linear_creator_onednn
 

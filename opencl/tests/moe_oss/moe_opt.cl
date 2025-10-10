@@ -11,7 +11,6 @@
 #define TYPE half
 #define TYPE_SIZE 2
 
-//#if SOFTMAX_TOPK_ENABLE
 
 __kernel void softmax_topk(
     const __global TYPE* input, // [input_batch, sort_in_num]
@@ -74,7 +73,6 @@ __kernel void softmax_topk(
     }
 }
 
-//#elif GATHER_ENABLE
 __kernel void gather_2d_ref(
     const __global TYPE* src_tok,
     const __global TYPE* src_rweight,
@@ -106,8 +104,6 @@ __kernel void gather_2d_ref(
     }
 }
 
-//#elif SCATTER_ENABLE
-
 __kernel void index_add_(const __global TYPE* src_tok,
     __global int * tok_index,
     __global TYPE* dst_tok) {
@@ -133,4 +129,36 @@ __kernel void index_add_(const __global TYPE* src_tok,
         dst_tok[off] += src_tok[off];
     #endif
 }
-//#endif
+
+// gws[batch, intermediate_size]
+// lws[1, 16]
+__kernel void gate_up_post_proc(
+    const __global half* gate,
+    const __global half* up,
+    __global half* output) {
+
+    int m = get_global_id(0);
+    int n = get_global_id(1);
+
+    int offset = m * INTERMEDIATE_SIZE + n;
+
+    const half oss_alpha = -1.702;
+    const half oss_limit = 7.0;
+    const half oss_neg_limit = -7.0;
+
+    half src_gate = as_half(intel_sub_group_block_read_us((const __global ushort *)(gate + offset)));
+    half src_up = as_half(intel_sub_group_block_read_us((const __global ushort *)(up + offset)));
+
+    if(src_up < oss_neg_limit) {
+        src_up = oss_neg_limit  ;
+    } else if(src_up > oss_limit) {
+        src_up = oss_limit;
+    }
+
+    if(src_gate > oss_limit) {
+        src_gate = oss_limit;
+    }
+
+    half value = src_gate * ( 1.0 / (1.0 + native_exp(oss_alpha * src_gate))) * (src_up + 1.0h);
+    intel_sub_group_block_write_us((__global ushort *)(output + offset), as_ushort(value));
+}
