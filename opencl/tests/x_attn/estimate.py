@@ -382,7 +382,7 @@ _GENX_MAIN_ void post_proc_mask(svmptr_t block_mask ATTR, svmptr_t merged_block_
         for (int i = 1; i < MERGED_Q_NUM; i++) {
             if (m_mereged * MERGED_Q_NUM + i < q_stride_pad / TOKEN_IN_BLOCK) {
                 vector<uchar, 32> cur_mask = cm_ptr_load<int, 8>((int*)block_mask, j + i * k_block_pad).format<uchar>();
-                new_mask &= cur_mask;
+                new_mask |= cur_mask;
             }
         }
         cm_ptr_store<int, 32 / 4>((int*)merged_block_mask, j, new_mask.format<int>());
@@ -1019,7 +1019,7 @@ def test_post_proc():
             org_pad = np.ones([1, HQ, q_block_pad + 1, k_block_pad], dtype=np.int8)
             org_pad[:,:,:-1,:] = org
             org = org_pad
-        t_merged_mask_ref = org[:,:,0::2,:] & org[:,:,1::2,:]
+        t_merged_mask_ref = org[:,:,0::2,:] | org[:,:,1::2,:]
         assert np.all(t_merged_mask_ref == t_merged_mask_np), f"merged mask not equal to ref, {q=} {k=}"
     print(f'{Colors.GREEN}test_post_proc done.{Colors.END}')
 
