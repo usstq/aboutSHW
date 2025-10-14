@@ -119,6 +119,10 @@ class page_atten_cm:
             aligned_seqlen = seq_len + padding_tokens
             padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 1)
             padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
+            #padding all to NAN to simulate the NAN case  when fp16
+            if self.compressed_kvcache == False:
+                padded_k.view(torch.uint16)[seq_len:aligned_seqlen] = 0xfe00
+                padded_v.view(torch.uint16)[seq_len:aligned_seqlen] = 0xfe00
 
         # print(f'k.shape:{k.shape}, padded_k.shape:{padded_k.shape}')
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
@@ -566,7 +570,7 @@ def test_ov():
     subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
     block_indices = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src7__i32__4_1_1_1__bfyx.bin', dtype=np.int32).reshape([valid_num_blks])
     block_indices_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_26732_src8__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
-    
+
     full_dense = False
     if xattn_thresh >= 1:
         full_dense = check_tril_all(base, "_intermediates_4__boolean__8192_1_1_1__bfyx.bin", block_mask.shape)
@@ -580,7 +584,7 @@ def test_ov():
 
     is_causal = True
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, kv_block_size, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
-   
+
     t_query = cl.tensor(query.detach().numpy())
     t_key_cache = cl.tensor(key_cache.detach().numpy())
     t_value_cache = cl.tensor(value_cache.detach().numpy())
