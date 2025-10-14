@@ -119,6 +119,10 @@ class page_atten_cm:
             aligned_seqlen = seq_len + padding_tokens
             padded_k = torch.nn.functional.pad(k,kv_padding_dims, "constant", 1)
             padded_v = torch.nn.functional.pad(v,kv_padding_dims, "constant", 1)
+            #padding nan for the fp16 to simulate PTL NAN issue.
+            if self.compressed_kvcache == False:
+                padded_k.view(torch.uint16)[seq_len:aligned_seqlen] = 0xfe00
+                padded_v.view(torch.uint16)[seq_len:aligned_seqlen] = 0xfe00
 
         # print(f'k.shape:{k.shape}, padded_k.shape:{padded_k.shape}')
         # reorder K,V from [L, H, S] to [block_num, H, block_size, S]
@@ -540,7 +544,7 @@ def test_ov():
 
     block_mask  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_4__boolean__32768_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
     block_mask_in_wg  = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_intermediates_5__boolean__16384_1_1_1__bfyx.bin', dtype=np.int8).reshape([32, -1, 32])
-    
+
     print(block_mask_in_wg, block_mask_in_wg.shape)
     block_mask = torch.ones(32, 32, 32, dtype=torch.bool)
     block_mask_in_wg = torch.ones(32, 16, 32, dtype=torch.bool)
@@ -549,13 +553,13 @@ def test_ov():
     subsequence_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src6__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
     block_indices = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src7__i32__16_1_1_1__bfyx.bin', dtype=np.int32).reshape([16])
     block_indices_begins = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_src8__i32__2_1_1_1__bfyx.bin', dtype=np.int32).reshape([2])
-    
+
     q_len = query.shape[0]
     kv_block_size = key_cache.shape[2]
     num_heads, num_kv_heads = block_mask.shape[0], key_cache.shape[1]
     head_size = query.shape[1] // num_heads
     valid_num_blks = key_cache.shape[0] - 1 # genai usually generates one more blocks than required
-    
+
     ov_out = get_tensor(base + 'program1_network1_0_pagedattentionextension_PagedAttentionExtension_27171_dst0__f16__4096_4096_1_1__bfyx.bin').reshape([q_len, num_heads*head_size])
 
     # q [q_len, num_heads*head_size], k/v cache [num_blks, num_kv_heads, kv_block_size, head_size]
@@ -563,7 +567,7 @@ def test_ov():
 
     is_causal = True
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
-   
+
     t_query = cl.tensor(query.detach().numpy())
     t_key_cache = cl.tensor(key_cache.detach().numpy())
     t_value_cache = cl.tensor(value_cache.detach().numpy())
@@ -596,7 +600,7 @@ def test_ov():
     if not np.all(t_out_np == ov_out.detach().numpy()):
         error_idx = np.where(t_out_np != ov_out.detach().numpy())
         print(f'{Colors.RED}result of unit test is not same with ov{Colors.END}: diff idx={error_idx}')
-        
+
     enable_dequant_check = 1
     if enable_dequant_check:
         k_dequan = dequant_per_token(key_cache.reshape(-1, num_kv_heads, kv_block_size*(head_size+2*2)), head_size, kv_block_size)
@@ -626,9 +630,9 @@ def test_ov():
 
 if __name__ == "__main__":
 
-    # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=sparse_ratio, check_acc=True)
+    test_page_attn_causal_batch1(17, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=256, trunk_sz=256, compressed_kvcache=False, sparse_block_sz = 1, sparse_ratio=0.1, check_acc=True)
     #ACC test PA base
-    if 0:
+    if 1:
         for block_sz in range(32, 144, 16):
             for blocks_per_trunk in range(1, 30, 6):
                 for seq_len in range(8192, 8248, 3):
@@ -687,4 +691,4 @@ if __name__ == "__main__":
     #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=True)
     #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=True)
 
-    test_ov()
+    # test_ov()

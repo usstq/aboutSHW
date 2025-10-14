@@ -14,7 +14,7 @@ parser.add_argument('-b', "--batch", type=int, default=1)
 parser.add_argument('-nh', "--num-heads", type=int, default=28)
 parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=4)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
-parser.add_argument('-kvl', "--kv-len", type=int, default=32768)
+parser.add_argument('-kvl', "--kv-len", type=int, default=4000)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
@@ -105,7 +105,7 @@ past_lens=torch.tensor([kv_len-1]).to(torch.int32)
 # the first block of each sequence
 block_indices_begins=torch.tensor([0, total_blk_num]).to(torch.int32)
 
-# block physical indices from logic index 
+# block physical indices from logic index
 block_indices =  torch.randperm(total_blk_num).to(torch.int32)
 # print("block_indices:", block_indices)
 
@@ -246,7 +246,7 @@ def get_flash1(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = rS.to(dtype=torch.float16) # [1,16]
-                    
+
                     vprint("P=", partial_attn_weight.shape)
 
                     rV = V[j:j1, :] # [16,128]
@@ -363,7 +363,7 @@ def get_flash2(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = rS.to(dtype=torch.float16) # [1,16]
-                    
+
                     vprint("P=", partial_attn_weight)
 
                     rV = V[j:j1, :] # [16,128]
@@ -394,7 +394,7 @@ def get_flash2(query, key, value, attention_mask):
             vprint("lse=", lse)
             # print("lse=", lse.shape) # [4]
             sum_lse = lse.sum(0)
-            # print("cur_O=", cur_O.shape) # 
+            # print("cur_O=", cur_O.shape) #
             # print("cur_O_f32=", cur_O_f32.shape) #
             vprint("lse = ", lse)
             vprint("sum_lse = ", sum_lse)
@@ -485,7 +485,7 @@ def get_flash3(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = rS.to(dtype=torch.float16) # [1,16]
-                    
+
                     vprint("P=", partial_attn_weight)
 
                     rV = V[j:j1, :] # [16,128]
@@ -508,7 +508,7 @@ def get_flash3(query, key, value, attention_mask):
             vprint("lse=", torch.log(lse))
             vprint("lse=", lse.shape) # [4]
             sum_lse = lse.sum(0)
-            # print("cur_O=", cur_O.shape) # 
+            # print("cur_O=", cur_O.shape) #
             # print("cur_O_f32=", cur_O_f32.shape) #
             vprint("lse = ", lse)
             vprint("sum_lse = ", sum_lse)
@@ -531,8 +531,8 @@ v = v.transpose(1,2)
 if kv_len % kv_block_size != 0:
     # pad k,v to multiple of kv_block_size
     pad_len = ((kv_len + kv_block_size - 1)//kv_block_size)*kv_block_size - kv_len
-    k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 0)
-    v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+    k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 1)
+    v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 1)
     attention_mask = F.pad(attention_mask, (0,pad_len,0,0), "constant", torch.finfo(act_dtype).min)
     print(f"pad k,v from {kv_len} to {k.shape[1]}")
     new_kv_len = k.shape[1]
@@ -616,20 +616,20 @@ def quan_per_token(kv):
         # print("dq_scale: ", dq_scale)
         # print("kz_zp: ", kv_zp)
         return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
-    
-    
+
+
 def dequant_per_token(kv, head_size, blk_size):
         blk_num, kv_head_num, _ = kv.shape
         kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
         kv_scale = kv[:,:,head_size * blk_size:head_size * blk_size + blk_size * 2].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
         kv_zp = kv[:,:,head_size * blk_size + blk_size * 2:head_size * blk_size + blk_size * 4].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
-        
+
         # print("dequant_kv_u8 = ", kv_u8)
         # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
         # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
-        
+
         kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
-        
+
         for m in range(blk_num):
             for n in range(kv_head_num):
                 for i in range(blk_size):
@@ -654,7 +654,7 @@ if enable_kvcache_compression:
     v = quan_per_token(v)
     # print(f"quant k shape: {k.shape}, dtype={k.dtype}")
     # print(f"quant v shape: {v.shape}, dtype={v.dtype}")
-    
+
     enable_dequant_check = 0
     if enable_dequant_check:
         k_dequan = dequant_per_token(k, head_size, kv_block_size)
@@ -744,7 +744,7 @@ print("LWS=", LWS)
 r'''
 increase WG_SIZE to 16 (-70ms)
 use GRF to store temp Output(rO) instead of SLM, requires `-Qxcm_register_file_size=256` (-40ms)
-avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mul<float>(St, (float)scale_factor);   (-10ms) 
+avoid type-promotion:   St = cm_mul<float>(St, scale_factor);    =>   St = cm_mul<float>(St, (float)scale_factor);   (-10ms)
 change dtype of attention_mask from float to half (-14ms)
 avoid indirect register access: unroll for loop which access matrix rows using loop-index
 use GRF to store temp Input rQ instead of SLM, this allows more Work-Groups to be packed into same Xe-core!!!
@@ -986,7 +986,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //    printf("Qmat loaded, kv_head_num_idx=%d\n", kv_head_num_idx);
     //    show(Qmat);
     //}
-    
+
     constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(KV_ELEMENT_TYPE)); // 4 bytes: scale/zp
     uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
 
@@ -1055,7 +1055,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             // auto rSvec = rS[ki].format<float>();
             // uint kv_offset_y = kv_pos;
-            
+
             #if KV_CACHE_COMPRESSION
                 vector<half, REG_N * 2> temp_scale, temp_zp;
                 temp_scale.select<REG_N,2>(0) = scale_vec.select<REG_N,1>(kv_pos);
@@ -1245,16 +1245,16 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         uint kv_x1 = HEAD_SIZE*sizeof(half);
         uint kv_y1 = KV_BLOCK_SIZE;
     #endif
-    
+
         //if(kv_partition_idx==kv_partition_num - 1 && head_num_idx == HEADS_NUM - 1) {
         //    printf("leftover_size = %d, leftover_aligned_size = %d, XE_ARCH = %d, KV_BLOCK_SIZE = %d\n", leftover_size, leftover_aligned_size, XE_ARCH, KV_BLOCK_SIZE);
-        //} 
+        //}
         uint kv_pos_end = KV_BLOCK_SIZE;
         if(block_idx == block_num - 1 && leftover_size > 0) {
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
             if(kv_pos_end == 0) kv_pos_end = KV_BLOCK_SIZE;
         }
-        
+
         #if KV_CACHE_COMPRESSION
         // load scale/zp
         vector<half, KV_BLOCK_SIZE> scale_vec;

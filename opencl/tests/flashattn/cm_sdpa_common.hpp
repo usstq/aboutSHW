@@ -224,7 +224,7 @@ inline matrix<float, _kv_step, _q_step> ugemm_KQ(uint slm_K, matrix_ref<half, nu
 template<int num_P_tiles = REG_N/REG_M, int num_rO_tiles>
 inline void ugemm_PV0(uint slm_V, matrix_ref<half, REG_N, REG_K> P, matrix_ref<float, num_rO_tiles, REG_M*REG_N> rO, uint slm_offset = 0) {
     constexpr int _head_size = num_rO_tiles*REG_N/num_P_tiles;
-    
+
     auto P2 = P.format<half, num_P_tiles, REG_M * REG_K>();
     #pragma unroll
     for(int k = 0, ri = 0; k < _head_size; k += REG_N, ri += num_P_tiles) {
@@ -465,15 +465,15 @@ void sdpa_kernel_lsc(
             v_base += kv_step * kv_pitch,
             slm_buff_id_read ++) {
 
-        //  load0, load1, signal1, 
+        //  load0, load1, signal1,
         //  [wait2, signal2, load2, read0]
         //  [wait3, signal3, load3, read1]
-        //  [wait4, signal4, load4, read2]  
-        //  [wait5, signal5, load5, read3]  
+        //  [wait4, signal4, load4, read2]
+        //  [wait5, signal5, load5, read3]
         //
         //  after wait4, all workers have reached signal3, so:
-        //     - all workers have finished load2 & read0. 
-        //     - we can start to load 4 into SLM slot 0 (i & 3) safely 
+        //     - all workers have finished load2 & read0.
+        //     - we can start to load 4 into SLM slot 0 (i & 3) safely
         //     - we can start to read 2 ((i-2) & 3) safely
 
         cm_fence(CM_LOCAL_BARRIER);
@@ -625,6 +625,7 @@ void sdpa_kernel_lsc_prefetch(
 
             b2dK.set_block_y(kv_pos);
             cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
+
             #pragma unroll
             for(int k = 0; k < num_K; k++)
                 St2.row(k) = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, RepeatCount, float>(
@@ -712,7 +713,7 @@ void sdpa_kernel_lsc_prefetch(
                                 Vmat.format<int32_t>(),
                                 P2.row(p).format<int32_t>());
                 }
-            }                
+            }
         }
     }
     if (q_tokens_left == 0) return;
@@ -819,7 +820,7 @@ void sdpa_kernel(
             matrix<half, 2*REG_M, REG_K> temp;
             for(int k = REG_K * wg_local_id; k < head_size; k += REG_K*(local_size/2)) {
                 cm_load_2d(temp, key, k_off + k*sizeof(half), kv_pitch);
-                cm_slm_block_write(slm_K, 
+                cm_slm_block_write(slm_K,
                                     slm_offset + k * 2 * REG_M * sizeof(half),
                                     temp.format<half>());
             }
@@ -860,15 +861,15 @@ void sdpa_kernel(
     for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,
             slm_buff_id_read ++) {
         //
-        //  load0->0, signal1, 
+        //  load0->0, signal1,
         //  [load1->1, wait2, signal2, read0]
         //  [load2->2, wait3, signal3, read1]
-        //  [load3->3, wait4, signal4, read2]  
-        //  [load4->0, wait5, signal5, read3]  
+        //  [load3->3, wait4, signal4, read2]
+        //  [load4->0, wait5, signal5, read3]
         //
         //  after wait4, all workers have reached signal3, so:
-        //     - all workers have finished load2 & read0. 
-        //     - we can start to load 4 into SLM slot 0 (i & 3) safely 
+        //     - all workers have finished load2 & read0.
+        //     - we can start to load 4 into SLM slot 0 (i & 3) safely
         //     - we can start to read 2 ((i-2) & 3) safely
         //
         cm_fence(CM_LOCAL_BARRIER);
