@@ -19,6 +19,7 @@ parser.add_argument('-nkvh', "--num-kv-heads", type=int, default=8)
 parser.add_argument('-ql', "--q-len", type=int, default=1)
 parser.add_argument('-kvl', "--kv-len", type=int, default=32769)
 parser.add_argument('-hs', "--head-size", type=int, default=128)
+parser.add_argument('-rkv', "--reset_kv_cache", type=int, default=1)
 parser.add_argument('-v', "--verbose", type=int, default=-1)
 args = parser.parse_args()
 print(args)
@@ -42,6 +43,7 @@ kv_block_size = 256
 
 enable_kvcache_compression = 0
 
+enable_clean_unused_kvcache = args.reset_kv_cache
 
 def get_tensor(name, dtype=np.float16):
     with open(name, 'rb') as f:
@@ -66,9 +68,10 @@ reduce_split_step = 8
 low = -127
 high = 128
 act_dtype = torch.float16
+new_kv_len = (kv_len + kv_block_size - 1) // kv_block_size * kv_block_size
 q = torch.randint(low, high, [batch, q_len, num_heads, head_size]).to(dtype=act_dtype)/high
-k = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
-v = torch.randint(low, high, [batch, kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+k = torch.randint(low, high, [batch, new_kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
+v = torch.randint(low, high, [batch, new_kv_len, num_kv_heads, head_size]).to(dtype=act_dtype)/high
 
 run_real_data_test=False
 
@@ -166,8 +169,9 @@ def get_org(Q, K, V, attention_mask):
             out[b,h,:,:] = attn_weights @ V[b, hkv, :, :].to(dtype=torch.float32)
     return out
 
-ref = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0, enable_gqa = enable_gqa)
-org = get_org(q,k,v,attention_mask)
+print("k = ", k.shape, k.dtype)
+ref = F.scaled_dot_product_attention(q, k[:,:,:kv_len,:], v[:,:,:kv_len,:], attention_mask, dropout_p=0.0, enable_gqa = enable_gqa)
+org = get_org(q,k[:,:,:kv_len,:], v[:,:,:kv_len,:],attention_mask)
 
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
@@ -556,8 +560,8 @@ v = v.transpose(1,2)
 if kv_len % kv_block_size != 0:
     # pad k,v to multiple of kv_block_size
     pad_len = ((kv_len + kv_block_size - 1)//kv_block_size)*kv_block_size - kv_len
-    k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 0)
-    v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+    # k = F.pad(k, (0,0,0,0,0,pad_len,0,0), "constant", 0)
+    # v = F.pad(v, (0,0,0,0,0,pad_len,0,0), "constant", 0)
     attention_mask = F.pad(attention_mask, (0,pad_len,0,0), "constant", torch.finfo(act_dtype).min)
     print(f"pad k,v from {kv_len} to {k.shape[1]}")
     new_kv_len = k.shape[1]
@@ -579,7 +583,7 @@ if args.impl == 0:
     print("=========== PASS ===========")
     sys.exit(0)
 
-#org = get_flash3(q,k,v,attention_mask)
+org = get_flash3(q,k,v,attention_mask)
 
 print()
 print("GPU cm kernels for flash attn2:")
@@ -661,6 +665,12 @@ def dequant_per_token(kv, head_size, blk_size):
                     kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
 
         return kv_dequant
+
+if enable_clean_unused_kvcache:
+    print("before blocking k:", k.shape, k.dtype)
+    print("before blocking v:", v.shape, v.dtype)
+    k.view(torch.uint16)[0,kv_len:,:,:] = 0xFE00
+    v.view(torch.uint16)[0,kv_len:,:,:] = 0xFE00
 
 # change from [batch, kv_len, num_kv_heads, head_size] to [batch * num_kv_heads / kv_block_size, num_kv_heads, head_size, kv_block_size]
 k = k.reshape(total_blk_num, kv_block_size, num_kv_heads, head_size).transpose(1,2).contiguous()
@@ -791,6 +801,8 @@ src1 = r'''
 #pyeval f"#define KV_BLOCK_SIZE {kv_block_size}"
 #pyeval f"#define KV_PARTITION_SIZE {kv_partition_size}"
 #pyeval f"#define REDUCE_SPLIT_SIZE {reduce_split_step}"
+
+#pyeval f"#define CLEAN_UNUSED_KVCACHE {enable_clean_unused_kvcache}"
 
 #pyeval f"#define KV_CACHE_COMPRESSION {enable_kvcache_compression}"
 
@@ -989,6 +1001,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     const uint kv_len = past_lens[seq_idx] + 1;
     const uint start_block_idx = block_indices_begins[seq_idx] + kv_partition_idx * (KV_PARTITION_SIZE / KV_BLOCK_SIZE);
 
+    //if(cm_global_id(0)==0 && cm_global_id(1)==0 && cm_global_id(2)==0)
+    //{
+    //    printf("cm_sdpa_2nd: kv_len = %d\n", kv_len);
+    //}
+
     if(kv_partition_idx * KV_PARTITION_SIZE > kv_len) {
         // printf("WG exit: kv_partition_idx=%d, KV_PARTITION_SIZE=%d, kv_len=%d\n", kv_partition_idx, KV_PARTITION_SIZE, kv_len);
         return;
@@ -1077,6 +1094,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             }
         #endif
 
+        //if(cm_global_id(0)==0 && cm_global_id(1)==0){
+        //    printf("kv_partition_idx = %d, leftover_size = %d, kv_pos_end = %d, token_idx = %d\n", kv_partition_idx, leftover_size, kv_pos_end, kv_pos_end + KV_PARTITION_SIZE * kv_partition_idx + block_idx*KV_BLOCK_SIZE);
+        //}
+
+
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             // auto rSvec = rS[ki].format<float>();
             // uint kv_offset_y = kv_pos;
@@ -1128,6 +1150,21 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                     }
                 #else
                     cm_load<lsc::Transpose>(Kt.format<uint>(), b2dK.set_block_y(kv_pos));
+                    #if CLEAN_UNUSED_KVCACHE & 0
+                    // Not need clean K cache: 1) col write will lead huge perf drop; 2) softmax will clear unused scores
+                    if(kv_pos_end < kv_pos + KV_STEP) {
+                        auto KmatRef = Kt.format<half, REG_K/2, REG_N*2>();
+                        uint valid_cols = kv_pos_end - kv_pos;
+                        uint valid_cols_vnni = valid_cols * 2;
+                        //printf("Kt: kv_pos = %d, kv_pos_end = %d, leftover = %d\n", kv_pos, kv_pos_end, KV_STEP - valid_cols);
+                        //show(Kt.format<half, REG_K/2, REG_N*2>());
+                        for (int r = valid_cols_vnni; r < KV_STEP * 2; r++)
+                            KmatRef.select<REG_K/2,1,1,1>(0,r) = 0.0f;
+                        //printf("Kt: reset unused...\n");
+                        //show(Kt.format<half, REG_K/2, REG_N*2>());
+                        //printf("\n\n");
+                    }
+                    #endif
                 #endif
                 //if(kv_partition_idx==kv_partition_num - 1 && kv_head_num_idx == KV_HEADS_NUM - 1) {
                 //    printf("Kt: k = %d\n", k);
@@ -1337,6 +1374,23 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                     prepackAsVNNIWidth2(VmatNormal, Vmat.format<half, REG_K/2, REG_N*2>());
                 #else
                     cm_load<lsc::VNNI>(Vmat[0].format<half>(), b2dV.set_block_y(kv_pos));
+                    // somtimes KV cache would be filled with random Nan, so need to clean up the unused value data.
+                    #if CLEAN_UNUSED_KVCACHE
+                    if(kv_pos_end - kv_pos < KV_STEP) {
+                        auto VmatRef = Vmat[0].format<half, REG_K/2, REG_N*2>();
+                        uint valid_rows = kv_pos_end - kv_pos;
+                        uint valid_rows_vnni = (valid_rows+1)/2;
+                        //printf("V: kv_pos = %d, kv_pos_end = %d, leftover = %d\n", kv_pos, kv_pos_end, KV_STEP - valid_rows);
+                        //show(VmatRef.format<half, REG_K/2, REG_N*2>());
+                        for (int r = valid_rows_vnni; r < KV_STEP / 2; r++)
+                            VmatRef.row(r) = 0.f;
+                        if (valid_rows % 2 == 1)
+                            VmatRef.row(valid_rows_vnni-1).select<REG_N,2>(1) = 0.f;
+                        //printf("Kt: reset unused...\n");
+                        //show(VmatRef.format<half, REG_K/2, REG_N*2>());
+                        //printf("\n\n");
+                    }
+                    #endif
                 #endif
                 if(0) {
                     printf("Vmat: k = %d\n", k);
@@ -1452,18 +1506,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
                 input_offset += HEAD_SIZE;
                 float lse_value = cm_exp<float>((lse_vec[ki] - lse_max)*log2e);
                 out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
-            } 
+            }
         }
         for(int k = iter * 16; k < kv_partition_num; k ++) {
             cm_svm_block_read<float, REDUCE_SPLIT_SIZE>((svmptr_t)(input + input_offset), data_mat.format<float>());
             input_offset += HEAD_SIZE;
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
             out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
-            //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
-            //    printf("out_mat_f32: %d, input_offset= %d, lse_value = %f, total_lse=%f\n", k, input_offset, lse_value, total_lse);
-            //    show(data_mat);
-            //    show(out_mat_f32);
-            //}
         }
         
         //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
@@ -1596,7 +1645,7 @@ for ns in latency:
         #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {kvcache_size/(ns):.3f} GB/s")
     else:
         intermedia_total_time += ns
-        print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
+        #print(f"  {ns*1e-6:.3f} ms,  Bandwidth = {intermedia_size/(ns):.3f} GB/s, intermedia = {intermedia_size*1e-6:.1f} MB")
     first_kernel =  1 - first_kernel
 
 
