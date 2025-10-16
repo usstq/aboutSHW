@@ -404,7 +404,7 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     high = 2
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
-
+    density = 1.0
 
     if compressed_kvcache:
         k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
@@ -454,9 +454,10 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     if sparse_block_sz > 1:
         approx_simple_mask = generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, 1.0 - sparse_ratio)
         percentage = count_false_percentage(approx_simple_mask)
-        print(f"Percentage of False elements: {percentage:.2f}%")
+        # print(f"Percentage of False elements: {percentage:.2f}%")
         # print(f"============ block_mask.shape={approx_simple_mask.shape}")
         # print(f"============ block_mask={approx_simple_mask}")
+        density = 1.0 - percentage / 100.0
 
     is_causal = True  # PageAttention implictly means causal_mask
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
@@ -480,12 +481,16 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
         if rep >= 15:
             print(f'====================================================================================')
+            flops = 1 * num_heads * seq_len * seq_len * head_size * 2 * density
             for trunk_idx in range(trunks):
+                cur_density = 1.0 - count_false_percentage(approx_simple_mask[trunk_idx:trunk_idx+1]) / 100.0  if sparse_block_sz > 1 else 1.0
+                cur_flops = 1 * num_heads * trunk_sz * (trunk_sz*(trunk_idx+1)) * head_size * 2 * cur_density
                 lat = latency[trunk_idx:-1:trunks]
                 avg = sum(lat[10:])/len(lat[10:])*1e-6
                 trunk_lat.append(avg)
-                print(f'[trunk{trunk_idx}] average latency: {avg:.3f} ms')
-            print(f"[total]: PA_causal {seq_len=} , {trunks=} latency: {sum(trunk_lat):.3f} ms")
+                print(f'[trunk {trunk_idx}] density {cur_density:.2f}, MFU {cur_flops/(avg*1e6):,.0f} GFLOPS, average latency: {avg:.3f} ms')
+            total_lat = sum(trunk_lat)
+            print(f"[total]: PA_causal {seq_len=} , {trunks=}, density {density:.2f}, compressKVCache {compressed_kvcache}, MFU {flops/(total_lat*1e6):,.0f} GFLOPS, latency: {total_lat:.3f} ms")
             print(f'====================================================================================')
 
 def test_ov():
@@ -672,7 +677,7 @@ if __name__ == "__main__":
                             test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache, sparse_block_sz=1, check_acc=True)
                             test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache, sparse_block_sz=1, check_acc=True)
     #ACC test sparse X Attention:
-    if 1:
+    if 0:
         for sparse_block_sz in [128, 256, 64,]:
             for block_sz in range (64, 256, 16):
                 for sparse_ratio in [0.5, 0.75]:
@@ -692,10 +697,10 @@ if __name__ == "__main__":
         sparse_block_sz = 128
 
         test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
-        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
+        # test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.5, check_acc=False)
 
-        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
-        test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
+        # test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
+        # test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
 
     # perf for sparse X attention, with QWen3 8K case
     if 0:
