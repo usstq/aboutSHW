@@ -200,7 +200,11 @@ __kernel void index_add_(
     src_tok += k * tok_size;
     dst_tok += tok_idx * tok_size;
 
-    dst_tok[off] += src_tok[off];
+    // dst_tok[off] += src_tok[off];
+    half src_value = as_half(intel_sub_group_block_read_us((const __global ushort *)(src_tok + off)));
+    half dst_value = as_half(intel_sub_group_block_read_us((const __global ushort *)(dst_tok + off)));
+    half value = dst_value + src_value;
+    intel_sub_group_block_write_us((__global ushort *)(dst_tok + off), as_ushort(value));
 }
 
 // gws[batch, intermediate_size]

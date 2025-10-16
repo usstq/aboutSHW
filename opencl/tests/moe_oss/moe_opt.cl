@@ -145,20 +145,23 @@ __kernel void gate_up_post_proc(
     const half oss_alpha = -1.702;
     const half oss_limit = 7.0;
     const half oss_neg_limit = -7.0;
+    const half oss_min_none = -3e38;
 
     half src_gate = as_half(intel_sub_group_block_read_us((const __global ushort *)(gate + offset)));
     half src_up = as_half(intel_sub_group_block_read_us((const __global ushort *)(up + offset)));
 
-    if(src_up < oss_neg_limit) {
-        src_up = oss_neg_limit  ;
-    } else if(src_up > oss_limit) {
-        src_up = oss_limit;
-    }
+    //if(src_up < oss_neg_limit) {
+    //    src_up = oss_neg_limit  ;
+    //} else if(src_up > oss_limit) {
+    //    src_up = oss_limit;
+    //}
 
-    if(src_gate > oss_limit) {
-        src_gate = oss_limit;
-    }
+    //if(src_gate > oss_limit) {
+    //    src_gate = oss_limit;
+    //}
 
+    src_up = clamp(src_up, oss_neg_limit, oss_limit);
+    src_gate = clamp(src_gate, oss_min_none, oss_limit);
     half value = src_gate * ( 1.0 / (1.0 + native_exp(oss_alpha * src_gate))) * (src_up + 1.0h);
     intel_sub_group_block_write_us((__global ushort *)(output + offset), as_ushort(value));
 }
