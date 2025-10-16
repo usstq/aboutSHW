@@ -27,7 +27,9 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     bool* sparse_block_mask_wg [[type("svmptr_t")]],
     int q_len,
     int num_q_blocks,
-    int num_k_blocks) {
+    int num_k_blocks,
+    // validate sparse atten process
+    bool validate) {
 #else
     int q_len) {
 #endif
@@ -107,12 +109,15 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
     uint q_offset = (q_start_sg*num_heads + h)*head_size;
 
 #if SPARSE_BLOCK_SIZE > 1
-    //# sparse_block_mask [num_heads, num_q_blocks, num_k_blocks]
-    //# sparse_block_mask_wg [num_heads, wg_count_along_query, num_k_blocks]
-    auto q_start_block = q_start_sg/ SPARSE_BLOCK_SIZE;
-    bool* block_mask_base = sparse_block_mask + (h * num_q_blocks + q_start_block) * num_k_blocks;
-    bool* wg_block_mask_base = sparse_block_mask_wg + (h * cm_group_count(2) + wg_id) * num_k_blocks;
-    // printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d, %d, x-attn: %d, %dx%d, %p, %p\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop, q_start_block, num_q_blocks, num_k_blocks, sparse_block_mask, block_mask_base);
+    bool *block_mask_base, *wg_block_mask_base;
+    if (validate) {
+        //# sparse_block_mask [num_heads, num_q_blocks, num_k_blocks]
+        //# sparse_block_mask_wg [num_heads, wg_count_along_query, num_k_blocks]
+        auto q_start_block = q_start_sg/ SPARSE_BLOCK_SIZE;
+        block_mask_base = sparse_block_mask + (h * num_q_blocks + q_start_block) * num_k_blocks;
+        wg_block_mask_base = sparse_block_mask_wg + (h * cm_group_count(2) + wg_id) * num_k_blocks;
+        // printf("wg:%d.%d  q: %d, +%d   kv: %d, +%d, %d, x-attn: %d, %dx%d, %p, %p\n", wg_id, wg_local_id, q_start_sg, q_len_sg, kv_start, kv_seq_len, kv_stop, q_start_block, num_q_blocks, num_k_blocks, sparse_block_mask, block_mask_base);
+    }
  #endif
 
 #if CMPA_KVCACHE_U8
@@ -132,7 +137,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
 #if SPARSE_BLOCK_SIZE > 1
                             reinterpret_cast<svmptr_t>(block_mask_base),
                             reinterpret_cast<svmptr_t>(wg_block_mask_base),
-
+                            validate,
 #endif
                             reinterpret_cast<svmptr_t>(output + q_offset),
                             past_q_lens,
@@ -151,7 +156,7 @@ extern "C" _GENX_MAIN_ void cm_page_attention(
 #if SPARSE_BLOCK_SIZE > 1
                             reinterpret_cast<svmptr_t>(block_mask_base),
                             reinterpret_cast<svmptr_t>(wg_block_mask_base),
-
+                            validate,
 #endif
                             reinterpret_cast<svmptr_t>(output + q_offset),
                             past_q_lens,

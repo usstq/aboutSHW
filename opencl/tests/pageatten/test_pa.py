@@ -249,11 +249,13 @@ class page_atten_cm:
                 t_past_lens=cl.tensor(past_lens.to(torch.int32).detach().numpy())
                 t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
                 t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
+
                 print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}, sparse_block_sz:{self.sparse_block_sz} kv_cache:{"U8" if self.compressed_kvcache else "F16"}")
                 if self.sparse_block_sz > 1:
                     t_block_mask = cl.tensor(block_mask_list[trunk_idx].to(torch.bool).detach().numpy())
                     t_block_mask_in_wg  = cl.tensor(block_mask_in_wg_list[trunk_idx].to(torch.bool).detach().numpy())
-                    self.kernels.enqueue("cm_page_attention", GWS, LWS, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out, t_block_mask, t_block_mask_in_wg, q_len, t_block_mask.shape[1], t_block_mask.shape[2])
+                    validate = True
+                    self.kernels.enqueue("cm_page_attention", GWS, LWS, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out, t_block_mask, t_block_mask_in_wg, q_len, t_block_mask.shape[1], t_block_mask.shape[2], validate)
                 else:
                     self.kernels.enqueue("cm_page_attention", GWS, LWS, t_q, t_k, t_v, t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, t_out, q_len)
                 output[q_start:q_end] = torch.from_numpy(t_out.numpy())
@@ -681,8 +683,9 @@ if __name__ == "__main__":
                                 print(f'[XATTENION_ACC_TETS]:seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} kv_cache={"U8" if compressed_kvcache else "F16"} {sparse_block_sz=} {sparse_ratio=}')
                                 print("----------------------------------------------------------------------------------------------------------------------------------------------------------------------")
                                 test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache, sparse_block_sz = sparse_block_sz, sparse_ratio=sparse_ratio, check_acc=True)
-    #perf for sparse X attention.
-    if 0:
+
+    # perf for sparse X attention.
+    if 1:
         seq_len = 32*1024
         block_sz = 256
         trunk_sz=seq_len
@@ -694,16 +697,17 @@ if __name__ == "__main__":
         test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
         test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=False)
 
+    # perf for sparse X attention, with QWen3 8K case
+    if 0:
+        for sparse_block_sz in [128]:
+            for density in [100.0, 0.8, 0.5, 0.25, 0.1]:
+                # seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16*2
+                seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
+                trunk_sz = blocks_per_trunk*block_sz
+                print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
+                print("-----------------------------------------------------------------------------------------------------------------------------------------")
+                test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=1.0-density, check_acc=False)
+                test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=1.0-density, check_acc=False)
 
-    # # QWen3 8K case
-    # for sparse_block_sz in [1, 128]:
-    #     # seq_len, block_sz, blocks_per_trunk= 8*1024, 256, 16*2
-    #     seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
-    #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    #     print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
-    #     print("-----------------------------------------------------------------------------------------------------------------------------------------")
-    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, sparse_block_sz = sparse_block_sz, sparse_ratio=0.9, check_acc=False)
-    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=True)
-    #     test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 4, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=0.8, check_acc=True)
-
-    test_ov()
+    # test_ov()
