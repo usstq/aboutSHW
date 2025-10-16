@@ -219,25 +219,30 @@ __kernel void gate_up_post_proc(
     const half oss_alpha = -1.702;
     const half oss_limit = 7.0;
     const half oss_neg_limit = -7.0;
+    const half oss_min_none = -3e38;
 
     half src_gate = as_half(intel_sub_group_block_read_us((const __global ushort *)(gate + offset)));
     half src_up = as_half(intel_sub_group_block_read_us((const __global ushort *)(up + offset)));
 
-    if(src_up < oss_neg_limit) {
-        src_up = oss_neg_limit  ;
-    } else if(src_up > oss_limit) {
-        src_up = oss_limit;
-    }
+    //if(src_up < oss_neg_limit) {
+    //    src_up = oss_neg_limit  ;
+    //} else if(src_up > oss_limit) {
+    //    src_up = oss_limit;
+    //}
 
-    if(src_gate > oss_limit) {
-        src_gate = oss_limit;
-    }
+    //if(src_gate > oss_limit) {
+    //    src_gate = oss_limit;
+    //}
+
+    src_up = clamp(src_up, oss_neg_limit, oss_limit);
+    src_gate = clamp(src_gate, oss_min_none, oss_limit);
 
     half value = src_gate * ( 1.0 / (1.0 + native_exp(oss_alpha * src_gate))) * (src_up + 1.0h);
     intel_sub_group_block_write_us((__global ushort *)(output + offset), as_ushort(value));
 }
 
 '''
+
 
 class scratchBuff:
     def __init__(self):
@@ -257,6 +262,8 @@ class onednnMLP:
         self.K_group_size = config.weight_group_size
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
+
+        self.total_latency = 0.0
 
         self.up_weight = cl.tensor(mlp.up.weight_q4)
         self.up_scale = cl.tensor(mlp.up.weight_scale)
@@ -330,11 +337,7 @@ class onednnMLP:
             if top_x.numel() == 0:
                 if config.debug: print("skip")
                 return
-            
             x = hidden_states
-            if config.debug:
-                print("========== x")
-                print(x.numpy())
 
             # expert_layer
             self.update_batch(1)
@@ -347,13 +350,12 @@ class onednnMLP:
             routing_weights.offset = idx[0]*2
             self.linear_up.forward(x, scratch.act_up, cl.tensor())
             self.linear_gate.forward(x, scratch.act_gate, cl.tensor())
-            self.ocl_kernels.enqueue("gate_up_post_proc", [M, self.intermediate_size],[1, 16],
+            self.ocl_kernels.enqueue("gate_up_post_proc", [1, self.intermediate_size],[1, 16],
                                     scratch.act_gate, scratch.act_up,
                                     scratch.act_gate)
             self.linear_down2.forward(scratch.act_gate, final_hidden_states, routing_weights)   # with routing weights applied
         else:
             # slow path
-            t0 = time.time()
             idx, top_x = torch.where(expert_mask)
             if top_x.numel() == 0:
                 if config.debug: print("skip")
@@ -361,14 +363,6 @@ class onednnMLP:
 
             n_tokens = len(top_x)
             # print("n_tokens=", n_tokens)
-            t1 = time.time()
-            # print(f">>>>>>>> expert_mask:{expert_mask.shape}  {(t1-t0)*1e3:.3f} ms")
-            
-            if config.debug:
-                print("========== expert_mask")
-                print(expert_mask)
-                print("========== top_x", top_x)
-                print("========== idx", idx)
 
             self.update_batch(n_tokens)
             if scratch.n_tokens != n_tokens:
@@ -382,16 +376,12 @@ class onednnMLP:
             tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
             top_index = cl.tensor(np.array(idx, dtype=np.int32))
             
-
+            t0 = time.time()
             self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 16],
                                     hidden_states, scratch.x,
                                     routing_weights, scratch.rweights,
                                     tok_index, top_index,
                                     hidden_states.shape[1], routing_weights.shape[1])
-
-            if config.debug:
-                print("========== x")
-                print(scratch.x.numpy())
 
             # expert_layer
             self.linear_up.forward(scratch.x, scratch.act_up, cl.tensor())
@@ -401,23 +391,16 @@ class onednnMLP:
                                     scratch.act_gate)
             self.linear_down2.forward(scratch.act_gate, scratch.y, scratch.rweights)   # with routing weights applied
 
-            if config.debug:
-                print("========== y")
-                print(scratch.y.numpy())
-
-                # routing_weights[i, j] i'th token's top-j's routing weight
-                # y[i, :]  i'th token's all hidden-states
-                print("========== routing_weights[top_x, idx, None]", routing_weights.shape, routing_weights.shape[1])
-                print(scratch.rweights.numpy())
-
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
             # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
-            
             self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 16],
                                     scratch.y, final_hidden_states,
                                     tok_index, 
                                     hidden_states.shape[1])
+            cl.finish()
+            t1 = time.time()
+            print(f">>>>>>>> expert_mask:{expert_mask.shape}, token_num = {n_tokens}, {(t1-t0)*1e3:.3f} ms")
 
 
 def test_mlp(K_group_size, n_tokens=8):
