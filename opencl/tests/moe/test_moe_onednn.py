@@ -4,15 +4,16 @@ import numpy as np
 import sys
 import torch
 import time, sys
+import torch.nn.functional as F
 
 from torch import nn
 class config:
     hidden_size = 768
     intermediate_size = 2048
-    num_experts = 32
-    num_experts_per_tok = 4
+    num_experts = 128
+    num_experts_per_tok = 8
     moe_intermediate_size = 2048
-    weight_group_size = 32
+    weight_group_size = 128
     debug = False
 
 SZ_LAYOUT = 0
@@ -104,7 +105,7 @@ class QWEN_MLP(nn.Module):
     # top_x： token index
     def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states):
         # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
-        # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
+        # expert_mask[?,j,k] == 1 means apply current expert to token k as the top-j
         
         # using CPU to get token_list & routing_weights index from expert_mask
         top_x = []
@@ -132,6 +133,68 @@ class QWEN_MLP(nn.Module):
 
 
 ocl_sources=r'''
+
+#define TYPE half
+__kernel void softmax_topk(
+    const __global TYPE* input, // [input_batch, sort_in_num]
+    __global uint* output_index, // [input_batch, TOP_K]
+    __global TYPE* output // [input_batch, TOP_K]
+) {
+    // gws [batch, sort_in_num]
+    const uint batch = (uint)get_global_id(0);
+    const uint sort_index = (uint)get_global_id(1);
+    const uint sort_cnt = (uint)get_global_size(1);
+
+    input += batch * sort_cnt + sort_index;
+
+    uint sort_position = 0;
+
+    __local TYPE local_input[VALUE_NUM];
+    __local TYPE local_output[TOP_K];
+    __local uint local_index[TOP_K];
+
+    TYPE in_value = as_half(intel_sub_group_block_read_us((const __global ushort*)(input)));
+    local_input[sort_index] = in_value;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    __attribute__((opencl_unroll_hint(8)))
+    for(uint i = 0; i < sort_index; i++) {
+        TYPE value = local_input[i];
+        if(value >= in_value) {
+            sort_position++;
+        }
+    }
+
+    __attribute__((opencl_unroll_hint(8)))
+    for(uint i = sort_index; i < sort_cnt; i++) {
+        TYPE value = local_input[i];
+        if(value > in_value) {
+            sort_position++;
+        }
+    }
+    if (sort_position < TOP_K) {
+        local_output[sort_position] = in_value;
+        local_index[sort_position] = sort_index;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if(sort_position == 0) {
+        float softmax_total = 1.0;
+        TYPE max_v = local_output[0];
+        local_output[0] = 1;
+        for(uint i = 1; i < TOP_K; i++) {
+            local_output[i] = native_exp(local_output[i] - max_v);
+            softmax_total += local_output[i];
+        }
+        output_index += batch * TOP_K;
+        output += batch * TOP_K;
+
+        for(uint i = 0; i < TOP_K; i++) {
+            output[i] = local_output[i]/softmax_total;
+            output_index[i] = local_index[i];
+        }
+    }
+}
 
 // [n_tokens, count] [1, 16]
 __attribute__((intel_reqd_sub_group_size(16)))
@@ -193,6 +256,10 @@ class scratchBuff:
         self.act_gate = None
         self.act_up = None
 
+def get_ocl_kernel():
+    return cl.kernels(ocl_sources, f"-D FMACNT=4 -D UNROLL=4 -D INTERMEDIATE_SIZE={config.intermediate_size} -D TOP_K={config.num_experts_per_tok} -D VALUE_NUM={config.num_experts}")
+
+
 class onednnMLP:
     def __init__(self, mlp, expert_id):
         self.w_dtype = cl.onednn_dtype.u4
@@ -223,7 +290,8 @@ class onednnMLP:
         self.gate_bias = cl.tensor(mlp.gate.weight_bias)
         self.down_bias = cl.tensor(mlp.down.weight_bias)
 
-        self.ocl_kernels = cl.kernels(ocl_sources, f"-D FMACNT=4 -D UNROLL=4 -D INTERMEDIATE_SIZE={config.intermediate_size} -D TOP_K={config.num_experts_per_tok} -D VALUE_NUM={config.num_experts}")
+        self.ocl_kernels = get_ocl_kernel()
+        #cl.kernels(ocl_sources, f"-D FMACNT=4 -D UNROLL=4 -D INTERMEDIATE_SIZE={config.intermediate_size} -D TOP_K={config.num_experts_per_tok} -D VALUE_NUM={config.num_experts}")
 
     def update_batch(self, batch):
         if self.M != batch:
@@ -264,76 +332,55 @@ class onednnMLP:
 
 
     # top_x： token index
+    # def forward_expert(self, hidden_states, idx, top_x, routing_weights, final_hidden_states, scratch):
     def forward_expert(self, hidden_states, expert_mask, routing_weights, final_hidden_states, scratch):
         # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
-        # expert_mask[j,k] == 1 means apply current expert to token k as the top-j
+        # expert_mask[?,j,k] == 1 means apply current expert to token k as the top-j
         
         # x = hidden_states[top_x, :] # slicing2d
-        if hidden_states.shape[0] == 1:
-            # fast path - check 
-            # using CPU to get token_list & routing_weights index from expert_mask
-            idx, top_x = torch.where(expert_mask)
-            if top_x.numel() == 0:
-                if config.debug: print("skip")
-                return
-            x = hidden_states
 
-            # expert_layer
-            self.update_batch(1)
-            if scratch.n_tokens != 1:
-                scratch.n_tokens = 1
-                scratch.act_gate = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
-                scratch.act_up = cl.tensor(np.zeros([1, config.moe_intermediate_size], dtype=np.float16))
+        idx, top_x = torch.where(expert_mask)
+        if top_x.numel() == 0:
+            if config.debug: print("skip")
+            return
 
-            # extract single rweights is time-consuming, just build a offseted tensor with just 1 element
-            routing_weights.offset = idx[0]*2
-            self.linear_up.forward(x, scratch.act_up, cl.tensor())
-            self.linear_gate.forward(x, scratch.act_gate, scratch.act_up)
-            self.linear_down2.forward(scratch.act_gate, final_hidden_states, routing_weights)   # with routing weights applied
-        else:
-            # slow path
-            idx, top_x = torch.where(expert_mask)
-            if top_x.numel() == 0:
-                if config.debug: print("skip")
-                return
+        n_tokens = len(top_x)
+        #print("n_tokens=", n_tokens)
 
-            n_tokens = len(top_x)
-            # print("n_tokens=", n_tokens)
+        self.update_batch(n_tokens)
+        if scratch.n_tokens != n_tokens:
+            scratch.n_tokens = n_tokens
+            scratch.act_gate = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+            scratch.act_up = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
+            scratch.y = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
+            scratch.x = cl.tensor(np.zeros([n_tokens, self.config.hidden_size], dtype=np.float16))
+            scratch.rweights = cl.tensor(np.zeros([n_tokens], dtype=np.float16))
 
-            self.update_batch(n_tokens)
-            if scratch.n_tokens != n_tokens:
-                scratch.n_tokens = n_tokens
-                scratch.act_gate = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
-                scratch.act_up = cl.tensor(np.zeros([n_tokens, config.moe_intermediate_size], dtype=np.float16))
-                scratch.y = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
-                scratch.x = cl.tensor(np.zeros([n_tokens, self.config.hidden_size], dtype=np.float16))
-                scratch.rweights = cl.tensor(np.zeros([n_tokens], dtype=np.float16))
-
-            tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
-            top_index = cl.tensor(np.array(idx, dtype=np.int32))
+        tok_index = cl.tensor(np.array(top_x, dtype=np.int32))
+        top_index = cl.tensor(np.array(idx, dtype=np.int32))
             
-            t0 = time.time()
-            self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 16],
+        t0 = time.time()
+        self.ocl_kernels.enqueue("gather_2d_ref", [n_tokens, self.config.hidden_size],[1, 16],
                                     hidden_states, scratch.x,
                                     routing_weights, scratch.rweights,
                                     tok_index, top_index,
                                     hidden_states.shape[1], routing_weights.shape[1])
 
-            # expert_layer
-            self.linear_up.forward(scratch.x, scratch.act_up, cl.tensor())
-            self.linear_gate.forward(scratch.x, scratch.act_gate, scratch.act_up)
-            self.linear_down2.forward(scratch.act_gate, scratch.y, scratch.rweights)   # with routing weights applied
+        # expert_layer
+        self.linear_up.forward(scratch.x, scratch.act_up, cl.tensor())
+        self.linear_gate.forward(scratch.x, scratch.act_gate, scratch.act_up)
+        self.linear_down2.forward(scratch.act_gate, scratch.y, scratch.rweights)   # with routing weights applied
 
-            # However `index_add_` only support torch tensors for indexing so we'll use
-            # the `top_x` tensor here.
-            # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
-            self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 16],
+        # However `index_add_` only support torch tensors for indexing so we'll use
+        # the `top_x` tensor here.
+        # final_hidden_states.index_add_(0, torch.tensor(top_x), y)
+        self.ocl_kernels.enqueue("index_add_", [n_tokens, self.config.hidden_size],[1, 16],
                                     scratch.y, final_hidden_states,
                                     tok_index, 
                                     hidden_states.shape[1])
-            cl.finish()
-            t1 = time.time()
-            #print(f">>>>>>>> expert_mask:{expert_mask.shape}, token_num = {n_tokens}, {(t1-t0)*1e3:.3f} ms")
+        cl.finish()
+        t1 = time.time()
+        #print(f">>>>>>>> expert_mask:{expert_mask.shape}, token_num = {n_tokens}, {(t1-t0)*1e3:.3f} ms")
 
 
 def test_mlp(K_group_size, n_tokens=8):
@@ -361,13 +408,26 @@ def test_mlp(K_group_size, n_tokens=8):
 
     print("\n"*6,f":::::::::: TEST EXPERT:::::::::: n_tokens={n_tokens} num_experts={config.num_experts} num_experts_per_tok={config.num_experts_per_tok} ")
 
+    low, high = -1.0, 1.0
     hidden_states = torch.randint(-1, 2, size=[n_tokens, config.hidden_size], dtype=torch.float16)
+    router_logits = (np.random.rand(n_tokens, config.num_experts) * (high - low) + low).astype(np.float16)
+    
+    routing_weights = F.softmax(torch.from_numpy(router_logits), dim=1, dtype=torch.float)
+    #print(f"routing_weights_softmax={routing_weights}")
+    routing_weights, selected_experts = torch.topk(routing_weights, k=config.num_experts_per_tok, dim=1)
+    #print(f"routing_weights_topk={routing_weights}")
+    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    routing_weights = routing_weights.to(torch.float16).reshape(n_tokens, config.num_experts_per_tok)
+    selected_experts = selected_experts.reshape(n_tokens, config.num_experts_per_tok)
 
-    # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
-    selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
+    print(f"selected_experts=\n{selected_experts}")
+    print(f"routing_weights=\n{routing_weights}")
+
+    # # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
+    # selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
     expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=config.num_experts).permute(2, 1, 0)
-    # routing_weights[i, j] i'th token's top-j's routing weight
-    routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
+    # # routing_weights[i, j] i'th token's top-j's routing weight
+    # routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
 
     # reference
     final_hidden_states1 = torch.zeros(n_tokens, config.hidden_size, dtype=torch.float32)
@@ -377,8 +437,13 @@ def test_mlp(K_group_size, n_tokens=8):
                             routing_weights.to(dtype=torch.float32),
                             final_hidden_states1)
 
-    scratch = scratchBuff()
     # impl
+    # self.ocl_kernels.enqueue("softmax_topk",[n_tokens, config.num_experts],
+    #                         [1, config.num_experts],
+    #                         t_router_logits,
+    #                         t_topk_idx, t_topk_weights)
+    scratch = scratchBuff()
+
     final_hidden_states2 = cl.tensor(np.zeros([n_tokens, config.hidden_size], dtype=np.float16))
     cl_hidden_states = cl.tensor(hidden_states.detach().numpy())
     cl_routing_weights = cl.tensor(routing_weights.detach().numpy())
@@ -406,13 +471,23 @@ def test_moe(n_tokens = 120, running_experts = config.num_experts):
     moe1 = [QWEN_MLP(config).eval() for _ in range(config.num_experts)]
     moe2 = [onednnMLP(mlp, i) for i,mlp in enumerate(moe1)]
 
+    low, high = -1.0, 1.0
     hidden_states = torch.randint(-1, 2, size=[n_tokens, config.hidden_size], dtype=torch.float16)
+    router_logits = (np.random.rand(n_tokens, config.num_experts) * (high - low) + low).astype(np.float16)
+    
+    routing_weights = F.softmax(torch.from_numpy(router_logits), dim=1, dtype=torch.float)
+    #print(f"routing_weights_softmax={routing_weights}")
+    routing_weights, selected_experts = torch.topk(routing_weights, k=config.num_experts_per_tok, dim=1)
+    #print(f"routing_weights_topk={routing_weights}")
+    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    routing_weights = routing_weights.to(torch.float16).reshape(n_tokens, config.num_experts_per_tok)
+    selected_experts = selected_experts.reshape(n_tokens, config.num_experts_per_tok)
 
     # expert_mask[i,j,k] == 1 means expert i is selected by token k as the top-j
-    selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
+    # selected_experts = torch.randint(0, config.num_experts, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16).type(torch.LongTensor)
     expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=config.num_experts).permute(2, 1, 0)
     # routing_weights[i, j] i'th token's top-j's routing weight
-    routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
+    # routing_weights = torch.randint(0, 10, size=[n_tokens, config.num_experts_per_tok], dtype=torch.float16)
 
     # reference
     print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> torch >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
@@ -457,7 +532,6 @@ def test_moe(n_tokens = 120, running_experts = config.num_experts):
         t1 = time.time()
         # for t in latency_ns:
         #     print(f"\t gpu-kernel: {t*1e-3:.3f} us")
-
         print(f" [{r}] :  {(t1 - t0)*1e3 : .3f} ms")
 
 np.set_printoptions(linewidth=1024)
