@@ -1,19 +1,4 @@
 
-#if 0
-// mlp common
-#define N_BLOCK      4
-#define SUBGROUP_NUM 8
-MAX_TOPK
-MAX_TOPK
-HIDDEN_SIZE
-INTERMEDIATE_SIZE
-N_BLOCK
-SUBGROUP_SIZE  16/32
-SUBGROUP_NUM
-GROUP_SIZE
-TYPE
-TYPE_SIZE
-#endif
 
 //#define MAX_TOPK 8
 //#define HIDDEN_SIZE 2048
@@ -25,10 +10,9 @@ TYPE_SIZE
 #define TYPE half
 #define TYPE_SIZE 2
 
-// 4bytes for each offset, there are 4 offset for each expert
+// 4 bytes for each offset, there are 4 offset for each expert
 #define EACH_EXPERT_WEIGHTS_OFFSET_SIZE 16
 
-//#if GATE_UP_ENABLE
 inline void gemv_n2x(const __global uchar* weight,
                     __global half* scales,
                     __global uchar* zps,
@@ -180,27 +164,38 @@ inline void gemv_n2x(const __global uchar* weight,
 __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE)))
 __kernel void mlp_gate_up(
     const __global int* expert_list,
-    const __global uchar* gate_weight_base_addr,
-    const __global uchar* gate_weight_offset,
-    const __global uchar* up_weight_base_addr,
-    const __global uchar* up_weight_offset,
+    const __global uchar* gate_weight_addr,
+    const __global uchar* gate_scale_addr,
+    const __global uchar* gate_zp_addr,
+    const __global uchar* up_weight_addr,
+    const __global uchar* up_scale_addr,
+    const __global uchar* up_zp_addr,
     __global TYPE* x,                        // [1, HIDDEN_SIZE]
     __global TYPE* y) {                      // [MAX_TOPK, INTERMEDIATE_SIZE]
     // global: [expert, SUBGROUP_SIZE, N//N_BLOCK],[1, SUBGROUP_SIZE, SUBGROUP_NUM]
     int expert_no = get_global_id(0);
     y += expert_no * INTERMEDIATE_SIZE;
 
+    const int expert_wei_size = INTERMEDIATE_SIZE * HIDDEN_SIZE / 2;
+    const int expert_scale_size = INTERMEDIATE_SIZE * HIDDEN_SIZE * 2 / GROUP_SIZE;
+    const int expert_zp_size = INTERMEDIATE_SIZE * HIDDEN_SIZE / 2 / GROUP_SIZE;
+    int expert_id = expert_list[expert_no];
+
+    // if(get_global_id(0) == 0 && get_global_id(1) ==0 && get_global_id(2) ==0) 
+    // {
+    //     printf("mlp_gate_up: [%d,%d,%d] - expert_no = %d, expert_id = %d, expert_wei_size = %d, expert_scale_size = %d, expert_zp_size = %d\n", 
+    //                     get_global_id(0), get_global_id(1), get_global_id(2), expert_no, expert_id, expert_wei_size, expert_scale_size, expert_zp_size);
+    // }
+
     // gate, [HIDDEN_SIZE, INTERMEDIATE_SIZE]
-    __global unsigned int *gate_addr_offset = (__global unsigned int *)(gate_weight_offset + expert_list[expert_no] * EACH_EXPERT_WEIGHTS_OFFSET_SIZE);
-    __global uchar* gate_weight = (__global uchar*)(gate_weight_base_addr + gate_addr_offset[0]);
-    __global half* gate_scale = (__global half*)(gate_weight_base_addr + gate_addr_offset[1]);
-    __global uchar* gate_zp = (__global uchar*)(gate_weight_base_addr + gate_addr_offset[2]);
+    __global uchar* gate_weight = (__global uchar*)(gate_weight_addr + expert_id * expert_wei_size);
+    __global half* gate_scale = (__global half*)(gate_scale_addr + expert_id * expert_scale_size);
+    __global uchar* gate_zp = (__global uchar*)(gate_zp_addr + expert_id * expert_zp_size);
 
     // up, [HIDDEN_SIZE, INTERMEDIATE_SIZE]
-    __global unsigned int *up_addr_offset = (__global unsigned int *)(up_weight_offset + expert_list[expert_no] * EACH_EXPERT_WEIGHTS_OFFSET_SIZE);
-    __global uchar* up_weight = (__global uchar*)(up_weight_base_addr + up_addr_offset[0]);
-    __global half* up_scale = (__global half*)(up_weight_base_addr + up_addr_offset[1]);
-    __global uchar* up_zp = (__global uchar*)(up_weight_base_addr + up_addr_offset[2]);
+    __global uchar* up_weight = (__global uchar*)(up_weight_addr + expert_id * expert_wei_size);
+    __global half* up_scale = (__global half*)(up_scale_addr + expert_id * expert_scale_size);
+    __global uchar* up_zp = (__global uchar*)(up_zp_addr + expert_id * expert_zp_size);
 
     // if(expert_no==0 && get_global_id(1)==0 && get_global_id(2)==0) {
     //     printf("mlp_gate_up: topk_id = %d, expert_id = %d, gate_wei_off = %d, gate_scale_off = %d, gate_zp_off = %d, up_wei_off = %d, up_scale_off = %d, up_zp_off = %d\n",
@@ -222,12 +217,12 @@ __kernel void mlp_gate_up(
     gemv_n2x(gate_weight, gate_scale, gate_zp, x, y, INTERMEDIATE_SIZE, HIDDEN_SIZE, x2, xg_sum, true);
 }
 
-//#elif DOWN_ENABLE
 __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE)))
 __kernel void mlp_down(
     const __global int* expert_list,
-    const __global uchar* down_weight_base_addr,
-    const __global uchar* down_weight_offset,
+    const __global uchar* down_weight_addr,
+    const __global uchar* down_scale_addr,
+    const __global uchar* down_zp_addr,
     const __global TYPE* x,                               // [MAX_TOPK, INTERMEDIATE_SIZE]
     __global TYPE* routing_weights,                       // [MAX_TOPK]
     __global TYPE* y) {                                   // [MAX_TOPK, HIDDEN_SIZE]
@@ -235,12 +230,16 @@ __kernel void mlp_down(
     int expert_no = get_global_id(0);
     x += expert_no * INTERMEDIATE_SIZE;
     y += expert_no * HIDDEN_SIZE;
-    __global unsigned int *addr_offset = (__global unsigned int *)(down_weight_offset + expert_list[expert_no] * EACH_EXPERT_WEIGHTS_OFFSET_SIZE);
+
+    const int expert_wei_size = INTERMEDIATE_SIZE * HIDDEN_SIZE / 2;
+    const int expert_scale_size = INTERMEDIATE_SIZE * HIDDEN_SIZE * 2 / GROUP_SIZE;
+    const int expert_zp_size = INTERMEDIATE_SIZE * HIDDEN_SIZE / 2 / GROUP_SIZE;
+    int expert_id = expert_list[expert_no];
 
     // down, [INTERMEDIATE_SIZE, HIDDEN_SIZE]
-    __global uchar* weight = (__global uchar*)(down_weight_base_addr + addr_offset[0]);
-    __global half* scales = (__global half*)(down_weight_base_addr + addr_offset[1]);
-    __global uchar* zps = (__global uchar*)(down_weight_base_addr + addr_offset[2]);
+    __global uchar* weight = (__global uchar*)(down_weight_addr + expert_id * expert_wei_size);
+    __global half* scales = (__global half*)(down_scale_addr + expert_id * expert_scale_size);
+    __global uchar* zps = (__global uchar*)(down_zp_addr + expert_id * expert_zp_size);
 
     int N = HIDDEN_SIZE;
     int K = INTERMEDIATE_SIZE;
@@ -363,4 +362,3 @@ __kernel void mlp_reduce(const __global TYPE* x,                // [MAX_TOPK, HI
     }
     intel_sub_group_block_write_us((const __global ushort*)(y + n), as_ushort(sum[0]));
 }
-//#endif

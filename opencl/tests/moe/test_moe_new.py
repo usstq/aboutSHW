@@ -97,46 +97,93 @@ class MoE:
         # gate/up/down - [expert_num, 3]
         self.experts = [[WeightQ4A(hidden_size, intermediate_size, group_size), WeightQ4A(hidden_size, intermediate_size, group_size), WeightQ4A(intermediate_size, hidden_size, group_size)] for _ in range(N_experts)]
         self.gate_fused_weight, self.gate_fused_weight_offset = MoE.fuse_to_single_weight(N_experts, self.experts, GATE_IDX)
+        self.gate_fused_scale, self.gate_fused_scale_offset = MoE.fuse_to_single_scale(N_experts, self.experts, GATE_IDX)
+        self.gate_fused_zp4, self.gate_fused_zp4_offset = MoE.fuse_to_single_zp(N_experts, self.experts, GATE_IDX)
+
         self.up_fused_weight, self.up_fused_weight_offset = MoE.fuse_to_single_weight(N_experts, self.experts, UP_IDX)
+        self.up_fused_scale, self.up_fused_scale_offset = MoE.fuse_to_single_scale(N_experts, self.experts, UP_IDX)
+        self.up_fused_zp4, self.up_fused_zp4_offset = MoE.fuse_to_single_zp(N_experts, self.experts, UP_IDX)
+
         self.down_fused_weight, self.down_fused_weight_offset = MoE.fuse_to_single_weight(N_experts, self.experts, DOWN_IDX)
+        self.down_fused_scale, self.down_fused_scale_offset = MoE.fuse_to_single_scale(N_experts, self.experts, DOWN_IDX)
+        self.down_fused_zp4, self.down_fused_zp4_offset = MoE.fuse_to_single_zp(N_experts, self.experts, DOWN_IDX)
 
     @staticmethod
     def fuse_to_single_weight(expert_num, experts, idx):
-        weight_size = expert_num * (experts[0][idx].weight_q4.size + experts[0][idx].weight_scale.size*2 + experts[0][idx].weight_zp4.size)
+        weight_size = expert_num * experts[0][idx].weight_q4.size
         fused_weight = np.zeros([weight_size], dtype=np.uint8)
-        # offset = [wei, scale, zp, 0], 4 per expert
-        fused_weight_offset = np.zeros([expert_num * 4], dtype=np.uint32)
+        # offset = wei/scale/zp, 1 per expert
+        fused_weight_offset = np.zeros([expert_num], dtype=np.uint32)
         offset = 0
-        bytes_num = 0
         for i in range(expert_num):
             w = experts[i][idx]
             fused_weight[offset:offset + w.weight_q4.nbytes] = w.weight_q4.view(np.uint8).reshape(-1)
-            fused_weight_offset[i*4 + 0] = offset
+            fused_weight_offset[i] = offset
             offset += w.weight_q4.nbytes
-            fused_weight[offset:offset + w.weight_scale.nbytes] = w.weight_scale.view(np.uint8).reshape(-1)
-            fused_weight_offset[i*4 + 1] = offset
-            offset += w.weight_scale.nbytes
-            fused_weight[offset:offset + w.weight_zp4.nbytes] = w.weight_zp4.view(np.uint8).reshape(-1)
-            fused_weight_offset[i*4 + 2] = offset
-            offset += w.weight_zp4.nbytes
-            bytes_num += w.nbytes
         
         # print(f"fused_weight_offset={fused_weight_offset}")
         # print(f"fused_weight.size={fused_weight.size}, offset={offset}")
         # experts[0][1].print()
         # print(f"fused_weight={fused_weight[672:720]}")
         
-        gate_wei_size = HIDDEN_SIZE * INTERMEDIATE_SIZE // 2 + (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE * 2 + (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE // 2
+        gate_wei_size = HIDDEN_SIZE * INTERMEDIATE_SIZE // 2
         up_wei_size = gate_wei_size
-        down_wei_size = INTERMEDIATE_SIZE * HIDDEN_SIZE // 2 + (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE  * 2 + (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE // 2
+        down_wei_size = INTERMEDIATE_SIZE * HIDDEN_SIZE // 2
         all_wei_size = [gate_wei_size, up_wei_size, down_wei_size]
 
         expected_size = expert_num * all_wei_size[idx]
         print(f"idx = {idx}, expected_size={expected_size}, gate_wei_size={gate_wei_size}, up_wei_size={up_wei_size}, down_wei_size={down_wei_size}")
 
         assert fused_weight.size == expected_size, f"fused_weight.size={fused_weight.size}, expected_size={expected_size}"
-        assert fused_weight.size == bytes_num, f"fused_weight.size={fused_weight.size}, bytes_num={bytes_num}"
         return fused_weight, fused_weight_offset
+
+    @staticmethod
+    def fuse_to_single_scale(expert_num, experts, idx):
+        scale_size = expert_num * experts[0][idx].weight_scale.size * 2
+        fused_scale = np.zeros([scale_size], dtype=np.uint8)
+        # offset = wei/scale/zp, 1 per expert
+        fused_scale_offset = np.zeros([expert_num], dtype=np.uint32)
+        offset = 0
+        for i in range(expert_num):
+            w = experts[i][idx]
+            fused_scale[offset:offset + w.weight_scale.nbytes] = w.weight_scale.view(np.uint8).reshape(-1)
+            fused_scale_offset[i] = offset
+            offset += w.weight_scale.nbytes
+
+        gate_scale_size = (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE * 2
+        up_scale_size = gate_scale_size
+        down_scale_size = (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE  * 2
+        all_scale_size = [gate_scale_size, up_scale_size, down_scale_size]
+
+        expected_size = expert_num * all_scale_size[idx]
+        print(f"idx = {idx}, expected_size={expected_size}, gate_scale_size={gate_scale_size}, up_scale_size={up_scale_size}, down_scale_size={down_scale_size}")
+
+        assert fused_scale.size == expected_size, f"fused_scale.size={fused_scale.size}, expected_size={expected_size}"
+        return fused_scale, fused_scale_offset
+
+    @staticmethod
+    def fuse_to_single_zp(expert_num, experts, idx):
+        zp_size = expert_num * experts[0][idx].weight_zp4.size
+        fused_zp = np.zeros([zp_size], dtype=np.uint8)
+        # offset = wei/scale/zp, 1 per expert
+        fused_zp_offset = np.zeros([expert_num], dtype=np.uint32)
+        offset = 0
+        for i in range(expert_num):
+            w = experts[i][idx]
+            fused_zp[offset:offset + w.weight_zp4.nbytes] = w.weight_zp4.view(np.uint8).reshape(-1)
+            fused_zp_offset[i] = offset
+            offset += w.weight_zp4.nbytes
+
+        gate_zp_size = (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE // 2
+        up_zp_size = gate_zp_size
+        down_zp_size = (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE // 2
+        all_zp_size = [gate_zp_size, up_zp_size, down_zp_size]
+
+        expected_size = expert_num * all_zp_size[idx]
+        print(f"idx = {idx}, expected_size={expected_size}, gate_zp_size={gate_zp_size}, up_zp_size={up_zp_size}, down_zp_size={down_zp_size}")
+
+        assert fused_zp.size == expected_size, f"fused_zp.size={fused_zp.size}, expected_size={expected_size}"
+        return fused_zp, fused_zp_offset
 
 moe_op = MoE(N_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, GROUP_SIZE)
 
@@ -204,11 +251,16 @@ t_topk_idx = cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.int32))
 t_topk_weights = cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.float16))
 
 t_gate_fused_weights = cl.tensor(moe_op.gate_fused_weight)
-t_gate_fused_offsets = cl.tensor(moe_op.gate_fused_weight_offset)
+t_gate_fused_scale = cl.tensor(moe_op.gate_fused_scale)
+t_gate_fused_zp4 = cl.tensor(moe_op.gate_fused_zp4)
+
 t_up_fused_weights = cl.tensor(moe_op.up_fused_weight)
-t_up_fused_offsets = cl.tensor(moe_op.up_fused_weight_offset)
+t_up_fused_scale = cl.tensor(moe_op.up_fused_scale)
+t_up_fused_zp4 = cl.tensor(moe_op.up_fused_zp4)
+
 t_down_fused_weights = cl.tensor(moe_op.down_fused_weight)
-t_down_fused_offsets = cl.tensor(moe_op.down_fused_weight_offset)
+t_down_fused_scale = cl.tensor(moe_op.down_fused_scale)
+t_down_fused_zp4 = cl.tensor(moe_op.down_fused_zp4)
 
 t_gate_up_output = cl.tensor(np.zeros([M*MAX_TOPK, INTERMEDIATE_SIZE], dtype=np.float16))
 t_down_output = cl.tensor(np.zeros([M*MAX_TOPK, HIDDEN_SIZE], dtype=np.float16))
@@ -253,17 +305,19 @@ moe_opt_kernels.enqueue("softmax_topk",[M, N_EXPERTS],
                                         t_router_logits,
                                         t_topk_idx, t_topk_weights)
 
-# cl.finish()
-# o_topk_idx = t_topk_idx.numpy()
-# o_topk_weights = t_topk_weights.numpy()
-# print(f"o_topk_idx={o_topk_idx}")
-# print(f"o_topk_weights={o_topk_weights}")
-# print()
+cl.finish()
+o_topk_idx = t_topk_idx.numpy()
+o_topk_weights = t_topk_weights.numpy()
+print(f"o_topk_idx={o_topk_idx}")
+print(f"o_topk_weights={o_topk_weights}")
+print()
 
+print(f"GWS = [{MAX_TOPK}, {SUBGROUP_SIZE}, {INTERMEDIATE_SIZE//N_BLOCK}], LWS = [1, {SUBGROUP_SIZE}, {SUBGROUP_NUM}]")
 moe_mlp_kernels.enqueue("mlp_gate_up",[MAX_TOPK, SUBGROUP_SIZE, INTERMEDIATE_SIZE//N_BLOCK], 
                                     [1, SUBGROUP_SIZE, SUBGROUP_NUM],
-                                    t_topk_idx, t_gate_fused_weights, t_gate_fused_offsets, t_up_fused_weights, t_up_fused_offsets, t_hidden_states,
+                                    t_topk_idx, t_gate_fused_weights, t_gate_fused_scale, t_gate_fused_zp4, t_up_fused_weights, t_up_fused_scale, t_up_fused_zp4, t_hidden_states,
                                     t_gate_up_output)
+
 
 # cl.finish()
 # o_gate_up_output = t_gate_up_output.numpy()
@@ -272,7 +326,7 @@ moe_mlp_kernels.enqueue("mlp_gate_up",[MAX_TOPK, SUBGROUP_SIZE, INTERMEDIATE_SIZ
 
 moe_mlp_kernels.enqueue("mlp_down",[MAX_TOPK, SUBGROUP_SIZE, HIDDEN_SIZE//N_BLOCK],
                                 [1, SUBGROUP_SIZE, SUBGROUP_NUM],
-                                t_topk_idx, t_down_fused_weights, t_down_fused_offsets, t_gate_up_output, t_topk_weights,
+                                t_topk_idx, t_down_fused_weights, t_down_fused_scale, t_down_fused_zp4, t_gate_up_output, t_topk_weights,
                                 t_down_output)
 
 max_work_group_size = cl.dev_info()["CL_DEVICE_MAX_WORK_GROUP_SIZE"]
@@ -288,12 +342,14 @@ if not np.allclose(reference, result, rtol=1e-02, atol=1e-02):
     print(f'reference = {reference[:, :32]}')
     print(f'result = {result[:, :32]}')
     print(f'{reference.shape=} {result.shape=}')
+    print(f"diff.max = {(reference - result).max()}")
+    print(f"rel_diff.max = {(abs(reference - result)/reference).max()}")
+    exit(0)
 else:
     print(f'reference = {reference[:, :32]}')
     print(f'result = {result[:, :32]}')
     print("================ PASSED ==================" , M, K, N)
 print(f"INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} HIDDEN_SIZE={HIDDEN_SIZE}")
-
 
 print("Performance test...\n")
 loop_cnt = 100
@@ -312,18 +368,21 @@ while len(all_layers) < loop_cnt and total_mem_size < 8e9:
         cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.int32)), #t_topk_idx  2
         cl.tensor(np.zeros([M, MAX_TOPK], dtype=np.float16)),#t_topk_weights 3
         cl.tensor(moe_op.gate_fused_weight), #t_gate_fused_weights 4
-        cl.tensor(moe_op.gate_fused_weight_offset), #t_gate_fused_offsets 5
-        cl.tensor(moe_op.up_fused_weight), #t_up_fused_weights 6
-        cl.tensor(moe_op.up_fused_weight_offset), #t_up_fused_offsets 7
-        cl.tensor(moe_op.down_fused_weight), #t_down_fused_weights 8
-        cl.tensor(moe_op.down_fused_weight_offset), #t_down_fused_offsets 9
-        cl.tensor(np.zeros([M*MAX_TOPK, INTERMEDIATE_SIZE], dtype=np.float16)), #t_gate_up_output 10
-        cl.tensor(np.zeros([M*MAX_TOPK, HIDDEN_SIZE], dtype=np.float16)),#t_down_output 11
-        cl.tensor(np.zeros([M, HIDDEN_SIZE], dtype=np.float16))#t_final_hidden_state 12
+        cl.tensor(moe_op.gate_fused_scale), #t_gate_fused_scale  5
+        cl.tensor(moe_op.gate_fused_zp4), #t_gate_fused_zp4  6
+        cl.tensor(moe_op.up_fused_weight), #t_up_fused_weights 7
+        cl.tensor(moe_op.up_fused_scale), #t_up_fused_scale 8
+        cl.tensor(moe_op.up_fused_zp4), #t_up_fused_zp4  9
+        cl.tensor(moe_op.down_fused_weight), #t_down_fused_weights 10
+        cl.tensor(moe_op.down_fused_scale), #t_down_fused_scale 11
+        cl.tensor(moe_op.down_fused_zp4), #t_down_fused_zp4  12
+        cl.tensor(np.zeros([M*MAX_TOPK, INTERMEDIATE_SIZE], dtype=np.float16)), #t_gate_up_output 13
+        cl.tensor(np.zeros([M*MAX_TOPK, HIDDEN_SIZE], dtype=np.float16)),#t_down_output 14
+        cl.tensor(np.zeros([M, HIDDEN_SIZE], dtype=np.float16))#t_final_hidden_state 15
     ])
-    total_mem_size += hidden_states.nbytes + router_logits.nbytes + moe_op.gate_fused_weight.nbytes + moe_op.gate_fused_weight_offset.nbytes
-    total_mem_size += moe_op.up_fused_weight.nbytes + moe_op.up_fused_weight_offset.nbytes
-    total_mem_size += moe_op.down_fused_weight.nbytes + moe_op.down_fused_weight_offset.nbytes
+    total_mem_size += hidden_states.nbytes + router_logits.nbytes + moe_op.gate_fused_weight.nbytes + moe_op.gate_fused_scale.nbytes + moe_op.gate_fused_zp4.nbytes
+    total_mem_size += moe_op.up_fused_weight.nbytes + moe_op.up_fused_scale.nbytes + moe_op.up_fused_zp4.nbytes
+    total_mem_size += moe_op.down_fused_weight.nbytes + moe_op.down_fused_scale.nbytes + moe_op.down_fused_zp4.nbytes
     total_mem_size += MAX_TOPK * INTERMEDIATE_SIZE * 2 * M + MAX_TOPK * HIDDEN_SIZE * 2 * M + HIDDEN_SIZE * 2 * M
 
 print(f"nlayers={len(all_layers)} total_mem_size={total_mem_size*1e-6:.3f} MB")
@@ -336,22 +395,21 @@ for i in range(loop_cnt):
                                         all_layers[j][2], all_layers[j][3])
     moe_mlp_kernels.enqueue("mlp_gate_up",[MAX_TOPK, SUBGROUP_SIZE, INTERMEDIATE_SIZE//N_BLOCK],
                                     [1, SUBGROUP_SIZE, SUBGROUP_NUM],
-                                    all_layers[j][2], all_layers[j][4], all_layers[j][5], 
-                                    all_layers[j][6], all_layers[j][7], all_layers[j][0],
-                                    all_layers[j][10])
+                                    all_layers[j][2], all_layers[j][4], all_layers[j][5], all_layers[j][6],
+                                    all_layers[j][7], all_layers[j][8], all_layers[j][9], all_layers[j][0],
+                                    all_layers[j][13])
     moe_mlp_kernels.enqueue("mlp_down",[MAX_TOPK, SUBGROUP_SIZE, HIDDEN_SIZE//N_BLOCK],
                                 [1, SUBGROUP_SIZE, SUBGROUP_NUM],
-                                all_layers[j][2], all_layers[j][8], all_layers[j][9], all_layers[j][10], all_layers[j][3],
-                                all_layers[j][11])
+                                all_layers[j][2], all_layers[j][10], all_layers[j][11], all_layers[j][12], all_layers[j][13], all_layers[j][3],
+                                all_layers[j][14])
     moe_mlp_kernels.enqueue("mlp_reduce",[1, HIDDEN_SIZE],
                                     [1, 1024],
-                                    all_layers[j][11], all_layers[j][12])
-    
-    
+                                    all_layers[j][14], all_layers[j][15])
+
 latency = cl.finish()
 i = 0
-for ns in latency:
-    print(f"{i}: {ns*1e-6:.3f} ms")
+for ns in range(0, len(latency), 4):
+    print(f"{i}: {latency[4*i+0]*1e-6:.3f} ms, {latency[4*i+1]*1e-6:.3f} ms, {latency[4*i+2]*1e-6:.3f} ms, {latency[4*i+3]*1e-6:.3f} ms")
     i += 1
 
 total_latency = sum(latency)
