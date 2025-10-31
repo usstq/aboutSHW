@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+dump_input_output = 0
+
 #GROUP_SIZE only support 128, don't modify it
 GROUP_SIZE = 128
 K = INTERMEDIATE_SIZE = 768
@@ -266,6 +268,7 @@ t_gate_up_output = cl.tensor(np.zeros([M*MAX_TOPK, INTERMEDIATE_SIZE], dtype=np.
 t_down_output = cl.tensor(np.zeros([M*MAX_TOPK, HIDDEN_SIZE], dtype=np.float16))
 t_final_hidden_state = cl.tensor(np.zeros([M, HIDDEN_SIZE], dtype=np.float16))
 
+
 moe_mlp_cl_source_file = "./moe_mlp_new.cl"
 with open(moe_mlp_cl_source_file, "r") as file:
     # Read the entire file content into a string
@@ -350,6 +353,49 @@ else:
     print(f'result = {result[:, :32]}')
     print("================ PASSED ==================" , M, K, N)
 print(f"INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} HIDDEN_SIZE={HIDDEN_SIZE}")
+
+
+def dump_buffer(tensor, name, is_fp16 = 0, n_experts = N_EXPERTS):
+    
+    if is_fp16:
+        src_buf = tensor.numpy().view(np.float16)
+    else:
+        src_buf = tensor.numpy()
+    shape = src_buf.shape
+    #print(f"{name}.orig_shape = {shape}")
+
+    # wei/scale/zp is 1D tensor [experts * per_expert]
+    if len(shape) == 1 and shape[0] % n_experts == 0:
+        per_expert = shape[0] // n_experts
+        src_buf = src_buf.reshape(n_experts, per_expert)
+        shape = src_buf.shape
+        #print(f"{name}.reshaped = {shape}")
+
+    if is_fp16:
+        print(f"float16 {name}[{shape[0]}][{shape[1]}]","={")
+    else:
+        print(f"uint8_t {name}[{shape[0]}][{shape[1]}]","={")
+    for j in range(shape[0]):
+        for i in range(shape[1]):
+            print(f"{src_buf[j][i]}, ",end="")
+        print("")
+    print("};")
+
+
+if dump_input_output:
+    dump_buffer(t_hidden_states, "input", 1)
+    dump_buffer(t_router_logits, "router_logits", 1)
+    dump_buffer(t_gate_fused_weights, "gate_fused_weights")
+    dump_buffer(t_gate_fused_scale, "gate_fused_scale", 1)
+    dump_buffer(t_gate_fused_zp4, "gate_fused_zp4")
+    dump_buffer(t_up_fused_weights, "up_fused_weights")
+    dump_buffer(t_up_fused_scale, "up_fused_scale", 1)
+    dump_buffer(t_up_fused_zp4, "up_fused_zp4")
+    dump_buffer(t_down_fused_weights, "down_fused_weights")
+    dump_buffer(t_down_fused_scale, "down_fused_scale",1)
+    dump_buffer(t_down_fused_zp4, "down_fused_zp4")
+    dump_buffer(t_final_hidden_state, "output", 1)
+    exit()
 
 print("Performance test...\n")
 loop_cnt = 100

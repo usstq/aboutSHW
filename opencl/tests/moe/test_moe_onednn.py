@@ -285,7 +285,6 @@ class onednnMLP:
         self.down_scale = cl.tensor(mlp.down.weight_scale)
         self.down_zp4 = cl.tensor(mlp.down.weight_zp4)
 
-
         self.up_bias = cl.tensor(mlp.up.weight_bias)
         self.gate_bias = cl.tensor(mlp.gate.weight_bias)
         self.down_bias = cl.tensor(mlp.down.weight_bias)
@@ -464,6 +463,63 @@ def test_mlp(K_group_size, n_tokens=8):
     else:
         print("mlp test forward_expert pass!")
 
+def dump_buffer(tensor, name, is_fp16 = 0, n_experts = 4):
+    if is_fp16:
+        src_buf = tensor.numpy().view(np.float16)
+    else:
+        src_buf = tensor.numpy()
+    shape = src_buf.shape
+    #print(f"{name}.orig_shape = {shape}")
+
+    # wei/scale/zp is 1D tensor [experts * per_expert]
+    if len(shape) == 1 and shape[0] % n_experts == 0:
+        per_expert = shape[0] // n_experts
+        src_buf = src_buf.reshape(n_experts, per_expert)
+        shape = src_buf.shape
+        #print(f"{name}.reshaped = {shape}")
+
+    if is_fp16:
+        print(f"float16 {name}[{shape[0]}][{shape[1]}]","={")
+    else:
+        print(f"uint8_t {name}[{shape[0]}][{shape[1]}]","={")
+    for j in range(shape[0]):
+        for i in range(shape[1]):
+            print(f"{src_buf[j][i]}, ",end="")
+        print("")
+    print("};")
+    
+
+# idx = 0, gate
+# idx = 1, up
+# idx = 2, down
+# type = 0/1/2 - wei/scale/zp
+def dump_moe_buffer(moe, expert_num, idx, type):
+    all_tensor_name = [
+        ["uint8_t gate_wei[]=", "float16 gate_scale[]=", "uint8_t up_zp4[]="],
+        ["uint8_t up_wei[]=", "float16 up_scale[]=", "uint8_t up_zp4[]="],
+        ["uint8_t down_wei[]=", "float16 down_scale[]=", "uint8_t down_zp4[]="],
+    ]
+    
+    print(all_tensor_name[idx][type]," {")
+    for i in range(expert_num):
+        mlp = moe[i]
+        all_mem_ptr = [ [mlp.gate_weight, mlp.gate_scale,mlp.gate_zp4],
+                        [mlp.up_weight, mlp.up_scale, mlp.up_zp4],
+                        [mlp.down_weight,mlp.down_scale,mlp.down_zp4],
+                      ]
+        src_mem = all_mem_ptr[idx][type]
+        shape = src_mem.shape
+        if type == 1:
+            src_buf = src_mem.numpy().view(np.float16)
+        else:
+            src_buf = src_mem.numpy().view(np.uint8)
+        data_size = shape[0] * shape[1]
+        src_buf = src_buf.reshape(data_size)
+        for j in range(data_size):
+             print(f"{src_buf[j]}, ",end="")
+        print("")
+    print("};")
+
 
 def test_moe(n_tokens = 120, running_experts = config.num_experts):
     torch.manual_seed(0)
@@ -519,6 +575,21 @@ def test_moe(n_tokens = 120, running_experts = config.num_experts):
         print("============ dst_cur")
         print(dst_cur)
     
+    dump_input_output = 0
+    if dump_input_output:
+        cl_router_logits = cl.tensor(router_logits)
+        dump_buffer(cl_hidden_states, "input", 1, running_experts)
+        dump_buffer(cl_router_logits, "router_logits", 1, running_experts)
+        dump_moe_buffer(moe2, running_experts, 0, 0)
+        dump_moe_buffer(moe2, running_experts, 0, 1)
+        dump_moe_buffer(moe2, running_experts, 0, 2)
+        dump_moe_buffer(moe2, running_experts, 1, 0)
+        dump_moe_buffer(moe2, running_experts, 1, 1)
+        dump_moe_buffer(moe2, running_experts, 1, 2)
+        dump_moe_buffer(moe2, running_experts, 2, 0)
+        dump_moe_buffer(moe2, running_experts, 2, 1)
+        dump_moe_buffer(moe2, running_experts, 2, 2)
+        exit()
 
     for r in range(10):
         cl.finish()
@@ -539,7 +610,7 @@ np.set_printoptions(linewidth=1024)
 cl.profiling(True)
 
 test_mlp(K_group_size = 32, n_tokens=12)
-test_moe(1024)
+test_moe(16)
 
 
 sys.exit()
