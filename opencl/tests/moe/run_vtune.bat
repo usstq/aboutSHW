@@ -1,0 +1,1 @@
+"C:\Program Files (x86)\Intel\oneAPI\vtune\2025.6\bin64\vtune" -collect gpu-hotspots -knob gpu-sampling-interval=0.1 -data-limit=10000 -r D:\river\vtune_logs\moe_kernel_opt_x2 --app-working-dir=D:\river\source\aboutSHW\opencl\tests\moe -- runme.bat
