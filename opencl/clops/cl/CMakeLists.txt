@@ -35,7 +35,8 @@ if(DEFINED ENV{OV_BUILD_PATH})
     message("++++++++++ $ENV{OV_BUILD_PATH} ++++++++++++++++ ")
     add_library(onednn_gpu STATIC IMPORTED) # or STATIC instead of SHARED
     set_target_properties(onednn_gpu PROPERTIES
-        IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/libopenvino_onednn_gpu.a"
+        #IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/libopenvino_onednn_gpu.a"
+        IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/openvino_onednn_gpu.lib"
         INTERFACE_INCLUDE_DIRECTORIES "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/include/"
     )
     target_link_libraries(csrc PRIVATE onednn_gpu)

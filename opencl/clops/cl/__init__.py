@@ -12,6 +12,7 @@ if os.name == 'nt':
                  r"C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\latest\\bin",
                  r"C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\bin",
                  r"C:\Program Files (x86)\Common Files\intel\Shared Libraries\bin"
+                 r"D:\\river\source\openvino\build\src\plugins\intel_gpu\thirdparty\onednn_gpu_install\lib"
                  #'C:\\Program Files (x86)\\Intel\\oneAPI\\tbb\\latest\\bin'
                 ]:
         if os.path.exists(path):
@@ -38,6 +39,8 @@ if cmake_need_config:
                     "-S", dir_path,
                     f"-DCMAKE_BUILD_TYPE={btype}",
                     "-Wno-dev",
+                    f"-DOpenCL_INCLUDE_DIR=D:\\river\OpenCL-SDK-v2025.07.23-Win-x64\\include",
+                    f"-DOpenCL_LIBRARY=D:\\river\\OpenCL-SDK-v2025.07.23-Win-x64\\lib\OpenCL.lib",
                     f"-DCMAKE_PREFIX_PATH={cmake_search_dir}",
                     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
                     generator], shell=False, check=True)
