@@ -31,6 +31,9 @@ pip install -e .
 # then tell cmake where to find_package(OpenCL) by export(or set) following env
 export OpenCL_ROOT="C:\Users\openvino-adlh\Downloads\OpenCL-SDK-v2024.10.24-Win-x64"
 
+# To ulitize onednn static lib built along with OpenVINO GPU plugin, set this env variable before build clops.
+export OV_BUILD_PATH=<Your local path to openvino/build>
+
 # run unit test (cmake will be automatically called to reflect the change in csrc)
 python -m clops.linear_f16xmx
 python -m clops.linear_w4x
