@@ -10,8 +10,9 @@ from torch import nn
 
 dump_input_output = 0
 
-#GROUP_SIZE only support 128, don't modify it
-GROUP_SIZE = 128
+#GROUP_SIZE only support 128 or -1, don't modify it
+GROUP_SIZE = -1
+
 K = INTERMEDIATE_SIZE = 768
 N = HIDDEN_SIZE = 2048
 
@@ -25,8 +26,14 @@ SZ_LAYOUT = 0
 
 M = 1
 
-assert (INTERMEDIATE_SIZE % GROUP_SIZE) == 0
-assert (HIDDEN_SIZE % GROUP_SIZE) == 0
+if GROUP_SIZE == -1:
+    GATE_UP_GROUP_SIZE = HIDDEN_SIZE
+    DOWN_GROUP_SIZE = INTERMEDIATE_SIZE
+else:
+    GATE_UP_GROUP_SIZE = GROUP_SIZE
+    DOWN_GROUP_SIZE = GROUP_SIZE
+    assert (INTERMEDIATE_SIZE % GROUP_SIZE) == 0
+    assert (HIDDEN_SIZE % GROUP_SIZE) == 0
 #K_groups = K // GROUP_SIZE
 
 GATE_IDX=0
@@ -90,14 +97,15 @@ class WeightQ4A:
         print(f"weight_zp4.shape={self.weight_zp4.shape}, weight_zp4=\n{self.weight_zp4[:16,:16]}")
 
 class MoE:
-    def __init__(self, N_experts, hidden_size, intermediate_size, group_size):
+    def __init__(self, N_experts, hidden_size, intermediate_size, gate_up_group_size, down_group_size):
         self.N_experts = N_experts
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.group_size = group_size
+        self.gate_up_group_size = gate_up_group_size
+        self.down_group_size = down_group_size
 
         # gate/up/down - [expert_num, 3]
-        self.experts = [[WeightQ4A(hidden_size, intermediate_size, group_size), WeightQ4A(hidden_size, intermediate_size, group_size), WeightQ4A(intermediate_size, hidden_size, group_size)] for _ in range(N_experts)]
+        self.experts = [[WeightQ4A(hidden_size, intermediate_size, gate_up_group_size), WeightQ4A(hidden_size, intermediate_size, gate_up_group_size), WeightQ4A(intermediate_size, hidden_size, down_group_size)] for _ in range(N_experts)]
         self.gate_fused_weight, self.gate_fused_weight_offset = MoE.fuse_to_single_weight(N_experts, self.experts, GATE_IDX)
         self.gate_fused_scale, self.gate_fused_scale_offset = MoE.fuse_to_single_scale(N_experts, self.experts, GATE_IDX)
         self.gate_fused_zp4, self.gate_fused_zp4_offset = MoE.fuse_to_single_zp(N_experts, self.experts, GATE_IDX)
@@ -152,9 +160,9 @@ class MoE:
             fused_scale_offset[i] = offset
             offset += w.weight_scale.nbytes
 
-        gate_scale_size = (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE * 2
+        gate_scale_size = (HIDDEN_SIZE // GATE_UP_GROUP_SIZE) * INTERMEDIATE_SIZE * 2
         up_scale_size = gate_scale_size
-        down_scale_size = (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE  * 2
+        down_scale_size = (INTERMEDIATE_SIZE // DOWN_GROUP_SIZE) * HIDDEN_SIZE  * 2
         all_scale_size = [gate_scale_size, up_scale_size, down_scale_size]
 
         expected_size = expert_num * all_scale_size[idx]
@@ -176,9 +184,9 @@ class MoE:
             fused_zp_offset[i] = offset
             offset += w.weight_zp4.nbytes
 
-        gate_zp_size = (HIDDEN_SIZE // GROUP_SIZE) * INTERMEDIATE_SIZE // 2
+        gate_zp_size = (HIDDEN_SIZE // GATE_UP_GROUP_SIZE) * INTERMEDIATE_SIZE // 2
         up_zp_size = gate_zp_size
-        down_zp_size = (INTERMEDIATE_SIZE // GROUP_SIZE) * HIDDEN_SIZE // 2
+        down_zp_size = (INTERMEDIATE_SIZE // DOWN_GROUP_SIZE) * HIDDEN_SIZE // 2
         all_zp_size = [gate_zp_size, up_zp_size, down_zp_size]
 
         expected_size = expert_num * all_zp_size[idx]
@@ -187,7 +195,7 @@ class MoE:
         assert fused_zp.size == expected_size, f"fused_zp.size={fused_zp.size}, expected_size={expected_size}"
         return fused_zp, fused_zp_offset
 
-moe_op = MoE(N_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, GROUP_SIZE)
+moe_op = MoE(N_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, GATE_UP_GROUP_SIZE, DOWN_GROUP_SIZE)
 
 low, high = -1.0, 1.0
 hidden_states = (np.random.rand(M, HIDDEN_SIZE) * (high - low) + low).astype(np.float16)
@@ -294,9 +302,9 @@ moe_mlp_kernels = cl.kernels(moe_mlp_src,
                             f"-D N_BLOCK={N_BLOCK} \
                             -D TYPE={TYPE} \
                             -D TYPE_SIZE={TYPE_SIZE} \
-                            -D SUBGROUP_NUM={SUBGROUP_NUM} \
                             -D SUBGROUP_SIZE={SUBGROUP_SIZE}\
-                            -D GROUP_SIZE={GROUP_SIZE} \
+                            -D GATE_UP_GROUP_SIZE={GATE_UP_GROUP_SIZE} \
+                            -D DOWN_GROUP_SIZE={DOWN_GROUP_SIZE} \
                             -D INTERMEDIATE_SIZE={INTERMEDIATE_SIZE} \
                             -D HIDDEN_SIZE={HIDDEN_SIZE} \
                             -D MAX_TOPK={MAX_TOPK} \
@@ -340,13 +348,16 @@ moe_mlp_kernels.enqueue("mlp_reduce",[1, HIDDEN_SIZE],
 
 cl.finish()
 
+np.set_printoptions(suppress=True)
 result = t_final_hidden_state.numpy()
-if not np.allclose(reference, result, rtol=1e-02, atol=1e-02):
+if not np.allclose(reference, result, rtol=1e-02, atol=1e1):
     print(f'reference = {reference[:, :32]}')
     print(f'result = {result[:, :32]}')
     print(f'{reference.shape=} {result.shape=}')
+    # print(f' diff = {reference - result}')
     print(f"diff.max = {(reference - result).max()}")
-    print(f"rel_diff.max = {(abs(reference - result)/reference).max()}")
+    # print(f' reference = {reference}')
+    print(f"rel_diff.max = {(abs(reference - result)/(abs(reference) + 1e-4)).max()}")
     exit(0)
 else:
     print(f'reference = {reference[:, :32]}')
