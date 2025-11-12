@@ -25,6 +25,7 @@ args = parser.parse_args()
 print(args)
 
 enable_vprint = False
+
 def vprint(*all_args):
     global enable_vprint
     if enable_vprint:
@@ -41,7 +42,19 @@ enable_gqa = num_heads > num_kv_heads
 # define KV_BLOCK_SIZE = 32,64,128,256
 kv_block_size = 256
 
-enable_kvcache_compression = 0
+enable_kvcache_compression = 1
+kv_cache_quantization_mode = os.environ.get("KV_CACHE_QUANT_MODE", "by_token")
+kv_cache_quantization_mode = "by_channel"
+
+def _validate_quant_mode(mode: str) -> str:
+    mode = mode.strip().lower()
+    if mode not in {"by_token", "by_channel"}:
+        raise ValueError(f"Unsupported kv-cache quantization mode: {mode}")
+    return mode
+
+kv_cache_quantization_mode = _validate_quant_mode(kv_cache_quantization_mode)
+kvcache_quantization_by_token = int(kv_cache_quantization_mode == "by_token")
+print(f"{kv_cache_quantization_mode=}, {kvcache_quantization_by_token=}")
 
 enable_clean_unused_kvcache = args.reset_kv_cache
 
@@ -91,11 +104,13 @@ if run_real_data_test:
 k_partition_block_num = kv_len//8192
 if k_partition_block_num < 1:
     k_partition_block_num = 1
-k_partition_block_num = 1
-kv_partition_size = kv_block_size * k_partition_block_num
+k_partition_block_num = 1  # test cm_sdpa_2nd
+# k_partition_block_num = 0.5  # test cm_sdpa_2nd_half_block, now output is wrong for enable_kvcache_compression
+kv_partition_size = int(kv_block_size * k_partition_block_num)
 
-#kv_partition_size = 128
+print("kv_step:", kv_step)
 print("k_partition_block_num:", k_partition_block_num)
+print("kv_partition_size:", kv_partition_size)
 
 new_kv_len = (kv_len + kv_block_size - 1) // kv_block_size * kv_block_size
 kv_partition_num = (new_kv_len + kv_partition_size - 1) // kv_partition_size
@@ -105,7 +120,6 @@ total_partition_num = kv_partition_num * num_heads
 # assert((kv_len//kv_partition_size)%(kv_partition_size//kv_step)==0)
 # assert(kv_len%kv_partition_size == 0)
 assert(kv_partition_size % kv_step == 0)
-
 
 # # test code
 # q = torch.arange(0, q_len* num_heads * head_size, dtype=act_dtype).reshape(batch, q_len, num_heads, head_size)/10000.0
@@ -173,7 +187,7 @@ def get_org(Q, K, V, attention_mask):
 
 print("k = ", k.shape, k.dtype)
 ref = F.scaled_dot_product_attention(q, k[:,:,:kv_len,:], v[:,:,:kv_len,:], attention_mask, dropout_p=0.0, enable_gqa = enable_gqa)
-org = get_org(q,k[:,:,:kv_len,:], v[:,:,:kv_len,:],attention_mask)
+org = get_org(q, k[:,:,:kv_len,:], v[:,:,:kv_len,:], attention_mask)
 
 def check_close(input, other, atol=1e-3, rtol=1e-3):
     print(f"[check_close] {input.shape}{input.dtype} vs {other.shape}{other.dtype}")
@@ -181,8 +195,8 @@ def check_close(input, other, atol=1e-3, rtol=1e-3):
     #print("res = ", other)
     rtol_max = (((input - other).abs() - 1e-5)/other.abs())[other != 0].max()
     atol_max = (((input - other).abs()) - 1e-5*other.abs()).max()
-    print(f"[check_close] rtol_max: {rtol_max}")
-    print(f"[check_close] atol_max: {atol_max}")
+    # print(f"[check_close] rtol_max: {rtol_max}")
+    # print(f"[check_close] atol_max: {atol_max}")
     if not torch.allclose(input, other, atol=atol, rtol=rtol):
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
@@ -226,8 +240,8 @@ def get_flash1(query, key, value, attention_mask):
 
                 rQ = Q[0, :].reshape(1,hs) # [1,128] sub Q block VNNI packed
 
-                cur_O=torch.full([kv_len//kv_step, 1, hs], 0, dtype=torch.float32)
-                max_comp_0=torch.full([kv_len//kv_step], 1, dtype=torch.float32)
+                cur_O = torch.full([kv_len // kv_step, 1, hs], 0, dtype=torch.float32)
+                max_comp_0 = torch.full([kv_len // kv_step], 1, dtype=torch.float32)
 
                 for j in range(0, kv_len, kv_step):
                     j1 = min(j + kv_step, kv_len)
@@ -235,9 +249,9 @@ def get_flash1(query, key, value, attention_mask):
                     if (j == args.verbose): enable_vprint = True
                     # compute in local SRAM
                     # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
-                    rKt = K[j:j1,:].transpose(0,1) #[16,128]->[128,16]
-                    rS = (rQ @ rKt).to(dtype=torch.float32).reshape(1,kv_step) #[1,16]
-                    rMask = mask[i:i1, j:j1] #[1,16]
+                    rKt = K[j:j1,:].transpose(0,1)  #[16, 128] -> [128, 16], suppose kv_step is 16
+                    rS = (rQ @ rKt).to(dtype=torch.float32).reshape(1,kv_step)  # [1,16]
+                    rMask = mask[i:i1, j:j1] # [1,16]
 
                     vprint("rK=", rKt.shape)
                     vprint("rQt=",rQ.shape)
@@ -279,7 +293,7 @@ def get_flash1(query, key, value, attention_mask):
                     
                     vprint("P=", partial_attn_weight.shape)
 
-                    rV = V[j:j1, :] # [16,128]
+                    rV = V[j:j1, :]  # [16,128]
                     vprint("rV=",rV.shape)
 
                     # correct last Output to current statistics
@@ -305,10 +319,12 @@ def get_flash1(query, key, value, attention_mask):
     return out
 
 # Split KV online-softmax
-def get_flash2(query, key, value, attention_mask):
+def get_flash2(query, key, value, attention_mask, real_kv_len=0):
     global enable_vprint
     B,H,q_len,hs = query.shape
     _,Hkv,kv_len,_ = key.shape
+    if real_kv_len == 0:
+        real_kv_len = kv_len
     out = torch.zeros([B,H,q_len,hs], dtype=value.dtype)
     scale_factor = hs**(-0.5)
     for b in range(B):
@@ -342,6 +358,8 @@ def get_flash2(query, key, value, attention_mask):
                 cur_sum = 0.0
                 for j in range(i, i1, kv_step):
                     j1 = min(j + kv_step, kv_len)
+                    if j > kv_len:
+                        break
 
                     if (j == args.verbose): enable_vprint = True
                     # compute in local SRAM
@@ -371,11 +389,11 @@ def get_flash2(query, key, value, attention_mask):
                         rowmax = torch.maximum(cur_max, rowmax)
                     vprint("rowmax=", rowmax.shape)
 
-                    print("rS=", rS)
+                    vprint("rS=", rS)
                     # compute in local SRAM
                     rS = torch.exp(rS - rowmax) # [1,16]
-                    print("rowmax = ", rowmax)
-                    print("St(Pt)=", rS)
+                    vprint("rowmax = ", rowmax)
+                    vprint("St(Pt)=", rS)
 
                     rowsumP = rS.sum(1, keepdim=True) # [1,1]
                     vprint("rowsumP=", rowsumP)
@@ -405,30 +423,33 @@ def get_flash2(query, key, value, attention_mask):
                     else:
                         cur_O[i//kv_partition_size,:,:] = cur_O[i//kv_partition_size,:,:] * max_comp;
                         cur_O[i//kv_partition_size,:,:] += partial_attn_weight @ rV # [:,1,128]
-                    print("j = ", j)
-                    print("cur_O2=",  cur_O[i//kv_partition_size,:,:])
+                    vprint("j = ", j)
+                    vprint("cur_O2=",  cur_O[i//kv_partition_size,:,:])
 
                     cur_max = rowmax
                     if (j == args.verbose): assert 0
 
                 lse[i//kv_partition_size] = cur_lse
-                cur_O[i//kv_partition_size,:,:] = cur_O[i//kv_partition_size,:,:] / cur_sum
+                if i > real_kv_len:
+                    cur_O[i//kv_partition_size,:,:] = 0
+                else:
+                    cur_O[i//kv_partition_size,:,:] = cur_O[i//kv_partition_size,:,:] / cur_sum
                 vprint("cur_sum=", cur_sum.shape)
                 vprint("cur_O=",  cur_O[i//kv_partition_size,:,:])
 
             # reduce
-            for i in range(0, kv_len//kv_partition_size, 1):
-                for j in range(0, hs, kv_step):
-                    stop = min(j + kv_step, hs)
-                    print("i=", i, ", j = ", j, ": cur_O[i,:,:]=", cur_O[i,0,j:stop])
-            vprint("lse=", lse)
+            # for i in range(0, kv_len//kv_partition_size, 1):
+            #     for j in range(0, hs, kv_step):
+            #         stop = min(j + kv_step, hs)
+            #         print("i=", i, ", j = ", j, ": cur_O[i,:,:]=", cur_O[i,0,j:stop])
+            # vprint("lse=", lse)
             # print("lse=", lse.shape) # [4]
             sum_lse = lse.sum(0)
             # print("cur_O=", cur_O.shape) # 
             # print("cur_O_f32=", cur_O_f32.shape) #
-            vprint("lse = ", lse)
-            vprint("sum_lse = ", sum_lse)
             for i in range(0, kv_len//kv_partition_size, 1):
+                if i * kv_partition_size > real_kv_len:
+                    break
                 cur_O_f32 += cur_O[i,:,:] * lse[i] / sum_lse
             cur_O_f16 = cur_O_f32.to(torch.float16)
             out[b, h, :, :] = cur_O_f16
@@ -448,16 +469,16 @@ def get_flash3(query, key, value, attention_mask):
     for b in range(B):
         for h in range(H):
             hkv = h // (H//Hkv)
-            Q = query[b, h, :, :]
-            K = key[b, hkv, :, :]
-            V = value[b, hkv, :, :]
-            mask = attention_mask[b,0,:,:]
+            Q = query[b, h, :, :]  # [q_len, head_size]
+            K = key[b, hkv, :, :]  # [kv_len, head_size]
+            V = value[b, hkv, :, :]  # [kv_len, head_size]
+            mask = attention_mask[b,0,:,:]  # [q_len, kv_len]
 
             # loop kv_split
-            cur_O=torch.full([kv_len//kv_partition_size, 1, hs], 0, dtype=torch.float32)
-            cur_O_f32=torch.full([1, hs], 0, dtype=torch.float32)
-            cur_O_f16=torch.full([1, hs], 0, dtype=torch.float16)
-            lse=torch.full([kv_len//kv_partition_size], 0, dtype=torch.float32)
+            cur_O=torch.full([kv_len//kv_partition_size, 1, hs], 0, dtype=torch.float32)  # [kv_len//kv_partition_size, 1, head_size]
+            cur_O_f32=torch.full([1, hs], 0, dtype=torch.float32)  # [1, head_size]
+            cur_O_f16=torch.full([1, hs], 0, dtype=torch.float16)  # [1, head_size]
+            lse=torch.full([kv_len//kv_partition_size], 0, dtype=torch.float32)  # [kv_len//kv_partition_size]
             for i in range(0, kv_len, kv_partition_size):
                 i1 = min(i + kv_partition_size, kv_len)
                 # online softmax states:
@@ -481,9 +502,9 @@ def get_flash3(query, key, value, attention_mask):
                     if (j == args.verbose): enable_vprint = True
                     # compute in local SRAM
                     # Step8: On chip, compute S(_𝑗)𝑖= Q𝑖K𝑇 𝑗∈ R𝐵𝑟 ×𝐵𝑐.
-                    rKt = K[j:j1,:].transpose(0,1) #[16,128]->[128,16]
-                    rS = (rQ @ rKt).to(dtype=torch.float32).reshape(1,kv_partition_size) #[1,16]
-                    rMask = mask[0:1, j:j1] #[1,16]
+                    rKt = K[j:j1,:].transpose(0,1)  # [head_size, kv_partition_size]
+                    rS = (rQ @ rKt).to(dtype=torch.float32).reshape(1,kv_partition_size)  #[1, kv_partition_size]
+                    rMask = mask[0:1, j:j1]  #[1, kv_partition_size]
 
                     vprint("rK=", rKt)
                     vprint("rQt=",rQ)
@@ -515,10 +536,10 @@ def get_flash3(query, key, value, attention_mask):
                     # softmax normalize is saved accoridng to flash-attn2 section 3.1.1
                     # We can instead maintain an “un-scaled” version of O(2) and keep around the statistics ℓ(2)
                     partial_attn_weight = rS.to(dtype=torch.float16) # [1,16]
-                    
+
                     vprint("P=", partial_attn_weight)
 
-                    rV = V[j:j1, :] # [16,128]
+                    rV = V[j:j1, :]  # [kv_partition_size, head_size]
                     vprint("rV=",rV)
 
                     # correct last Output to current statistics
@@ -552,7 +573,6 @@ def get_flash3(query, key, value, attention_mask):
     #print("out = ", out)
     return out
 
-
 # transpose back to orginal shape: [batch, q_len, num_heads, head_size] for padding
 q = q.transpose(1,2)
 k = k.transpose(1,2)
@@ -571,7 +591,7 @@ if kv_len % kv_block_size != 0:
 
 print("k.shape:", k.shape, k.dtype)
 print("v.shape:", v.shape, v.dtype)
-print("new_kv_len = ",new_kv_len)
+print("new_kv_len = ", new_kv_len)
 
 # transpose shape: [batch, num_heads, q_len, head_size] for get_flash3
 q = q.transpose(1,2)
@@ -584,8 +604,18 @@ if args.impl == 0:
     print("=========== PASS ===========")
     sys.exit(0)
 
-org = get_flash3(q,k,v,attention_mask)
+org1 = get_flash1(q,k,v,attention_mask)
+check_close(ref, org1, atol=1e-3, rtol=1e-2)
+print("org of get_flash1 passed !")
 
+org2 = get_flash2(q,k,v,attention_mask, real_kv_len=kv_len)
+check_close(ref, org2, atol=1e-3, rtol=1e-2)
+print("org of get_flash2 passed !")
+
+org = get_flash3(q,k,v,attention_mask)
+check_close(ref, org, atol=1e-3, rtol=1e-2)
+print("org of get_flash3 passed !")
+check_close(org, org2, atol=1e-3, rtol=1e-2)
 
 print()
 print("GPU cm kernels for flash attn2:")
@@ -620,95 +650,144 @@ print("v:", v.shape, v.dtype)
 #     assert(new_kv_len % kv_block_size == 0)
 
 def quan_per_token(kv):
-        blk_num, kv_heads, blksz, *_ = kv.shape
-        kv_max = kv.amax(dim=-1, keepdim = True)
-        kv_min = kv.amin(dim=-1, keepdim = True)
-        qrange = kv_max - kv_min
+    blk_num, kv_heads, blksz, *_ = kv.shape
+    kv_max = kv.amax(dim=-1, keepdim = True)
+    kv_min = kv.amin(dim=-1, keepdim = True)
+    qrange = kv_max - kv_min
 
-        INTMAX = 255.0
-        INTMIN = 0.0
-        INTRAGNE = INTMAX - INTMIN
-        kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
-        kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
+    INTMAX = 255.0
+    INTMIN = 0.0
+    INTRAGNE = INTMAX - INTMIN
+    kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
+    kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
 
-        kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        # print("################################################################################")
-        # print(f'KV\n:{kv.reshape(16, 32)}')
-        # print(f'kv_INT8\n:{kv_INT8.reshape(16, 32)}')
-        # print(f'kv_scale\n:{kv_scale.reshape( 16, 1)}')
-        # print(f'kv_zp\n:{kv_zp.reshape( 16, 1)}')
-        # print("################################################################################")
+    kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    # print("################################################################################")
+    # print(f'KV\n:{kv.reshape(16, 32)}')
+    # print(f'kv_INT8\n:{kv_INT8.reshape(16, 32)}')
+    # print(f'kv_scale\n:{kv_scale.reshape( 16, 1)}')
+    # print(f'kv_zp\n:{kv_zp.reshape( 16, 1)}')
+    # print("################################################################################")
 
-        # print("quant_scale =", (1.0/kv_scale).reshape(blk_num,kv_heads,-1))
-        # print("quant_zp    =", kv_zp.reshape(blk_num,kv_heads,-1))
+    # print("quant_scale =", (1.0/kv_scale).reshape(blk_num,kv_heads,-1))
+    # print("quant_zp    =", kv_zp.reshape(blk_num,kv_heads,-1))
 
-        dq_scale = (1.0/kv_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        # print("dq_scale: ", dq_scale)
-        # print("kz_zp: ", kv_zp)
-        return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
-    
-    
+    dq_scale = (1.0/kv_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    # print("dq_scale: ", dq_scale)
+    # print("kz_zp: ", kv_zp)
+    return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
+
 def dequant_per_token(kv, head_size, blk_size):
-        blk_num, kv_head_num, _ = kv.shape
-        kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
-        kv_scale = kv[:,:,head_size * blk_size:head_size * blk_size + blk_size * 2].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
-        kv_zp = kv[:,:,head_size * blk_size + blk_size * 2:head_size * blk_size + blk_size * 4].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
-        
-        # print("dequant_kv_u8 = ", kv_u8)
-        # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
-        # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
-        
-        kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
-        
-        for m in range(blk_num):
-            for n in range(kv_head_num):
-                for i in range(blk_size):
-                    kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
+    blk_num, kv_head_num, _ = kv.shape
+    kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
+    kv_scale = kv[:,:,head_size * blk_size: (head_size * blk_size + blk_size * 2)].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
+    kv_zp = kv[:,:, (head_size * blk_size + blk_size * 2):(head_size * blk_size + blk_size * 4)].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
 
-        return kv_dequant
+    # print("dequant_kv_u8 = ", kv_u8)
+    # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
+    # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
+
+    kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
+
+    for m in range(blk_num):
+        for n in range(kv_head_num):
+            for i in range(blk_size):
+                kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
+
+    return kv_dequant
+
+def quan_per_channel(kv):
+    blk_num, kv_heads, blksz, head_size = kv.shape
+    kv_max = kv.amax(dim=2, keepdim=True)
+    kv_min = kv.amin(dim=2, keepdim=True)
+    qrange = kv_max - kv_min
+
+    INTMAX = 255.0
+    INTMIN = 0.0
+    INTRANGE = INTMAX - INTMIN
+
+    # need to consider qrange equals to zero
+    kv_scale = torch.zeros(blk_num, kv_heads, 1, head_size, dtype=torch.float16)
+    kv_scale[qrange!=0] = (INTRANGE / qrange[qrange!=0]).to(dtype=torch.float16)
+    kv_zp = ((0.0 - kv_min) * kv_scale + INTMIN).to(dtype=torch.float16)
+    kv_INT8 = torch.round(kv * kv_scale + kv_zp).clamp(INTMIN, INTMAX).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    dq_scale = torch.zeros(blk_num, kv_heads, 1, head_size, dtype=torch.float16)
+    dq_scale[kv_scale!=0] = (1.0 / kv_scale[kv_scale!=0]).to(dtype=torch.float16)
+    dq_scale = dq_scale.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+
+    return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
+
+def dequant_per_channel(kv, head_size, blk_size):
+    blk_num, kv_head_num, _ = kv.shape
+    kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
+    kv_scale = kv[:,:,head_size * blk_size: (head_size * blk_size + head_size * 2)].view(dtype=torch.float16).reshape(blk_num, kv_head_num, 1, head_size)
+    kv_zp = kv[:,:, (head_size * blk_size + head_size * 2):(head_size * blk_size + head_size * 4)].view(dtype=torch.float16).reshape(blk_num, kv_head_num, 1, head_size)
+
+    # print("dequant_kv_u8 = ", kv_u8)
+    # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
+    # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
+
+    kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
+
+    for m in range(blk_num):
+        for n in range(kv_head_num):
+            for i in range(head_size):
+                kv_dequant[m,n,:,i] = (kv_u8[m,n,:,i].to(dtype=torch.float16) - kv_zp[m,n,0,i].to(dtype=torch.float16)) * kv_scale[m,n,0,i].to(dtype=torch.float16)
+
+    return kv_dequant
 
 if enable_clean_unused_kvcache:
     print("before blocking k:", k.shape, k.dtype)
     print("before blocking v:", v.shape, v.dtype)
-    k.view(torch.uint16)[0,kv_len:,:,:] = 0xFE00
+    if kvcache_quantization_by_token:
+        k.view(torch.uint16)[0,kv_len:,:,:] = 0xFE00
+    else:
+        k.view(torch.uint16)[0,kv_len:,:,:] = 0
     v.view(torch.uint16)[0,kv_len:,:,:] = 0xFE00
 
-print("after blocking k:", k.shape, k.dtype)
-print("after blocking v:", v.shape, v.dtype)
-# change from [batch, kv_len, num_kv_heads, head_size] to [batch * num_kv_heads / kv_block_size, num_kv_heads, head_size, kv_block_size]
+# change from [batch, kv_len, num_kv_heads, head_size] to [total_blk_num, num_kv_heads, kv_block_size, head_size]
 k = k.reshape(total_blk_num, kv_block_size, num_kv_heads, head_size).transpose(1,2).contiguous()
 v = v.reshape(total_blk_num, kv_block_size, num_kv_heads, head_size).transpose(1,2).contiguous()
+print("after blocking k:", k.shape, k.dtype)
+print("after blocking v:", v.shape, v.dtype)
 
+vprint("k[0,0,0,:] = ", k[0,0,0,:])
+vprint("v[0,0,0,:] = ", v[0,0,0,:])
 print()
-print(f"block k shape: {k.shape}, dtype={k.dtype}")
-print("k[0,0,0,:] = ", k[0,0,0,:])
-print("v[0,0,0,:] = ", v[0,0,0,:])
-print()
+
 if enable_kvcache_compression:
     # print("quant = ", k.reshape(total_blk_num, num_kv_heads, kv_block_size, head_size))
-    #k_origin = k.clone()
+    k_origin = k.clone()
     print("k = ", k.shape)
-    k = quan_per_token(k)
+    if kvcache_quantization_by_token:
+        k = quan_per_token(k)
+    else:
+        k = quan_per_channel(k)
     v = quan_per_token(v)
-    # print(f"quant k shape: {k.shape}, dtype={k.dtype}")
-    # print(f"quant v shape: {v.shape}, dtype={v.dtype}")
-    
-    enable_dequant_check = 0
+    print(f"quant k shape: {k.shape}, dtype={k.dtype}")
+    print(f"quant v shape: {v.shape}, dtype={v.dtype}")
+
+    enable_dequant_check = 1
     if enable_dequant_check:
-        k_dequan = dequant_per_token(k, head_size, kv_block_size)
+        if kvcache_quantization_by_token:
+            k_dequan = dequant_per_token(k, head_size, kv_block_size)
+        else:
+            k_dequan = dequant_per_channel(k, head_size, kv_block_size)
         v_dequan = dequant_per_token(v, head_size, kv_block_size)
         # print("de-quant = ", k_dequan.reshape(total_blk_num, num_kv_heads, kv_block_size, head_size))
         # print("diff = ", (k_dequan - k_origin).abs())
-        print("k_dequan = ",k_dequan.shape)
+        # print("k_dequan = ", k_dequan.shape)
 
         q_input = q.transpose(1,2).contiguous()
-        k_input = k_dequan.transpose(1,2).reshape(batch, kv_len, num_kv_heads, head_size).transpose(1,2).contiguous()
-        v_input = v_dequan.transpose(1,2).reshape(batch, kv_len, num_kv_heads, head_size).transpose(1,2).contiguous()
+        k_input = k_dequan.transpose(1,2).reshape(batch, new_kv_len, num_kv_heads, head_size).transpose(1,2).contiguous()
+        v_input = v_dequan.transpose(1,2).reshape(batch, new_kv_len, num_kv_heads, head_size).transpose(1,2).contiguous()
 
-        print("q = ",q_input.shape)
-        print("k_input = ",k_input.shape)
-        org = get_org(q_input,k_input,v_input,attention_mask)
+        # print("q = ", q_input.shape)
+        # print("k_input = ", k_input.shape)
+        org = get_org(q_input, k_input[:, :, :kv_len, :], v_input[:, :, :kv_len, :], attention_mask[:, :, :, :kv_len])
+        check_close(ref, org, atol=1e-3, rtol=1e-2)
 
 
 # print("quanted k[0,0,16*32:16*32+2*16]:", k[0,0,16*32:16*32+2*16])
@@ -809,6 +888,7 @@ src1 = r'''
 #pyeval f"#define CLEAN_UNUSED_KVCACHE {enable_clean_unused_kvcache}"
 
 #pyeval f"#define KV_CACHE_COMPRESSION {enable_kvcache_compression}"
+#pyeval f"#define KV_CACHE_COMPRESSION_BY_TOKEN {kvcache_quantization_by_token}"
 
 // #define KV_CACHE_COMPRESSION 0
 
@@ -979,13 +1059,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //# batch=1, seq_num=1 or >1
     //# query [seq_idx, seq_num, head_num, head_size]
     //# output[seq_idx, seq_num, head_num, head_size]
-    //#   key [block_num, head_num, block_size, head_size] + [block_num, head_num, block_size, 4] (scale/zp)
-    //# value [block_num, head_num, block_size, head_size] + [block_num, head_num, block_size, 4] (scale/zp)
+    //#   key [block_num, kv_head_num, block_size, head_size] + [block_num, kv_head_num, block_size, 4] (scale/zp)
+    //# value [block_num, kv_head_num, block_size, head_size] + [block_num, kv_head_num, block_size, 4] (scale/zp)
 
     //# KV_PARTITION_SIZE should be multiple of kv_block_size(KV_BLOCK_SIZE)
     //# kv_len dimision will be split into multiple partitions, each WG process a partition
     //# total_partitions_num = kv_len // KV_PARTITION_SIZE
-    //# GWS=[seq_num, num_heads, total_partitions_num]
+    //# GWS=[seq_num, num_kv_heads, total_partitions_num]
     //# LWS=[1, 1, 1]
 
     //# Each WG processes a partition, which is KV_PARTITION_SIZE long and multiple of KV_BLOCK_SIZE.
@@ -1003,6 +1083,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //# const uint subsequence_begin = subsequence_begins[subsequence_idx];
     //# const uint subsequence_end = subsequence_begins[subsequence_idx + 1];
     const uint kv_len = past_lens[seq_idx] + 1;
+    // The code here requires KV_PARTITION_SIZE to be an integer multiple of KV_BLOCK_SIZE.
     const uint start_block_idx = block_indices_begins[seq_idx] + kv_partition_idx * (KV_PARTITION_SIZE / KV_BLOCK_SIZE);
 
     //if(cm_global_id(0)==0 && cm_global_id(1)==0 && cm_global_id(2)==0)
@@ -1018,13 +1099,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     constexpr uint kv_pitch = HEAD_SIZE * sizeof(KV_ELEMENT_TYPE);
 
     //# Load Q into register(as dpas-A tile)
-    const uint qo_offset = (seq_idx*HEADS_NUM*q_len + head_num_idx)*HEAD_SIZE;
+    const uint qo_offset = (seq_idx * HEADS_NUM * q_len + head_num_idx) * HEAD_SIZE;
 
     #if Q_RepeatCount != 1
-        matrix <half,Q_RepeatCount, HEAD_SIZE> Qmat = 0;
+        matrix <half, Q_RepeatCount, HEAD_SIZE> Qmat = 0;
         cm_svm_block_read<half, Q_RepeatCount * HEAD_SIZE>((svmptr_t)(query + qo_offset), Qmat.format<half>());
     #else
-        matrix <half,Q_SLICE_NUM, HEAD_SIZE> Qmat = 0;
+        matrix <half, Q_SLICE_NUM, HEAD_SIZE> Qmat = 0;
         cm_svm_block_read<half, Q_SLICE_NUM * HEAD_SIZE>((svmptr_t)(query + qo_offset), Qmat.format<half>());
     #endif
 
@@ -1032,12 +1113,18 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     //    printf("Qmat loaded, kv_head_num_idx=%d\n", kv_head_num_idx);
     //    show(Qmat);
     //}
-    
-    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(KV_ELEMENT_TYPE)); // 4 bytes: scale/zp
+
+    constexpr uint per_v_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE); // 4 bytes: scale/zp
+    #if KV_CACHE_COMPRESSION_BY_TOKEN
+        constexpr uint per_k_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE); // 4 bytes: scale/zp
+    #else
+        constexpr uint per_k_block_element_num = KV_HEADS_NUM * HEAD_SIZE * (KV_BLOCK_SIZE + KV_SCALE_ZP_SIZE); // 4 bytes: scale/zp
+    #endif
     uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
 
     uint leftover_size = 0;
     if(kv_partition_idx == kv_partition_num - 1) {
+        // last partition
         leftover_size = (kv_len - KV_PARTITION_SIZE * kv_partition_idx) % KV_PARTITION_SIZE;
     }
     if(block_num > total_blocks_num - start_block_idx) {
@@ -1054,22 +1141,23 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     // # Each SG can process multiple blocks
     #pragma unroll
     for(uint block_idx = 0, ki = 0; block_idx < block_num; block_idx++) {
+        // split kv_partition into multi kv_block
         uint blk_indices = block_indices[start_block_idx + block_idx];
-        uint kv_base_offset = blk_indices * per_kv_block_element_num + kv_head_num_idx * (per_kv_block_element_num / KV_HEADS_NUM);
-        uint kv_scale_zp_offset = kv_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset
+        uint k_base_offset = blk_indices * per_k_block_element_num + kv_head_num_idx * (per_k_block_element_num / KV_HEADS_NUM);
+        uint k_scale_zp_offset = k_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset
 
-        // printf("seq_idx = %d, head_num_idx = %d, kv_partition_idx = %d,  start_block_idx = %d, block_idx = %d, blk_indices = %d, KV_PARTITION_SIZE = %d, KV_BLOCK_SIZE = %d, total_blocks_num = %d, kv_pitch = %d, kv_base_offset = %d\n",
-        //        seq_idx, head_num_idx, kv_partition_idx, start_block_idx, block_idx, blk_indices, KV_PARTITION_SIZE, KV_BLOCK_SIZE, total_blocks_num, kv_pitch, kv_base_offset);
+        // printf("seq_idx = %d, head_num_idx = %d, kv_partition_idx = %d,  start_block_idx = %d, block_idx = %d, blk_indices = %d, KV_PARTITION_SIZE = %d, KV_BLOCK_SIZE = %d, total_blocks_num = %d, kv_pitch = %d, k_base_offset = %d\n",
+        //        seq_idx, head_num_idx, kv_partition_idx, start_block_idx, block_idx, blk_indices, KV_PARTITION_SIZE, KV_BLOCK_SIZE, total_blocks_num, kv_pitch, k_base_offset);
 
     #if USE_LSC_BLOCK_2D_DESC
         #if KV_CACHE_COMPRESSION
             // Transpose only support dword and qwork
-            lsc::block_2d_desc<uint, 1, REG_N, REG_K/4> b2dK(reinterpret_cast<uint*>(key + kv_base_offset),  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
+            lsc::block_2d_desc<uint, 1, REG_N, REG_K/4> b2dK(reinterpret_cast<uint*>(key + k_base_offset),  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
         #else
-            lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dK(reinterpret_cast<uint*>(key + kv_base_offset),  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+            lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dK(reinterpret_cast<uint*>(key + k_base_offset),  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(half) - 1, kv_pitch - 1, 0, 0);
         #endif
     #else
-        uint kv_offset = kv_base_offset;
+        uint kv_offset = k_base_offset;
         uint kv_stride = HEAD_SIZE;
         uint kv_x0 = 0, kv_y0 = 0;
         uint kv_x1 = HEAD_SIZE*sizeof(KV_ELEMENT_TYPE);
@@ -1083,11 +1171,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         }
 
         #if KV_CACHE_COMPRESSION
+            #if KV_CACHE_COMPRESSION_BY_TOKEN
             // load scale/zp
             vector<half, KV_BLOCK_SIZE> scale_vec;
             vector<half, KV_BLOCK_SIZE> zp_vec;
-            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset), scale_vec);
-            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + k_scale_zp_offset), scale_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + k_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
             if(kv_pos_end < KV_BLOCK_SIZE) {
                 // fill leftover with last valid scale/zp
                 #pragma unroll
@@ -1096,18 +1185,24 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                     zp_vec[i] = 0.0;
                 }
             }
+            #else
+            // load scale/zp
+            vector<half, HEAD_SIZE> scale_vec;
+            vector<half, HEAD_SIZE> zp_vec;
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + k_scale_zp_offset), scale_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + k_scale_zp_offset + HEAD_SIZE * sizeof(half)), zp_vec);
+            #endif
         #endif
 
         //if(cm_global_id(0)==0 && cm_global_id(1)==0){
         //    printf("kv_partition_idx = %d, leftover_size = %d, kv_pos_end = %d, token_idx = %d\n", kv_partition_idx, leftover_size, kv_pos_end, kv_pos_end + KV_PARTITION_SIZE * kv_partition_idx + block_idx*KV_BLOCK_SIZE);
         //}
 
-
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             // auto rSvec = rS[ki].format<float>();
             // uint kv_offset_y = kv_pos;
-            
-            #if KV_CACHE_COMPRESSION
+
+            #if KV_CACHE_COMPRESSION && KV_CACHE_COMPRESSION_BY_TOKEN
                 vector<half, REG_N * 2> temp_scale, temp_zp;
                 temp_scale.select<REG_N,2>(0) = scale_vec.select<REG_N,1>(kv_pos);
                 temp_scale.select<REG_N,2>(1) = scale_vec.select<REG_N,1>(kv_pos);
@@ -1147,11 +1242,39 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                     show_u8(Kt_quant.format<uint8_t, REG_K, REG_N>());
                     #endif
 
+                    #if KV_CACHE_COMPRESSION_BY_TOKEN
                     #pragma unroll
                     for(int r = 0; r < REG_K; r++) {
                         Kt[r] = Kt_quant[r] - temp_zp.format<half, 2, REG_N>()[r%2]; //vector - vector
                         Kt[r] = cm_mul<half>(Kt[r], temp_scale.format<half, 2, REG_N>()[r%2]);    // vector * vector
                     }
+                    #else
+                    vector<half, REG_K> temp_scale, temp_zp;
+                    temp_scale.select<REG_K, 1>(0) = scale_vec.select<REG_K, 1>(k * 4);
+                    temp_zp.select<REG_K, 1>(0) = zp_vec.select<REG_K, 1>(k * 4);
+
+                    // performance is very slow for this code, 37.2ms
+                    // #pragma unroll
+                    // for(int r = 0; r < REG_K; r+=2) {
+                        // #pragma unroll
+                        // for(int z = 0; z <= 1; z++) {
+                        //    Kt[r].select<REG_N/2, 2>(z) = Kt_quant[r].select<REG_N/2, 2>(z) - temp_zp[r+z];
+                        //    Kt[r].select<REG_N/2, 2>(z)  = cm_mul<half>(Kt[r].select<REG_N/2, 2>(z), temp_scale[r+z]);
+                        //    Kt[r+1].select<REG_N/2, 2>(z) = Kt_quant[r+1].select<REG_N/2, 2>(z) - temp_zp[r+z];
+                        //    Kt[r+1].select<REG_N/2, 2>(z)  = cm_mul<half>(Kt[r+1].select<REG_N/2, 2>(z), temp_scale[r+z]);
+                        //}
+                    // }
+
+                    auto Kt_dequant_out = Kt.format<half, REG_K/2, 2*REG_N>();
+                    auto Kt_dequant_tmp = Kt_quant.format<uint8_t, REG_K/2, 2*REG_N>();
+                    #pragma unroll
+                    for(int r = 0; r < REG_K/2; r++) {
+                        Kt_dequant_out[r].select<REG_N, 2>(0) = Kt_dequant_tmp[r].select<REG_N, 2>(0) - temp_zp[r*2];
+                        Kt_dequant_out[r].select<REG_N, 2>(0) = cm_mul<half>(Kt_dequant_out[r].select<REG_N, 2>(0), temp_scale[r*2]);
+                        Kt_dequant_out[r].select<REG_N, 2>(1) = Kt_dequant_tmp[r].select<REG_N, 2>(1) - temp_zp[r*2+1];
+                        Kt_dequant_out[r].select<REG_N, 2>(1) = cm_mul<half>(Kt_dequant_out[r].select<REG_N, 2>(1), temp_scale[r*2+1]);
+                    }
+                    #endif
                 #else
                     cm_load<lsc::Transpose>(Kt.format<uint>(), b2dK.set_block_y(kv_pos));
                     #if CLEAN_UNUSED_KVCACHE & 0
@@ -1191,15 +1314,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             #if Q_RepeatCount != 1
                 matrix<half, Q_RepeatCount, REG_K> Qmat_data = Qmat.select<Q_RepeatCount,1,REG_K,1>(0, ri*REG_K);
                 matrix<float, Q_RepeatCount, REG_N> rS_data = 0;
-                #pragma unroll
-                for(int qi = 0; qi < Q_SLICE_NUM; qi ++) {
-                    Qmat_data[qi] = Qmat[qi].format<half, HEAD_SIZE / REG_K, REG_K>()[ri];
-                }
                 rS_data = cm_dpas<CM_PRECISION_HF, CM_PRECISION_HF, SystolicDepth, Q_RepeatCount>(
                             rS_data.format<float>(),
                             Kt.format<int32_t>(),
                             Qmat_data.format<int32_t>());
-                rS.select<Q_RepeatCount,1,REG_N,1>(0, ki*REG_N) += rS_data;
+                rS.select<Q_RepeatCount, 1, REG_N, 1>(0, ki*REG_N) += rS_data;
 
                 //if(kv_partition_idx==kv_partition_num - 1 && kv_head_num_idx == KV_HEADS_NUM - 1) {
                 //    show(rS_data);
@@ -1228,12 +1347,12 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     vector<float, Q_SLICE_NUM> cur_sum = 0.0f;
     vector<float, Q_SLICE_NUM> cur_lse = 0.0f;
     #if XE_ARCH==1
-    matrix<half, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K> Pmat = 0;
+    matrix<half, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_N> Pmat = 0;
     #else
         #if Q_RepeatCount != 1
-            matrix<half, Q_RepeatCount, KV_PARTITION_STEP_NUM * REG_M * REG_K> Pmat = 0;
+            matrix<half, Q_RepeatCount, KV_PARTITION_STEP_NUM * REG_M * REG_N> Pmat = 0;
         #else
-            matrix<half, Q_SLICE_NUM, KV_PARTITION_STEP_NUM * REG_M * REG_K> Pmat = 0;
+            matrix<half, Q_SLICE_NUM, KV_PARTITION_STEP_NUM * REG_M * REG_N> Pmat = 0;
         #endif
     #endif
     #pragma unroll
@@ -1252,7 +1371,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         // compute lse
         constexpr float log2e = 1.4426950408889634f;
         constexpr float loge2 = 0.6931471805599453f;
-        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp = cm_exp(rS_slice.format<float>()*log2e);
 
         // compute row_max
         auto rSv = rS_slice.format<float>();
@@ -1264,14 +1382,15 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
         for(int r = 1; r < rSv.n_elems(); r++)
             row_max = cm_max<float>(row_max, rSv[r]);
 
-        // compute P = exp(rS_slice - row_max)
+        // compute Pmat = exp(rS_slice - row_max)
         #if XE_ARCH==1
         Pmat[qi].format<half, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K>() = cm_exp((rS_slice.format<float, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K>() - row_max)*log2e);
+        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max)*log2e);
         #else
-        Pmat[qi].format<half, KV_PARTITION_STEP_NUM * REG_M, REG_K>() = cm_exp((rS_slice - row_max)*log2e);
+        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max)*log2e);
+        Pmat[qi].format<half, KV_PARTITION_STEP_NUM * REG_M, REG_N>() = rS_exp_temp;
         #endif
 
-        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max)*log2e);
         cur_lse[qi] = cm_sum<float>(rS_exp_temp.format<float>());
         cur_lse[qi] = cm_log<float>(cur_lse[qi]) * loge2 + row_max; // log2(sum(exp(x))) = log2e * log(sum(exp(x)))
 
@@ -1294,19 +1413,19 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     #pragma unroll
     for(uint block_idx = 0, ki = 0; block_idx < block_num; block_idx++) {
         uint blk_indices = block_indices[start_block_idx + block_idx];
-        uint kv_base_offset = blk_indices * per_kv_block_element_num + kv_head_num_idx * (per_kv_block_element_num / KV_HEADS_NUM);
-        uint kv_scale_zp_offset = kv_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset
+        uint v_base_offset = blk_indices * per_v_block_element_num + kv_head_num_idx * (per_v_block_element_num / KV_HEADS_NUM);
+        uint v_scale_zp_offset = v_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset
 
     #if USE_LSC_BLOCK_2D_DESC
         //# vector load cannot be used for block_2d_desc
         //# note: candidate template ignored: deduced type 'details::Block2DRefTy<half, 1U, 16U, 1U, (LoadOp)0U>' (aka 'vector_ref<half,32>') of 1st parameter
         #if KV_CACHE_COMPRESSION
-        lsc::block_2d_desc<uint8_t, 1, REG_K, REG_N> b2dV(value + kv_base_offset,  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
+        lsc::block_2d_desc<uint8_t, 1, REG_K, REG_N> b2dV(value + v_base_offset,  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
         #else
-        lsc::block_2d_desc<half, 1, REG_K, REG_N>   b2dV(value + kv_base_offset,  KV_BLOCK_SIZE - 1, HEAD_SIZE*sizeof(half) - 1, kv_pitch - 1, 0, 0);
+        lsc::block_2d_desc<half, 1, REG_K, REG_N>   b2dV(value + v_base_offset,  KV_BLOCK_SIZE - 1, HEAD_SIZE * sizeof(half) - 1, kv_pitch - 1, 0, 0);
         #endif
     #else
-        uint kv_offset = kv_base_offset;
+        uint kv_offset = v_base_offset;
         uint kv_stride = HEAD_SIZE;
         uint kv_x0 = 0, kv_y0 = 0;
         uint kv_x1 = HEAD_SIZE*sizeof(half);
@@ -1321,27 +1440,27 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             kv_pos_end = leftover_size % KV_BLOCK_SIZE;
             if(kv_pos_end == 0) kv_pos_end = KV_BLOCK_SIZE;
         }
-        
+
         #if KV_CACHE_COMPRESSION
-        // load scale/zp
-        vector<half, KV_BLOCK_SIZE> scale_vec;
-        vector<half, KV_BLOCK_SIZE> zp_vec;
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset), scale_vec);
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
-        if(kv_pos_end < KV_BLOCK_SIZE) {
-            // fill leftover with last valid scale/zp
-            for(int i = kv_pos_end; i < KV_BLOCK_SIZE; i++) {
-                scale_vec[i] = 0.0;
-                zp_vec[i] = 0.0;
+            // load scale/zp
+            vector<half, KV_BLOCK_SIZE> scale_vec;
+            vector<half, KV_BLOCK_SIZE> zp_vec;
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(value + v_scale_zp_offset), scale_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(value + v_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
+            if(kv_pos_end < KV_BLOCK_SIZE) {
+                // fill leftover with last valid scale/zp
+                for(int i = kv_pos_end; i < KV_BLOCK_SIZE; i++) {
+                    scale_vec[i] = 0.0;
+                    zp_vec[i] = 0.0;
+                }
             }
-        }
         #endif
         #pragma unroll
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += REG_K, ki++) {
             // uint kv_offset_y = kv_pos;
             #if KV_CACHE_COMPRESSION
-            vector<half, REG_N> temp_scale = scale_vec.select<REG_N,1>(kv_pos);
-            vector<half, REG_N> temp_zp = zp_vec.select<REG_N,1>(kv_pos);
+            vector<half, REG_K> temp_scale = scale_vec.select<REG_K, 1>(kv_pos);
+            vector<half, REG_K> temp_zp = zp_vec.select<REG_K, 1>(kv_pos);
             #endif
             #pragma unroll
             for(int k = 0, ri = 0; k < HEAD_SIZE; k += REG_N, ri ++ ) {
@@ -1349,7 +1468,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
                 matrix<half, REG_K, REG_N> VmatNormal;
                 matrix<half, REG_M, REG_K*REG_N> Vmat;
             #if USE_LSC_BLOCK_2D_DESC
-                b2dV.set_block_x(k);
+                b2dV.set_block_x(k); // x is the column index
                 #if KV_CACHE_COMPRESSION
                     // dequantize
                     matrix<uint8_t, REG_K, REG_N> Vt_quant;
@@ -1372,13 +1491,13 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
 
                     if(kv_pos_end - kv_pos < KV_STEP) {
                         #pragma unroll
-                        for(int r = kv_pos_end; r<KV_STEP; r++)  {
+                        for(int r = kv_pos_end; r < KV_STEP; r++)  {
                             VmatNormal[r] = 0;
                         }
                     }
                     prepackAsVNNIWidth2(VmatNormal, Vmat.format<half, REG_K/2, REG_N*2>());
                 #else
-                    cm_load<lsc::VNNI>(Vmat[0].format<half>(), b2dV.set_block_y(kv_pos));
+                    cm_load<lsc::VNNI>(Vmat[0].format<half>(), b2dV.set_block_y(kv_pos)); // y is the row index
                     // somtimes KV cache would be filled with random Nan, so need to clean up the unused value data.
                     #if CLEAN_UNUSED_KVCACHE
                     if(kv_pos_end - kv_pos < KV_STEP) {
@@ -1447,7 +1566,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
     #pragma unroll
     for (int qi = 0; qi < Q_SLICE_NUM; qi++) {
         matrix<float, REG_M, REG_N> cur_O_f32;
-        uint o_offset = seq_idx * kv_partition_num * KV_HEADS_NUM * HEAD_SIZE + kv_partition_num * (head_num_idx + qi) * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
+        uint o_offset = seq_idx * kv_partition_num * HEADS_NUM * HEAD_SIZE + kv_partition_num * (head_num_idx + qi) * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
         float div_cur_sum = 1.0/cur_sum[qi];
         auto Omat_slice = Omat[qi].format<float, HEAD_SIZE/REG_N * REG_M, REG_N>();
         #pragma unroll
@@ -1460,7 +1579,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd(
             #endif
             cm_svm_block_write<float, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f32.format<float>());
         }
-        uint lse_offset = seq_idx * KV_HEADS_NUM * kv_partition_num + (head_num_idx + qi) * kv_partition_num + wg_thread_id;
+        uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + (head_num_idx + qi) * kv_partition_num + wg_thread_id;
         lse[lse_offset] = cur_lse[qi];
     }
 }
@@ -1484,7 +1603,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     //#   key [block_num, head_num, block_size, head_size] + [block_num, head_num, block_size, 4] (scale/zp)
     //# value [block_num, head_num, block_size, head_size] + [block_num, head_num, block_size, 4] (scale/zp)
 
-    //# KV_PARTITION_SIZE should be multiple of kv_block_size(KV_BLOCK_SIZE)
+    //# KV_PARTITION_SIZE here equals to half kv_block_size(KV_BLOCK_SIZE)
     //# kv_len dimision will be split into multiple partitions, each WG process a partition
     //# total_partitions_num = kv_len // KV_PARTITION_SIZE
     //# GWS=[seq_num, num_heads, total_partitions_num]
@@ -1507,7 +1626,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     //# const uint subsequence_begin = subsequence_begins[subsequence_idx];
     //# const uint subsequence_end = subsequence_begins[subsequence_idx + 1];
     const uint kv_len = past_lens[seq_idx] + 1;
-    const uint start_block_idx = block_indices_begins[seq_idx] + kv_partition_idx * KV_PARTITION_SIZE / KV_BLOCK_SIZE;
+    const uint start_block_idx = block_indices_begins[seq_idx] + (kv_partition_idx * KV_PARTITION_SIZE) / KV_BLOCK_SIZE;
 
     //if(cm_global_id(0)==0 && cm_global_id(1)==0 && cm_global_id(2)==0)
     //{
@@ -1535,9 +1654,8 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     //    printf("Qmat loaded, kv_head_num_idx=%d\n", kv_head_num_idx);
     //    show(Qmat);
     //}
-    
-    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(KV_ELEMENT_TYPE)); // 4 bytes: scale/zp
-    //uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
+
+    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE); // 4 bytes: scale/zp
 
     uint leftover_size = 0;
     if(kv_partition_idx == kv_partition_num - 2) {
@@ -1548,9 +1666,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     if(kv_partition_idx == kv_partition_num - 1) {
         leftover_size = (kv_len - KV_PARTITION_SIZE * kv_partition_idx);
     }
-    //if(block_num > total_blocks_num - start_block_idx) {
-    //    block_num = total_blocks_num - start_block_idx;
-    //}
 
     //# rS = Q @ Kt
     //#  KV_PARTITION_STEP_NUM * [REG_M, REG_K] * [REG_K, REG_N] = KV_PARTITION_STEP_NUM * [REG_M, REG_N]
@@ -1559,9 +1674,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     #else
         matrix<float, Q_SLICE_NUM, REG_M * KV_PARTITION_STEP_NUM * REG_N> rS = 0;
     #endif
-    // # Each SG can process half blocks
-    // #pragma unroll
-    // for(uint block_idx = 0, ki = 0; block_idx < block_num; block_idx++)
+    // Each SG can process half block
     {
         uint ki = 0;
         uint blk_indices = block_indices[start_block_idx];
@@ -1612,11 +1725,10 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
         //    printf("kv_partition_idx = %d, leftover_size = %d, kv_pos_end = %d, token_idx = %d\n", kv_partition_idx, leftover_size, kv_pos_end, kv_pos_end + KV_PARTITION_SIZE * kv_partition_idx + block_idx*KV_BLOCK_SIZE);
         //}
 
-
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             // auto rSvec = rS[ki].format<float>();
             // uint kv_offset_y = kv_pos;
-            
+
             #if KV_CACHE_COMPRESSION
                 vector<half, REG_N * 2> temp_scale, temp_zp;
                 temp_scale.select<REG_N,2>(0) = scale_vec.select<REG_N,1>(kv_pos);
@@ -1738,12 +1850,11 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     vector<float, Q_SLICE_NUM> cur_sum = 0.0f;
     vector<float, Q_SLICE_NUM> cur_lse = 0.0f;
     #if XE_ARCH==1
-    matrix<half, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K> Pmat = 0;
     #else
         #if Q_RepeatCount != 1
-            matrix<half, Q_RepeatCount, KV_PARTITION_STEP_NUM * REG_M * REG_K> Pmat = 0;
+            matrix<half, Q_RepeatCount, KV_PARTITION_STEP_NUM * REG_M * REG_N> Pmat = 0;
         #else
-            matrix<half, Q_SLICE_NUM, KV_PARTITION_STEP_NUM * REG_M * REG_K> Pmat = 0;
+            matrix<half, Q_SLICE_NUM, KV_PARTITION_STEP_NUM * REG_M * REG_N> Pmat = 0;
         #endif
     #endif
     #pragma unroll
@@ -1774,14 +1885,15 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
         for(int r = 1; r < rSv.n_elems(); r++)
             row_max = cm_max<float>(row_max, rSv[r]);
 
-        // compute P = exp(rS_slice - row_max)
+        // compute Pmat = exp(rS_slice - row_max)
         #if XE_ARCH==1
         Pmat[qi].format<half, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K>() = cm_exp((rS_slice.format<float, KV_PARTITION_STEP_NUM / 2 * REG_M, REG_K>() - row_max)*log2e);
+        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max) * log2e);
         #else
-        Pmat[qi].format<half, KV_PARTITION_STEP_NUM * REG_M, REG_K>() = cm_exp((rS_slice - row_max)*log2e);
+        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max) * log2e);
+        Pmat[qi].format<half, KV_PARTITION_STEP_NUM * REG_M, REG_N>() = rS_exp_temp;
         #endif
 
-        vector<float, KV_PARTITION_STEP_NUM * REG_N> rS_exp_temp = cm_exp((rS_slice.format<float>() - row_max)*log2e);
         cur_lse[qi] = cm_sum<float>(rS_exp_temp.format<float>());
         cur_lse[qi] = cm_log<float>(cur_lse[qi]) * loge2 + row_max; // log2(sum(exp(x))) = log2e * log(sum(exp(x)))
 
@@ -1802,8 +1914,6 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     #else
     matrix <float, Q_SLICE_NUM, HEAD_SIZE/REG_N * REG_M*REG_N> Omat = 0;
     #endif
-    //#pragma unroll
-    //for(uint block_idx = 0, ki = 0; block_idx < block_num; block_idx++)
     {
         uint ki = 0;
         uint blk_indices = block_indices[start_block_idx];
@@ -1837,27 +1947,27 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
             kv_pos_end = leftover_size % KV_PARTITION_SIZE;
             if(kv_pos_end == 0) kv_pos_end = KV_PARTITION_SIZE;
         }
-        
+
         #if KV_CACHE_COMPRESSION
-        // load scale/zp
-        vector<half, KV_PARTITION_SIZE> scale_vec;
-        vector<half, KV_PARTITION_SIZE> zp_vec;
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset), scale_vec);
-        cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
-        if(kv_pos_end < KV_PARTITION_SIZE) {
-            // fill leftover with last valid scale/zp
-            for(int i = kv_pos_end; i < KV_PARTITION_SIZE; i++) {
-                scale_vec[i] = 0.0;
-                zp_vec[i] = 0.0;
+            // load scale/zp
+            vector<half, KV_PARTITION_SIZE> scale_vec;
+            vector<half, KV_PARTITION_SIZE> zp_vec;
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset), scale_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(value + kv_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
+            if(kv_pos_end < KV_PARTITION_SIZE) {
+                // fill leftover with last valid scale/zp
+                for(int i = kv_pos_end; i < KV_PARTITION_SIZE; i++) {
+                    scale_vec[i] = 0.0;
+                    zp_vec[i] = 0.0;
+                }
             }
-        }
         #endif
         #pragma unroll
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += REG_K, ki++) {
             // uint kv_offset_y = kv_pos;
             #if KV_CACHE_COMPRESSION
-            vector<half, REG_N> temp_scale = scale_vec.select<REG_N,1>(kv_pos);
-            vector<half, REG_N> temp_zp = zp_vec.select<REG_N,1>(kv_pos);
+            vector<half, REG_K> temp_scale = scale_vec.select<REG_K,1>(kv_pos);
+            vector<half, REG_K> temp_zp = zp_vec.select<REG_K,1>(kv_pos);
             #endif
             #pragma unroll
             for(int k = 0, ri = 0; k < HEAD_SIZE; k += REG_N, ri ++ ) {
@@ -1888,7 +1998,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
 
                     if(kv_pos_end - kv_pos < KV_STEP) {
                         #pragma unroll
-                        for(int r = kv_pos_end; r<KV_STEP; r++)  {
+                        for(int r = kv_pos_end; r < KV_STEP; r++)  {
                             VmatNormal[r] = 0;
                         }
                     }
@@ -1963,7 +2073,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
     #pragma unroll
     for (int qi = 0; qi < Q_SLICE_NUM; qi++) {
         matrix<float, REG_M, REG_N> cur_O_f32;
-        uint o_offset = seq_idx * kv_partition_num * KV_HEADS_NUM * HEAD_SIZE + kv_partition_num * (head_num_idx + qi) * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
+        uint o_offset = seq_idx * kv_partition_num * HEADS_NUM * HEAD_SIZE + kv_partition_num * (head_num_idx + qi) * HEAD_SIZE + wg_thread_id * HEAD_SIZE;
         float div_cur_sum = 1.0/cur_sum[qi];
         auto Omat_slice = Omat[qi].format<float, HEAD_SIZE/REG_N * REG_M, REG_N>();
         #pragma unroll
@@ -1976,7 +2086,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_half_block(
             #endif
             cm_svm_block_write<float, REG_N>((svmptr_t)(output + o_offset + k),cur_O_f32.format<float>());
         }
-        uint lse_offset = seq_idx * KV_HEADS_NUM * kv_partition_num + (head_num_idx + qi) * kv_partition_num + wg_thread_id;
+        uint lse_offset = seq_idx * HEADS_NUM * kv_partition_num + (head_num_idx + qi) * kv_partition_num + wg_thread_id;
         lse[lse_offset] = cur_lse[qi];
     }
 }
@@ -1990,7 +2100,7 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
         auto batch = cm_global_id(0);
         auto head = cm_global_id(1);
         auto offset = cm_group_id(2) * REDUCE_SPLIT_SIZE;
-        const int total_partition_num = (kv_partition_num * KV_HEADS_NUM);
+        const int total_partition_num = (kv_partition_num * HEADS_NUM);
 
         // load lse
         float total_lse = 0.0;
@@ -2036,16 +2146,16 @@ extern "C" _GENX_MAIN_ void cm_sdpa_2nd_reduce(
             float lse_value = cm_exp<float>((lse_vec[k] - lse_max)*log2e);
             out_mat_f32 += cm_mul<float>(data_mat, (float)(lse_value/total_lse));
         }
-        
+
         //if(cm_global_id(1) == 28 && cm_global_id(2) == 0) {
         //    printf("out_mat_f32:\n");
         //    show(out_mat_f32);
         //}
-        
+
         out_mat = cm_mul<half>(out_mat_f32, (float)1.0f);
         // write output
         uint output_offset = batch * HEADS_NUM * HEAD_SIZE + head * HEAD_SIZE + offset;
-        cm_svm_block_write<half, REDUCE_SPLIT_SIZE>((svmptr_t)(output + output_offset),out_mat.format<half>());
+        cm_svm_block_write<half, REDUCE_SPLIT_SIZE>((svmptr_t)(output + output_offset), out_mat.format<half>());
     }
 '''
 
@@ -2088,12 +2198,12 @@ print("first call ...")
 
 if kv_partition_size * 2 == kv_block_size:
     cm_kernels.enqueue("cm_sdpa_2nd_half_block", GWS, LWS, t_q, t_k, t_v,
-                   t_past_lens, t_block_indices, t_block_indices_begins,
-                   t_subsequence_begins,t_out, t_lse, t_gws_subseq_mapping, q_len)
+                       t_past_lens, t_block_indices, t_block_indices_begins,
+                       t_subsequence_begins,t_out, t_lse, t_gws_subseq_mapping, q_len)
 else:
     cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS, t_q, t_k, t_v,
-                   t_past_lens, t_block_indices, t_block_indices_begins,
-                   t_subsequence_begins,t_out, t_lse, t_gws_subseq_mapping, q_len)
+                       t_past_lens, t_block_indices, t_block_indices_begins,
+                       t_subsequence_begins,t_out, t_lse, t_gws_subseq_mapping, q_len)
 
 # np.save("bmg_out", t_out.numpy())
 
@@ -2146,20 +2256,20 @@ for i in range(loop_cnt):
     j  = i % len(all_layers)
     if kv_partition_size * 2 == kv_block_size:
         cm_kernels.enqueue("cm_sdpa_2nd_half_block", GWS, LWS,
-                       all_layers[j][0],
-                       all_layers[j][1],
-                       all_layers[j][2],
-                       t_past_lens, t_block_indices, t_block_indices_begins,t_subsequence_begins,
-                       all_layers[j][3],
-                       t_lse, t_gws_subseq_mapping, q_len)
+                           all_layers[j][0],
+                           all_layers[j][1],
+                           all_layers[j][2],
+                           t_past_lens, t_block_indices, t_block_indices_begins,t_subsequence_begins,
+                           all_layers[j][3],
+                           t_lse, t_gws_subseq_mapping, q_len)
     else:
         cm_kernels.enqueue("cm_sdpa_2nd", GWS, LWS,
-                       all_layers[j][0],
-                       all_layers[j][1],
-                       all_layers[j][2],
-                       t_past_lens, t_block_indices, t_block_indices_begins,t_subsequence_begins,
-                       all_layers[j][3],
-                       t_lse, t_gws_subseq_mapping, q_len)
+                           all_layers[j][0],
+                           all_layers[j][1],
+                           all_layers[j][2],
+                           t_past_lens, t_block_indices, t_block_indices_begins,t_subsequence_begins,
+                           all_layers[j][3],
+                           t_lse, t_gws_subseq_mapping, q_len)
 
     cm_kernels.enqueue("cm_sdpa_2nd_reduce", GWS_2, LWS_2, all_layers[j][3],all_layers[j][4], t_lse, kv_partition_num)
 
@@ -2187,8 +2297,8 @@ for ns in latency:
 
 
 print()
-# print("intermedia_total_time = ", intermedia_total_time*1e-6, "ms")
-# print("kvcache_total_time = ", kvcache_total_time*1e-6, "ms")
+print("intermedia_total_time = ", intermedia_total_time*1e-6, "ms")
+print("kvcache_total_time = ", kvcache_total_time*1e-6, "ms")
 
 print(f"num_runs = {num_runs}, avg kvcache = {kvcache_size*num_runs/kvcache_total_time:.3f} GB/s, avg intermedia = {intermedia_size*num_runs/(intermedia_total_time):.3f} GB/s")
 print()
