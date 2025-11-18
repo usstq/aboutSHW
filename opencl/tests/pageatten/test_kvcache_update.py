@@ -63,20 +63,10 @@ class pa_kvcache_update_cm:
         # print(f"============ {batch_size_in_tokens=} {batch_size_in_sequences=}")
         # print(f"============ {key.stride()=} {value.stride()=}")
 
-        t_key = cl.tensor(key.to(torch.float16).detach().numpy())
-        t_value = cl.tensor(value.to(torch.float16).detach().numpy())
-        
         if kv_cache_compression_enabled:
             kv_cache_type = torch.uint8
         else:
             kv_cache_type = torch.float16
-        t_key_cache = cl.tensor(key_cache.to(kv_cache_type).detach().numpy())
-        t_value_cache = cl.tensor(value_cache.to(kv_cache_type).detach().numpy())
-
-        t_block_indices=cl.tensor(torch.tensor(block_indices).to(torch.int32).detach().numpy())
-        t_past_lens=cl.tensor(torch.tensor(past_lens).to(torch.int32).detach().numpy())
-        t_block_indices_begins=cl.tensor(torch.tensor(block_indices_begins).to(torch.int32).detach().numpy())
-        t_subsequence_begins=cl.tensor(torch.tensor(subsequence_begins).to(torch.int32).detach().numpy())
 
         wg_count = (batch_size_in_tokens + self.wg_size - 1) // self.wg_size
         GWS = [1, self.num_kv_heads, int(wg_count * self.wg_size)]
@@ -84,6 +74,18 @@ class pa_kvcache_update_cm:
 
         for i in range(0, n_repeats):
             print(f'{Colors.GREEN}calling pa_kv_cache_update {GWS=} {LWS=} {key_pitch=} {val_pitch=} {batch_size_in_sequences=} at {i}/{n_repeats} times {Colors.END}')
+
+            t_key = cl.tensor(key.to(torch.float16).detach().numpy())
+            t_value = cl.tensor(value.to(torch.float16).detach().numpy())
+
+            t_key_cache = cl.tensor(key_cache.to(kv_cache_type).detach().numpy())
+            t_value_cache = cl.tensor(value_cache.to(kv_cache_type).detach().numpy())
+
+            t_block_indices=cl.tensor(torch.tensor(block_indices).to(torch.int32).detach().numpy())
+            t_past_lens=cl.tensor(torch.tensor(past_lens).to(torch.int32).detach().numpy())
+            t_block_indices_begins=cl.tensor(torch.tensor(block_indices_begins).to(torch.int32).detach().numpy())
+            t_subsequence_begins=cl.tensor(torch.tensor(subsequence_begins).to(torch.int32).detach().numpy())
+
             self.kernels.enqueue("pa_kv_cache_update", GWS, LWS, t_key, t_value,
                             t_past_lens, t_block_indices, t_block_indices_begins, t_subsequence_begins, 
                             t_key_cache, t_value_cache,
@@ -96,7 +98,7 @@ class pa_kvcache_update_cm:
                 else:
                     total_bytes = batch_size_in_tokens * self.num_kv_heads * (4 * self.k_head_size + 4 * self.v_head_size)
                 tput = total_bytes / time_opt
-                print(f'(pa_kv_cache_update)TPUT_{i}:[{total_bytes*1e-6:,} MB] {tput/1e3:,.2f} GB/s')
+                print(f'(pa_kv_cache_update)TPUT_{i}:[{total_bytes*1e-6:,} MB] {tput:,.2f} GB/s')
 
         return t_key_cache.numpy(), t_value_cache.numpy()
                     
@@ -130,9 +132,9 @@ def test_pa_kv_cache_update(num_tokens:list, past_lens:list, num_kv_heads=1, k_h
 
         required_blocks = (subsequence_length + block_size - 1) // block_size
 
-        block_indices_start_pos = block_indices_begins[i];
-        block_indices_end_pos = block_indices_start_pos + required_blocks;
-        block_indices_begins.append(block_indices_end_pos);
+        block_indices_start_pos = block_indices_begins[i]
+        block_indices_end_pos = block_indices_start_pos + required_blocks
+        block_indices_begins.append(block_indices_end_pos)
 
     # simulate random block allocation
     num_blocks = block_indices_begins[-1]
@@ -343,12 +345,12 @@ if __name__ == "__main__":
     
     # test_pa_kv_cache_update([1024, 16, 17], [16, 0, 1])
     test_pa_kv_cache_update([32*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
-    test_pa_kv_cache_update([64*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
-    test_pa_kv_cache_update([128*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
-    test_pa_kv_cache_update([32*1024], [4*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
-    test_pa_kv_cache_update([128*1024], [1*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    # test_pa_kv_cache_update([64*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    # test_pa_kv_cache_update([128*1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    # test_pa_kv_cache_update([32*1024], [4*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    # test_pa_kv_cache_update([128*1024], [1*1024], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
     
-    test_pa_kv_cache_update([1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
-    # test_pa_kv_cache_update([1], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
+    # test_pa_kv_cache_update([1024], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=True)
+    test_pa_kv_cache_update([1], [0], num_kv_heads=8, k_head_size=128, v_head_size=128, block_size=256, check_perf=False)
     # test_pa_kv_cache_update([1024], [0], num_kv_heads=2, k_head_size=16, v_head_size=16, block_size=32, check_perf=False)
     # test_pa_kv_cache_update([129], [0], num_kv_heads=2, k_head_size=64, v_head_size=64, block_size=16, check_perf=True)
