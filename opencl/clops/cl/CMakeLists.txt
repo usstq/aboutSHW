@@ -41,7 +41,7 @@ if(DEFINED ENV{OV_BUILD_PATH})
         )
     else()
         set_target_properties(onednn_gpu PROPERTIES
-            IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/openvino_onednn_gpu.a"
+            IMPORTED_LOCATION "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/lib/libopenvino_onednn_gpu.a"
             INTERFACE_INCLUDE_DIRECTORIES "$ENV{OV_BUILD_PATH}/src/plugins/intel_gpu/thirdparty/onednn_gpu_install/include/"
         )
     endif()
