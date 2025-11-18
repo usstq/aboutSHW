@@ -62,6 +62,15 @@ void show(const matrix<T, M, N> mat, bool isfloat=true) {
     }
     printf("]\n");
 }
+
+template<typename T, int N>
+void show(vector<T, N> vec) {
+    printf("\t[");
+    for(int n = 0; n < N; n ++) {
+        printf("%8.4f,", vec[n]);
+    }
+    printf("]\n");
+}
 #endif
 template <typename T1, typename T2>
 CM_INLINE void Transpose_16x16(matrix_ref<T1, 16, 16> in,

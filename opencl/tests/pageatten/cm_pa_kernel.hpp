@@ -1,11 +1,6 @@
 
 #include "cm_pa_common.hpp"
 
-#ifdef CM_HAS_LSC_UNTYPED_2D
-#define USE_LSC 1
-#else
-#define USE_LSC 0
-#endif
 
 extern "C" _GENX_MAIN_ void cm_page_attention(
     //query [q_len, num_heads, S]

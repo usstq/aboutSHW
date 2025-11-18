@@ -22,49 +22,54 @@ def get_cm_grf_width():
     return t_info.numpy()[0]
 
 CM_GRF_WIDTH = get_cm_grf_width()
+print(f"{CM_GRF_WIDTH=}")
+if CM_GRF_WIDTH == 256:
+    xe_arch = 1
+else:
+    xe_arch = 2
 
 def quan_per_token(kv):
-        blk_num, kv_heads, blksz, *_ = kv.shape
-        kv_max = kv.amax(dim=-1, keepdim = True)
-        kv_min = kv.amin(dim=-1, keepdim = True)
-        qrange = kv_max - kv_min
+    blk_num, kv_heads, blksz, *_ = kv.shape
+    kv_max = kv.amax(dim=-1, keepdim = True)
+    kv_min = kv.amin(dim=-1, keepdim = True)
+    qrange = kv_max - kv_min
 
-        INTMAX = 255.0
-        INTMIN = 0.0
-        INTRAGNE = INTMAX - INTMIN
-        kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
-        kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
-        #round half to even
-        kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        # print("################################################################################")
-        # print(f'KV\n:{kv.reshape(64, 16)}')
-        # print(f'kv_INT8\n:{kv_INT8.reshape(64, 16)}')
-        # print(f'kv_scale\n:{kv_scale.reshape( 1, 64)}')
-        # print(f'kv_zp\n:{kv_zp.reshape( 1, 64)}')
-        # print("################################################################################")
+    INTMAX = 255.0
+    INTMIN = 0.0
+    INTRAGNE = INTMAX - INTMIN
+    kv_scale = ((INTRAGNE)/qrange).to(dtype=torch.half)
+    kv_zp = ((0.0-kv_min)*kv_scale+INTMIN).to(dtype=torch.half)
+    #round half to even
+    kv_INT8 = torch.round((kv*kv_scale+kv_zp)).to(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    # print("################################################################################")
+    # print(f'KV\n:{kv.reshape(64, 16)}')
+    # print(f'kv_INT8\n:{kv_INT8.reshape(64, 16)}')
+    # print(f'kv_scale\n:{kv_scale.reshape( 1, 64)}')
+    # print(f'kv_zp\n:{kv_zp.reshape( 1, 64)}')
+    # print("################################################################################")
 
-        dq_scale = (1.0/kv_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
-        return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
+    dq_scale = (1.0/kv_scale).view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    kv_zp = kv_zp.view(dtype=torch.uint8).reshape(blk_num,kv_heads,-1)
+    return torch.concat((kv_INT8, dq_scale, kv_zp), dim=-1)
 
 def dequant_per_token(kv, head_size, blk_size):
-        blk_num, kv_head_num, _ = kv.shape
-        kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
-        kv_scale = kv[:,:,head_size * blk_size:head_size * blk_size + blk_size * 2].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
-        kv_zp = kv[:,:,head_size * blk_size + blk_size * 2:head_size * blk_size + blk_size * 4].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
+    blk_num, kv_head_num, _ = kv.shape
+    kv_u8 = kv[:,:,:head_size * blk_size].to(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, head_size)
+    kv_scale = kv[:,:,head_size * blk_size:head_size * blk_size + blk_size * 2].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
+    kv_zp = kv[:,:,head_size * blk_size + blk_size * 2:head_size * blk_size + blk_size * 4].view(dtype=torch.float16).reshape(blk_num, kv_head_num, blk_size, 1)
 
-        # print("dequant_kv_u8 = ", kv_u8)
-        # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
-        # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
+    # print("dequant_kv_u8 = ", kv_u8)
+    # print("dequant_kv_scale = ", kv_scale.reshape(blk_num, kv_head_num, blk_size))
+    # print("dequant_kv_zp    = ", kv_zp.reshape(blk_num, kv_head_num, blk_size))
 
-        kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
+    kv_dequant = torch.empty([blk_num, kv_head_num, blk_size, head_size], dtype=torch.float16)
 
-        for m in range(blk_num):
-            for n in range(kv_head_num):
-                for i in range(blk_size):
-                    kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
+    for m in range(blk_num):
+        for n in range(kv_head_num):
+            for i in range(blk_size):
+                kv_dequant[m,n,i,:] = (kv_u8[m,n,i,:].to(dtype=torch.float16) - kv_zp[m,n,i,0].to(dtype=torch.float16)) * kv_scale[m,n,i,0].to(dtype=torch.float16)
 
-        return kv_dequant
+    return kv_dequant
 
 def ALIGN_UP(x, y):
     return (x + y -1) // y * y
@@ -98,6 +103,7 @@ class page_atten_cm:
                       f" -DCMPA_BLOCK_SZ={self.block_sz}"
                       f" -DSPARSE_BLOCK_SIZE={int(sparse_block_sz)}"
                       f" -DCMPA_KVCACHE_U8={int(compressed_kvcache)}"
+                      f" -DCMPA_XE_ARCH={int(xe_arch)}"
                       f" -mdump_asm -g2")
                      )
 
@@ -250,7 +256,8 @@ class page_atten_cm:
                 t_block_indices_begins=cl.tensor(block_indices_begins.to(torch.int32).detach().numpy())
                 t_subsequence_begins=cl.tensor(subsequence_begins.to(torch.int32).detach().numpy())
 
-                print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}, sparse_block_sz:{self.sparse_block_sz} kv_cache:{"U8" if self.compressed_kvcache else "F16"}")
+                kv_precision = "U8" if self.compressed_kvcache else "F16"
+                print(f"calling cm_page_attention {GWS=} {LWS=} x {n_repeats} times, q:[{q_start}, {q_end}], past_lens:{int(past_lens)}, kv_blk_num:{blk_num}, sparse_block_sz:{self.sparse_block_sz} kv_cache:{kv_precision}")
                 if self.sparse_block_sz > 1:
                     t_block_mask = cl.tensor(block_mask_list[trunk_idx].to(torch.bool).detach().numpy())
                     t_block_mask_in_wg  = cl.tensor(block_mask_in_wg_list[trunk_idx].to(torch.bool).detach().numpy())
@@ -373,11 +380,13 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
     print(f"[check_close] rtol_max: {rtol_max}")
     print(f"[check_close] atol_max: {atol_max}")
     if not torch.allclose(input, other, atol=atol, rtol=rtol):
+        print(input)
+        print(other)
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
         print(f"Not close indices: {not_close_indices}")
-        # print(f"    input_tensor: {input[not_close_indices]}")
-        # print(f"    other_tensor: {other[not_close_indices]}")
+        print(f"    input_tensor: {input[not_close_indices]}")
+        print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
 def count_false_percentage(mask):
@@ -446,7 +455,6 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         block_mask[:,:,:,0] = True  # the first column is always True
         # if q_block_num == 2 and k_block_num == 2: # HARD CODE FOR DEBUG
         #     block_mask = torch.tensor([True, False, False, True], dtype=torch.bool).reshape(q_block_num, k_block_num).expand(trunk_num, num_heads, q_block_num, k_block_num)
-
 
         return block_mask
 
@@ -610,7 +618,8 @@ def test_ov():
     GWS = [1, pa_cm.num_heads, int(wg_count * wg_size)]
     LWS = [1, 1, wg_size]
 
-    print(f"calling cm_page_attention {GWS=} {LWS=} sparse_block_sz:{pa_cm.sparse_block_sz} kv_cache:{"U8" if pa_cm.compressed_kvcache else "F16"}")
+    kv_precision = "U8" if pa_cm.compressed_kvcache else "F16"
+    print(f"calling cm_page_attention {GWS=} {LWS=} sparse_block_sz:{pa_cm.sparse_block_sz} kv_cache:{kv_precision}")
     if pa_cm.sparse_block_sz > 1:
         t_block_mask = cl.tensor(block_mask.to(torch.bool).detach().numpy())
         t_block_mask_in_wg  = cl.tensor(block_mask_in_wg.to(torch.bool).detach().numpy())
@@ -653,17 +662,18 @@ def test_ov():
 if __name__ == "__main__":
 
     # test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=sparse_ratio, check_acc=True)
+    # test_page_attn_causal_batch1(32768, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=256, trunk_sz=4096, compressed_kvcache=False, sparse_block_sz = 1, check_acc=False)
     #ACC test PA base
-    if 0:
+    if 1:
         for block_sz in range(32, 144, 16):
             for blocks_per_trunk in range(1, 30, 6):
                 for seq_len in range(8192, 8248, 3):
-                    for compressed_kv in [False, True]:
+                    for compressed_kv in [True,False]:
                         print("----------------------------------------------------------------------------------------------------------------------------------------------------------------------")
                         print(f'[PA_BASE_ACC_TETS]: seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} kv_cache=={"U8" if compressed_kv else "F16"} sparse_block_sz=1')
                         print("----------------------------------------------------------------------------------------------------------------------------------------------------------------------")
                         test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kv, sparse_block_sz = 1, check_acc=True)
-                        test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kv, sparse_block_sz = 1, check_acc=True)
+                        test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kv, sparse_block_sz = 1, check_acc=False)
 
         for block_sz in range(128, 257, 32):
                 for seq_len in range(32768, 32810):
@@ -690,7 +700,7 @@ if __name__ == "__main__":
                                 test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 32, block_sz=block_sz, trunk_sz=blocks_per_trunk*block_sz, compressed_kvcache=compressed_kvcache, sparse_block_sz = sparse_block_sz, sparse_ratio=sparse_ratio, check_acc=True)
 
     # perf for sparse X attention.
-    if 1:
+    if 0:
         seq_len = 32*1024
         block_sz = 256
         trunk_sz=seq_len
