@@ -23,6 +23,9 @@
 #include <cm/cm.h>
 #include <cm/cmtl.h>
 
+#include "sort.hpp"
+#define MYMIN(x, y) ((x) < (y) ? (x) : (y))
+
 #define MYCONCAT(x, y) x ## y
 #define IS_float 1
 #define IS_half 2
