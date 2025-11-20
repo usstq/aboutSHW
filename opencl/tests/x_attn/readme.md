@@ -195,3 +195,66 @@ hardware roofline: `2.9G*20eu*8*32*4*2=118T/s`, current hits about 85%/89%, the 
 ### intel-gpu-tools
 - record: `xe-perf-recorder --metric ComputeBasic`
 - decode: `xe-perf-reader xe_perf.record -c all`
+
+
+
+# Porting to Xe1
+
+## Statefull block load/store/prefetch
+```
+template <typename T, int NElts, DataSize DS = DataSize::Default,
+          CacheHint L1H = CacheHint::Default,
+          CacheHint L2H = CacheHint::Default>
+vector<RetTy, NElts> cm_load(SurfaceIndex Idx, unsigned Offset);
+
+cm_prefetch
+```
+
+## Stateless block load/store/prefetch
+```
+template <typename T, int NElts, DataSize DS = DataSize::Default,
+          CacheHint L1H = CacheHint::Default,
+          CacheHint L2H = CacheHint::Default>
+vector<RetTy, NElts> cm_ptr_load(const T *const Ptr, unsigned Offset);
+
+cm_ptr_prefetch
+```
+
+## Untyped 2D block load/store/prefetch
+target-dependent and only available when CM_HAS_LSC_UNTYPED_2D macro is defined.
+```
+template <typename T, int Width, int Height = 1, int NumBlocks = 1,
+          bool Transposed = false, bool Transformed = false,
+          CacheHint L1H = CacheHint::Default,
+          CacheHint L2H = CacheHint::Default,
+vector<T, N> cm_ptr_load(T *Ptr, unsigned SurfaceWidth, unsigned SurfaceHeight,
+                         unsigned SurfacePitch, int X, int Y);
+
+cm_ptr_prefetch
+```
+
+## Untyped descriptor based 2D block load/store/prefetch
+target-dependent and only available when CM_HAS_LSC_UNTYPED_2D macro is defined.
+```
+cm_load
+cm_prefetch
+```
+
+## Typed load/store/prefetch
+target-dependent and only available when CM_HAS_LSC_TYPED macro is defined.
+```
+cm_load4_typed
+cm_prefetch4_typed
+```
+
+## Typed 2D block load/store
+target-dependent and only available when CM_HAS_LSC_TYPED_2D macro is defined.
+```
+cm_load(SurfaceIndex Idx, int X, int Y, matrix_ref<T, Height, Width> Data);
+cm_prefetch(SurfaceIndex Idx, int X, int Y);
+```
+
+## charpter4.19 Shared Virtual Memory (SVM)
+```
+cm_svm_block_read(svmptr_t v_Addr, vector_ref<TYPE, N> v_Src);
+```
