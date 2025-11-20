@@ -28,7 +28,7 @@ def create_kernels():
     jit_option = '-abortonspill -noschedule '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}"
                         -mCM_printregusage -mdump_asm -g2
-                        -Qxcm_register_file_size=256 -I{cwd}
+                        -Qxcm_register_file_size=128 -I{cwd}
                         -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK}
                         -DBLOCK_SIZE={BLOCK_SIZE}
                         -DMERGED_Q_NUM={MERGED_Q_NUM}''')

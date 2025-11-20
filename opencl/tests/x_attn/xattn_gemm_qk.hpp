@@ -69,7 +69,6 @@ extern "C" _GENX_MAIN_ void gemm_qk(
     uint M, uint N, uint K, uint query_stride, int slice_no, int slice, uint q_start_strided) {
     const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
-    const uint size_slm_b = 0;
     uint hq = cm_group_id(2) * WALK_HQ;
     hq += cm_group_id(0) & (WALK_HQ - 1);
     if (hq >= HQ) return;

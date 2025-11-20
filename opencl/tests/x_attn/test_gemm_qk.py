@@ -14,6 +14,21 @@ def div_up(a, b):
 def rnd_up(a, b):
     return (a + b - 1) // b * b
 
+#  determine Xe1/Xe2
+def get_cm_grf_width():
+    cm_kernels = cl.kernels(r'''
+    extern "C" _GENX_MAIN_ void cm_get_grf_width(int * info [[type("svmptr_t")]]) {
+        info[0] = CM_GRF_WIDTH;
+    }''', f"-cmc")
+    t_info = cl.tensor([2], np.dtype(np.int32))
+    cm_kernels.enqueue("cm_get_grf_width", [1], [1], t_info)
+    return t_info.numpy()[0]
+
+CM_GRF_WIDTH = get_cm_grf_width()
+print(f'{CM_GRF_WIDTH=}')
+
+# gemmQK
+
 kernel_name = 'gemm_qk'
 BLOCK_SG_M = 64 #32
 BLOCK_SG_N = 32
@@ -29,7 +44,7 @@ HEAD_SIZE = 128
 STRIDE = 16
 BLOCK_SIZE = 128
 THRESH = 0.9
-IS_CAUSAL = 1
+IS_CAUSAL = 0
 USE_INT8 = 0
 if USE_INT8:
     HEAD_SIZE_KEY = HEAD_SIZE + 2 * 2
@@ -155,20 +170,17 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     # loop N first:[0, 1], loop M first:[0, 0]; block M first[slice_no, slice(>0)], block N first[slice_no, slice(<0)]
     #default linear
     slice_no = 0
-    block_m = M // BLOCK_WG_M
-    block_n = N // BLOCK_WG_N
-    devinfo = cl.dev_info()
-    eu_xecore = 8
-    xecores = devinfo["CL_DEVICE_MAX_COMPUTE_UNITS"] // eu_xecore
-    slice_no = 0
     slice = 0
-    print(f'{xecores=} {block_m=} {block_n=} {slice=} {slice_no=}')
+    print(f'{slice=} {slice_no=}')
 
     global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
 
-    # gemm
+    # gemm warmup
     for i in range(1):
-        kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+        kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1],
+                        t_key_cache, t_query, t_block_indices, t_block_indices_begins,
+                        t_kq_max_wg, t_kq_exp_partial_sum,
+                        M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
     cl.finish()
 
     if not perf:
@@ -185,7 +197,10 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     else:
         flops = B * Hq * M * N * K * 2
         for i in range(0, 100):
-            kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1], t_key_cache, t_query, t_block_indices, t_block_indices_begins, t_kq_max_wg, t_kq_exp_partial_sum, M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+            kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1],
+                            t_key_cache, t_query, t_block_indices, t_block_indices_begins,
+                            t_kq_max_wg, t_kq_exp_partial_sum,
+                            M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
