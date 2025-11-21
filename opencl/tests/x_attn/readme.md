@@ -201,6 +201,7 @@ hardware roofline: `2.9G*20eu*8*32*4*2=118T/s`, current hits about 85%/89%, the 
 # Porting to Xe1
 
 ## Statefull block load/store/prefetch
+Hardware will return 0 for the out-of-bound bytes.
 ```
 template <typename T, int NElts, DataSize DS = DataSize::Default,
           CacheHint L1H = CacheHint::Default,
@@ -211,6 +212,7 @@ cm_prefetch
 ```
 
 ## Stateless block load/store/prefetch
+Hardware will return 0 for the out-of-bound bytes.
 ```
 template <typename T, int NElts, DataSize DS = DataSize::Default,
           CacheHint L1H = CacheHint::Default,
@@ -236,7 +238,14 @@ cm_ptr_prefetch
 ## Untyped descriptor based 2D block load/store/prefetch
 target-dependent and only available when CM_HAS_LSC_UNTYPED_2D macro is defined.
 ```
-cm_load
+template <lsc::LoadOp Op = lsc::LoadOp::Normal,
+          CacheHint L1H = CacheHint::Default,
+          CacheHint L2H = CacheHint::Default,
+          int OffsetX = 0, int OffsetY = 0>
+void cm_load(details::Block2DRefTy<T, BlockH, BlockW, NBlocks, Op> Res,
+            const lsc::block_2d_desc<T, NBlocks, BlockH, BlockW> &Desc,
+            int16_t Pred = 1);
+
 cm_prefetch
 ```
 

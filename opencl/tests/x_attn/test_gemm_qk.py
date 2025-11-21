@@ -36,7 +36,7 @@ SG_M = 4
 SG_N = 8
 BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
-KV_BLOCK_SIZE = 256
+KV_BLOCK_SIZE = 256   # should BLOCK_WG_N be dividable by KV_BLOCK_SIZE?
 
 HQ = 32
 HK = 8
@@ -76,7 +76,7 @@ def create_kernels(force_create=False):
                         -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
                         -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={INV_S} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
                         -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}
-                        -DDEBUG_ACC={FIND_DEBUG_ACC}
+                        -DDEBUG_ACC={FIND_DEBUG_ACC} -DSG_SIZE={CM_GRF_WIDTH//32}
                         ''')
 
 def quant_i8(k:torch.Tensor):
@@ -172,15 +172,17 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
     slice_no = 0
     slice = 0
     print(f'{slice=} {slice_no=}')
+    query_stride = K * HQ * 2   # i.e. (stride * S) * HQ * 2
+    M_kq_groups = q_stride_pad // BLOCK_WG_M
 
-    global_size = [N_kq_groups * (q_stride_pad // BLOCK_WG_M) * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
+    global_size = [N_kq_groups * M_kq_groups * SG_N * WALK_HQ, SG_M, Hq // WALK_HQ]
 
     # gemm warmup
     for i in range(1):
         kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1],
                         t_key_cache, t_query, t_block_indices, t_block_indices_begins,
                         t_kq_max_wg, t_kq_exp_partial_sum,
-                        M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+                        M, N, K, query_stride, slice_no, slice, q_start_strided)
     cl.finish()
 
     if not perf:
@@ -200,7 +202,7 @@ def test_gemm(q:torch.Tensor, k:torch.Tensor, block_size=128, q_start_strided=0,
             kernels.enqueue(kernel_name, global_size, [SG_N, SG_M, 1],
                             t_key_cache, t_query, t_block_indices, t_block_indices_begins,
                             t_kq_max_wg, t_kq_exp_partial_sum,
-                            M, N, K, K * HQ * 2, slice_no, slice, q_start_strided)
+                            M, N, K, query_stride, slice_no, slice, q_start_strided)
             ns = cl.finish()
             for i, time_opt in enumerate(ns):
                 print(f'(GEMM)TPUT_{i}:{flops/time_opt:,.0f} GFLOPS, BW:{(M*K+K*N+M*N)*2/time_opt:,.0f} GB/s {time_opt*1e-3:,.0f} us')
