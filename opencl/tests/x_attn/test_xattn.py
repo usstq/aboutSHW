@@ -748,4 +748,4 @@ if __name__ == "__main__":
     # num_q_head == num_kv_head
     # chunk size alignment
     # causal_mask
-    main(load_from_ov_dump = True)
+    main(load_from_ov_dump = False)

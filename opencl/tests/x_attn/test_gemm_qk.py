@@ -76,7 +76,7 @@ def create_kernels(force_create=False):
                         -DSTRIDE={STRIDE} -DHQ={HQ} -DHK={HK} -DHEAD_SIZE={HEAD_SIZE} -DSG_M={SG_M} -DSG_N={SG_N} -DBLOCK_SG_N={BLOCK_SG_N} -DBLOCK_SG_M={BLOCK_SG_M}
                         -DBLOCK_SIZE={BLOCK_SIZE} -DINV_S={INV_S} -DKV_BLOCK_SIZE={KV_BLOCK_SIZE} -DBLOCK_SHARE_MAX={BLOCK_WG_N} -DWALK_HQ={WALK_HQ}
                         -DIS_CAUSAL={IS_CAUSAL} -DUSE_INT8={USE_INT8} -DHEAD_SIZE_KEY={HEAD_SIZE_KEY} -DSOFTMAX_TYPE={SOFTMAX_TYPE}
-                        -DDEBUG_ACC={FIND_DEBUG_ACC} -DSG_SIZE={CM_GRF_WIDTH//32}
+                        -DDEBUG_ACC={FIND_DEBUG_ACC}
                         ''')
 
 def quant_i8(k:torch.Tensor):
