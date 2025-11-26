@@ -78,7 +78,7 @@ void pa_lsc_u8(
             matrix<half, REG_N, head_size> rQtmp;
             #pragma unroll
             for(int r = 0; r < q_tokens_left; r++){
-                cm_svm_block_read<half, head_size>((svmptr_t)((half*)q_base + r * head_size), rQtmp.row(r));
+                cm_svm_block_read<half, head_size>((svmptr_t)((half*)q_base + r * (q_pitch / sizeof(half))), rQtmp.row(r));
             }
             if (q_tokens_left < q_step) {
                 for(int r = q_tokens_left; r < q_step; r++) {
@@ -333,11 +333,12 @@ void pa_lsc_u8(
             #if USE_LSC
             cm_store(b2dO.set_block_y(p * REG_M), cur_O_f16.format<half, num_P_tiles, REG_M * REG_N>().row(p));
             #else
-            half* output_ptr = (half*)o_base + p * REG_M * head_size + k;
+            int o_stride_elems = o_pitch / sizeof(half);
+            half* output_ptr = (half*)o_base + p * REG_M * o_stride_elems + k;
             auto cur_O_ref = cur_O_f16.format<half, num_P_tiles, REG_M * REG_N>().row(p).format<half, REG_M, REG_N>();
             #pragma unroll
-            for(int r = 0; r < REG_M; r++) {
-                cm_svm_block_write<half, REG_N>((svmptr_t)((half*)output_ptr + r * head_size), cur_O_ref.row(r).format<half>());
+            for (int r = 0; r < REG_M; r++) {
+                cm_svm_block_write<half, REG_N>((svmptr_t)(output_ptr + r * o_stride_elems), cur_O_ref.row(r).format<half>());
             }
             #endif
         }
@@ -401,8 +402,8 @@ void pa_kernel_lsc_prefetch_f16(
             // for xe1, load original Q
             matrix<half, REG_N, head_size> rQtmp;
             #pragma unroll
-            for(int r = 0; r < q_tokens_left; r++){
-                cm_svm_block_read<half, head_size>((svmptr_t)((half*)q_base + r * head_size), rQtmp.row(r));
+            for (int r = 0; r < q_tokens_left; r++) {
+                cm_svm_block_read<half, head_size>((svmptr_t)((half*)q_base + r * (q_pitch / sizeof(half))), rQtmp.row(r));
             }
             if (q_tokens_left < q_step) {
                 for(int r = q_tokens_left; r < q_step; r++) {
@@ -645,11 +646,12 @@ void pa_kernel_lsc_prefetch_f16(
             #if USE_LSC
             cm_store(b2dO.set_block_y(p * REG_M), cur_O_f16.format<half, num_P_tiles, REG_M * REG_N>().row(p));
             #else
-            half* output_ptr = (half*)o_base + p * REG_M * head_size + k;
+            int o_stride_elems = o_pitch / sizeof(half);
+            half* output_ptr = (half*)o_base + p * REG_M * o_stride_elems + k;
             auto cur_O_ref = cur_O_f16.format<half, num_P_tiles, REG_M * REG_N>().row(p).format<half, REG_M, REG_N>();
             #pragma unroll
-            for(int r = 0; r < REG_M; r++) {
-                cm_svm_block_write<half, REG_N>((svmptr_t)((half*)output_ptr + r * head_size), cur_O_ref.row(r).format<half>());
+            for (int r = 0; r < REG_M; r++) {
+                cm_svm_block_write<half, REG_N>((svmptr_t)(output_ptr + r * o_stride_elems), cur_O_ref.row(r).format<half>());
             }
             #endif
         }
