@@ -12,8 +12,8 @@ CM_INLINE void cm_load_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint of
     }
 }
 
-extern "C" _GENX_MAIN_ void cm_stateful_load(SurfaceIndex A [[type("buffer_t")]],
-                                             uint offset_a, uint pitch_in_byte,
+extern "C" _GENX_MAIN_ void test_stateful_load(SurfaceIndex A [[type("buffer_t")]],
+                                             uint offset_in_byte, uint pitch_in_byte,
                                              half* B [[type("svmptr_t")]]) {
     half sum = 0;
     auto id_wg_m = cm_group_id(0);
@@ -21,7 +21,7 @@ extern "C" _GENX_MAIN_ void cm_stateful_load(SurfaceIndex A [[type("buffer_t")]]
     constexpr uint k_step = K_STEP;
     
     auto m = id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M;
-    auto offset = offset_a + m * pitch_in_byte;
+    auto offset = offset_in_byte + m * pitch_in_byte;
 
     #pragma unroll
     for (uint k = 0; k < HEAD_SIZE*STRIDE; k += k_step) {
@@ -40,7 +40,7 @@ extern "C" _GENX_MAIN_ void cm_stateful_load(SurfaceIndex A [[type("buffer_t")]]
 }
 
 #ifdef CM_HAS_LSC_UNTYPED_2D
-extern "C" _GENX_MAIN_ void cm_lsc_2d_load(half* A [[type("svmptr_t")]],
+extern "C" _GENX_MAIN_ void test_lsc_2d_load(half* A [[type("svmptr_t")]],
                                            uint M, uint pitch_in_byte,
                                            half* B [[type("svmptr_t")]]) {
     half sum = 0;
@@ -89,8 +89,8 @@ CM_INLINE void cm_gather_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint 
     }
 }
 
-extern "C" _GENX_MAIN_ void cm_stateful_gather(SurfaceIndex A [[type("buffer_t")]],
-                                             uint offset_a, uint pitch_in_byte,
+extern "C" _GENX_MAIN_ void test_stateful_gather(SurfaceIndex A [[type("buffer_t")]],
+                                             uint offset_in_byte, uint pitch_in_byte,
                                              half* B [[type("svmptr_t")]]) {
     half sum = 0;
     auto id_wg_m = cm_group_id(0);
@@ -98,13 +98,45 @@ extern "C" _GENX_MAIN_ void cm_stateful_gather(SurfaceIndex A [[type("buffer_t")
     constexpr uint k_step = K_STEP;
     
     auto m = id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M;
-    auto offset = offset_a + m * pitch_in_byte;
+    auto offset = offset_in_byte + m * pitch_in_byte;
 
     #pragma unroll
     for (uint k = 0; k < HEAD_SIZE*STRIDE; k += k_step) {
         matrix<half, BLOCK_SG_M, k_step> a0;
 
         cm_gather_2d(a0, A, offset + k * 2, pitch_in_byte);
+
+        #pragma unroll
+        for(int i = 0; i < a0.n_rows(); i += 1) {
+            // # for(int j = 0; j < a0.n_cols(); j++)
+                sum += a0.row(i)[0];
+            //}
+        }
+    }
+
+    B[m/BLOCK_SG_M] = sum;
+}
+
+
+extern "C" _GENX_MAIN_ void test_svm_block_read(const svmptr_t A [[type("svmptr_t")]],
+                                             uint pitch_in_byte,
+                                             half* B [[type("svmptr_t")]]) {
+    half sum = 0;
+    auto id_wg_m = cm_group_id(0);
+    auto id_sg_m = cm_local_id(1);
+    constexpr uint k_step = K_STEP;
+    
+    auto m = id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M;
+    auto base_addr = A + m * pitch_in_byte;
+
+    #pragma unroll
+    for (uint k = 0; k < HEAD_SIZE*STRIDE; k += k_step) {
+        matrix<half, BLOCK_SG_M, k_step> a0;
+
+        #pragma unroll
+        for(int i = 0; i < BLOCK_SG_M; i++){
+            cm_svm_block_read<half, k_step>(base_addr + (k * 2 + i * pitch_in_byte), a0.row(i));
+        }
 
         #pragma unroll
         for(int i = 0; i < a0.n_rows(); i += 1) {
@@ -162,19 +194,25 @@ total_bytes = M * K * 2 + (M//BLOCK_SG_M) * 2
 flops = M * (HEAD_SIZE * STRIDE // K_STEP)
 n_repeats = 10
 for j in range(0, n_repeats):
-    k.enqueue("cm_stateful_load", gws, lws, cl.tensor(A.numpy()), 0, K*2, cl.tensor(B.numpy()))
+    k.enqueue("test_stateful_load", gws, lws, cl.tensor(A.numpy()), 0, K*2, cl.tensor(B.numpy()))
     latency = cl.finish()
     for i, ns in enumerate(latency):
-        print(f'(cm_stateful_load [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
+        print(f'(test_stateful_load [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
         
 # for j in range(0, n_repeats):
-#     k.enqueue("cm_lsc_2d_load", gws, lws, cl.tensor(A.numpy()), M, K*2, cl.tensor(B.numpy()))
+#     k.enqueue("test_lsc_2d_load", gws, lws, cl.tensor(A.numpy()), M, K*2, cl.tensor(B.numpy()))
 #     latency = cl.finish()
 #     for i, ns in enumerate(latency):
-#         print(f'(cm_lsc_2d_load [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
+#         print(f'(test_lsc_2d_load [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
         
 for j in range(0, n_repeats):
-    k.enqueue("cm_stateful_gather", gws, lws, cl.tensor(A.numpy()), 0, K*2, cl.tensor(B.numpy()))
+    k.enqueue("test_stateful_gather", gws, lws, cl.tensor(A.numpy()), 0, K*2, cl.tensor(B.numpy()))
     latency = cl.finish()
     for i, ns in enumerate(latency):
-        print(f'(cm_stateful_gather [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
+        print(f'(test_stateful_gather [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
+        
+for j in range(0, n_repeats):
+    k.enqueue("test_svm_block_read", gws, lws, cl.tensor(A.numpy()), K*2, cl.tensor(B.numpy()))
+    latency = cl.finish()
+    for i, ns in enumerate(latency):
+        print(f'(test_svm_block_read [{j},{i}]) TPUT:{flops/ns:,.0f} GFLOPS, BW: {total_bytes / ns:,.2f} GB/s with [{total_bytes*1e-6:,} MB] during {ns*1e-3:,.0f} us')
