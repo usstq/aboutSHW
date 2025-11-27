@@ -509,20 +509,27 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
     block_idx = MYMIN(block_idx, max_block_idx);
     offset = block_indices_p[block_idx] * (HK * KV_BLOCK_SIZE * HEAD_SIZE * (uint)sizeof(half));
     static_assert(BLOCK_WG_N / SG_MN <= KEY_LINES_PER_LOAD, "prefetch lines should be inside one block");
-    // lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{ key_cache + offset, BLOCK_WG_N / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
-        // 0, 0 };
+    #if USE_LSC_BLOCK_2D_DESC == 1
+    lsc::block_2d_desc<half, 1, BLOCK_WG_N / SG_MN, 32> desc_prefetch_b{ key_cache + offset, BLOCK_WG_N / SG_MN - 1, (uint)(K * sizeof(half) - 1), (uint)(K * sizeof(half) - 1),
+        0, 0 };
+    #else
+    uint off_prefetch_b = hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(half));
+    off_prefetch_b += offset;
+    #endif
     // 0~2 M[:]xK[0:16] 2~4 K[16:32]                                                     --> 32 * 2 regs
     matrix<half, REG_N, BLOCK_REG_B> b0, b1;      // ping-pong B
 #endif
 
     // warmup
     // prefetch
-    // cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-    // desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
     #if USE_LSC_BLOCK_2D_DESC == 1
+    cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+    desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
     cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
     desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
-    #else    
+    #else
+    cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(key_cache, off_prefetch_b);
+    off_prefetch_b += 32 * sizeof(half);  
     cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
     off_prefetch_a += 32 * sizeof(half);
     #endif
@@ -620,15 +627,17 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
         for (uint hs = 0; hs < HEAD_SIZE / BLOCK_WG_K; hs++) {
             // --------------------------------------------- unroll 0 ?      -----------------------------
             // prefetch
-            // cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-            // desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
             #if USE_LSC_BLOCK_2D_DESC == 1
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+            desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
                 desc_prefetch_a.set_block_x((STRIDE - 1 - s - 1) * b_adjacent_between_head);
             else
                 desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
             #else
+            cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(key_cache, off_prefetch_b);
+            off_prefetch_b += 32 * sizeof(half);
             cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
                 off_prefetch_a = base_off_prefetch_a + ((STRIDE - 1 - s - 1) * b_adjacent_between_head) * sizeof(half);
@@ -710,9 +719,9 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
             // --------------------------------------------- unroll 2 ?      -----------------------------
 
             // prefetch
-            // cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-            // desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
             #if USE_LSC_BLOCK_2D_DESC == 1
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
+            desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
 
@@ -720,6 +729,8 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
             #else
+            cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(key_cache, off_prefetch_b);
+            off_prefetch_b += 32 * sizeof(half);
             cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
             off_prefetch_a += 32 * sizeof(half);
 
