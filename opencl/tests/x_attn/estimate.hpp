@@ -333,6 +333,14 @@ CM_INLINE void cm_store_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint o
     }
 }
 
+template <int M, int N>
+CM_INLINE void cm_store_2d(matrix_ref<uint, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        cm_store<uint, N>(base, offset + i * pitch, out.row(i).format<uint>());
+    }
+}
+
 #if USE_INT8
     #define KV_ELEMENT_TYPE uint8_t
 #else
@@ -355,8 +363,12 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
         svmptr_t block_indices ATTR,
         svmptr_t block_indices_begins ATTR,
         svmptr_t kq_max_wg ATTR,
+        #if USE_LSC_BLOCK_2D_DESC == 1
         svmptr_t kq_exp_partial_sum ATTR,
-        uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
+        #else
+        SurfaceIndex kq_exp_partial_sum [[type("buffer_t")]],
+        #endif
+        const uint M, const uint N, const uint K, const uint query_stride, const uint q_start_strided, const uint offset_partial_sum) {
     constexpr int SG_SIZE = 16;     // Xe1==8?
     constexpr int BLOCK_WG_K = 64;	// same in sg  // because unroll 4 times along K ??
 #ifndef BLOCK_SG_M
@@ -688,7 +700,6 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
             #else
-            // read_2d(a0.format<half, 64, 16>(), reinterpret_cast<svmptr_t>(ptr_a), pitch_a * sizeof(half));
             cm_load_2d(a0.format<half, 64, 16>(), query, off_a, pitch_a);
             #endif
 
@@ -926,6 +937,7 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
         sum_t.select<32, 1, 4, 1>(32).format<SOFTMAX_TYPE>() = reduce2d<4, 1, 4>(acc_half.select<32, 1, 32, 1>(32)).format<SOFTMAX_TYPE>();
     }
     // store
+    #if USE_LSC_BLOCK_2D_DESC == 1
     lsc::block_2d_desc<SOFTMAX_TYPE, 1, 8, 4> desc_c{ kq_exp_partial_sum, M - 1, (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1), (uint)(K_block_pad * sizeof(SOFTMAX_TYPE) - 1),
         (int)((id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / block_size_div_stride), (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };
     cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 0>(desc_c, sum_t.select<8, 1, 4, 1>( 0).format<SOFTMAX_TYPE>());
@@ -936,5 +948,19 @@ CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
     cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 5>(desc_c, sum_t.select<8, 1, 4, 1>(40).format<SOFTMAX_TYPE>());
     cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 6>(desc_c, sum_t.select<8, 1, 4, 1>(48).format<SOFTMAX_TYPE>());
     cm_store<CacheHint::Uncached, CacheHint::WriteBack, 0, 8 * 7>(desc_c, sum_t.select<8, 1, 4, 1>(56).format<SOFTMAX_TYPE>());
+    #else
+    const uint pitch_c = K_block_pad * sizeof(SOFTMAX_TYPE);
+    uint off_c = offset_partial_sum;
+    off_c += pitch_c * (id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M);
+    off_c += ((id_wg_n * BLOCK_WG_N + id_sg_n * BLOCK_SG_N) / block_size_div_stride) * sizeof(SOFTMAX_TYPE);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>( 0).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 0) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>( 8).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 1) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(16).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 2) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(24).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 3) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(32).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 4) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(40).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 5) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(48).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 6) * pitch_c, pitch_c);
+    cm_store_2d(sum_t.select<8, 1, 4, 1>(56).format<uint, 8, 4>(), kq_exp_partial_sum, off_c + (8 * 7) * pitch_c, pitch_c);
+    #endif
 }
 #endif

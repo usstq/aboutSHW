@@ -70,7 +70,11 @@ extern "C" _GENX_MAIN_ void gemm_qk(
     svmptr_t block_indices ATTR,
     svmptr_t block_indices_begins ATTR,
     svmptr_t kq_max_wg ATTR,
+    #if USE_LSC_BLOCK_2D_DESC == 1
     svmptr_t kq_exp_partial_sum ATTR,
+    #else
+    SurfaceIndex kq_exp_partial_sum [[type("buffer_t")]],
+    #endif
     uint M, uint N, uint K, uint query_stride, int slice_no, int slice, uint q_start_strided) {
     const uint BLOCK_WG_M = BLOCK_SG_M * SG_M;
     const uint BLOCK_WG_N = BLOCK_SG_N * SG_N;
@@ -108,12 +112,15 @@ extern "C" _GENX_MAIN_ void gemm_qk(
     const uint sum_per_n_token_in_block = BLOCK_SIZE / STRIDE;
     const uint n_after_sum_in_group = BLOCK_WG_N / sum_per_n_token_in_block;
     const uint n_after_sum_pad = n_after_sum_in_group * n_groups;
-    kq_exp_partial_sum += hq * n_after_sum_pad * m_pad * (uint)sizeof(SOFTMAX_TYPE);
+    const uint offset_partial_sum = hq * n_after_sum_pad * m_pad * (uint)sizeof(SOFTMAX_TYPE);
+    #if USE_LSC_BLOCK_2D_DESC == 1
+    kq_exp_partial_sum += offset_partial_sum;
+    #endif
 
 #define CONCAT_IMPL(a, b) gemm_qk_ ##a ##x ##b ##_xe2
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 #define FUNC CONCAT(BLOCK_SG_M, BLOCK_SG_N)
-    FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
+    FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided, offset_partial_sum);
 }
 
 // }  // NAMESPACE
