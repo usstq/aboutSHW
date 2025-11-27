@@ -23,6 +23,12 @@
 #include <cm/cm.h>
 #include <cm/cmtl.h>
 
+// #ifdef CM_HAS_LSC_UNTYPED_2D
+#define USE_LSC_BLOCK_2D_DESC 0
+// #else
+// #define USE_LSC_BLOCK_2D_DESC 0
+// #endif
+
 #if defined(SHIM) || defined(CMRT_EMU)
 #define ATTR
 #define ATTR_BUF
@@ -286,12 +292,53 @@ CM_INLINE void write_2d(matrix_ref<TSRC, M, N> out, SurfaceIndex base, uint offs
     }
 }
 
+template <int M, int N>
+CM_INLINE void cm_load_2d(matrix_ref<uint, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        out.row(i).format<uint>() = cm_load<uint, N>(base, offset + i * pitch);
+    }
+}
+
+template <int M, int N>
+CM_INLINE void cm_load_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint offset, uint pitch, bool showit = 0) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        out.row(i).format<uint>() = cm_load<uint, N/2>(base, offset + i * pitch);
+    }
+}
+
+template <int M, int N>
+CM_INLINE void cm_store_2d(matrix_ref<half, M, N> out, SurfaceIndex base, uint offset, uint pitch) {
+    #pragma unroll
+    for(int i = 0; i < out.n_rows(); i++) {
+        cm_store<uint, N/2>(base, offset + i * pitch, out.row(i).format<uint>());
+    }
+}
+
+#if USE_INT8
+    #define KV_ELEMENT_TYPE uint8_t
+#else
+    #define KV_ELEMENT_TYPE half
+#endif
+
 #if 1 || (BLOCK_SG_M == 64 && BLOCK_SG_N == 32)
 // const static int channels_reduce_32[] = { 0, 16,  8, 24,  4, 20, 12, 28,  2, 18, 10, 26,  6, 22, 14, 30,  
 // 		                                  1, 17,  9, 25,  5, 21, 13, 29,  3, 19, 11, 27,  7, 23, 15, 31};
 // src_a is query, src_b is key
-CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm, svmptr_t key_cache ATTR, svmptr_t query ATTR, svmptr_t block_indices ATTR, svmptr_t block_indices_begins ATTR, svmptr_t kq_max_wg ATTR, svmptr_t kq_exp_partial_sum ATTR,
-uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
+
+CM_INLINE void gemm_qk_64x32_xe2(uint id_wg_m, uint id_wg_n, uint hq, uint slm,
+        svmptr_t key_cache ATTR,
+        #if USE_LSC_BLOCK_2D_DESC == 1
+        svmptr_t query ATTR,
+        #else
+        SurfaceIndex query [[type("buffer_t")]],
+        #endif
+        svmptr_t block_indices ATTR,
+        svmptr_t block_indices_begins ATTR,
+        svmptr_t kq_max_wg ATTR,
+        svmptr_t kq_exp_partial_sum ATTR,
+        uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     constexpr int SG_SIZE = 16;     // Xe1==8?
     constexpr int BLOCK_WG_K = 64;	// same in sg  // because unroll 4 times along K ??
 #ifndef BLOCK_SG_M
@@ -338,6 +385,8 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     constexpr SOFTMAX_TYPE log2e = 1.4426950408889634f;
     //static_assert(BLOCK_SG_M / block_size_div_stride == 8, "BLOCK_SG_M / block_size_div_stride should be 8");
 
+    static constexpr int SG_MN = SG_M * SG_N;
+
 #if IS_CAUSAL == 1
     if ((int)(id_wg_n * BLOCK_WG_N) >= ((int)id_wg_m + 1) * BLOCK_WG_M + q_start_strided) {
         // fill -inf -> max in group, 0 -> exp_sum to make compensation work
@@ -369,14 +418,25 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     // assume block index coming from 0 in block_indices_begins
     int block_index_begin = ((int*)block_indices_begins)[0];
     int* block_indices_p = (int*)block_indices + block_index_begin;
-    int b_adjacent_between_head = query_stride / STRIDE;   // query_stride_in_original_space = S * HQ * 2 ?
+    int b_adjacent_between_head = query_stride / STRIDE;   // query_stride_in_original_space = HEAD_SIZE * HQ * 2 ?
     // M[0:16*2]xK[0:16]
+    #if USE_LSC_BLOCK_2D_DESC == 1
     lsc::block_2d_desc<half, 1, 32, BLOCK_REG_K> desc_a{ query, M - 1, (uint)((query_stride - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(query_stride * sizeof(half) - 1),
         (STRIDE - 1) * b_adjacent_between_head, (int)(id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M) };   // 32 = BLOCK_SG_M/2 ?
     // prefetch A
-    static constexpr int SG_MN = SG_M * SG_N;
     lsc::block_2d_desc<half, 1, BLOCK_WG_M / SG_MN, 32> desc_prefetch_a{query, M - 1, (uint)((query_stride - hq * HEAD_SIZE) * sizeof(half) - 1), (uint)(query_stride * sizeof(half) - 1),
         (STRIDE - 1) * b_adjacent_between_head, (int)(id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN)) };  // 32 = BLOCK_REG_K * 2 (prefetch every 2 iters) ?
+    #else
+    const uint pitch_a = query_stride * sizeof(half);
+    uint base_off_a = hq * HEAD_SIZE * (uint)sizeof(half);
+    uint base_off_prefetch_a = base_off_a;
+
+    base_off_a += pitch_a * (id_wg_m * BLOCK_WG_M + id_sg_m * BLOCK_SG_M);
+    uint off_a = base_off_a + ((STRIDE - 1) * b_adjacent_between_head) * sizeof(half);
+
+    base_off_prefetch_a += pitch_a * (id_wg_m * BLOCK_WG_M + id_sg_mn * (BLOCK_WG_M / SG_MN));
+    uint off_prefetch_a = base_off_prefetch_a + ((STRIDE - 1) * b_adjacent_between_head) * sizeof(half);
+    #endif
     // M[0:16*2]xK[0:16]    // should be M[0:32*2]xK[0:16] instead ?                                                              --> 8+8 regs
     matrix<half, REG_M, BLOCK_REG_A> a0;
 
@@ -430,8 +490,13 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
     // prefetch
     cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
     desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
+    #if USE_LSC_BLOCK_2D_DESC == 1
     cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
     desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
+    #else    
+    cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
+    off_prefetch_a += 32;
+    #endif
 
     // load b: N[0:16]xK[0:16]
 #if USE_INT8
@@ -517,16 +582,30 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             // --------------------------------------------- unroll 0 ?      -----------------------------
             // prefetch
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
+            #if USE_LSC_BLOCK_2D_DESC == 1
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
                 desc_prefetch_a.set_block_x((STRIDE - 1 - s - 1) * b_adjacent_between_head);
             else
                 desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
+            #else
+            cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
+            if (hs == HEAD_SIZE / BLOCK_WG_K - 1)
+                off_prefetch_a = base_off_prefetch_a + ((STRIDE - 1 - s - 1) * b_adjacent_between_head) * sizeof(half);
+            else
+                off_prefetch_a += 32;
+            #endif
 
             // load a: M[0:16*4]xK[0:16]
+            #if USE_LSC_BLOCK_2D_DESC == 1
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
+            if(id_sg_mn==0 && s==0) show(a0.format<half, 64, 16>());
+            #else
+            // read_2d(a0.format<half, 64, 16>(), reinterpret_cast<svmptr_t>(ptr_a), pitch_a * sizeof(half));
+            cm_load_2d(a0.format<half, 64, 16>(), query, off_a, pitch_a, (id_sg_mn==0 && s==0));
+            #endif
             // load b: N[0:16*2]xK[16:32]
 #if USE_INT8
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1_up_s8.format<int>(), desc_b0);
@@ -538,16 +617,25 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1[1].format<int>(), desc_b1);
             dot(a0, b0);
 #endif
-
+            #if USE_LSC_BLOCK_2D_DESC == 1
             desc_a.set_block_x(desc_a.get_block_x() + BLOCK_REG_K);
+            #else
+            // ptr_a += BLOCK_REG_K;
+            off_a += BLOCK_REG_K * sizeof(half);
+            #endif
             desc_b0.set_block_x(desc_b0.get_block_x() + 8);
             desc_b1.set_block_x(desc_b1.get_block_x() + 8);
 
             // --------------------------------------------- unroll 1 ?      -----------------------------
 
             // load a: M[0:16*4]xK[16:32]
+            #if USE_LSC_BLOCK_2D_DESC == 1
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
+            #else
+            // read_2d(a0.format<half, 64, 16>(), reinterpret_cast<svmptr_t>(ptr_a), pitch_a * sizeof(half));
+            cm_load_2d(a0.format<half, 64, 16>(), query, off_a, pitch_a);
+            #endif
 
 #if USE_INT8
             dec(b0_up_s8.format<int>().select<64, 1>(64), b0_down_s8.format<int>().select<64, 1>(64), b0);
@@ -559,19 +647,34 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             desc_b0.set_block_x(desc_b0.get_block_x() + 8);
             desc_b1.set_block_x(desc_b1.get_block_x() + 8);
 #endif
+            #if USE_LSC_BLOCK_2D_DESC == 1
             desc_a.set_block_x(desc_a.get_block_x() + BLOCK_REG_K);
+            #else
+            // ptr_a += BLOCK_REG_K;
+            off_a += BLOCK_REG_K * sizeof(half);
+            #endif
 
             // --------------------------------------------- unroll 2 ?      -----------------------------
 
             // prefetch
             cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_b);
-            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             desc_prefetch_b.set_block_x(desc_prefetch_b.get_block_x() + 32);
+            #if USE_LSC_BLOCK_2D_DESC == 1
+            cm_prefetch<CacheHint::Cached, CacheHint::Cached>(desc_prefetch_a);
             desc_prefetch_a.set_block_x(desc_prefetch_a.get_block_x() + 32);
+            #else
+            cm_prefetch<16, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(query, off_prefetch_a);
+            off_prefetch_a += 32;
+            #endif
 
             // load a: M[0:16*4]xK[32:48]
+            #if USE_LSC_BLOCK_2D_DESC == 1
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
+            #else
+            // read_2d(a0.format<half, 64, 16>(), reinterpret_cast<svmptr_t>(ptr_a), pitch_a * sizeof(half));
+            cm_load_2d(a0.format<half, 64, 16>(), query, off_a, pitch_a);
+            #endif
 
             // load b: N[0:16*2]xK[32:64]
 #if USE_INT8
@@ -584,14 +687,19 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b1[1].format<int>(), desc_b1);
             dot(a0, b0);
 #endif
-
+            #if USE_LSC_BLOCK_2D_DESC == 1
             desc_a.set_block_x(desc_a.get_block_x() + BLOCK_REG_K);
+            #else
+            // ptr_a += BLOCK_REG_K;
+            off_a += BLOCK_REG_K * sizeof(half);
+            #endif
             desc_b0.set_block_x(desc_b0.get_block_x() + 8);
             desc_b1.set_block_x(desc_b1.get_block_x() + 8);
 
             // --------------------------------------------- unroll 3 ?      -----------------------------
 
             // load a: M[0:16*4]xK[48:64]
+            #if USE_LSC_BLOCK_2D_DESC == 1
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0,  0>(a0.select<4, 1, BLOCK_REG_A, 1>(0).format<half>(), desc_a);
             cm_load<lsc::Normal, CacheHint::Cached, CacheHint::Cached, 0, 32>(a0.select<4, 1, BLOCK_REG_A, 1>(4).format<half>(), desc_a);
             if (hs == HEAD_SIZE / BLOCK_WG_K - 1) {
@@ -599,6 +707,17 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
             } else {
                 desc_a.set_block_x(desc_a.get_block_x() + BLOCK_REG_K);
             }
+            #else
+            // read_2d(a0.format<half, 64, 16>(), reinterpret_cast<svmptr_t>(ptr_a), pitch_a * sizeof(half));
+            cm_load_2d(a0.format<half, 64, 16>(), query, off_a, pitch_a);
+            if (hs == HEAD_SIZE / BLOCK_WG_K - 1) {
+                // ptr_a = base_a + ((STRIDE - 1 - s - 1) * b_adjacent_between_head);
+                off_a = base_off_a + ((STRIDE - 1 - s - 1) * b_adjacent_between_head) * sizeof(half);
+            } else {
+                // ptr_a += BLOCK_REG_K;
+                off_a += BLOCK_REG_K * sizeof(half);
+            }
+            #endif
 
 #if USE_INT8
             dec(b1_up_s8.format<int>().select<64, 1>(64), b1_down_s8.format<int>().select<64, 1>(64), b0);

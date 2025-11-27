@@ -24,8 +24,8 @@ def get_cm_grf_width():
     cm_kernels.enqueue("cm_get_grf_width", [1], [1], t_info)
     return t_info.numpy()[0]
 
-CM_GRF_WIDTH = get_cm_grf_width()
-print(f'{CM_GRF_WIDTH=}')
+# CM_GRF_WIDTH = get_cm_grf_width()
+# print(f'{CM_GRF_WIDTH=}')
 
 # gemmQK
 
@@ -38,12 +38,12 @@ BLOCK_WG_M = BLOCK_SG_M * SG_M
 BLOCK_WG_N = BLOCK_SG_N * SG_N
 KV_BLOCK_SIZE = 256   # should BLOCK_WG_N be dividable by KV_BLOCK_SIZE?
 
-HQ = 32
-HK = 8
-HEAD_SIZE = 128
+HQ = 1
+HK = 1
+HEAD_SIZE = 64
 STRIDE = 16
 BLOCK_SIZE = 128
-THRESH = 0.9
+THRESH = 1.0
 IS_CAUSAL = 0
 USE_INT8 = 0
 if USE_INT8:
@@ -69,7 +69,8 @@ def create_kernels(force_create=False):
     cwd = os.path.dirname(os.path.realpath(__file__))
     print(f"compiling {cwd} ...")
 
-    jit_option = '-abortonspill -noschedule '
+    # jit_option = '-abortonspill -noschedule '
+    jit_option = ' '
     kernels = cl.kernels(src, f'''-cmc -Qxcm_jit_option="{jit_option}"
                         -mCM_printregusage -mdump_asm -g2
                         -Qxcm_register_file_size=256 -I{cwd}
@@ -220,6 +221,7 @@ def test_func():
     block_size = BLOCK_SIZE
     stride = STRIDE
     sizes = [
+        (256 * STRIDE, 256 * STRIDE, '4k'),
         # normal case
         (512 * STRIDE, 512 * STRIDE, '8k'),
         (256 * STRIDE, 256 * STRIDE, 'normal+causal start == 0'),           # normal case:causal start == 0
@@ -246,6 +248,7 @@ def test_func():
         print(f'{Colors.BLUE}test gemm("{prompt}") query: [{q_len}, {dim}*{stride}] key:[{k_len}, {dim}*{stride}]...{Colors.END}')
 
         q = torch.randint(-2, 4, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        # q = torch.arange(1*q_head*q_len*dim).reshape(1, q_head, q_len, dim).to(dtype=torch.float16)
         k = torch.randint(-2, 4, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
 
         if IS_CAUSAL:
