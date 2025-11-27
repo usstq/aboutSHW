@@ -44,7 +44,7 @@ HEAD_SIZE = 64
 STRIDE = 16
 BLOCK_SIZE = 128
 THRESH = 1.0
-IS_CAUSAL = 0
+IS_CAUSAL = 1
 USE_INT8 = 0
 if USE_INT8:
     HEAD_SIZE_KEY = HEAD_SIZE + 2 * 2
@@ -250,6 +250,7 @@ def test_func():
         q = torch.randint(-2, 4, size=[1, q_head, q_len, dim], dtype=torch.int16).to(dtype=torch.float16)
         # q = torch.arange(1*q_head*q_len*dim).reshape(1, q_head, q_len, dim).to(dtype=torch.float16)
         k = torch.randint(-2, 4, size=[1, k_head, k_len, dim], dtype=torch.int16).to(dtype=torch.float16)
+        # k = torch.arange(1*k_head*k_len*dim).reshape(1, k_head, k_len, dim).to(dtype=torch.float16)
 
         if IS_CAUSAL:
             q_start_strided = k_len // stride - q_len // stride

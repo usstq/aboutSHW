@@ -60,10 +60,11 @@ CM_INLINE void get_mn(uint& id_wg_m, uint& id_wg_n, uint M, uint N, int slice_no
 }
 
 extern "C" _GENX_MAIN_ void gemm_qk(
-    svmptr_t key_cache ATTR,
     #if USE_LSC_BLOCK_2D_DESC == 1
+    svmptr_t key_cache ATTR,
     svmptr_t query ATTR,
     #else
+    SurfaceIndex key_cache [[type("buffer_t")]],
     SurfaceIndex query [[type("buffer_t")]],
     #endif
     svmptr_t block_indices ATTR,
@@ -86,6 +87,7 @@ extern "C" _GENX_MAIN_ void gemm_qk(
     uint id_wg_m, id_wg_n;
     get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
 
+    #if USE_LSC_BLOCK_2D_DESC == 1
     // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE_KEY]
 #if USE_INT8
     key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
@@ -93,7 +95,6 @@ extern "C" _GENX_MAIN_ void gemm_qk(
     key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(half));
 #endif
     // query: [l_q, HQ * HEAD_SIZE]
-    #if USE_LSC_BLOCK_2D_DESC == 1
     query += hq * HEAD_SIZE * (uint)sizeof(half);
     #endif
 
