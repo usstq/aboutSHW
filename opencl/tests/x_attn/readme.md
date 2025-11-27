@@ -222,6 +222,28 @@ vector<RetTy, NElts> cm_ptr_load(const T *const Ptr, unsigned Offset);
 cm_ptr_prefetch
 ```
 
+## charpter4.19 Shared Virtual Memory (SVM)
+
+Return 0 if out of boundary. The larger N is, performance improves. (Mannually verified on DG2.)
+
+```
+cm_svm_block_read(svmptr_t v_Addr, vector_ref<TYPE, N> v_Src);
+```
+
+## clang/lib/Headers/cm/include/cm/cm_pointer.h
+
+HW hangs when trying to read memory out of boundary. (Mannually verified on LNL.)
+
+```
+template <typename T0, int N, int M>
+CM_NODEBUG CM_INLINE void
+cm_ptr_block_read(const T0 *const addr,
+                  matrix_ref<details::remove_address_space_t<T0>, N, M> dst)
+```
+
+
+# The following load methods are not applicable to Xe1.
+
 ## Untyped 2D block load/store/prefetch
 target-dependent and only available when CM_HAS_LSC_UNTYPED_2D macro is defined.
 ```
@@ -261,9 +283,4 @@ target-dependent and only available when CM_HAS_LSC_TYPED_2D macro is defined.
 ```
 cm_load(SurfaceIndex Idx, int X, int Y, matrix_ref<T, Height, Width> Data);
 cm_prefetch(SurfaceIndex Idx, int X, int Y);
-```
-
-## charpter4.19 Shared Virtual Memory (SVM)
-```
-cm_svm_block_read(svmptr_t v_Addr, vector_ref<TYPE, N> v_Src);
 ```
