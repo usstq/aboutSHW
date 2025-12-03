@@ -11,6 +11,7 @@ import os
 import numpy as np
 
 from flashattn import get_flash0
+from generate_block_mask import generate_block_mask_with_ratio
 
 def get_cm_grf_width():
     cm_kernels = cl.kernels(r'''
@@ -380,21 +381,6 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
         # print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
-def count_false_percentage(mask):
-    B, H, NQ, NL = mask.shape
-    tril_mask = torch.tril(torch.ones((NQ, NL), dtype=torch.bool, device=mask.device))
-    expanded_tril = tril_mask.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
-    # Count elements in the tril region
-    tril_elements = torch.sum(expanded_tril).item()
-    # Count False elements in the tril region
-    false_in_tril = torch.sum(~mask & expanded_tril).item()
-    # Calculate percentage
-    if tril_elements > 0:
-        false_percentage = (false_in_tril / tril_elements) * 100
-    else:
-        false_percentage = 0.0
-    return false_percentage
-
 def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512, compressed_kvcache=False, sparse_block_sz=128, sparse_ratio=0.5, check_acc = True):
     cl.profiling(True)
     torch.manual_seed(0)
@@ -404,7 +390,6 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
     high = 2
     act_dtype = torch.float16
     q = torch.randint(low, high, [seq_len, num_heads, head_size]).to(dtype=act_dtype)
-    density = 1.0
 
     if compressed_kvcache:
         k = torch.randint(low, high, [seq_len, num_kv_heads, head_size]).to(dtype=act_dtype) / 4.0
@@ -426,39 +411,12 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         non_diag_causal = causal_without_diag & (rand_mask < ratio)
         return diag | non_diag_causal
 
-    def generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, true_ratio=sparse_ratio, is_causal=True, device='cpu'):
-        trunk_num = (seq_len + trunk_sz -1) // trunk_sz
-        q_block_num = (trunk_sz + sparse_block_sz -1) // sparse_block_sz
-        k_block_num = (seq_len + sparse_block_sz -1) // sparse_block_sz
-
-        if true_ratio <= 0:
-            block_mask = torch.full([trunk_num, num_heads, q_block_num, k_block_num], False).to(dtype=torch.bool)
-        elif true_ratio >= 1:
-            block_mask = torch.full([trunk_num, num_heads, q_block_num, k_block_num], True).to(dtype=torch.bool)
-        else:
-            block_mask = torch.rand(trunk_num, num_heads, q_block_num, k_block_num, device=device) < true_ratio
-
-        block_mask = block_mask.transpose(0, 1).contiguous().reshape(num_heads, trunk_num*q_block_num, k_block_num)
-        block_mask[:,:,0] = True  # the first column is always True
-        block_mask[:,-1,:] = True  # the last row is always True
-
-        if is_causal:
-            causal_pattern = torch.tril(torch.ones(trunk_num*q_block_num, k_block_num, dtype=torch.bool, device=device))
-            block_mask = block_mask & causal_pattern
-
-        block_mask = block_mask.reshape(num_heads, trunk_num, q_block_num, k_block_num).transpose(0, 1).contiguous()
-        return block_mask
-
-    approx_simple_mask = None
-    if sparse_block_sz > 1:
-        approx_simple_mask = generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, 1.0 - sparse_ratio)
-        percentage = count_false_percentage(approx_simple_mask)
-        print(f"Percentage of False elements: {percentage:.2f}%")
-        print(f"============ block_mask.shape={approx_simple_mask.shape}")
-        print(f"============ block_mask={approx_simple_mask}")
-        density = 1.0 - percentage / 100.0
-
     is_causal = True  # PageAttention implictly means causal_mask
+    if sparse_block_sz > 1:
+        approx_simple_mask, density = generate_block_mask_with_ratio(num_heads, seq_len, trunk_sz, sparse_block_sz, 1.0 - sparse_ratio, is_causal)
+    else:
+        approx_simple_mask, density = None, 1.0
+
     pa_cm = page_atten_cm.create_instance(num_heads, num_kv_heads, head_size, block_sz, trunk_sz, compressed_kvcache, is_causal, sparse_block_sz)
     out = pa_cm(q, k, v, approx_simple_mask)
     latency = cl.finish()
@@ -480,9 +438,12 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
         if rep >= 15:
             print(f'====================================================================================')
-            flops = 1 * num_heads * seq_len * seq_len * head_size * 2 * density
+            flops = 1 * num_heads * seq_len * seq_len * head_size * 2 * density   # *sizeof(half)*mad/causual
             for trunk_idx in range(trunks):
-                cur_density = 1.0 - count_false_percentage(approx_simple_mask[trunk_idx:trunk_idx+1]) / 100.0  if sparse_block_sz > 1 else 1.0
+                cur_density = 1.0
+                if sparse_block_sz > 1:
+                    cur_block_mask = approx_simple_mask[trunk_idx:trunk_idx+1]
+                    cur_density = cur_block_mask.sum().item() / cur_block_mask.numel()
                 cur_flops = 1 * num_heads * trunk_sz * (trunk_sz*(trunk_idx+1)) * head_size * 2 * cur_density
                 lat = latency[trunk_idx:-1:trunks]
                 avg = sum(lat[10:])/len(lat[10:])*1e-6
