@@ -329,7 +329,15 @@ void pa_kernel_lsc_prefetch_f16(
     constexpr int blk_stride = CMFLA_NUM_KV_HEADS*CMFLA_HEAD_SIZE*CMPA_BLOCK_SZ;
     int causal_left = q_start+past_lens;
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step) {
+    for (int sparse_block_pos = 0; sparse_block_pos < kv_stop / SPARSE_BLOCK_SIZE; sparse_block_pos++) {
+        bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + sparse_block_pos);
+        if (!sparse_mask) {
+            causal_left -= SPARSE_BLOCK_SIZE;
+            continue;  // skip load (inheristically incl. skip compute)
+        }
+    #pragma unroll
+    for(int kv_pos_idx = 0; kv_pos_idx < SPARSE_BLOCK_SIZE /*kv_stop*/; kv_pos_idx += kv_step) {
+        int kv_pos = kv_pos_idx + sparse_block_pos * SPARSE_BLOCK_SIZE;
         auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
         //For the last step, duplicate prefetch here.
         uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
@@ -473,7 +481,9 @@ void pa_kernel_lsc_prefetch_f16(
                 }
             }
         }
-    }
+    } // loop over kv_pos within a sparse block
+
+    } // loop over sparse blocks
     if (q_tokens_left == 0) return;
 
     //# save cur_O/cur_sum.transpose(0, 1)
