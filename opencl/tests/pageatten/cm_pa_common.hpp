@@ -330,19 +330,38 @@ void pa_kernel_lsc_prefetch_f16(
     int causal_left = q_start+past_lens;
 
     for (int sparse_block_pos = 0; sparse_block_pos < kv_stop / SPARSE_BLOCK_SIZE; sparse_block_pos++) {
-        bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + sparse_block_pos);
-        if (!sparse_mask) {
-            causal_left -= SPARSE_BLOCK_SIZE;
-            continue;  // skip load (inheristically incl. skip compute)
+#if SPARSE_BLOCK_SIZE > 1
+        if (validate) {
+            bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + sparse_block_pos);
+            if (!sparse_mask) {
+                if constexpr (use_causal_mask) {
+                    causal_left -= SPARSE_BLOCK_SIZE;
+                }
+                continue;  // skip load (inheristically incl. skip compute)
+            }
+
+            sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + sparse_block_pos);
+            if (!sparse_mask) {
+                if constexpr (use_causal_mask) {
+                    causal_left -= SPARSE_BLOCK_SIZE;
+                }
+                continue;
+            }
         }
+#endif
+
+        auto cur_block_id = block_indices[sparse_block_pos * SPARSE_BLOCK_SIZE / CMPA_BLOCK_SZ];
+        b2dK.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+cur_block_id*blk_stride));
+        b2dV.set_base_ptr((reinterpret_cast<half*>(v_cache_base)+cur_block_id*blk_stride));
 
         #pragma unroll
         for(int kv_pos_idx = 0; kv_pos_idx < SPARSE_BLOCK_SIZE /*kv_stop*/; kv_pos_idx += kv_step) {
             int kv_pos = kv_pos_idx + sparse_block_pos * SPARSE_BLOCK_SIZE;
-            auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
+
             //For the last step, duplicate prefetch here.
             uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
             auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
+
             //# St = k @ Qt
             matrix<float, kv_step, q_step> St;
             {
@@ -355,20 +374,6 @@ void pa_kernel_lsc_prefetch_f16(
                 prefetch_K.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
                 cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(0));
 
-#if SPARSE_BLOCK_SIZE > 1
-                if (validate)
-                {
-                    auto kv_start_block = kv_pos/ SPARSE_BLOCK_SIZE;
-                    bool sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_start_block);
-                    if (!sparse_mask) {
-                        if constexpr (use_causal_mask) {
-                            causal_left -= kv_step;
-                        }
-                        continue;
-                    }
-                }
-#endif
-                b2dK.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+cur_block_id*blk_stride));
                 b2dK.set_block_y(kv_pos%CMPA_BLOCK_SZ);
                 cm_load<lsc::Normal>(Kmat.format<half>(), b2dK.set_block_x(0));
                 if ((kv_pos + kv_step) > kv_stop) {
@@ -419,7 +424,6 @@ void pa_kernel_lsc_prefetch_f16(
             prefetch_V.set_base_ptr((reinterpret_cast<half*>(v_cache_base)+prefetch_block_id*blk_stride));
             prefetch_V.set_block_y((prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ);
 
-            b2dV.set_base_ptr((reinterpret_cast<half*>(v_cache_base)+cur_block_id*blk_stride));
             b2dV.set_block_y(kv_pos%CMPA_BLOCK_SZ);
             if (kv_pos == 0) {
                 // ugemm_PV0(slm_V, P, rO, slm_offset);
