@@ -345,6 +345,28 @@ void pa_kernel_lsc_prefetch_f16(
                 if constexpr (use_causal_mask) {
                     causal_left -= SPARSE_BLOCK_SIZE;
                 }
+                #pragma unroll
+                for(int kv_pos_idx = 0; kv_pos_idx < SPARSE_BLOCK_SIZE /*kv_stop*/; kv_pos_idx += kv_step) {
+                    int kv_pos = kv_pos_idx + sparse_block_pos * SPARSE_BLOCK_SIZE;
+
+                    //For the last step, duplicate prefetch here.
+                    uint32_t prefetch_kv_pos = (kv_pos+kv_step) >= kv_stop ?  kv_pos : (kv_pos+kv_step);
+                    auto prefetch_block_id = block_indices[prefetch_kv_pos / CMPA_BLOCK_SZ];
+                    prefetch_kv_pos = (prefetch_kv_pos + wg_local_id) % CMPA_BLOCK_SZ;
+
+                    prefetch_V.set_base_ptr((reinterpret_cast<half*>(v_cache_base)+prefetch_block_id*blk_stride));
+                    prefetch_V.set_block_y(prefetch_kv_pos);
+
+                    prefetch_K.set_base_ptr((reinterpret_cast<half*>(k_cache_base)+prefetch_block_id*blk_stride));
+                    prefetch_K.set_block_y(prefetch_kv_pos);
+
+                    #pragma unroll
+                    for(int k = 0; k < head_size; k += REG_K) {
+                        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_K.set_block_x(k));
+                        cm_prefetch<CacheHint::Cached, CacheHint::Cached>(prefetch_V.set_block_x(k));
+                    }
+
+                }
                 continue;
             }
         }
