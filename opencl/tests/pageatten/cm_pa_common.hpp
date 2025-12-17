@@ -15,6 +15,7 @@
  *******************************************************************************/
 #include "cm_attention_common.hpp"
 
+#define CMPA_KVCACHE_U8 1
 #if CMPA_KVCACHE_U8
 template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_q_fused = 0>
 void pa_lsc_u8(
@@ -59,6 +60,9 @@ void pa_lsc_u8(
     if (q_tokens_left < 0) q_tokens_left = 0;
     if (q_tokens_left > q_step) q_tokens_left = q_step;
 
+    auto h = cm_group_id(1);
+    auto wg_id = cm_group_id(2);
+
     if (q_tokens_left > 0) {
         lsc::block_2d_desc<uint, 1, REG_N, REG_K/2> b2dQ(reinterpret_cast<uint*>(q_base), q_tokens_left - 1, head_size*sizeof(half) - 1, q_pitch - 1, 0, 0);
         #pragma unroll
@@ -96,7 +100,7 @@ void pa_lsc_u8(
 #if SPARSE_BLOCK_SIZE > 1
             if (validate) {
                 if (skip_load(kv_pos)) {
-                    slm_buff_id_write++;
+                    // slm_buff_id_write++;
                     return;
                 }
             }
@@ -104,6 +108,9 @@ void pa_lsc_u8(
             auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
             uint32_t dscale_offset = cur_block_id*quan_blk_stride + \
                         CMPA_BLOCK_SZ * head_size * sizeof(uint8_t) + kv_pos%CMPA_BLOCK_SZ*sizeof(half);
+    
+            // if(0)
+            //     printf("[%d, %d: %d] write_id %d @%d\n", h, wg_id, wg_local_id, slm_buff_id_write, kv_pos);
 
             uint slm_offset = (slm_buff_id_write & 3) * slm_buff_size;
             vector<half, kv_step> dscale;
@@ -176,12 +183,46 @@ void pa_lsc_u8(
         }
     };
 
+    // the first block is always true.
     load_slm_KV(0);
     load_slm_KV(kv_step);
     cm_slm_fence(CM_LOCAL_BARRIER);
-    cm_sbarrier(1);
+    cm_sbarrier(1); // signal
+    // if(0)
+    //     printf("[%d: %d: %d] Signal 1 @kv_stop %d.\n", h, wg_id, wg_local_id, kv_stop);
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,slm_buff_id_read++) {
+    int next_kv_pos = kv_step*2;
+
+    int wg_kv_stop = SPARSE_BLOCK_SIZE;
+
+    for (int sparse_block_pos = (kv_stop -1) / SPARSE_BLOCK_SIZE; sparse_block_pos >= 0; sparse_block_pos--) {
+        bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + sparse_block_pos);
+        // if (wg_local_id==0)
+        //     printf("[%d: %d: %d] sparse_mask %d %d/%d.\n", h, wg_id, wg_local_id, sparse_mask, sparse_block_pos, kv_stop / SPARSE_BLOCK_SIZE);
+        if (sparse_mask) {
+            wg_kv_stop = (sparse_block_pos + 1) * SPARSE_BLOCK_SIZE;
+            break;
+        }
+    }
+    // if (wg_local_id==0)
+    //     printf("[%d: %d: %d] wg_kv_stop %d %d.\n", h, wg_id, wg_local_id, wg_kv_stop, kv_stop / SPARSE_BLOCK_SIZE);
+
+    for (int sparse_block_pos = 0; sparse_block_pos < (kv_stop + SPARSE_BLOCK_SIZE-1) / SPARSE_BLOCK_SIZE; sparse_block_pos++) {  // 4
+// #if SPARSE_BLOCK_SIZE > 1
+        // if (validate) {
+            bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + sparse_block_pos);
+            if (!sparse_mask /*&& sparse_block_pos < kv_stop / SPARSE_BLOCK_SIZ*/) { // not the last block
+                if constexpr (use_causal_mask) {
+                    causal_left -= SPARSE_BLOCK_SIZE;
+                }
+                continue;  // skip load (inheristically incl. skip compute)
+            }
+        // }
+// #endif
+
+    // for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,slm_buff_id_read++) {
+    for(int kv_pos_idx = 0; kv_pos_idx < SPARSE_BLOCK_SIZE /*kv_stop*/; kv_pos_idx += kv_step,slm_buff_id_read++) {  // 8
+        int kv_pos = kv_pos_idx + sparse_block_pos * SPARSE_BLOCK_SIZE;
 
         //  load0, load1, signal1,
         //  [wait1, signal2, load2, read0, compute0]
@@ -196,12 +237,22 @@ void pa_lsc_u8(
 
 
         cm_fence(CM_LOCAL_BARRIER);
-        cm_sbarrier(0);
+        cm_sbarrier(0); // wait
+        // if(0)
+        //     printf("[%d: %d: %d] Wait %d @ %d.\n", h, wg_id, wg_local_id, slm_buff_id_read, kv_pos);
         //if (kv_pos > 1024000)
-        if (kv_pos + kv_step < kv_stop)
-            cm_sbarrier(1);
-        load_slm_KV(kv_pos + kv_step*2);
-
+        while (skip_load(next_kv_pos)) {
+            next_kv_pos += kv_step;
+        }
+        // int wg_kv_stop[2] = {128, 4096};
+        if (kv_pos + kv_step < wg_kv_stop && kv_pos + kv_step < kv_stop) {
+               cm_sbarrier(1); // signal
+            //    if(0)
+            //         printf("[%d: %d: %d] Signal %d @ %d.\n", h, wg_id, wg_local_id, slm_buff_id_write, next_kv_pos);
+        }
+        // load_slm_KV(kv_pos + kv_step*2);
+        load_slm_KV(next_kv_pos);
+        next_kv_pos += kv_step;
 
 #if SPARSE_BLOCK_SIZE > 1
         if (validate) {
@@ -213,8 +264,9 @@ void pa_lsc_u8(
         }
 #endif
         {
-
             uint slm_offset = (slm_buff_id_read & 3) * slm_buff_size;
+            // if(0)
+            //     printf("[%d: %d: %d] read_id %d\n", h, wg_id, wg_local_id, slm_buff_id_read);
 
             //# St = k @ Qt
             matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
@@ -241,8 +293,13 @@ void pa_lsc_u8(
             else
                 ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
         }
-    }
-    // cm_sbarrier(0);
+        // if(0)
+        //     printf("\n");
+    } // loop over kv_pos within a sparse block
+        // if(0)
+        //     printf("\n");
+    } // loop over sparse blocks
+
     if (q_tokens_left == 0) return;
 
     //# save cur_O/cur_sum.transpose(0, 1)
