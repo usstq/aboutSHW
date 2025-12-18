@@ -377,8 +377,8 @@ def check_close(input, other, atol=1e-2, rtol=1e-2):
         close_check = torch.isclose(input, other, atol=atol, rtol=rtol)
         not_close_indices = torch.where(~close_check) # Invert the close check to find failures
         print(f"Not close indices: {not_close_indices}")
-        # print(f"    input_tensor: {input[not_close_indices]}")
-        # print(f"    other_tensor: {other[not_close_indices]}")
+        print(f"    input_tensor: {input[not_close_indices]}")
+        print(f"    other_tensor: {other[not_close_indices]}")
         assert 0
 
 def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, head_size = 80, block_sz=128, trunk_sz=512, compressed_kvcache=False, sparse_block_sz=128, sparse_ratio=0.5, check_acc = True):
@@ -435,6 +435,7 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
         latency = cl.finish()
         trunks = len(latency) // rep
         trunk_lat = []
+        ideal_latency = 293.27
         # for i,ns in enumerate(latency): print(f"[{i}]  {ns*1e-6:.3f} ms")
         if rep >= 15:
             print(f'====================================================================================')
@@ -450,7 +451,7 @@ def test_page_attn_causal_batch1(seq_len, num_heads = 16, num_kv_heads = 16, hea
                 trunk_lat.append(avg)
                 print(f'[trunk {trunk_idx}] density {cur_density:.2f}, MFU {cur_flops/(avg*1e6):,.0f} GFLOPS, average latency: {avg:.3f} ms')
             total_lat = sum(trunk_lat)
-            print(f"[total]: PA_causal {seq_len=} , {trunks=}, density {density:.2f}, compressKVCache {compressed_kvcache}, MFU {flops/(total_lat*1e6):,.0f} GFLOPS, latency: {total_lat:.3f} ms")
+            print(f"[total]: PA_causal {seq_len=} , {trunks=}, density {density:.2f}, compressKVCache {compressed_kvcache}, MFU {flops/(total_lat*1e6):,.0f} GFLOPS, latency: {total_lat:.3f} ms {ideal_latency*density/total_lat:.2f}")
             print(f'====================================================================================')
 
 def test_ov():
@@ -665,14 +666,15 @@ if __name__ == "__main__":
     # perf for sparse X attention, with QWen3 8K case
     if 1:
         for sparse_block_sz in [128]:
-            for density in [0.33, 0.1, 0.02]:
-                seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 16
-                # seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 128
+            for density in [1.0]:
+            # for density in [0.33, 0.11, 0.02]: #.base perf: 0.34, 0.22, 0.09 -> 0.35, 0.26, 0.12
+                seq_len, block_sz, blocks_per_trunk= 256*2, 256, 2
+                # seq_len, block_sz, blocks_per_trunk= 32*1024, 256, 16
+                # seq_len, block_sz, blocks_per_trunk= 1024, 256, 2
                 trunk_sz = blocks_per_trunk*block_sz
                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
                 print(f'seq_len={seq_len} block_sz={block_sz} blocks_per_trunk={blocks_per_trunk} sparse_block_sz={sparse_block_sz}')
                 print("-----------------------------------------------------------------------------------------------------------------------------------------")
-                test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=False, sparse_block_sz = sparse_block_sz, sparse_ratio=1.0-density, check_acc=False)
+                test_page_attn_causal_batch1(seq_len, num_heads = 1, num_kv_heads = 1, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=1.0-density, check_acc=True)
                 # test_page_attn_causal_batch1(seq_len, num_heads = 32, num_kv_heads = 8, head_size = 128, block_sz=block_sz, trunk_sz=trunk_sz,  compressed_kvcache=True, sparse_block_sz = sparse_block_sz, sparse_ratio=1.0-density, check_acc=False)
-
     # test_ov()
